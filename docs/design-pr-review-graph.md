@@ -119,7 +119,8 @@ graphloom task new pr-review apache/skywalking-banyandb#1234 --repo ../skywalkin
 # fetches the head and base refs, pins the head, writes reviews/skywalking-banyandb-1234/task.yaml
 graphloom check reviews/skywalking-banyandb-1234/task.yaml
 graphloom run reviews/skywalking-banyandb-1234/task.yaml --on-stop '…'
-# stops "report ready": read <worktree>/.graphloom/review/review.md, or open review.html beside it (graphloom inspect prints the path)
+# stops "report ready": open <worktree>/.graphloom/review/review.html, the one-page briefing (review-appendix.html beside it holds the rest;
+# review.md is the plain-text copy of both; graphloom inspect prints the path)
 graphloom session open <run> --stage answers               # optional: chat with a fork of the answerer's session; recorded on exit
 graphloom session open <run> --stage answers               # optional again: continues that conversation (--from-original starts over)
 graphloom resume <run> --decline review-layer              # report only: done
@@ -279,7 +280,7 @@ generation's evidence holds a `--decline review-layer`.
 | Fetch | `pr-snapshot` | The PR's metadata, every changed file with its patch, every commit, review, review comment and thread (with resolution), and the head's check runs were read completely, for head `<sha>` | GitHub read results | `pr-snapshot` |
 | Fetch | `head-checked-out` | The worktree holds exactly the head's tree, its base is the merge base, and no repository code ran to produce it | `checkout-command-v1` | `head-tree` |
 | Fetch | `prior-ledger` | The PR's ledger was read, or recorded absent, and the delta scope follows from it | command report | `review-scope` |
-| Report | `change-report` | Every template section is present, with cited items or an explicit "None". Every citation is inside the PR's diff. Every changed file and every detector fact is cited. No item carries a severity, finding or verdict (the contract has no such field). Every report has an architecture diagram ([§6.10](#610-architecture-diagram)), and `review.html` is written beside `review.md` ([§6.11](#611-the-html-report)); an artifact too large for one command is written in parts ([§6.6](#66-output)) | `change-report-v1`, `report-write` | `change-report` |
+| Report | `change-report` | Every template section is present, with cited items or an explicit "None". Every citation is inside the PR's diff. Every changed file and every detector fact is cited. No item carries a severity, finding or verdict (the contract has no such field). Every report opens with a briefing the reporter writes (what is new, the data flow of each new feature, what to check, [§6.1](#61-template), [§6.10](#610-features-and-their-data-flow)), and `review.html` (the briefing) and `review-appendix.html` are written beside `review.md` ([§6.11](#611-the-html-report)); an artifact too large for one command is written in parts ([§6.6](#66-output)) | `change-report-v1`, `report-write` | `change-report` |
 | Report | `measurements` | For every function the PR adds or modifies, complexity and nesting were measured by the pinned tools over the head tree, and coverage (on by default) and then mutation (on by default, at covered sites only) were measured in the Docker sandbox over a checkout of the head, or carry a not-run reason (switched off by the profile, Docker unavailable, image missing, a dependency not cached, no vitest coverage provider, no coverage). Every value recomputes from its evidence ([metrics §5](design-code-quality-metrics.md#5-records-and-recomputation)) | `graphloom-metrics-v1` command reports | `measurements` |
 | Report | `claims-checked` | An independent `<report-checker>` judged every report item against the diff, and every item left is `supported` with matching quotes | `claim-check-v1` | `claims-checked` |
 | Questions | `questions-complete` | N1, the necessity question, was asked first ([§7.5](#75-the-necessity-question-n1)): its three parts have their evidence, an independent checker verified every cited design statement, trace step and the conclusion, and N1's checked answer and decision are recorded in `necessity.json`. When N1 concluded `unnecessary`, the checker supports it and the operator did not ask for every question, N1 is the only question required and the skip is recorded. Otherwise every required question was asked ([§7.1](#71-questions)): purpose for each change item whose purpose the PR text does not state (a stated purpose recorded with a matching quote instead); `existing-equivalent`, `reuse-library` and `common-logic` for each new symbol; `missing-test` for each new or modified symbol with no mapped test; and one question per value over a metric limit and per surviving mutant. Every changed function has a measurement record or a not-run reason | `necessity-v1`, `answer-check-v1`, `necessity-write`, `questions-v1`, search and test-map reports | `questions-complete` (`independence: separate-reviewer`: N1's check is its latest review) |
@@ -335,8 +336,32 @@ minimal extras:
 
 Each item gets a stable id (`R<n>`). The Q&A refers to items by it.
 
-**The report is analysis, not narration.** It has three layers, and the
-sections above hold only the second:
+**The report opens with a briefing, and is analysis, not narration.** A
+maintainer must grasp the change, and know what to check in it, in about two
+minutes. The first fields of the reporter's result are therefore a briefing, and
+the HTML report ([§6.11](#611-the-html-report)) shows only that on its one page;
+everything below it is the appendix.
+
+- **`whatsNew`:** 3 to 5 bullets, one for each new capability (not for each file
+  or refactor), each at most 240 characters with 1 to 4 cites.
+- **`features`:** at most 3, each the path the data takes through a new feature,
+  end to end, drawn as a data-flow diagram ([§6.10](#610-features-and-their-data-flow)).
+- **`check`:** five lists of at most 8 one-line entries, each with cites and each
+  a claim the checker verifies: `surfaces` (new public APIs, RPCs, proto
+  messages, CLI commands and flags, config), `behavior` (changes to the behavior
+  of existing code paths, not new code), `compatibility` (wire format,
+  on-disk or schema format, mixed versions), `risks` (concurrency, retries, rate
+  limiting, unbounded memory or resources, error handling that drops data) and
+  `tests` (the tests and end-to-end tests added, and what they cover).
+- **`areas`:** a short label for each area id of a large report
+  ([§6.9](#69-large-pull-requests)); empty otherwise.
+
+The scope split, the hotspots and the open questions of the briefing are not the
+reporter's: plugin code computes them from the file list, the measurement records
+and the answers ([§6.11](#611-the-html-report)).
+
+After the briefing, the report is analysis, not narration. It has three layers,
+and the sections above hold only the second:
 
 1. **Summary**, first in the report. The **purpose** is `{ text, source,
    quote }`: `source` is `stated` when the pull request's own title, body or
@@ -425,6 +450,10 @@ see, relies on the reporter's prompt and on the checker.
    ```text
    purpose:  { text, source: "stated" | "inferred", quote }   quote "" when inferred
    overview: text                                              2 to 4 sentences
+   whatsNew: [{ text, cites: [cite] }]                         3 to 5 bullets
+   features: [{ name, summary, stages: [...], flows: [...] }]  at most 3 (§6.10)
+   check:    { surfaces, behavior, compatibility, risks, tests }   each [{ text, cites: [cite] }], at most 8
+   areas:    [{ id, label }]                                   large mode only; [] otherwise
    sections: [{ id, none, items: [{
        text,                                    one conceptual change
        cites: [{ path, side, start, end, symbol }],            every location
@@ -439,7 +468,11 @@ see, relies on the reporter's prompt and on the checker.
    ```
 
    Every property is required (empty arrays where an item has no state or no
-   behavior change), and the contract has no other. Its prompt says:
+   behavior change), and the contract has no other. Its prompt leads with the
+   briefing fields, says what each is for (the maintainer must grasp the change
+   and what to check in two minutes) and gives each field's bounds (in large
+   mode the features' and the check entries' cites may name lines the reporter
+   read in the tree, which the claim check verifies there); then it says:
    analyse, do not narrate the diff; one item per conceptual change; do not
    split one mechanism across items; give every new or changed piece of state
    its lifecycle (each transition and each read the diff shows, in the order
@@ -464,6 +497,11 @@ see, relies on the reporter's prompt and on the checker.
    | `R3.s1.t2` | the transition's condition (`when`) is the one the code has at the cited line, and its effect is what the line does | required, from the cited file |
    | `R3.s1.r1` | the code at the cited line decides what `decision` says, from this state | required, from the cited file |
    | `R3.b1` | `before` is what the base code does in that case, `after` what the head code does | required, any changed file |
+   | `W1` | the cited code provides the capability the what's-new bullet names | required, from the cited files |
+   | `F1` | the feature's summary is what the data path through its stages shows | required, from the stages' files |
+   | `F1.s2` | the cited code is that stage of the data's path, of that kind | required, from the cited file |
+   | `F1.f3` | the cited code moves the data from the one stage to the other, in that direction, as the label says | required, from the cited file |
+   | `C.risks.1` | what the check entry says (a surface, a behavior change, a compatibility fact, a risk, a test) is what the cited code shows | required, from the cited file |
 
    The checker also says, in the note of an entry's verdict, when the diff
    shows a transition or a read the entry leaves out.
@@ -476,8 +514,13 @@ see, relies on the reporter's prompt and on the checker.
      name, scope or initial value, or any one of its transitions or reads, is
      unsupported, half a lifecycle would mislead more than none;
    - a **behavior row** is dropped, with the item and its other rows kept;
-   - the **purpose** or the **overview** is not shown; the summary says the
-     claim check could not support it, with the reason.
+   - the **purpose** or the **overview** is not shown; the briefing (the purpose)
+     or the appendix (the overview) says the claim check could not support it,
+     with the reason;
+   - a **what's-new bullet** or a **check entry** is dropped; a feature's
+     **stage** is dropped with the flows that touch it, a **flow** alone, and a
+     **feature** left with fewer than two stages or no flow, or whose own claim
+     is unsupported, whole ([§6.10](#610-features-and-their-data-flow)).
 
    Plugin code then lists any file that became uncited in `other` as "changed
    (+a −d lines); not summarised", so coverage holds without trusting a model.
@@ -491,6 +534,16 @@ see, relies on the reporter's prompt and on the checker.
 - **Summary:** the purpose and the overview are present and bounded (400 and
   900 characters). A `stated` purpose's quote matches the PR's title, body or
   a commit message, whitespace collapsed; an `inferred` one has no quote.
+- **Briefing:** `whatsNew` has 1 to 5 bullets (the prompt asks for 3 to 5) of
+  at most 240 characters, each with 1 to 4 cites; `features` at most 3, each with
+  2 to 8 stages and 1 to 12 flows, unique stage ids, flows between two stages of
+  their feature, and bounded labels ([§6.10](#610-features-and-their-data-flow));
+  each `check` list at most 8 entries of at most 240 characters with 1 to 4 cites;
+  `areas` only ids of the report's areas, each once (none in a standard report).
+  Every briefing cite follows the rule below (inside the diff on the side it
+  names), except that in large mode it may name a file the pull request does not
+  change, by path and a range of lines. The claim check can only drop entries,
+  so a report left with no bullet or a smaller feature is not a failure.
 - **Citations:** paths are PR files, line ranges lie in the file's hunks on
   the given side, and symbols appear in the file's patch. A file with patch
   text is cited by lines: `0`/`0` and a symbol alone are refused, so that
@@ -522,7 +575,7 @@ see, relies on the reporter's prompt and on the checker.
 - **Bounds:** at most 40 items per section and 600 characters per item, all
   within the 256 KiB evidence bound, in every mode: large mode has no larger item.
 - **Large mode** ([§6.9](#69-large-pull-requests)) is high level, so two rules
-  are relaxed: a changed file no item cites, and a detector fact no item lists,
+  are relaxed (and the briefing's cites may leave the hunks, above): a changed file no item cites, and a detector fact no item lists,
   are not problems (the plugin accounts for them in `other` and with its own
   fact items), and no state candidate needs a lifecycle entry. Every other rule
   is the standard one, including citations inside the file's hunks.
@@ -538,39 +591,66 @@ evidence. The human-readable report is the first part of the one file
 
 ````markdown
 # apache/skywalking-banyandb#1234 at 9ab2…41 (base 3f1c…e9)
-Contents: Necessity · Report · Measurements · Q&A (2 items need the author)
+Contents: Briefing · Appendix (Necessity · Report · Measurements · Q&A)
 
-# Necessity
-**N1 — Is this change necessary?** Conclusion: **necessary**. The failure is possible on the base, the change keeps the design, and nothing existing does it.
-Checker: supported. All questions follow: N1 concluded necessary; every question is asked.
-…
-
-# Report
+# Briefing
 14 files, +612 −88. Commits: 5. GitHub checks at head: 9 passed, 1 pending.
 
-## Summary
 **Purpose** (stated: "replies with the first error when nothing was stored"): A write batch whose events all fail was acknowledged as a success; the callback now replies with the first error in that case.
+
+## What's new
+- A write batch that stores nothing is answered with its first error instead of a success — banyand/stream/write_standalone.go:12-47
+
+## Scope that matters
+- Production code: 4 files, +52 −9
+- Tests: 2 files, +31 −0
+- Docs: 1 file, +3 −0
+- Generated / other: 0 files, +0 −0
+
+## Necessity and principles
+- N1, is it necessary: necessary — The failure is possible on the base, the change keeps the design, and nothing existing does it.
+- Principles touched: offline-idempotent preserves
+- Questions that need the author: 1
+
+## Data flow per new feature
+None: the report names no new feature with a data path.
+
+## What you need to check
+### New surfaces (public APIs, RPCs, proto messages, CLI commands and flags, config)
+- None.
+### Changed behavior of existing code paths
+- The write callback replies with an INTERNAL_ERROR when every event of a batch fails — banyand/stream/write_standalone.go:45-47
+…
+
+## Hotspots
+1. stream.(*writeCallback).Rev — CRAP 156 (upper bound, coverage unknown), complexity 7 → 12, nesting 3 → 4 (modified) — banyand/stream/write_standalone.go:6
+
+## Areas
+- Every feature added or modified: 1 item
+- Other changes: 1 item
+…
+
+## Open questions
+- **Q3 [missing-test] needs author** Which test covers Rev (banyand/stream/write_standalone.go:6)? … — …
+2 answered — see the appendix.
+
+# Appendix
+Every change item with its lifecycles and tables, the full measurements, the claim check's removals and the whole Q&A.
+
+## Necessity
+**N1 — Is this change necessary?** Conclusion: **necessary**. …
+…
+
+## Report
+14 files, +612 −88. Commits: 5. GitHub checks at head: 9 passed, 1 pending.
+
+### Summary
 **Overview:** Rev counts the events it stores and remembers the first failure among its three failure paths. After the batch is flushed, a batch that stored nothing and failed at least once is answered with an INTERNAL_ERROR carrying that error and the original message ID. A batch that stored anything keeps the success reply.
 
-## Architecture
-```mermaid
-flowchart LR
-  n1["Stream write callback<br/>package"]:::modified
-  n2["Liaison gRPC API<br/>api"]:::unchanged
-  n2 -->|"sends write batches (rpc)"| n1
-  classDef modified fill:#fdeccd,stroke:#d98e04,color:#4a3200
-  classDef unchanged fill:#eceff1,stroke:#90a4ae,color:#263238
-```
-Components:
-- Stream write callback (package, modified): banyand/stream — banyand/stream/write_standalone.go:12-13
-- Liaison gRPC API (api, unchanged): banyand/liaison/grpc — banyand/liaison/grpc/server.go:40 (base)
-Connections:
-- Liaison gRPC API → Stream write callback (rpc, unchanged): sends write batches — banyand/liaison/grpc/server.go:88 (base)
-
-## Database / storage schema changes
+### Database / storage schema changes
 - None
 
-## Every feature added or modified
+### Every feature added or modified
 - R1. A write batch that stores nothing is now answered with the first failure instead of a success: Rev counts the events it stores and keeps the first error of its three failure paths, and the reply is decided from the two after the groups are flushed. — banyand/stream/write_standalone.go:12-13, banyand/stream/write_standalone.go:23-25, banyand/stream/write_standalone.go:30-32, banyand/stream/write_standalone.go:37-39, banyand/stream/write_standalone.go:42, banyand/stream/write_standalone.go:45-47
   - State `stored` (per call); starts: 0, set at the start of the Rev call before the event loop
     - when w.handle returns no error for an event → increments by one; every failure path continues before it (banyand/stream/write_standalone.go:42)
@@ -588,24 +668,31 @@ Connections:
     | some events are stored and some fail | the empty success reply | the empty success reply (unchanged) |
     | flushing the groups fails after events were stored | logged; the empty success reply | logged; the empty success reply (unchanged) |
 
-## Other changes
+### Other changes
 - R2. Adds a changelog entry for the fix. — CHANGES.md:14
 …
-# Measurements
+## Measurements
 …
-# Q&A
+## Q&A
 …
 ````
 
-(The Necessity part comes first, before the Report, and is written with the
-Q&A ([§7.5](#75-the-necessity-question-n1)). The example is the
+(The briefing is what the maintainer reads; the Appendix holds, in this order,
+the Necessity part, written with the Q&A ([§7.5](#75-the-necessity-question-n1)),
+the Report's change items, the Measurements and the Q&A, each one heading level
+down so that the file reads as one document; the Verdict and the Open questions
+of the briefing say "pending" until the Answers stage rewrites the file.
+`review.md` stays complete, because agents and `graphloom session open` read it.
+The example is the
 `state-lifecycle` rehearsal scenario, a change modelled on
 the first live report, [apache/skywalking-banyandb#1443](https://github.com/apache/skywalking-banyandb/pull/1443),
 whose first report narrated it hunk by hunk as six items.) The report shows
 the lifecycle as a compact block under its item and the before/after as a
 small table, and a claim check removal as a "Removed by the claim check" line
 under the item. `report.json` carries `summary` (`purpose`, `overview`, each
-null when removed), the items' `state` and `behavior`, and `removedParts`.
+null when removed), `scope` (the lines by kind of file, counted by plugin code),
+`briefing` (`whatsNew`, `features`, `check` and `areas` as the claim check left
+them), the items' `state` and `behavior`, and `removedParts`.
 
 **Multi-part writes.** One command carries about 236,000 characters (at most
 55 chunks of 4,000 characters in the argv, and the executor's input bound once
@@ -617,6 +704,7 @@ text is cut into parts that each fit a command, in order, and each part is one
 command, so one job, recorded as evidence like any write
 (`report-json-p1`, `report-json-p2`, …; `review-md-p<k>`, `qa-json-p<k>`,
 `review-md-qa-p<k>`, `review-html-p<k>`, `review-html-qa-p<k>`,
+`review-appendix-html-p<k>`, `review-appendix-html-qa-p<k>`,
 `necessity-json-p<k>`, and `<record id>-p<k>` for a record of a large run). Every
 part carries the path, its position, the number of parts and the SHA-256 of the
 whole artifact. Part 1 starts `<path>.parts`; each later part appends to it and
@@ -627,12 +715,14 @@ one is replaced only whole. A ledger too large for its one command writes
 reads those files. The validators reconstruct each artifact from the evidence:
 they concatenate the recorded parts in order and check the digest, and a part
 that is missing, failed, out of order, of another file or artifact, or altered
-makes the artifact unread and the requirement failed. `review.html` is always
-written as a part set (one part when small). The `.gitignore` of `*` in
+makes the artifact unread and the requirement failed. `review.html` and
+`review-appendix.html` are always written as part sets (one part when small; the
+briefing stays small however large the pull request is, and the appendix is the
+file that grows). The `.gitignore` of `*` in
 `.graphloom/review/` is written by each command, as before.
 
-`review.html` ([§6.11](#611-the-html-report)) is written beside `review.md` at
-the same two points: after the Report stage's measurements, with the Necessity
+`review.html` and `review-appendix.html` ([§6.11](#611-the-html-report)) are
+written beside `review.md` at the same two points: after the Report stage's measurements, with the Necessity
 and the Q&A marked pending, and whole after the answers are checked.
 
 `review.md` is local. From the publish phase on, its Report and Measurements
@@ -805,9 +895,14 @@ into an area is something they ask for (see "Dive into an area" below).
 
    The instruction says: describe the PR at a high level: the purpose, an
    overview, one item per conceptual change (usually one per area or per
-   subsystem), the template sections and the architecture
-   ([§6.10](#610-architecture-diagram)). State lifecycles and before/after rows are not
-   required (empty arrays are allowed). The reporter may open any file of the
+   subsystem), the template sections and the briefing fields
+   ([§6.1](#61-template), [§6.10](#610-features-and-their-data-flow)). State lifecycles and before/after rows are not
+   required (empty arrays are allowed). In this mode the briefing's cites (what is
+   new, the stages and flows of the features, the check entries) may also name a file of
+   the head or the base that the pull request does not change, and lines the
+   reporter read in the tree: the claim check verifies their quotes against that
+   tree, and the deterministic rule that a cite lies in a hunk does not apply to
+   them. `areas` gives a short label for each area id. The reporter may open any file of the
    head or the base read-only to confirm a claim, and every item cites the files
    and lines it rests on; those lines still lie in the file's hunks of the PR's
    diff, whether or not the patch was given to the reporter. An item is at most
@@ -821,19 +916,21 @@ into an area is something they ask for (see "Dive into an area" below).
    against the patch: each quote must be on a line of the file its cite names, in
    the tree that cite names (the head's working tree, or the base commit's file;
    a claim with no cite quotes the head), within three lines of the line given
-   (whitespace collapsed). It reuses the check of the architecture claims'
-   quotes ([§6.10](#610-architecture-diagram), `arch-quote` commands, one job for up to 14
-   quotes), so a quote the tree does not show makes its claim unsupported, with
-   the revision and removal rules of §6.4. A quote from a file the claim does not
-   cite is refused.
-3. The **diagrams** ([§6.10](#610-architecture-diagram), [§6.11](#611-the-html-report))
+   (whitespace collapsed), by read-only `tree-quote` commands (one job for up to
+   14 quotes), so a quote the tree does not show makes its claim unsupported,
+   with the revision and removal rules of §6.4. A quote from a file the claim
+   does not cite is refused. A claim that cites a file the pull request does
+   not change is never supported on the checker's word: it needs a quote.
+3. The **diagrams** ([§6.10](#610-features-and-their-data-flow), [§6.11](#611-the-html-report))
    are drawn from the checked report as in standard mode.
 4. Items are numbered `R1`... in section order. `report.json` records the mode,
    the limit passed, the areas with the number of items that cite each, and the
    files without a patch; there are no merges and no area records.
 
-**Dive into an area.** `review.md` and `review.html` end the Report with a
-"Dive into an area" block: the areas table and the command
+**Dive into an area.** The Areas section of the briefing ([§6.11](#611-the-html-report))
+lists the areas, one line each (id, what it is, files, lines added and
+deleted), where "what it is" is the reporter's label for the area id (the
+area's path when it gave none), and gives the command
 
 ```sh
 graphloom session open <run> --stage report
@@ -853,71 +950,89 @@ with the numbers if the run's remaining budget cannot cover them, so the
 maintainer can raise the profile's `budgets` instead of losing a run halfway.
 It is a floor: corrections and retries come on top.
 
-### 6.10 Architecture diagram
+### 6.10 Features and their data flow
 
-Every report, standard or large, has an architecture diagram of what the pull
-request changes: the components it adds or modifies, the components they
-connect to, and the connections. The reporter returns it with the report.
+The maintainer reads the briefing ([§6.1](#61-template)) to learn what the
+pull request adds. For each new feature the reporter returns the path the data
+takes through it, end to end: where it enters, each hop, where it is stored. The
+report draws one **data-flow diagram** for each, not a map of the modules the
+change touches (a diagram of the architecture was tried in 0.12 and dropped in
+0.16: it was long, and it did not say what the new code does).
 
 ```text
-architecture: {
-  nodes: [{ id, label,
-            kind:   "package" | "cli" | "service" | "api" | "storage" | "external" | "other",
-            change: "added" | "modified" | "unchanged",
-            paths:  [path or directory],          what the node is, in the tree
-            cite:   { path, side, start, end } }],
-  edges: [{ from, to, label,
-            kind:   "call" | "rpc" | "data" | "import" | "config",
-            change: "added" | "modified" | "removed" | "unchanged",
-            cite:   { path, side, start, end } }]  where the connection is made
-}
+features: [{ name, summary,
+             stages: [{ id, label,
+                        kind: "source" | "process" | "transport" | "store" | "external" | "sink",
+                        cite: { path, side, start, end, symbol } }],      a place that shows the stage
+             flows:  [{ from, to, label,                                  stage ids, what moves
+                        cite: { path, side, start, end, symbol } }] }]    where the code moves it
 ```
 
-At most 30 nodes and 60 edges. An `unchanged` node appears only when an edge
-connects it to a changed one (context, not inventory).
+At most 3 features (the most important new capabilities; none for a fix or a
+refactor), 2 to 8 stages and 1 to 12 flows each. A feature's place in the list
+names it (`F1`, `F2`, `F3`). `source` is where the data enters, `process` code
+that transforms or routes it, `transport` a hop over a wire or a queue, `store`
+where it is kept, `external` a system outside the repository, `sink` where it
+leaves or is consumed.
 
-**Deterministic validation:** ids unique; every edge names two nodes; every
-cite resolves in the tree it names; an `added` or `modified` node's paths match
-at least one changed file, an `unchanged` node's paths exist at the base. For a
-Go `call` or `import` edge between two package nodes, the plugin checks the
-`from` package's head imports (its `import` blocks, read from the tree) and
-tells the checker when the import is missing.
+**Deterministic validation:** stage ids unique inside a feature and of the form
+letters, digits, `_` and `-`; every flow names two stages of its feature and
+joins no stage to itself; every label non-empty and bounded; every cite a range
+of lines inside the diff's hunks on the side it names (the rule of an item's
+cites, [§6.5](#65-deterministic-validation)); in large mode a cite may also name a file
+the pull request does not change, by a repository-relative path and a range of
+lines, which the claim check's tree verification covers
+([§6.9](#69-large-pull-requests)).
 
-**Claim check:** claims `A.<node id>` (the node is what its label and paths say
-and has the change it states) and `A.e<n>` (the code at the cite makes that
-connection). An unsupported node is dropped with its edges; an unsupported edge
-is dropped alone; both are recorded under "Removed by the claim check".
+**Claim check:** claims `F1` (the summary is what the data path through its
+stages shows), `F1.s2` (the cited code is that stage, of that kind) and `F1.f3`
+(the cited code moves the data from the one stage to the other, in that
+direction, as the label says), each needing quotes like an item's. An
+unsupported stage is dropped with the flows that touch it, an unsupported flow
+alone, and a feature left with fewer than two stages or no flow, or whose own
+claim is unsupported, is dropped whole; each drop is recorded under "Removed by
+the claim check". The other briefing fields are claims of the same check
+(`W1` a what's-new bullet, `C.surfaces.1`, `C.behavior.1`,
+`C.compatibility.1`, `C.risks.1`, `C.tests.1` the entries of the check lists),
+dropped and recorded the same way.
 
-**Drawing.** What the claim check leaves (the nodes and edges that survived)
-is drawn for the HTML report ([§6.11](#611-the-html-report)) by the **diagram
-job**, with the vendored diagram-design skill ([§12.4](#124-the-vendored-diagram-design-skill)),
-and the plugin's own SVG is only the fallback:
+**Drawing.** What the claim check leaves is drawn for the HTML report
+([§6.11](#611-the-html-report)) by the **diagram job**, with the vendored
+diagram-design skill ([§12.4](#124-the-vendored-diagram-design-skill)), and the
+plugin's own SVG is only the fallback:
 
-- **The job.** After the claim check, one read-only agent job (`diagrams-v1`, fresh session `diagrammer`, on
-  the optional `diagrammer` role's harness, model and effort, the `reporter`'s
-  when the profile names none; [§13.1](#131-roles)) receives only the checked
-  data: the nodes (id, label, kind, change) and edges (from, to, label, kind,
-  change) that survived, and every lifecycle entry that survived ([§6.4](#64-writing-and-checking)):
-  its name, scope, initial value, transitions (condition and effect) and
-  reads. It gets no path, citation or diff. The skill is mounted read-only in
-  the job like the other read-only binds, and the instruction names
-  `<mount>/SKILL.md` and the references to read: `type-architecture-delta.md`,
-  `type-state.md`, `style-guide.md` (Font source: offline/system fonts),
-  `primitives-core.md`, `output-spec.md` and `layout-budget.md`.
-- **What it draws.** One **Architecture delta** (id `arch`): the Before and
-  After topologies of the same grid with the Changes ledger between them. A
-  node with change `unchanged` or `modified` is in both panels, one `added` only
-  in After; an edge `added` only in After, `removed` only in Before, the others
-  in both. And one **State machine** for each lifecycle entry (id
+- **The job.** After the claim check, one read-only agent job (`diagrams-v1`,
+  fresh session `diagrammer`, on the optional `diagrammer` role's harness, model
+  and effort, the `reporter`'s when the profile names none;
+  [§13.1](#131-roles)) receives only the checked data: for each feature that
+  survived its stages (id, label, kind) and flows (from, to, label), and every
+  lifecycle entry that survived ([§6.4](#64-writing-and-checking)): its name,
+  scope, initial value, transitions (condition and effect) and reads. It gets no
+  path, citation or diff. The skill is mounted read-only in the job like the
+  other read-only binds, and the instruction names `<mount>/SKILL.md` and the
+  references to read: `type-data-flow.md`, `type-state.md`, `style-guide.md`
+  (Font source: offline/system fonts), `primitives-core.md`, `output-spec.md`
+  and `layout-budget.md`.
+- **What it draws.** One **Data flow** (the skill's type, `type-data-flow.md`)
+  for each feature (id `feature:<feature id>`): the skill's type has roles in
+  lanes and steps in columns, and here the lanes are the kinds of the stages
+  (only those that occur) and the columns the stages in the order the data
+  reaches them; every stage is a node titled with its label, every flow an arrow
+  from its from stage to its to stage, labelled with its label (the skill's
+  one-labelled-arrow rule gives way, since every checked flow is drawn); the
+  first `store` stage (the last stage when there is none) is the focal node and
+  the flow into it the focal arrow. No step-header strip, step number or role
+  chip is drawn, since they would print text that is no label of the data. And
+  one **State machine** for each lifecycle entry (id
   `state:<item id>:<entry name>`): the start dot, the initial state, one
   transition for each recorded transition, labelled with its condition, and the
-  reads noted. At most 12 diagrams (the architecture first, then the entries in
+  reads noted. At most 12 diagrams (the features first, then the entries in
   report order); the rest are drawn by the plugin. The choices are fixed in the
   instruction, and nobody is asked: the skill's default style (its style-guide
   gate is answered "keep default"), system fonts (no Google Fonts link), static
   (no motion), the light minimal template. The skill's complexity budgets do
-  not apply: every checked node, edge and entry is drawn. The result is, for each
-  diagram, its id and the complete self-contained HTML document the skill
+  not apply: every checked stage, flow and entry is drawn. The result is, for
+  each diagram, its id and the complete self-contained HTML document the skill
   produces, at most 160,000 characters.
 - **Checks, for each diagram, deterministic and recorded as evidence.** (1) The
   skill's own `self_check.py --offline` and `verify-geometry.py`, run by one
@@ -929,9 +1044,9 @@ and the plugin's own SVG is only the fallback:
   stylesheet, font, image or link, no `url(` that leaves it) and on the `<svg>` the
   report embeds. (3) The **label rule**: every visible text of the SVG (each
   `<text>` and `<tspan>`) is built from the labels of the data the job was
-  given: node ids, labels and kinds, edge labels and kinds, state names, scopes,
-  initial values, transition conditions and effects, read descriptions, and the
-  skill's fixed words (Before, After, Changes, ADDED, REMOVED, CHANGED,
+  given: feature names, stage ids, labels and kinds, flow labels, state names,
+  scopes, initial values, transition conditions and effects, read descriptions,
+  and the skill's fixed words (Before, After, Changes, ADDED, REMOVED, CHANGED,
   MODIFIED, UNCHANGED, MOVED, REWIRED, STATE, START, END, INITIAL, READS, and a
   legend's words). Text is compared with whitespace, case and decorating
   punctuation normalized; a text passes when each part of it between standalone
@@ -956,82 +1071,112 @@ and the plugin's own SVG is only the fallback:
   fallback), drops every `class`, sets the title, description and `role="img"`,
   scales the viewBox to the container (`width: 100%`; the job is asked for a
   viewBox at most 1200 wide, the output spec's `doc-inline` preset, or `doc-wide`
-  when a three-panel delta needs it), and writes it back out. The reader allows
+  when a wide diagram needs it), and writes it back out. The reader allows
   at most 64 levels of nesting and 6,000 elements and stops there, so a hostile
   drawing is a problem, never a crash. The drawing
   is recorded in `report.json` (`diagrams`) so that `review.html` at the Answers
   stage embeds the same bytes.
 
-**Fallback rendering**, by plugin code, with no third-party tool:
-
-- an SVG for the HTML report ([§6.11](#611-the-html-report)), used when the
-  skill's drawing fails its checks: a layered
-  layout (layers by longest path from the nodes with no incoming edges, cycles
-  broken at back edges found by depth-first search, order within a layer by
-  barycentre over a few sweeps), boxes coloured by `change` (added green,
-  modified amber, unchanged grey, removed edges dashed red), edge labels, a
-  legend; a lifecycle diagram of its own for each state entry;
-- a `mermaid` code block in `review.md`, as text (it renders where Markdown
-  renders Mermaid, and reads as a list where it does not). `review.md` keeps
-  its mermaid and text forms whoever drew the SVG.
+**Fallback rendering**, by plugin code, with no third-party tool: an SVG for the
+HTML report ([§6.11](#611-the-html-report)), used when the skill's drawing fails
+its checks: a layered layout (layers by longest path from the stages with no
+incoming flows, cycles broken at back flows found by depth-first search, order
+within a layer by barycentre over a few sweeps), boxes coloured by the stage's
+kind, flow labels, a legend of the kinds that occur; and a lifecycle diagram of
+its own for each state entry. `review.md` has the features as text lists (the
+stages, then the flows, each with its cite), whoever drew the SVG; it has no
+Mermaid block.
 
 ### 6.11 The HTML report
 
-Beside `review.md`, the plugin writes `.graphloom/review/review.html`, one
-self-contained file, for every pull request. Plugin code renders it from
+Beside `review.md`, the plugin writes two self-contained files in
+`.graphloom/review/`, for every pull request: **`review.html`**, the briefing,
+one page a maintainer reads in about two minutes, and
+**`review-appendix.html`**, everything else. Plugin code renders both from
 `report.json`, `qa.json`, `necessity.json` and the measurement records, at the
 same two points `review.md` is written (Report, with the Q&A pending; Answers,
-whole). **`review.html` is the report, for every size**; `review.md` beside it is
-its plain-text copy, for agents and `graphloom session open`. No model writes
-HTML: the one piece of a model's markup it holds is the `<svg>` of a diagram the
-skill drew ([§6.10](#610-architecture-diagram)), which plugin code re-serializes
+whole). `review.md` beside them is their plain-text copy, for agents and
+`graphloom session open`, and it stays complete: the briefing, then the
+appendix's content. No model writes HTML: the one piece of a model's markup
+they hold is the `<svg>` of a diagram the skill drew
+([§6.10](#610-features-and-their-data-flow)), which plugin code re-serializes
 from an allow-list.
 
 **Self-contained and inert:** inline CSS and inline SVG; no `<script>`, no
 external stylesheet, image or font; the only links are `href`s to the pull
-request, its commits and files on GitHub at the pinned head and base. Every
-text that came from a model or the pull request is HTML-escaped. A
-deterministic check on the written bytes enforces this, for the embedded
-diagram SVGs too (an allow-list of elements and attributes, `data-*` and `aria-*`
-by prefix, no `href` outside `<a>`, no `url(` that leaves the document). Sections
-use `<details>`, so they collapse without JavaScript. A diagram sits inline in an
-`overflow-x: auto` wrapper and scales to the container width, so a three-panel
-Architecture delta shows whole on a page 1100 to 1400 pixels wide.
+request, its commits and files on GitHub at the pinned head and base, and the
+two files' links to each other (`review.html` and `review-appendix.html`, with
+an optional `#fragment` of letters, digits and `_.:-`). Every text that came
+from a model or the pull request is HTML-escaped. A deterministic check on the
+written bytes of both files enforces this, for the embedded diagram SVGs too (an
+allow-list of elements and attributes, `data-*` and `aria-*` by prefix, no `href`
+outside `<a>`, no `url(` that leaves the document). Sections use `<details>`, so
+they collapse without JavaScript. A diagram sits inline in an `overflow-x: auto`
+wrapper and scales to the container width.
 
-**Contents, in order:**
+**`review.html`, in this order, and nothing else:**
 
-1. **Header cards:** the PR (title, author, head, base), files, +/− lines,
-   commits, GitHub checks, the mode, and N1's conclusion as a coloured badge
-   (necessary green, questionable amber, unnecessary red, needs author grey).
-2. **Necessity:** the base trace as numbered steps with their citations, the
-   design statements, the principles block with one badge per verdict
-   (preserves, breaks, not applicable) and the checker's judgment, and the
-   simpler-way answer.
-3. **Summary:** purpose (with its source) and overview.
-4. **Architecture diagram** ([§6.10](#610-architecture-diagram)): the skill's
-   Architecture delta, or the plugin's SVG with its note.
-5. **Change map:** a horizontal bar chart of added and deleted lines per area
-   (large mode) or per report section (standard mode).
-6. **Report items** as cards, grouped by section: the text, the citations as
-   links, a **state diagram** (the skill's State machine, or the plugin's SVG
-   with its note) for each lifecycle entry (the initial value, one arrow per
-   transition labelled with its condition, the reads listed under it) and the
-   before/after table.
-7. **Measurements:** the metrics table with cells coloured against the limits
-   (over the limit red; inherited from the base, made worse or introduced
-   said in the cell), coverage as a bar, CRAP as a bar with the threshold
-   marked, and the coverage run's note.
-8. **Q&A:** per item, each question with a status badge (answered, partially
-   answered, needs author), the answer, its evidence and the checker's
-   judgment, collapsed by default except "needs author".
-9. **Removed by the claim check** and notes.
+1. **Briefing**, one screen: the **purpose** (one sentence, quoted when the pull
+   request states it, marked inferred otherwise); **What's new**, the reporter's
+   3 to 5 bullets, one for each new capability, with their cites; **Scope that
+   matters**, the lines added and deleted split into production code, tests,
+   docs, and generated or other files, counted by plugin code from the file list
+   (a generated file is one the profile's `questions.excludeRoots` or its
+   generated globs name; docs are `docs/**` and `*.md`; tests are the files the
+   plugin's own rule classifies as tests, `_test.go`, `*.test.ts`, `*.spec.ts`,
+   and any file in a `test`, `tests` or `__tests__` directory; production code
+   is the rest); and the **Verdict panel**: N1's conclusion as a coloured badge
+   (necessary green, questionable amber, unnecessary red, needs author grey), the
+   project principles the change touches with a badge for each verdict
+   (preserves, breaks, not applicable, [§7.5.1](#751-project-design-principles))
+   and the number of questions that need the author.
+2. **Data flow per new feature** ([§6.10](#610-features-and-their-data-flow)): for
+   each feature its name, its summary, the skill's Data flow (or the plugin's SVG
+   with its note) and, collapsed, its stages and flows with their cites.
+3. **What you need to check:** the five lists of the reporter's `check` field
+   (new surfaces; changed behavior of existing code paths; compatibility;
+   risks; tests added), one line each with cites.
+4. **Hotspots:** the top 5 functions by CRAP, then complexity, from the
+   measurement records (a test file's functions have no CRAP and are not
+   ranked); a modified function that got worse than at the base says
+   `base → head` ([§6.8](#68-measurements)).
+5. **Areas:** for a large report with more than one area, one line for each area
+   (its id, what it is as the reporter labelled it or its path, files, lines
+   added and deleted) and the command that opens the reporter's session
+   ([§6.9](#69-large-pull-requests)); otherwise the report's sections with how
+   many items each holds, and the same command.
+6. **Open questions:** only the questions whose answer status is "needs author"
+   or "partially answered" (or not answered), and N1 when its conclusion is
+   questionable or unnecessary ([§7.4](#74-output-one-file)), each linking to its
+   place in the appendix; the answered ones are a count, "N answered — see the
+   appendix". Pending (the Questions and Answers stages follow) at the Report stage.
 
-In large mode the Report card ends with **Dive into an area** ([§6.9](#69-large-pull-requests)):
-the areas table and the command that opens the reporter's session.
+It ends with a link to the appendix. It holds no change item, no full
+measurements table, no Q&A and no module diagram.
 
-The stop message names `review.html` first: "the report is
-`.graphloom/review/review.html`; `review.md` beside it is its plain-text copy for
-agents and `graphloom session open`".
+**`review-appendix.html`, in this order:** the **Summary** (the reporter's
+overview of the mechanism); the **Necessity** part (the base trace as numbered
+steps with their citations, the design statements, the principles block with
+one badge per verdict and the checker's judgment, and the simpler-way answer);
+the **Change map** (a horizontal bar chart of added and deleted lines per area
+in large mode, per report section otherwise); the **Change items**, as cards
+grouped by section (the text, the citations as links, a state diagram, the
+skill's State machine or the plugin's SVG with its note, for each lifecycle
+entry with its reads listed under it, and the before/after table; standard mode
+keeps producing the lifecycles); the **Measurements** (the full metrics table
+with cells coloured against the limits, over the limit red, inherited from the
+base, made worse or introduced said in the cell, coverage as a bar, CRAP as a
+bar with the threshold marked, and the coverage run's note, with the files not
+measured); the whole **Q&A** (per item, each question with a status badge, the
+answer, its evidence and the checker's judgment, collapsed by default except
+"needs author", each with an `id` the briefing links to); and **Removed by the
+claim check**, with the notes. It links back to the briefing at the top and the
+bottom.
+
+The stop message names the briefing first: "the report is the briefing
+`.graphloom/review/review.html`, with the appendix
+`.graphloom/review/review-appendix.html`; `review.md` beside them is the
+plain-text copy of both for agents and `graphloom session open`".
 
 ## 7. Questions and answers
 
@@ -1352,14 +1497,24 @@ leaves the base tree out of the assignments, with a note, and the agents use
 ### 7.4 Output: one file
 
 **Decision:** the first layer writes one human-readable file,
-`.graphloom/review/review.md`, with four parts: **Necessity** (N1's answer,
-first, [§7.5](#75-the-necessity-question-n1)), then **Report**, then
-**Measurements**, then **Q&A**. The user asked for the first step to hold the
+`.graphloom/review/review.md`, with the **Briefing** first
+([§6.11](#611-the-html-report)) and then the **Appendix**: **Necessity** (N1's
+answer, [§7.5](#75-the-necessity-question-n1)), the **Report**'s change items,
+**Measurements**, and the **Q&A**. The user asked for the first step to hold the
 report, the questions and the answers together, and one file is read in one
 pass. Each question sits with its answer. The machine-readable copies are
 `report.json` (`pr-change-report-v1`) and `qa.json` (`pr-qa-v1`), which the
 validators, the ledger and the review layer read. The review layer's
 `draft.md` remains separate, because it is what may be posted.
+
+**Open questions in the briefing.** The Q&A is long, and most of it needs no
+person. The briefing's Open questions section ([§6.11](#611-the-html-report))
+lists only the questions whose answer status is `needs author` or `partially
+answered` (or that have no answer), and N1 when its conclusion is questionable
+or unnecessary, each with the first lines of its answer and a link to its place
+in the appendix; every other question is a count, "N answered — see the
+appendix". The Verdict panel counts the questions that need the author. Plugin
+code selects them from `qa.json`; the Q&A part below keeps every question.
 
 The Q&A part is grouped by change item, then by symbol. Each entry has the
 question (type, asked by the questioner), the answer (by the answerer), the
@@ -2299,7 +2454,7 @@ tools run under bwrap.
 |---|---|
 | Reporter, questioner, answerer, checkers, reviewers, verifiers | `untrusted-read` (bwrap). Reviewers write reproducing tests only as text in their results and run nothing. The root filesystem is read-only, and so is the workspace: because the runner enforces that, a Claude Code agent of these roles may run shell commands (`git show <base>:<path>`, `git grep <base>`, `cat`, `grep`), which a read-only job without such a sandbox may not (a Codex agent's shell is inside Codex's own read-only sandbox). The base tree ([§7.3](#73-answers)) lies inside that read-only workspace. The home directory is replaced by a tmpfs, except the agent's own login state (`ownState`) and the inventory's dependency directories (read-only). The masks above apply, the environment is minimal, and there is no GitHub token. Network is on, because the agents need their CLI logins and their model APIs |
 | A session the maintainer opens (`graphloom session open`, [§17](#17-discussing-a-run-graphloom-session-open)) | The confinement of the job that recorded it: `untrusted-read` with the same masks, a read-only checkout, no GitHub token, network on for the agent's login and model API, and the maintainer's own CLI login. A configured session launcher is bound read-only and its state directories writable. The run's state is not mounted; the `graphloom` process records the conversation after the agent exits |
-| The diagram job ([§6.10](#610-architecture-diagram)) | `untrusted-read` (bwrap) like the other agents, with the vendored skill's directory bound read-only, and told not to read the repository |
+| The diagram job ([§6.10](#610-features-and-their-data-flow)) | `untrusted-read` (bwrap) like the other agents, with the vendored skill's directory bound read-only, and told not to read the repository |
 | The skill's checks on a diagram (`diagram-check-<attempt>-<n>`) | bwrap with no network, read-only, the plugin's directory read-only: `python3` runs the skill's `self_check.py` and `verify-geometry.py` on a scratch file in the run's temporary directory |
 | Static metrics (`gometrics`, `tsmetrics`) | bwrap with no network, read-only. They run the plugin's own parser over the head tree and execute none of it, so they always run, with or without Docker |
 | Checks, coverage, mutation, reproducing tests: **everything that runs PR code** | `sandbox: docker` (below) |
@@ -2506,8 +2661,12 @@ names the location.
 `examples/plugins/pr-review/vendor/diagram-design/` is the third-party agent skill
 [diagram-design](https://github.com/cathrynlavery/diagram-design) (MIT, Cathryn
 Lavery), copied unmodified at commit `0cf73c3fcc56667ad91a9a04c439ac6ccfabc9d1`:
-its `SKILL.md`, the references the diagram job reads, the light minimal template
-and the two examples of the types drawn, and the two scripts the plugin runs
+its `SKILL.md`, the references the diagram job reads (the **Data flow** type,
+`type-data-flow.md`, for the features, and the **State machine** type for the
+lifecycle entries; 0.16 added the Data flow reference and its example from the same
+commit, and the Architecture delta files of the earlier versions stay in the
+subset, undrawn), the light minimal template and the examples of the types drawn,
+and the two scripts the plugin runs
 (`scripts/self_check.py`; `scripts/verify-geometry.py`, which the source repository
 keeps at its root). `LICENSE` is the source repository's, `VENDORED.md` records the
 URL, the commit and what was left out (screenshots, the other types, the icon set,
@@ -2521,7 +2680,7 @@ directory from the SPDX header rule, because the files stay as they came.
 The skill is a model-facing document and two scripts; none of it runs inside the
 controller or the graph. What it makes is untrusted: a diagram document is checked
 by the skill's own scripts, by the inertness check, and by the **label rule** (every
-visible text is a label of the checked data the job was given, [§6.10](#610-architecture-diagram)),
+visible text is a label of the checked data the job was given, [§6.10](#610-features-and-their-data-flow)),
 so a drawing cannot carry a claim the claim checker never saw. The plugin embeds
 only the `<svg>` it re-serializes from an allow-list, with the title and description
 its own. The skill's scripts read the document and print findings; they open
@@ -2544,7 +2703,7 @@ the review base session ([§8.1](#81-review)).
 | Role | Default harness | Access | Constraint |
 |---|---|---|---|
 | `reporter` | `claude-code` | read | Writes the neutral report and the draft summary; in large mode the one high-level reporter job ([§6.9](#69-large-pull-requests)), whose session the maintainer opens to dive into an area (`claude-code` or `codex`: a Pi session cannot be opened) |
-| `diagrammer` | the `reporter`'s | read | Optional. The diagram job only ([§6.10](#610-architecture-diagram)): it draws the checked architecture and lifecycle entries with the vendored diagram-design skill, fresh session, one correction in the same session. Absent, it takes the reporter's harness, model and effort. No `distinctFrom`: its drawings are checked by code (the skill's checks, inertness, the label rule), and it receives only data the claim check already judged |
+| `diagrammer` | the `reporter`'s | read | Optional. The diagram job only ([§6.10](#610-features-and-their-data-flow)): it draws the checked data flows of the features and the lifecycle entries with the vendored diagram-design skill, fresh session, one correction in the same session. Absent, it takes the reporter's harness, model and effort. No `distinctFrom`: its drawings are checked by code (the skill's checks, inertness, the label rule), and it receives only data the claim check already judged |
 | `report-checker` | `codex` | read | `distinctFrom: ["reporter"]` |
 | `questioner` | `codex` | read | `distinctFrom: ["reporter"]`. Asks only |
 | `answerer` | `claude-code` | read | `distinctFrom: ["questioner"]`. Claude Code or Codex only. Answers N1 first, in the Questions stage (`necessity-v1`), then the other questions from the whole codebase |
@@ -2777,9 +2936,9 @@ recorded, so they do not decide CI verdicts.
 | `needs-author-purpose` | A new config flag; nothing in the PR text, commits, issue or code comments says why | A `purpose` question answered `needs author`, listing what was read; marked in `review.md`; offered as a draft comment in the review layer |
 | `purpose-stated` | The PR body states why the flag is added | A purpose record `stated` with the matching quote; no `purpose` question |
 | `missing-test` | A new exported function that no test references; the questioner omits the question | The plugin adds the required `missing-test` question; the answerer's whole-repository search finds no test → `needs author`, naming the package's `_test.go` |
-| `large-pull-request` | Run with `limits: { maxFiles: 2, areaMaxBytes: 500, areaMinBytes: 1 }` (`LARGE_LIMITS`): two packages (`alpha`: six exported functions; `beta`: an exported function and an unexported helper), a guide, a generated `*.pb.go` file and a binary file GitHub gave no patch for. Under the profile's own limits the same pull request is an ordinary small one | Stops `report ready`: three areas (`A1` docs, `A2` `pkg/alpha`, `A3` `pkg/beta`) and the generated area; **one** reporter job (given the digest: the areas with the names of their exported symbols, the file list, the facts and the guide's patch, the only interface file) and **one** claim check whose quotes are verified in the trees (`arch-quote-1`), then the diagrams; no area job, no synthesis; the generated file and `assets/logo.png` listed in `other` ("generated code, not summarised", "patch not provided by GitHub"); `report.json` says `mode: "large"` with the limit passed and the areas, `review.md` says so in its header and ends the Report with the "Dive into an area" block; the questions follow [§7.6](#76-questions-in-large-mode) (the trio once for the `alpha` item and once for the `beta` item, a `purpose` question for the item the PR text does not explain, one `missing-test` question for each item, none per symbol and none per function): N1 and 8 more, answered in one batch, checked in a fresh session and recorded; `qa.json` and `review.md` written once; every receipt valid |
-| `architecture-diagram` | The `report` pull request with a diagram of four components (the server command, the schema field, the cron library it schedules with, and the liaison API as unchanged context) and three connections; the canned tree check resolves every cite; the claim check does not support one connection (`A.e2`) twice | `arch-check-1` runs after the reporter and before the checker; the checker is asked for `A.server` … `A.e3`; the connection is dropped from `report.json` and listed under "Removed by the claim check" in `review.md` and `review.html`; the Mermaid block and the SVG hold the other two connections |
-| `large-artifacts` | A pull request of 1,000 data files (large mode), whose `report.json` and `review.html` pass one write command | Both are written as part sets (`report-json-p1`…, `review-html-p1`…), each part its own job; the validators reconstruct them from the recorded parts and pass; `succeeded` at `report ready` |
+| `large-pull-request` | Run with `limits: { maxFiles: 2, areaMaxBytes: 500, areaMinBytes: 1 }` (`LARGE_LIMITS`): two packages (`alpha`: six exported functions; `beta`: an exported function and an unexported helper), a guide, a generated `*.pb.go` file and a binary file GitHub gave no patch for. Under the profile's own limits the same pull request is an ordinary small one | Stops `report ready`: three areas (`A1` docs, `A2` `pkg/alpha`, `A3` `pkg/beta`) and the generated area; **one** reporter job (given the digest: the areas with the names of their exported symbols, the file list, the facts and the guide's patch, the only interface file) and **one** claim check whose quotes are verified in the trees (`arch-quote-1`), then the diagrams; no area job, no synthesis; the generated file and `assets/logo.png` listed in `other` ("generated code, not summarised", "patch not provided by GitHub"); `report.json` says `mode: "large"` with the limit passed and the areas, `review.md` says so in its header and its Areas section lists the areas with the reporter's labels and the "Dive into an area" command; the questions follow [§7.6](#76-questions-in-large-mode) (the trio once for the `alpha` item and once for the `beta` item, a `purpose` question for the item the PR text does not explain, one `missing-test` question for each item, none per symbol and none per function): N1 and 8 more, answered in one batch, checked in a fresh session and recorded; `qa.json` and `review.md` written once; every receipt valid |
+| `feature-data-flow` | The `report` pull request with one feature, the nightly retention sweep: four stages (the `retention_days` flag as a source, the group's `retention_days` as a store, the sweep as a process, the cron library as an external) and three flows, each cited in the diff; the claim check does not support one flow (`F1.f2`) twice | The checker is asked for `W1`…, `F1`, `F1.s1`…`F1.s4` and `F1.f1`…`F1.f3`; the flow is dropped from `report.json` and listed under "Removed by the claim check" in `review.md` and `review-appendix.html`; the skill's Data flow (passing its real `self_check.py` and `verify-geometry.py` and the label rule) holds the two other flows in `review.html`; the same `diagram-corrected` and `diagram-fallback` variants draw it by a corrected document and by the plugin |
+| `large-artifacts` | A pull request of 1,000 data files (large mode), whose `report.json` and `review-appendix.html` pass one write command | Both are written as part sets (`report-json-p1`…, `review-appendix-html-p1`…), each part its own job, while the briefing `review.html` stays small; the validators reconstruct them from the recorded parts and pass; `succeeded` at `report ready` |
 | `complex-function` | A new function with 12 decision points and nesting 4; `metrics.coverage: false` | A Measurements row (12, 4, CRAP with coverage unknown as the upper bound, mutation not run with its reason); `split-function` answered with a proposal (line ranges, names new to the package, one responsibility each) and `complexity-coverage` entries; the `measurements` validator rejects a canned record whose `complexity` disagrees with its `decisions` |
 | `crap-upper-bound` | A modified function with complexity 6 in a package that does not build offline | Coverage `unknown` with that reason; CRAP 42 shown as the upper bound; no `complexity-coverage` question; mutation `not run: no coverage` |
 | `sandbox-unavailable` | Docker missing (the stand-in's image check, a Fetch command with a canned result, says `unavailable`) with coverage and mutation on | Static metrics run; coverage and mutation `not run: docker unavailable`; CRAP shown as the upper bound; no PR code runs anywhere; the run still succeeds |
@@ -2881,7 +3040,7 @@ The heuristic parts (symbol packs, similarity threshold, test mapping, answer
 search) are tuned against the P1 live trial instead. P1 and P2 make no GitHub
 writes.
 
-**Landed in 0.12:** the architecture diagram ([§6.10](#610-architecture-diagram)),
+**Landed in 0.12:** the architecture diagram ([§6.10](#610-features-and-their-data-flow)),
 the HTML report ([§6.11](#611-the-html-report)) and the multi-part writes of
 [§6.6](#66-output), within the first layer and without changing the stage list
 ([Version 0.12](#version-012-architecture-diagram-html-report-and-multi-part-writes)).
@@ -2889,7 +3048,7 @@ the HTML report ([§6.11](#611-the-html-report)) and the multi-part writes of
 **Landed in 0.14:** the diagrams of the architecture and the lifecycle entries
 drawn by an agent job with the vendored diagram-design skill, checked by the
 skill's own scripts, the inertness check and the label rule, with the plugin's
-SVG as the fallback ([§6.10](#610-architecture-diagram),
+SVG as the fallback ([§6.10](#610-features-and-their-data-flow),
 [§12.4](#124-the-vendored-diagram-design-skill),
 [Version 0.14](#version-014-diagrams-drawn-with-the-diagram-design-skill)).
 
@@ -2898,6 +3057,14 @@ digest, one claim check with its quotes verified against the cited trees, the qu
 reduced to the high-level set, and a "Dive into an area" block that points at the reporter's
 session ([§6.9](#69-large-pull-requests), [§7.6](#76-questions-in-large-mode),
 [Version 0.15](#version-015-large-mode-at-a-high-level)).
+
+**Landed in 0.16:** a one-page briefing report for every size: the reporter's `whatsNew`,
+`features` (the data flow of each new feature, drawn with the skill's Data flow type),
+`check` and `areas`, the scope, hotspots and open questions counted by plugin code,
+`review.html` as the briefing and `review-appendix.html` as everything else, and
+the architecture diagram removed ([§6.1](#61-template),
+[§6.10](#610-features-and-their-data-flow), [§6.11](#611-the-html-report),
+[Version 0.16](#version-016-a-one-page-briefing-report)).
 
 | Phase | Scope | Verification |
 |---|---|---|
@@ -2942,7 +3109,7 @@ reporter: [Version 0.15](#version-015-large-mode-at-a-high-level).)
 Large mode ([§6.9](#69-large-pull-requests), [§7.6](#76-questions-in-large-mode))
 lands in 0.11: a pull request over `maxFiles`, `maxPatchBytes` or `maxNewSymbols`
 is reviewed area by area instead of refused, and only the hard caps refuse it.
-The architecture diagram ([§6.10](#610-architecture-diagram)) and the HTML report
+The architecture diagram ([§6.10](#610-features-and-their-data-flow)) and the HTML report
 ([§6.11](#611-the-html-report)) landed in 0.12 ([below](#version-012-architecture-diagram-html-report-and-multi-part-writes)):
 in 0.11 the synthesis job returned `purpose`, `overview` and `merges` only.
 
@@ -2972,6 +3139,61 @@ What 0.11 does, where this document leaves it open:
   Q&A that does not fit still stops the run "incompatible task" and says so.
   (0.12 lifts this: [§6.6](#66-output), multi-part writes.)
 
+### Version 0.16: a one-page briefing report
+
+The maintainer's feedback on the 0.15 report: "the high level report still show too many
+details. and it lacks the data flow diagram of the new features. and module dependence
+diagram verbose, it useless. the report is too long and lack of critical info. it
+overwhelmed me. redesign its content." The content of the report is redesigned, for every
+size, so that one page is readable in about two minutes and everything else is an appendix
+([§6.1](#61-template), [§6.10](#610-features-and-their-data-flow),
+[§6.11](#611-the-html-report)). What 0.16 does, where this document leaves it open:
+
+- `change-report-v1` gains `whatsNew`, `features`, `check` and `areas` (all required, empty
+  arrays allowed) and loses `architecture`. The reporter's prompts (standard and large) lead
+  with the briefing, say what each field is for, and keep each field's bounds; in large mode
+  the briefing's cites may name lines the reporter read in the tree (a file the pull request
+  changes outside its hunks, or one it does not change), which the claim check's tree
+  verification covers. The sections' items stay: they are the appendix's content, and
+  standard mode keeps producing lifecycles and before/after tables.
+- The architecture machinery is gone: the `architecture` field, its validation, the `arch-check`
+  tree check (cites, paths at the base, Go imports), the node and edge claims (`A.<id>`,
+  `A.e<n>`), the Architecture delta drawing, the plugin's module layout and the Mermaid block.
+  The quote verification stays, renamed `tree-quote-<n>` (it was `arch-quote-<n>`), since a
+  large report's claims and the briefing's need it. Reports written by 0.15 are not read by
+  0.16 (`report.json` changes shape; a run is pinned to one plugin version).
+- Claims `W<n>`, `F<n>`, `F<n>.s<k>`, `F<n>.f<k>` and `C.<list>.<n>` join the claim check; an
+  unsupported one is dropped and recorded (`removedParts` kinds `whatsNew`, `feature`,
+  `stage`, `flow`, `check`), and a feature with too little left is dropped whole.
+- The diagram job draws one **Data flow** per feature (id `feature:<feature id>`) and still one
+  State machine per lifecycle entry; the vendored subset gains `type-data-flow.md` and
+  `example-data-flow.html` from the pinned commit (`VENDORED.md`). The type is made for roles
+  and steps; the instruction maps the stage kinds to lanes and the order of the data to
+  columns, and overrides the one-labelled-arrow rule, so a drawing may differ from the skill's
+  gallery, and the skill's checks and the label rule decide. The plugin's fallback layout is the
+  old layered layout over stages and flows, boxes coloured by kind.
+- `report.json` gains `scope` and `briefing`; `diagrams` holds `features` and `states`.
+  `review.html` is the briefing; `review-appendix.html` is new, written at the same two points
+  (`review-appendix-html-p<k>`, `review-appendix-html-qa-p<k>` part sets), validated against the
+  evidence and the inertness check like `review.html`, and the two link to each other (the
+  inertness check allows exactly those two local links). `review.md` mirrors the briefing and
+  holds the appendix under an Appendix heading, with its blocks one heading level down.
+- The briefing's section in `review.md` that holds N1 and the principles is headed "Necessity
+  and principles", not "Verdict": the report has no verdict (the reporter's contract has no
+  such field, [§6.5](#65-deterministic-validation)), and the Verdict panel of the HTML is N1's
+  conclusion and the principles' verdicts of [§7.5.1](#751-project-design-principles).
+- Ambiguities resolved: "tests" are the files the plugin's own test rule names (`_test.go`,
+  `*.test.ts`, `*.spec.ts`, a `test`, `tests` or `__tests__` directory), whatever the language;
+  a file under `excludeRoots` or the profile's generated globs is "generated" before it is
+  docs or tests; "needs the author" counts the questions whose status is `needs author`
+  (N1 included when that is its status); a question with no answer counts as open. The
+  Areas section shows the sections' item counts for a standard report and for a large one with
+  a single area.
+- The rehearsal scenario `architecture-diagram` is now `feature-data-flow`.
+- Where Versions 0.12, 0.14 and 0.15 below speak of the architecture diagram, the
+  `arch-check` and `arch-quote` commands, the Architecture delta, the Mermaid block or
+  `review.html` as the whole report, 0.16 supersedes them; the sections above are current.
+
 ### Version 0.15: large mode at a high level
 
 The maintainer decided: "the large mode should not read the detail in each area, so only
@@ -2992,7 +3214,7 @@ is reworked to that, replacing the per-area reporters and the synthesis of
   A validator sees the newest review, and the Report stage has one claim check, so no record
   of the report is needed (answered batches are still recorded, [§7.6](#76-questions-in-large-mode)).
 - Quotes of every claim are verified against the cited tree by the `arch-quote` commands of
-  [§6.10](#610-architecture-diagram) (the claim carries the tree of each cite, one command job
+  [§6.10](#610-features-and-their-data-flow) (the claim carries the tree of each cite, one command job
   per 14 quotes). The check is the same one; what 0.15 adds is that item, lifecycle and
   summary claims use it in large mode. A claim with no cite quotes the head tree, so a quote
   of a deleted file belongs to a cited claim. Citations still lie inside the diff's hunks.
@@ -3010,7 +3232,7 @@ is reworked to that, replacing the per-area reporters and the synthesis of
 
 ### Version 0.14: diagrams drawn with the diagram-design skill
 
-The diagram job ([§6.10](#610-architecture-diagram)) and the vendored skill
+The diagram job ([§6.10](#610-features-and-their-data-flow)) and the vendored skill
 ([§12.4](#124-the-vendored-diagram-design-skill)) land in 0.14, within the first
 layer and without changing the stage list. How 0.14 does it, where this document
 leaves it open:
@@ -3044,7 +3266,7 @@ leaves it open:
 
 ### Version 0.12: architecture diagram, HTML report and multi-part writes
 
-[§6.10](#610-architecture-diagram), [§6.11](#611-the-html-report) and the
+[§6.10](#610-features-and-their-data-flow), [§6.11](#611-the-html-report) and the
 multi-part writes of [§6.6](#66-output) land in 0.12. `architecture` is a
 property of `change-report-v1` (an area reporter in large mode returns it empty)
 and of `change-synthesis-v1`; both contracts require it. How 0.12 does it, where
