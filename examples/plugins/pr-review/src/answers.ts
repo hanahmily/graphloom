@@ -22,7 +22,8 @@ import { matchesGeneratedGlob } from "./metrics/generated.js";
 import type { FullPack } from "./packs.js";
 import type { MetricsRecord } from "./metrics/record.js";
 import { crapRounded } from "./metrics/crap.js";
-import { NECESSITY_SCHEMA, NECESSITY_REVISION_SCHEMA_NAME, NECESSITY_SCHEMA_NAME, necessityAnswer, necessityProblems, type Necessity } from "./necessity.js";
+import { effectiveConclusion, NECESSITY_SCHEMA, NECESSITY_REVISION_SCHEMA_NAME, NECESSITY_SCHEMA_NAME, necessityAnswer, necessityProblems, statusOf, type Necessity, type PrincipleCheck } from "./necessity.js";
+import type { Principle } from "./principles.js";
 import type { PinnedText, Question } from "./questions.js";
 import type { ReportView } from "./reportview.js";
 import { MAX_RERUN_SEARCHES, readSearchReport, searchCommand, searchKey, searchProblems, searchWhere, SEARCH_SCHEMA, type MeasuredSearch, type Search } from "./searches.js";
@@ -50,7 +51,7 @@ export type AnswerVerdict = (typeof VERDICTS)[number];
 
 /** The id fields of the answerer's and the checker's contracts: each is constrained, per job, to the ids the assignment lists. */
 export const ANSWERS_REFERENCES = ["answers[].question"];
-export const ANSWER_CHECK_REFERENCES = ["verdicts[].question"];
+export const ANSWER_CHECK_REFERENCES = ["verdicts[].question", "verdicts[].principles[].id"];
 
 export const ANSWERS_SCHEMA = {
   type: "object",
@@ -112,8 +113,18 @@ export const ANSWER_CHECK_SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["question", "verdict", "note", "searches"],
-        properties: { question: { type: "string" }, verdict: { type: "string", enum: VERDICTS }, note: { type: "string" }, searches: { type: "array", items: SEARCH_SCHEMA } },
+        required: ["question", "verdict", "note", "searches", "principles"],
+        properties: {
+          question: { type: "string" },
+          verdict: { type: "string", enum: VERDICTS },
+          note: { type: "string" },
+          searches: { type: "array", items: SEARCH_SCHEMA },
+          // N1 only: the judgment of each design principle verdict (design §7.5.1); empty for every other question.
+          principles: {
+            type: "array",
+            items: { type: "object", additionalProperties: false, required: ["id", "verdict", "note"], properties: { id: { type: "string" }, verdict: { type: "string", enum: VERDICTS }, note: { type: "string" } } },
+          },
+        },
       },
     },
   },
@@ -155,6 +166,7 @@ export interface CheckVerdict {
   verdict: AnswerVerdict;
   note: string;
   searches: Search[];
+  principles: PrincipleCheck[];
 }
 
 export interface AnswerContext {
@@ -164,6 +176,8 @@ export interface AnswerContext {
   packs: readonly FullPack[];
   /** The pull request's own text, which a necessity answer's quotes must match. */
   pinned?: readonly PinnedText[];
+  /** The design principles that apply to the change, which N1's answer must each judge once (design §7.5.1). */
+  principles?: readonly Principle[];
 }
 
 const isRelative = (p: string): boolean => p !== "" && !p.startsWith("/") && !p.split("/").some((s) => s === ".." || s === "") && !/[\n\u0000|]/.test(p);
@@ -248,7 +262,7 @@ function answerProblemsOf(a: Answer, q: Question, ctx: AnswerContext, dirs: read
   switch (q.type) {
     case "necessity":
       if (a.necessity === undefined) out.push(`${at}: the necessity answer is missing`);
-      else out.push(...necessityProblems(a.necessity, ctx.pinned ?? []));
+      else out.push(...necessityProblems(a.necessity, ctx.pinned ?? [], ctx.principles ?? []));
       break;
     case "purpose":
       if (a.status === "answered" && a.citations.length === 0) out.push(`${at}: a purpose is answered only from cited code, comments or documents; otherwise it needs the author`);
@@ -562,6 +576,8 @@ export interface AnswerReading {
   partial: Map<string, string>;
   unsupported: Map<string, string>;
   searches: Map<string, Search[]>;
+  /** The checker's judgment of each principle verdict, on N1. */
+  principles: Map<string, PrincipleCheck[]>;
   /** What was normalized in reading the verdicts' ids, by question id. */
   notes: Map<string, string[]>;
   /** Verdict ids that matched no question (unknown or ambiguous), which stay unjudged. */
@@ -589,15 +605,23 @@ export function readAnswerCheck(output: unknown, questions: readonly Question[],
     // Two verdicts for one question: the weaker stands.
     if (earlier === undefined || VERDICTS.indexOf(v.verdict) > VERDICTS.indexOf(earlier.verdict)) byQuestion.set(r.id, v);
   }
-  const reading: AnswerReading = { unchecked: [], supported: new Set(), partial: new Map(), unsupported: new Map(), searches: new Map(), notes, ignored };
+  const reading: AnswerReading = { unchecked: [], supported: new Set(), partial: new Map(), unsupported: new Map(), searches: new Map(), principles: new Map(), notes, ignored };
   for (const q of questions) {
     const a = answers.get(q.id);
     const v = byQuestion.get(q.id);
     if (a === undefined) continue;
-    if (v === undefined || (needsOwnSearch(q, a) && v.searches.length === 0)) {
+    // A principle verdict the answerer gave is judged too (the weaker judgment of two stands); one left unjudged sends the check back.
+    const judged = new Map<string, PrincipleCheck>();
+    for (const c of v?.principles ?? []) {
+      const earlier = judged.get(c.id);
+      if (earlier === undefined || VERDICTS.indexOf(c.verdict) > VERDICTS.indexOf(earlier.verdict)) judged.set(c.id, c);
+    }
+    const mine = (a.necessity?.principles ?? []).map((p) => p.id);
+    if (v === undefined || (needsOwnSearch(q, a) && v.searches.length === 0) || mine.some((id) => !judged.has(id))) {
       reading.unchecked.push(q.id);
       continue;
     }
+    if (mine.length > 0) reading.principles.set(q.id, mine.map((id) => ({ id, verdict: judged.get(id)!.verdict, note: judged.get(id)!.note.trim() })));
     reading.searches.set(q.id, v.searches);
     if (v.verdict === "supported") reading.supported.add(q.id);
     else if (v.verdict === "partial") reading.partial.set(q.id, v.note.trim());
@@ -610,7 +634,7 @@ export function readAnswerCheck(output: unknown, questions: readonly Question[],
 export interface FinalAnswer extends Answer {
   /** The searches as the plugin re-ran them: its own count beside the agent's, or why it has none. */
   searches: MeasuredSearch[];
-  check: { verdict: AnswerVerdict | "downgraded"; note: string; searches: MeasuredSearch[] };
+  check: { verdict: AnswerVerdict | "downgraded"; note: string; searches: MeasuredSearch[]; /** N1: the checker's judgment of each principle verdict. */ principles?: PrincipleCheck[] };
   /** What was normalized in reading this answer's id and its verdict's, recorded and never silent. */
   notes: string[];
   /** The statements the answerer made, oldest first, when the answer was corrected. */
@@ -749,10 +773,14 @@ export function assemble(questions: readonly Question[], current: ReadonlyMap<st
     const searches = measured(reading.searches.get(q.id) ?? []);
     const notes = [...(idNotes.get(q.id) ?? []), ...(reading.notes.get(q.id) ?? [])];
     const mine = { ...a, searches: measured(a.searches), notes };
+    const principles = reading.principles.get(q.id);
+    const checked = (verdict: AnswerVerdict, note: string): FinalAnswer["check"] => ({ verdict, note, searches, ...(principles !== undefined ? { principles } : {}) });
+    // A design principle the checker supports as broken makes N1 questionable, so its status says so (design §7.5.1).
+    const settle = (f: FinalAnswer): FinalAnswer => (f.necessity !== undefined && effectiveConclusion(f) !== f.necessity.conclusion && f.check.verdict !== "downgraded" ? { ...f, status: statusOf(effectiveConclusion(f)) } : f);
     if (reading.unsupported.has(q.id)) {
-      out.push({ ...mine, status: "needs author", check: { verdict: "downgraded", note: reading.unsupported.get(q.id) ?? "", searches }, history: history.length > 0 ? history : [{ answer: a.answer, status: a.status }] });
-    } else if (reading.partial.has(q.id)) out.push({ ...mine, check: { verdict: "partial", note: reading.partial.get(q.id) ?? "", searches }, history });
-    else out.push({ ...mine, check: { verdict: "supported", note: "", searches }, history });
+      out.push({ ...mine, status: "needs author", check: { ...checked("unsupported", reading.unsupported.get(q.id) ?? ""), verdict: "downgraded" }, history: history.length > 0 ? history : [{ answer: a.answer, status: a.status }] });
+    } else if (reading.partial.has(q.id)) out.push(settle({ ...mine, check: checked("partial", reading.partial.get(q.id) ?? ""), history }));
+    else out.push(settle({ ...mine, check: checked("supported", ""), history }));
   }
   return out;
 }

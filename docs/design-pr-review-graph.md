@@ -225,7 +225,7 @@ meaning and parser (review-kit, [§14](#14-sharing-code-with-issue-fix)).
 | `environment` | Only `checks` (`git`, the bundled `ocr` via `scripts/ocr-path.sh`, the harness CLIs). **`prepare` and `pinnedFiles` are refused**: preparation would run contributor code in the unconfined worktree. Setup that a coverage run needs (code generation the repository does not commit) is `metrics.sandbox.<language>.setup` instead, which runs inside the Docker sandbox ([§12.2](#122-confinement)) |
 | `report` | The section template, each section's meaning in this repository, and its detectors ([§6.2](#62-profile-mapping), [§6.3](#63-detectors)) |
 | `symbols` | Language packs: file globs, definition patterns, test-file and test-name patterns ([§7.2](#72-deterministic-groundwork)). The plugin ships packs for Go and TypeScript as data, and a profile may add or override them |
-| `questions` | `excludeRoots` (generated code only; the search covers the whole base tree, vendored directories included), `similarity` (default 0.5), `maxCandidates` per query (5) ([§7.2](#72-deterministic-groundwork)); and `designDocs`, repository-relative globs of the design and architecture documents that N1's answerer and checker read first, beside the `context` documents ([§7.5](#75-the-necessity-question-n1)). BanyanDB's are `docs/concept/{tsdb,clustering,persistence-storage,storage-and-format,data-model,rotation}.md`, `docs/design/README.md` and the two `docs/design/0.12.0` pages on the write stream (`streaming-api`, `measure-batch-v2`) |
+| `questions` | `excludeRoots` (generated code only; the search covers the whole base tree, vendored directories included), `similarity` (default 0.5), `maxCandidates` per query (5) ([§7.2](#72-deterministic-groundwork)); and `designDocs`, repository-relative globs of the design and architecture documents that N1's answerer and checker read first, beside the `context` documents ([§7.5](#75-the-necessity-question-n1)). BanyanDB's are `docs/concept/{tsdb,clustering,persistence-storage,storage-and-format,data-model,rotation}.md`, `docs/design/README.md` and the two `docs/design/0.12.0` pages on the write stream (`streaming-api`, `measure-batch-v2`); and `principles`, `{ "path": "<repo-relative .md>", "ref": "<git ref>" }`, the project's design principles file and the ref to read it at (`ref` optional, a git ref name matching `^[A-Za-z0-9._/-]+$`, at most 200 characters, default the task's base commit; [§7.5.1](#751-project-design-principles)). BanyanDB's is `skills/design-principles/SKILL.md` |
 | `metrics` | Per language: `files`, and the tools' `argv` for static metrics, coverage and mutation (defaults: [metrics §3](design-code-quality-metrics.md#3-tools)). Also `generated` globs; `coverage` (run the PR's tests for coverage under untrusted confinement, **default true**); `mutation.enabled` (**default true**; needs coverage) and `mutation.timeBudgetMs` (default 30 min); and `sandbox`, the Docker sandbox's image digest per language with its `cpus`, `memory`, `pids`, `tmp` and `wallClockMs`, its `readOnly` mounts (named host directories of tools and offline caches, `~/…` for the operator's home) and, for Go, its `setup` commands (sandboxed code generation run in the checkout before the tests, [§12.2](#122-confinement)) and its `buildTags` (the Go build tags the coverage `go test` compiles with, `-tags=a,b`: those the repository's own CI passes; each `[A-Za-z0-9_.]+`, none twice, at most 16; never applied to setup) and its `ginkgoLabelFilter` (a Ginkgo label-filter expression, `[A-Za-z0-9_.\-!&|() ,/]+`, at most 200 characters, the `--label-filter` the repository's CI passes; given only to the touched packages whose tests import Ginkgo, [§12.2](#122-confinement)). `go test`'s own `-timeout` is not a profile key: it follows `wallClockMs` less two minutes BanyanDB's protobuf and mock code is generated this way. A profile may turn either run off. Thresholds may be tightened, never loosened |
 | `context` | issue-fix's [context documents](design-issue-fix-graph.md#context-documents) |
 | `issues` | Where linked issues live. `Fixes`/`Closes` references are read with `get-issue` |
@@ -1087,7 +1087,7 @@ with evidence, and a conclusion.
 | Part | The answerer must |
 |---|---|
 | 1. **Is the problem real on the base?** | Quote the claimed problem from the pull request's title, body or a commit message (the quote must match the pinned text, as a stated purpose does). Trace the base behavior through the **base code**: each trace step cites `path:line` in the base tree. Say whether the claimed failure can happen on the base (`yes`, `no`, `unclear`). A failing test on the base is optional evidence; this version has no mechanism to run one (it arrives with the P4 reproducing tests), so the answer says `not attempted: no reproduction mechanism in this version` and rests on the trace |
-| 2. **Does the fix fit the system's design?** | Search the repository's **design and architecture documents** (the profile's `questions.designDocs` globs, its `context` documents, and the repository's `docs/`) and the code comments that state intent. List every search as a structured record ([§7.3](#searches-and-their-counts)), found or not; the plugin re-runs each and records its own count Cite the **design statement** and the **changed lines** and say whether the change `preserves` or `breaks` them, is `unrelated`, or that no design statement is `not stated` (for #1443: does replying after the flush loop make the write wait on flushing, against the write path design?) |
+| 2. **Does the fix fit the system's design?** | Search the repository's **design and architecture documents** (the profile's `questions.designDocs` globs, its `context` documents, and the repository's `docs/`) and the code comments that state intent. List every search as a structured record ([§7.3](#searches-and-their-counts)), found or not; the plugin re-runs each and records its own count Cite the **design statement** and the **changed lines** and say whether the change `preserves` or `breaks` them, is `unrelated`, or that no design statement is `not stated` (for #1443: does replying after the flush loop make the write wait on flushing, against the write path design?). When the profile names a principles file, also one verdict per applicable project principle ([§7.5.1](#751-project-design-principles)) |
 | 3. **Is there a simpler or existing way?** | Say whether the caller, another layer or an existing mechanism already handles it, or the fix belongs elsewhere, and cite where |
 
 **Conclusion**, one line with its rationale: `necessary`, `questionable`,
@@ -1186,6 +1186,111 @@ reads "N1 is answered above, under Necessity" and, when skipped, the skip
 note. `qa.json` records N1 as the first question with its structured answer,
 and a `necessity` object with the conclusion, the decision and whether the
 rest was skipped.
+
+### 7.5.1 Project design principles
+
+A project can keep its design principles in its own repository as an agent
+skill, so the same file guides contributors' agents and this review. The
+profile names it (`questions.principles`, [§3.2](#32-profile)); N1's part 2
+judges the change against every principle that applies. Nothing about a
+project's principles is in the graph: the file is data.
+
+**Format** (`src/principles.ts`, parsed exactly this way):
+
+````markdown
+---
+name: design-principles
+description: ...
+---
+# <title>
+<intro paragraph>
+
+## <id>
+<statement paragraph(s), up to the first bullet or the next heading>
+- Why: <text>                      (optional)
+- Applies to: <glob>, <glob>, ...  (optional; absent = every change)
+- Source: <text>                   (optional)
+````
+
+The frontmatter is skipped, and so are the title and intro. `<id>` matches
+`^[a-z0-9][a-z0-9-]*$`; a `##` heading that does not is ignored and recorded as a
+note, as is a repeated id (the first is kept) and an item with no statement.
+Bounds: at most 50 principles, a statement of at most 1,000 characters, at most
+20 globs each; what is over a bound is cut (the rest of the list, the end of the
+statement, the later globs) with a note.
+
+**Where it is read from.** The file is read from `questions.principles.ref`,
+or, when the profile gives none, the task's pinned base commit; never from the
+pull request's head, so a pull request cannot change the rules it is judged by.
+`ref` exists so a maintainer can try a principles file that is not merged
+upstream yet (a local branch of the review clone). Fetch reads it with one
+read-only command (`principles-read`: the ref is resolved once to a commit SHA,
+then `git cat-file blob <sha>:<path>`), after the checkout and the ledger read.
+The output, the commit and the file's bytes, is evidence; the parse recomputes
+from those bytes, so a validator derives the same principles. A missing file is
+not an error: the evidence says `absent`, review.md says "no principles file at
+`<ref>:<path>`", and N1 proceeds as before. A ref that names no commit fails the
+command and goes to the supervisor. When the pull request's changed files
+include the principles file, that is recorded and review.md says so.
+
+**What N1 does with it.** A principle applies when it names no globs or any
+changed file (a renamed file under both names) matches any of its globs, with the
+matcher that routes report sections. The answerer's instruction lists each
+applicable principle (id, statement, why, source) and its result,
+`necessity-v1`, carries a `principles` array with one entry per applicable
+principle:
+
+| Field | Meaning |
+|---|---|
+| `id` | One of the applicable ids (a per-job `enum`, as the Q&A ids are, [§7.3](#ids)); each answered exactly once |
+| `verdict` | `preserves`, `breaks` or `not-applicable` |
+| `explanation` | Why, in the answerer's words |
+| `citations` | `path:line` with a quote, in the base or head tree, as the rest of N1 cites; `preserves` and `breaks` need at least one |
+
+The deterministic rules reject a missing, repeated or unknown id and a verdict
+without its citations; the one-correction flow of N1 handles the rest. Every
+citation is resolved in the tree it names like N1's other citations.
+
+The answer checker judges each principle verdict on its own, beside the trees
+(its result's `verdicts[].principles`, one `supported`, `partial` or
+`unsupported` judgment per id, constrained to the same ids): a `breaks` is
+supported only when the cited code violates the principle's statement as
+written. A judgment of a principle verdict does not change the checker's verdict
+on N1 itself, which covers the trace, the design statements, the changed lines,
+the alternatives and the conclusion.
+
+**Conclusion rule.** When the checker supports a `breaks` verdict, N1's
+conclusion becomes at most `questionable`: `necessary` becomes `questionable`;
+`questionable`, `unnecessary` and `needs author` are unchanged. The conclusion
+names the broken principle ids (in review.md, in `necessity.json`'s
+`conclusionNote` and in the decision's reason). A principle break never skips a
+question: every other question is still asked, and only a supported
+`unnecessary` skips, as before. A `breaks` the checker does not support
+(`partial` or `unsupported`) is recorded with both statements, the answerer's
+explanation and the checker's note, and changes nothing.
+
+**Records.** `necessity.json` gains a `principles` object: the file's `path`,
+`ref` (when the profile names one), `commit` and whether it was `present`, whether
+the pull request changed it, each parsed principle with whether it applied, the
+parse's notes, and the verdicts, the checker's judgments and the supported
+breaks. `qa.json`'s `necessity` object carries the same and `principlesBroken`.
+The validator for `questions-complete` recomputes the principles record from the
+recorded bytes and the pull request's files.
+
+**Rendering.** In part 2 of the Necessity section of review.md:
+
+````markdown
+Principles: `skills/design-principles/SKILL.md` at `fedcba987654`.
+- offline-idempotent — breaks — Running twice appends the item again. — `pkg/offline/sync.go:11-13` "items = append(items, x)"; checker: supported
+- small-steps — preserves — One change. — `pkg/offline/sync.go:11-13` "…"; checker: supported
+Principles that did not apply: proto-compatible.
+This pull request changes skills/design-principles/SKILL.md; it was judged by the version at fedcba987654.
+````
+
+and, with no file, `Principles: no principles file at <ref>:<path>.` The last
+line appears only when the pull request changes the file. A broken principle also
+appears in the conclusion line: "Design principle broken (the checker supports
+it): offline-idempotent."
 
 ## 8. The review layer
 
@@ -2254,6 +2359,9 @@ recorded, so they do not decide CI verdicts.
 | `necessity-unnecessary` | The `state-lifecycle` change with a design statement (BanyanDB's `docs/concept/tsdb.md` write path: a write is buffered and a background worker flushes it): N1 finds the problem real but the change decides the reply after the flush loop, which breaks that statement; the checker supports it | N1 concludes `unnecessary` with the design statement and the changed lines cited; only N1 is asked and answered (no questioner, no other answer); `review.md` shows N1 first, then the Report, the Measurements and "Remaining questions skipped…"; `necessity.json` records the skip; every receipt is valid |
 | `necessity-disputed` | As above, but the checker refutes the answer twice (the cited statement is about the shard's buffer, not this reply) | One correction, then N1 is `questionable` (status `needs author`, both statements recorded) and **every** question is asked |
 | `necessity-necessary` | A modified function; N1 finds the failure possible, the design untouched and nothing existing | N1 is `necessary`, first in `qa.json`, and every other question follows; nothing is skipped |
+| `necessity-principles` | A modified function; the repository's principles skill (`rehearsal-fixtures.ts`) has three principles, two of which apply to the changed file | N1 gives each applicable principle a `preserves` verdict, the checker supports both, N1 is `necessary`; the third principle is listed as not applying |
+| `necessity-principle-broken` | As above, N1 says `offline-idempotent` is broken and the checker supports it | N1 is `questionable`, naming `offline-idempotent`; every other question is asked |
+| `necessity-principle-unsupported` | As above, but the checker does not support the break | N1 stays `necessary`; review.md shows both the break and the checker's note |
 | `report-delta` | Seeded ledger with a report at L; rebased with one new commit | A since-L section with that commit's facts and items, then the full report |
 | `answer-finds-existing-helper` | The PR adds `ParseTTL`; the base has `ParseDuration`, outside any path the PR touches | `existing-equivalent` answered with `ParseDuration`'s `path:line`, its call sites and the search; checker `supported`; status `answered`, not posted |
 | `answer-no-library-with-whole-repo-search` | The PR adds a back-off helper; no declared dependency or internal package provides one | `reuse-library` answered "none found", listing the name, signature and token searches over the whole base tree and every go.mod entry with its source status; checker `supported` |

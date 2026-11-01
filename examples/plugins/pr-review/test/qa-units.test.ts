@@ -401,7 +401,7 @@ describe("reading the answer checker", () => {
   const answers = new Map(set.questions.map((x) => [x.id, { question: x.id, none_found: x.type === "existing-equivalent" } as Answer] as const));
 
   it("leaves a question unchecked when it has no verdict, or a none-found or test answer has no searches of the checker's own", () => {
-    const verdicts = set.questions.map((x) => ({ question: x.id, verdict: "supported", note: "", searches: [] }));
+    const verdicts = set.questions.map((x) => ({ question: x.id, verdict: "supported", note: "", searches: [], principles: [] }));
     const reading = readAnswerCheck({ verdicts }, set.questions, answers) as { unchecked: string[] };
     const needing = set.questions.filter((x) => x.type === "existing-equivalent" || x.type === "missing-test").map((x) => x.id);
     expect(reading.unchecked).toEqual(needing);
@@ -411,12 +411,12 @@ describe("reading the answer checker", () => {
 
   it("takes the weaker of two verdicts for one question", () => {
     const id = set.questions.find((x) => x.type === "common-logic")!.id;
-    const verdicts = [{ question: id, verdict: "supported", note: "", searches: [] }, { question: id, verdict: "unsupported", note: "found one", searches: [] }];
+    const verdicts = [{ question: id, verdict: "supported", note: "", searches: [], principles: [] }, { question: id, verdict: "unsupported", note: "found one", searches: [], principles: [] }];
     const reading = readAnswerCheck({ verdicts }, set.questions, answers) as { unsupported: Map<string, string> };
     expect(reading.unsupported.get(id)).toBe("found one");
   });
 
   it("refuses a result the contract refuses", () => {
-    expect(readAnswerCheck({ verdicts: [{ question: "Q1", verdict: "maybe", note: "", searches: [] }] }, set.questions, answers)).toMatchObject({ problems: [expect.stringMatching(/verdict must be one of/)] });
+    expect(readAnswerCheck({ verdicts: [{ question: "Q1", verdict: "maybe", note: "", searches: [], principles: [] }] }, set.questions, answers)).toMatchObject({ problems: [expect.stringMatching(/verdict must be one of/)] });
   });
 });

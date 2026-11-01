@@ -12,7 +12,8 @@
 import type { RehearsalCommandResult, RehearsalReply } from "@graphloom/sdk";
 import { needsOwnSearch, searchItems, verificationPlan, type Answer, type CheckVerdict, type VerifyItem } from "./answers.js";
 import { COMMAND } from "./constants.js";
-import { effectiveConclusion, necessityAnswer, necessityQuestion, type Necessity } from "./necessity.js";
+import { effectiveConclusion, necessityAnswer, necessityQuestion, type Necessity, type PrincipleVerdict } from "./necessity.js";
+import { applies, parsePrinciples } from "./principles.js";
 import { candidatePlan, type Groundwork } from "./groundwork.js";
 import { declaredDependencies, parseManifests, siteCommands } from "./inventory.js";
 import type { MetricsRecord } from "./metrics/record.js";
@@ -69,6 +70,11 @@ export interface NecessitySpec {
   checks?: Array<{ verdict: "supported" | "partial" | "unsupported"; note: string }>;
   /** The corrected result after an unsupported verdict. It keeps the number of citations, so the verification command is the same. */
   revise?: (prev: Necessity) => Necessity;
+  /**
+   * The repository has a design principles file with this text at the profile's ref. The answerer judges each principle that
+   * applies (`preserves` unless `verdicts` says otherwise) and the checker supports each verdict unless `checks` says otherwise.
+   */
+  principles?: { text: string; verdicts?: Record<string, PrincipleVerdict["verdict"]>; checks?: Record<string, "supported" | "partial" | "unsupported"> };
 }
 
 export interface QaSpec {
@@ -160,6 +166,7 @@ export function defaultNecessity(title: string): Necessity {
       explanation: "Following the callers of the touched code in the base, nothing else handles the case, so it can happen.",
     },
     reproduction: "not attempted: no reproduction mechanism in this version",
+    principles: [],
     design: { statements: [], changed: [], effect: "unrelated", explanation: "No design or architecture statement concerns this behavior.", searches: [{ pattern: "design|architecture|write path", tree: "base", paths: [], ignoreCase: false, hits: 4 }] },
     alternatives: { exists: false, explanation: "No caller or other layer already handles it, and the change belongs where it is made.", citations: [] },
     searches: [{ pattern: "callers of the touched code", tree: "base", paths: [], ignoreCase: false, hits: 3 }],
@@ -219,13 +226,18 @@ export function qaScenario(i: QaInput): QaScenario {
   const final = first.map((a) => revised.find((r) => r.question === a.question) ?? a);
   // N1 comes first: its answerer, its checker (one correction when the first round is unsupported), and its verification.
   const nspec = spec.necessity ?? {};
-  const n1First = nspec.result !== undefined ? nspec.result(defaultNecessity(i.pull.title)) : defaultNecessity(i.pull.title);
+  const principled = nspec.principles !== undefined && profile.questions.principles !== undefined ? parsePrinciples(nspec.principles.text).principles.filter((p) => applies(p, i.files)) : [];
+  const verdictOf = (id: string): PrincipleVerdict["verdict"] => nspec.principles?.verdicts?.[id] ?? "preserves";
+  const principleVerdicts: PrincipleVerdict[] = principled.map((p) => ({ id: p.id, verdict: verdictOf(p.id), explanation: `The change ${verdictOf(p.id) === "breaks" ? "violates" : "keeps"} the principle ${p.id}.`, citations: verdictOf(p.id) === "not-applicable" ? [] : [{ path: "pkg/timestamp/duration.go", tree: "base", start: 30, end: 42, quote: "func ParseDuration" }] }));
+  const dflt = { ...defaultNecessity(i.pull.title), principles: principleVerdicts };
+  const n1First = nspec.result !== undefined ? nspec.result(dflt) : dflt;
   const nChecks = nspec.checks ?? [];
   const n1Revised = nChecks[0]?.verdict === "unsupported" && nspec.revise !== undefined ? nspec.revise(n1First) : undefined;
   const n1Final = n1Revised ?? n1First;
   const n1Verdicts = (round: number, n: Necessity): CheckVerdict[] => {
     const given = nChecks[round];
-    return [{ question: necessityQuestion().id, verdict: given?.verdict ?? "supported", note: given?.note ?? "", searches: [{ pattern: "design|flush|write path|acknowledg", tree: "base", paths: [], ignoreCase: false, hits: 4 }, { pattern: n.problem.trace[0]?.path ?? "path", tree: "base", paths: [], ignoreCase: false, hits: 1 }] }];
+    const principles = n.principles.map((p) => ({ id: p.id, verdict: nspec.principles?.checks?.[p.id] ?? "supported", note: nspec.principles?.checks?.[p.id] === undefined ? "" : `the checker's note on ${p.id}` }));
+    return [{ question: necessityQuestion().id, verdict: given?.verdict ?? "supported", note: given?.note ?? "", principles, searches: [{ pattern: "design|flush|write path|acknowledg", tree: "base", paths: [], ignoreCase: false, hits: 4 }, { pattern: n.problem.trace[0]?.path ?? "path", tree: "base", paths: [], ignoreCase: false, hits: 1 }] }];
   };
   const n1Rounds = [n1Verdicts(0, n1First), ...(n1Revised !== undefined ? [n1Verdicts(1, n1Revised)] : [])];
   const lastN1 = nChecks[n1Rounds.length - 1];
@@ -236,7 +248,7 @@ export function qaScenario(i: QaInput): QaScenario {
       const a = set[n]!;
       const given = spec.checks?.[round]?.(q, a);
       const searches = given?.searches ?? (needsOwnSearch(q, a) ? [{ pattern: `\\b${symOf(q)?.name ?? "x"}\\b|test`, tree: "base", paths: [], ignoreCase: false as const, hits: 0 }] : []);
-      return { question: q.id, verdict: given?.verdict ?? "supported", note: given?.note ?? "", searches };
+      return { question: q.id, verdict: given?.verdict ?? "supported", note: given?.note ?? "", searches, principles: [] };
     });
   const rounds = revised.length > 0 || (spec.checks?.length ?? 0) > 1 ? [verdicts(0, first), verdicts(1, final)] : [verdicts(0, final)];
   const results: QaScenario["results"] = {
@@ -290,6 +302,7 @@ export function qaScenario(i: QaInput): QaScenario {
   for (const round of rounds) for (const item of searchItems(round.flatMap((v) => v.searches.map((search) => ({ question: v.question, search }))), i.mergeBase, COMMAND.cite, [], true)) canned(item);
   for (const round of n1Rounds) for (const item of searchItems(round.flatMap((v) => v.searches.map((search) => ({ question: v.question, search }))), i.mergeBase, COMMAND.citeNecessity, [], true)) canned(item);
   commands["necessity-write"] = ok("written\n");
+  if (nspec.principles !== undefined) commands["principles-read"] = ok(`commit ${i.mergeBase}\npresent\n${nspec.principles.text}`);
   commands["qa-write"] = ok("written\n");
   commands["ledger-write"] = ok(`advanced ${"b".repeat(40)}\n`);
   return { results, commands, questions, symbols, necessity: { first: n1First, final: n1Final, asked: n1Asked } };

@@ -108,7 +108,8 @@
       "docs/design/README.md",
       "docs/design/0.12.0/streaming-api/README.md",
       "docs/design/0.12.0/measure-batch-v2/README.md"
-    ]
+    ],
+    "principles": { "path": "skills/design-principles/SKILL.md" }
   },
   "metrics": {
     "generated": ["**/*.pb.go", "**/*.pb.validate.go", "**/*_mock.go", "**/mock_*.go"],

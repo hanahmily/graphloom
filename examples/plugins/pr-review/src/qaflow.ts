@@ -13,7 +13,8 @@ import { answersFlow, NECESSITY_KIND, type AnswerContext, type AnswersFlow, type
 import { pinnedBase } from "./commands.js";
 import { COMMAND } from "./constants.js";
 import { commandRuns, succeeded, type CommandRun } from "./evidence.js";
-import { necessityJson, necessityQuestion, parseNecessityRecord, type NecessityRecord } from "./necessity.js";
+import { necessityDecision, necessityJson, necessityQuestion, parseNecessityRecord, type NecessityRecord } from "./necessity.js";
+import { principlesContext, principlesReading, principlesRecord, type PrinciplesContext } from "./principles.js";
 import { ledgerJson, ledgerMarkdown, ledgerRead, ledgerWriteCommand, oldValue, priorState, type PriorLedger } from "./ledger.js";
 import { withQa } from "./output.js";
 import { necessityWriteCommand, qaWriteCommand, writtenNecessity, writtenReport } from "./write.js";
@@ -37,6 +38,8 @@ export interface QaContext {
   /** The profile's design-document globs and context documents, which N1's answerer and checker search (design §7.5). */
   designDocs: string[];
   context: Profile["context"];
+  /** The project's design principles as N1 judges the change against them, when the profile names a file (design §7.5.1). */
+  principles?: PrinciplesContext;
 }
 
 export type QaContextState =
@@ -55,9 +58,17 @@ export function qaContext(evidence: readonly EvidenceRecord[], profile: Profile,
   if (view === undefined) return { state: "pending", reason: "the report was not written" };
   const g = groundworkState({ evidence, files: a.analysis.snapshot.files, profile, base, ...(retryable !== undefined ? { retryable } : {}) });
   if (g.state !== "ready") return { state: "groundwork", step: g };
+  let principles: PrinciplesContext | undefined;
+  const configured = profile.questions.principles;
+  if (configured !== undefined) {
+    const reading = principlesReading(evidence, configured, base);
+    if (reading.state === "missing") return { state: "pending", reason: "the design principles file has not been read" };
+    if (reading.state === "failed") return { state: "pending", reason: reading.reason };
+    principles = principlesContext(reading.read, a.analysis.snapshot.files);
+  }
   const symbols = g.groundwork.symbols.map((s) => ({ ...s, ...(itemOfSymbol(s, view.items) !== undefined ? { item: itemOfSymbol(s, view.items)! } : {}) }));
   const groundwork: Groundwork = { ...g.groundwork, symbols };
-  return { state: "ready", ctx: { analysis: a.analysis, pr, base, view, groundwork, pinned: pinnedTexts(a.analysis.snapshot.pull, a.analysis.snapshot.commits), packs: effectivePacks(profile), refs: g.refs, designDocs: profile.questions.designDocs, context: profile.context } };
+  return { state: "ready", ctx: { analysis: a.analysis, pr, base, view, groundwork, pinned: pinnedTexts(a.analysis.snapshot.pull, a.analysis.snapshot.commits), packs: effectivePacks(profile), refs: g.refs, designDocs: profile.questions.designDocs, context: profile.context, ...(principles !== undefined ? { principles } : {}) } };
 }
 
 /** The questioner's flow: its result checked by the deterministic rules. */
@@ -90,12 +101,18 @@ export function questionSet(ctx: QaContext, output: QuestionerOutput | undefined
 
 export const answerContext = (ctx: QaContext, questions: readonly Question[]): AnswerContext => ({ questions, groundwork: ctx.groundwork, view: ctx.view, packs: ctx.packs, pinned: ctx.pinned });
 
+/** N1's own answer context: the principles that apply to the change must each be judged once. */
+export const necessityContext = (ctx: QaContext): AnswerContext => ({ ...answerContext(ctx, [necessityQuestion()]), principles: ctx.principles?.applicable ?? [] });
+
+/** N1's checked answer with its decision and the principles file it was judged against: what `necessity.json` records. */
+export const necessityRecordOf = (ctx: QaContext, final: FinalAnswer, askAll: boolean): NecessityRecord => ({ final, decision: necessityDecision(final, askAll), ...(ctx.principles !== undefined ? { principles: principlesRecord(ctx.principles) } : {}) });
+
 /** The questions the answerer answers after N1: every one but N1, which has its own flow and its own answerer job. */
 export const afterNecessity = (set: QuestionSet): Question[] => set.questions.filter((q) => q.type !== "necessity");
 
 /** N1's flow: its answerer, the verification of its citations, and the checker (design §7.5), over the necessity contract. */
 export function necessityFlow(evidence: readonly EvidenceRecord[], ctx: QaContext, retryable?: (r: CommandRun) => boolean): AnswersFlow {
-  return answersFlow(evidence, answerContext(ctx, [necessityQuestion()]), ctx.base, retryable, NECESSITY_KIND, COMMAND.citeNecessity);
+  return answersFlow(evidence, necessityContext(ctx), ctx.base, retryable, NECESSITY_KIND, COMMAND.citeNecessity);
 }
 
 export type RecordedNecessity = { state: "missing" } | { state: "failed"; reason: string; ref: string } | { state: "read"; record: NecessityRecord; ref: string };

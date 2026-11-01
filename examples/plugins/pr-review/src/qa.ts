@@ -11,7 +11,7 @@
  */
 import type { FinalAnswer } from "./answers.js";
 import type { Groundwork } from "./groundwork.js";
-import { effectiveConclusion, NECESSITY_ID, SKIPPED_NOTE, type NecessityRecord } from "./necessity.js";
+import { brokenNote, effectiveConclusion, NECESSITY_ID, SKIPPED_NOTE, supportedBreaks, type NecessityRecord } from "./necessity.js";
 import type { PurposeRecord, Question } from "./questions.js";
 import { searchLine, withMeasure } from "./searchview.js";
 import type { ReportView } from "./reportview.js";
@@ -60,7 +60,7 @@ export function qaJson(i: QaInput): string {
       tests: (i.groundwork.testMap.get(s.id) ?? []).length,
     })),
     purposes: i.purposes,
-    ...(i.necessity !== undefined ? { necessity: { conclusion: effectiveConclusion(i.necessity.final), decision: i.necessity.decision, skipped: i.skipped === true, ...(i.skipped === true ? { note: SKIPPED_NOTE } : {}), detail: i.necessity.final.necessity } } : {}),
+    ...(i.necessity !== undefined ? { necessity: { conclusion: effectiveConclusion(i.necessity.final), ...(supportedBreaks(i.necessity.final).length > 0 ? { principlesBroken: supportedBreaks(i.necessity.final) } : {}), ...(i.necessity.principles !== undefined ? { principles: i.necessity.principles } : {}), decision: i.necessity.decision, skipped: i.skipped === true, ...(i.skipped === true ? { note: SKIPPED_NOTE } : {}), detail: i.necessity.final.necessity } } : {}),
     inventory: { dependencies: inv.dependencies, packages: inv.packages.length, truncated: inv.truncated },
     weakTest: WEAK_TEST_NOTE,
     questions: i.questions.map((q) => {
@@ -167,6 +167,29 @@ export function renderQa(i: QaInput): string {
 
 const cite = (c: { path: string; tree: string; start: number; end: number; quote: string }): string => `${c.tree === "base" ? "" : `${c.tree} `}\`${c.path}${c.start === c.end ? `:${c.start}` : `:${c.start}-${c.end}`}\` "${short(oneLine(c.quote), 160)}"`;
 
+/** The Principles block of part 2 (design §7.5.1): the source, a line per applicable principle with the checker's judgment, the ones that did not apply, and the flags. */
+function principleBlock(r: NecessityRecord): string[] {
+  const rec = r.principles;
+  if (rec === undefined) return [];
+  const at = rec.ref ?? rec.commit.slice(0, 12);
+  if (rec.file === "absent") return [`Principles: no principles file at ${at}:${rec.path}.`, ...(rec.changedByPullRequest ? [`This pull request changes ${rec.path}; it was judged by the version at ${at}.`] : [])];
+  const n = r.final.necessity!;
+  const checks = new Map((r.final.check.principles ?? []).map((c) => [c.id, c]));
+  const applicable = rec.principles.filter((p) => p.applicable);
+  const judged = (id: string): string => {
+    const c = checks.get(id);
+    return c === undefined ? "checker: no judgment" : `checker: ${c.verdict}${c.note !== "" ? ` (${short(oneLine(c.note), 200)})` : ""}`;
+  };
+  return [
+    `Principles: \`${rec.path}\` at \`${rec.commit.slice(0, 12)}\`${rec.ref !== undefined ? ` (${rec.ref})` : ""}.`,
+    ...n.principles.map((p) => `- ${p.id} — ${p.verdict} — ${short(oneLine(p.explanation), 300)} — ${p.citations.length > 0 ? p.citations.map(cite).join(", ") : "no citations"}; ${judged(p.id)}`),
+    ...(applicable.length === 0 ? ["No principle applies to this change."] : []),
+    ...(rec.principles.some((p) => !p.applicable) ? [`Principles that did not apply: ${rec.principles.filter((p) => !p.applicable).map((p) => p.id).join(", ")}.`] : []),
+    ...(rec.notes.length > 0 ? [`Notes on the principles file: ${rec.notes.join("; ")}.`] : []),
+    ...(rec.changedByPullRequest ? [`This pull request changes ${rec.path}; it was judged by the version at ${at}.`] : []),
+  ];
+}
+
 /** The Necessity part of `review.md` (design §7.5): N1 first, before the report, with its three parts and their evidence. */
 export function renderNecessity(r: NecessityRecord): string {
   const a = r.final;
@@ -175,8 +198,8 @@ export function renderNecessity(r: NecessityRecord): string {
   const check = a.check.verdict === "downgraded" ? `downgraded to needs author${a.check.note !== "" ? ` (${oneLine(a.check.note)})` : ""}` : `${a.check.verdict}${a.check.note !== "" ? `: ${oneLine(a.check.note)}` : ""}`;
   const lines = [
     "# Necessity",
-    `**${NECESSITY_ID} — Is this change necessary?** Conclusion: **${conclusion}**. ${oneLine(n.rationale)}`,
-    `Checker: ${check}.${conclusion !== n.conclusion ? ` The answerer concluded ${n.conclusion}; its evidence did not hold after one correction, so the conclusion is ${conclusion}.` : ""} ${r.decision.action === "skip" ? SKIPPED_NOTE : `All questions follow: ${r.decision.reason}.`}`,
+    `**${NECESSITY_ID} — Is this change necessary?** Conclusion: **${conclusion}**. ${oneLine(n.rationale)}${brokenNote(a) !== "" ? ` ${brokenNote(a)}` : ""}`,
+    `Checker: ${check}.${conclusion !== n.conclusion ? ` The answerer concluded ${n.conclusion}; ${a.check.verdict === "downgraded" ? "its evidence did not hold after one correction" : "the checker supports a broken design principle"}, so the conclusion is ${conclusion}.` : ""} ${r.decision.action === "skip" ? SKIPPED_NOTE : `All questions follow: ${r.decision.reason}.`}`,
     "",
     "## 1. Is the problem real on the base?",
     `Claimed: ${oneLine(n.problem.claim)}${n.problem.quotes.map((q) => ` — "${short(oneLine(q.quote), 200)}" (pull request ${q.source})`).join("")}`,
@@ -188,6 +211,7 @@ export function renderNecessity(r: NecessityRecord): string {
     `Effect: **${n.design.effect}**. ${oneLine(n.design.explanation)}`,
     ...n.design.statements.map((s) => `- Design statement: ${cite(s)}`),
     ...n.design.changed.map((s) => `- Changed lines: ${cite(s)}`),
+    ...principleBlock(r),
     `Searched: ${n.design.searches.map((s) => searchLine(withMeasure(s, a.searches), 80)).join("; ")}.`,
     "",
     "## 3. Is there a simpler or existing way?",

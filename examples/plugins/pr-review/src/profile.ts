@@ -173,7 +173,7 @@ export interface ProfileData {
   environment: { checks: EnvironmentCommand[] };
   report?: { sections: SectionConfig[] };
   symbols?: { packs: SymbolPack[] };
-  questions?: { excludeRoots?: string[]; similarity?: number; maxCandidates?: number; designDocs?: string[] };
+  questions?: { excludeRoots?: string[]; similarity?: number; maxCandidates?: number; designDocs?: string[]; principles?: { path: string; ref?: string } };
   metrics?: Partial<MetricsConfig>;
   context?: ContextRef[];
   privateRepos?: string[];
@@ -195,7 +195,8 @@ export interface Profile {
   environment: { checks: EnvironmentCommand[] };
   sections: SectionConfig[];
   symbols: SymbolPack[];
-  questions: { excludeRoots: string[]; similarity: number; maxCandidates: number; designDocs: string[] };
+  /** `principles`: the repository's design principles file and the ref to read it at (default: the task's base commit), see design §7.5.1. */
+  questions: { excludeRoots: string[]; similarity: number; maxCandidates: number; designDocs: string[]; principles?: { path: string; ref?: string } };
   metrics: MetricsConfig;
   context: ContextRef[];
   privateRepos: string[];
@@ -611,11 +612,11 @@ export function parseProfile(config: unknown): Profile {
   const environment = checkEnvironment(p.environment);
   const sections = checkSections(p.report);
   const symbols = checkSymbols(p.symbols);
-  let questions = { excludeRoots: [] as string[], similarity: 0.5, maxCandidates: 5, designDocs: [] as string[] };
+  let questions: Profile["questions"] = { excludeRoots: [], similarity: 0.5, maxCandidates: 5, designDocs: [] };
   if (p.questions !== undefined) {
     need(isObject(p.questions), "questions must be an object");
     const q = p.questions as Record<string, unknown>;
-    onlyKeys(q, "questions", ["excludeRoots", "similarity", "maxCandidates", "designDocs"]);
+    onlyKeys(q, "questions", ["excludeRoots", "similarity", "maxCandidates", "designDocs", "principles"]);
     need(q.excludeRoots === undefined || isStrings(q.excludeRoots), "questions.excludeRoots must be a list of paths");
     // They travel in one argument of each search command, which a command allows 4,096 characters.
     need(q.excludeRoots === undefined || (q.excludeRoots as string[]).join("\n").length <= 3_000, "questions.excludeRoots is too long: at most 3,000 characters in all");
@@ -624,7 +625,16 @@ export function parseProfile(config: unknown): Profile {
     need(q.designDocs === undefined || isStrings(q.designDocs), "questions.designDocs must be a list of repository-relative globs");
     need(q.designDocs === undefined || (q.designDocs as string[]).every((g) => g.trim() !== "" && !g.startsWith("/") && !g.split("/").includes("..") && !/[\n\u0000]/.test(g)), "questions.designDocs globs are repository-relative, without \"..\" or empty entries");
     need(q.designDocs === undefined || (q.designDocs as string[]).join("\n").length <= 3_000, "questions.designDocs is too long: at most 3,000 characters in all");
-    questions = { excludeRoots: (q.excludeRoots as string[] | undefined) ?? [], similarity: (q.similarity as number | undefined) ?? 0.5, maxCandidates: (q.maxCandidates as number | undefined) ?? 5, designDocs: (q.designDocs as string[] | undefined) ?? [] };
+    let principles: { path: string; ref?: string } | undefined;
+    if (q.principles !== undefined) {
+      need(isObject(q.principles), "questions.principles must be an object with a path and an optional ref");
+      const pr = q.principles as Record<string, unknown>;
+      onlyKeys(pr, "questions.principles", ["path", "ref"]);
+      need(isString(pr.path) && (pr.path as string).endsWith(".md") && !(pr.path as string).startsWith("/") && !(pr.path as string).split("/").some((x) => x === ".." || x === "") && !/[\n\u0000]/.test(pr.path as string), "questions.principles.path must be a repository-relative path to a .md file, without \"..\"");
+      need(pr.ref === undefined || (isString(pr.ref) && (pr.ref as string).length <= 200 && /^[A-Za-z0-9._/-]+$/.test(pr.ref as string) && !(pr.ref as string).startsWith("-") && !(pr.ref as string).includes("..")), "questions.principles.ref must be a git ref name (letters, digits, . _ / -; at most 200 characters)");
+      principles = { path: pr.path as string, ...(pr.ref !== undefined ? { ref: pr.ref as string } : {}) };
+    }
+    questions = { excludeRoots: (q.excludeRoots as string[] | undefined) ?? [], similarity: (q.similarity as number | undefined) ?? 0.5, maxCandidates: (q.maxCandidates as number | undefined) ?? 5, designDocs: (q.designDocs as string[] | undefined) ?? [], ...(principles !== undefined ? { principles } : {}) };
   }
   const metrics = checkMetrics(p.metrics, { generated: [], coverage: true, mutation: { enabled: true }, files: {} });
   const context = checkContext(p.context);

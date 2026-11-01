@@ -9,7 +9,7 @@ export const GRAPH_ID = "pr-review";
  * §18): 0.1 declares Fetch, Report, Questions and Answers. Review, Checks,
  * Draft and Publish arrive with later versions.
  */
-export const GRAPH_VERSION = "0.9.0";
+export const GRAPH_VERSION = "0.10.0";
 
 /** The operator decision that would continue into the review layer (design §11). */
 export const REVIEW_LAYER_APPROVAL = "review-layer";
@@ -55,6 +55,8 @@ export const COMMAND = {
   headTree: "head-tree",
   reviewDir: "review-dir",
   ledger: "ledger-read",
+  /** The read of the project's design principles file at the profile's ref (design §7.5.1). */
+  principles: "principles-read",
   metricsDiff: "metrics-diff",
   reportWrite: "report-write",
   baseDefs: "base-defs",
