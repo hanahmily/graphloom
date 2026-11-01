@@ -216,6 +216,37 @@ describe("report-corrections", () => {
   });
 });
 
+describe("the revision has corrections of its own", () => {
+  it("corrects a revision that fails deterministic validation even when the first result used both corrections", () => {
+    const tight = scenarioWith("report-corrections", (s) => {
+      const [bad, corrected] = s.results["change-report-v1"]!;
+      // Both corrections are spent before the claim check: bad, bad, then valid.
+      s.results["change-report-v1"] = [bad!, structuredClone(bad!), corrected!];
+      // The revision comes back one item too long, then within the limit.
+      const long = structuredClone(corrected!.output) as { sections: Array<{ items: Array<{ text: string }> }> };
+      long.sections.find((x) => x.items.length > 0)!.items[0]!.text = "x".repeat(601);
+      s.results["change-report-revision-v1"] = [{ output: long }, corrected!];
+    });
+    const sim = simulate({ scenario: tight });
+    const schemas = jobsOf(sim, "Write the change report").map((j) => j.resultSchema);
+    expect(schemas).toEqual(["change-report-v1", "change-report-v1", "change-report-v1", "change-report-revision-v1", "change-report-revision-v1"]);
+    const stuck = superviseOf(sim);
+    expect(stuck?.reason ?? "").not.toMatch(/fails deterministic validation/);
+  });
+
+  it("still gives up after the revision's own two corrections", () => {
+    const stubborn = scenarioWith("report-corrections", (s) => {
+      const corrected = s.results["change-report-v1"]![1]!;
+      const long = structuredClone(corrected.output) as { sections: Array<{ items: Array<{ text: string }> }> };
+      long.sections.find((x) => x.items.length > 0)!.items[0]!.text = "x".repeat(601);
+      s.results["change-report-revision-v1"] = [{ output: long }];
+    });
+    const sim = simulate({ scenario: stubborn });
+    expect(jobsOf(sim, "Write the change report").filter((j) => j.resultSchema === "change-report-revision-v1")).toHaveLength(3);
+    expect(superviseOf(sim)!.reason).toMatch(/revision still fails deterministic validation after 2 corrections/);
+  });
+});
+
 describe("a contract refusal is a correction too", () => {
   it("names the contract's problem (an extra property) beside the deterministic ones it can still read", () => {
     const bad = scenarioWith("report", (s) => {

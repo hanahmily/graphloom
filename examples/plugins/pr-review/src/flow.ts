@@ -175,6 +175,8 @@ export interface StageReplay<T> {
   checked?: unknown;
   pending?: { problems: string[]; revision: boolean };
   detProblems: number;
+  /** Results of the revision (after the claim check) that failed deterministic validation: the revision has corrections of its own. */
+  revisionProblems: number;
   /** Outputs whose architecture tree check found problems, each sent back for a correction (design §6.10). */
   treeCorrections: number;
   /** The runs of the tree check seen so far; a run counts for the output whose plan has exactly its argv. */
@@ -186,7 +188,7 @@ export interface StageReplay<T> {
 
 /** Replays a stage's events (design §6.4): the reporter writes, deterministic validation corrects, the checker judges, the reporter revises once. */
 export function replayStage<T>(events: readonly StageEvent[], spec: StageSpec<T>): StageReplay<T> {
-  const rep: StageReplay<T> = { revised: false, detProblems: 0, treeCorrections: 0, verifyRuns: [], checkTries: 0, ignored: [], refs: [] };
+  const rep: StageReplay<T> = { revised: false, detProblems: 0, revisionProblems: 0, treeCorrections: 0, verifyRuns: [], checkTries: 0, ignored: [], refs: [] };
   for (const ev of events) {
     rep.refs.push(ev.run.record.ref);
     if (ev.kind === "verify") {
@@ -198,7 +200,8 @@ export function replayStage<T>(events: readonly StageEvent[], spec: StageSpec<T>
       const result = spec.result(ev.run);
       if (result === undefined) continue;
       if ("problems" in result) {
-        rep.detProblems += 1;
+        if (revision) rep.revisionProblems += 1;
+        else rep.detProblems += 1;
         rep.pending = { problems: result.problems, revision };
         continue;
       }
@@ -250,8 +253,11 @@ export function stageStep<T>(rep: StageReplay<T>, spec: StageSpec<T>, names: Sta
   const tail = rep.refs.slice(-10);
   const scope = names.scope ?? "";
   if (rep.pending !== undefined) {
-    if (rep.detProblems > MAX_REPORT_CORRECTIONS) {
-      return { state: "supervise", reason: `${scope}the reporter's result still fails deterministic validation after ${MAX_REPORT_CORRECTIONS} corrections: ${rep.pending.problems.slice(0, 3).join("; ")}`, refs: tail };
+    // The revision answers the claim check with new text, which deterministic validation judges again: it gets
+    // MAX_REPORT_CORRECTIONS corrections of its own rather than whatever the first result left.
+    const used = rep.pending.revision ? rep.revisionProblems : rep.detProblems;
+    if (used > MAX_REPORT_CORRECTIONS) {
+      return { state: "supervise", reason: `${scope}the reporter's ${rep.pending.revision ? "revision" : "result"} still fails deterministic validation after ${MAX_REPORT_CORRECTIONS} corrections: ${rep.pending.problems.slice(0, 3).join("; ")}`, refs: tail };
     }
     return { state: "reporter", kind: "correction", feedback: rep.pending.problems, schema: rep.pending.revision ? names.revision : names.first };
   }
