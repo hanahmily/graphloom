@@ -185,6 +185,7 @@ export function diagramsInstruction(a: DiagramsAssignment): string {
       'Style: the skill\'s default. At its style-guide gate (SKILL.md section 0) the answer is "keep default"; do not customize, onboard or load a profile.',
       "Fonts: offline, system fonts (style-guide.md, Font source: system). No Google Fonts link, no <link>, no @import, nothing loaded from the network.",
       "Static: no motion, no animation, no JavaScript.",
+      "Attribute values are literal: write fill, stroke and the other SVG attributes as plain values (\"#f5f5f5\"), never var(--x); the report embeds the <svg> without its stylesheet.",
       "Template: the light minimal one. A document is complete, self-contained HTML with one <svg> inside a local overflow-x: auto wrapper as output-spec.md asks.",
       "Size: the report shows a drawing scaled to a page about 1100 to 1400 pixels wide, so use a viewBox at most 1200 wide (output-spec.md presets: doc-inline 0 0 960 600, or doc-wide 0 0 1280 720 only when a three-panel delta cannot fit narrower) and tall as needed, wide enough that every label fits unclipped at that scale. The skill's complexity budgets do not apply, because every checked node, edge and entry below must be drawn.",
       "Accessible SVG: role=\"img\", aria-labelledby, <title> then <desc> as the <svg>'s first children (the plugin replaces their text).",

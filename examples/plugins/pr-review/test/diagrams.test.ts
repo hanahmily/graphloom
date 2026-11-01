@@ -179,6 +179,13 @@ describe("the inertness of a drawing and of its document (design 6.11)", () => {
       expect(r.svg.match(/class="/g)).toHaveLength(1);
     });
 
+    it("refuses a var() in an SVG attribute, which would lose its definition with the stylesheet", () => {
+      const doc = withStyle(":root { --paper: #f5f5f5 }").replace(/<rect ([^>]*?)fill="[^"]*"/, '<rect $1fill="var(--paper)"');
+      expect(doc).toContain('fill="var(--paper)"');
+      const r = drawingOf(doc, archSpec, "dd1");
+      expect("problems" in r ? r.problems.join(" ") : "embedded").toMatch(/var\(\), which the embedded drawing cannot resolve/);
+    });
+
     it("resolves several classes on one element in stylesheet order, not class-attribute order", () => {
       const r = drawingOf(withStyle(".node { fill: #ffffff } .added { fill: #ee8800 }", "added node"), archSpec, "dd1");
       if (!("svg" in r)) throw new Error(JSON.stringify(r));

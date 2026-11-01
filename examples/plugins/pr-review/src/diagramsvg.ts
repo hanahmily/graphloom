@@ -385,6 +385,12 @@ export function stylesFor(html: string, root: SvgElement): { classes: Map<string
       else if (SVG_TAGS.test(sel) || sel.includes("[") || [...used].some((c) => new RegExp(`\\.${c}(?![\\w-])`).test(sel))) add(`the rule ${JSON.stringify(sel)} styles the drawing's elements; give each element its presentation attributes instead`);
     }
   }
+  // A var() in an attribute would lose its definition with the stylesheet; the drawing writes literal values instead.
+  const visit = (el: SvgElement): void => {
+    for (const [k, v] of el.attrs) if (/var\(/i.test(v)) add(`<${el.tag} ${k}="${v.slice(0, 60)}">: an attribute uses var(), which the embedded drawing cannot resolve; write the value itself`);
+    for (const c of el.children) if (typeof c !== "string") visit(c);
+  };
+  visit(root);
   return problems.length > 0 ? { problems } : { classes };
 }
 
