@@ -103,7 +103,7 @@ export function largeReporterInstruction(a: LargeReporterAssignment): string {
       "3. " + ARCHITECTURE_PROMPT,
       "",
       "The template. Every section below must appear exactly once in the sections of your result, with its id, either with items or with none set to true. Each item is one conceptual change.",
-      ...a.sections.map((s) => sectionText(s, a.facts)),
+      ...a.sections.map((s) => sectionText(s, [])),
       "",
       `Items: text is at most ${MAX_ITEM_CHARS} characters; at most ${MAX_ITEMS_PER_SECTION} items per section. Every item has cites, at least one. path is a changed file; side is "head" for the new text or "base" for the old; start and end are the first and last line on that side, and every line must lie inside the file's hunks of the pull request's diff (\`git diff HEAD -- <path>\` shows them, even where the patch was not given to you), so cite the lines (a symbol or the whole file is not enough: a cite is rendered as path:start-end). Use 0 and 0 only for a file with no patch text. symbol, optional, names a symbol that appears in the file's patch, or is "". You need not cite every changed file: the plugin lists a file no item cites in "other", with its diffstat. A change that fits no other section goes in "other".`,
       'The "claims" section lists only factual mismatches between the pull request\'s own text and the diff, for example "the body says X is removed; x.go:40 still defines it". Each entry quotes the text and cites the diff, and judges neither side. Use none when there is none.',
@@ -141,6 +141,6 @@ export function largeReporterInstruction(a: LargeReporterAssignment): string {
 export function largeCheckScope(): string {
   return [
     "This pull request is large, and the report below is a high-level one: its reporter was given a digest and the patches of the interface files only, and read other files to confirm its claims. The citations of an item may therefore name lines that the reporter's patches did not show.",
-    "The quotes for every claim below come from the file a cite names, in the tree that cite names (the head is the working tree; the base is `git show HEAD:<path>`; a claim that has no cite quotes the head), at or within three lines of the line you give. The quotes are matched against that file, not against the diff, so read the cited file and copy an excerpt of it exactly; the diff need not show it.",
+    "The quotes for every claim below come from the file a cite names, in the tree that cite names (the head is the working tree; the base is `git show HEAD:<path>`; a file cited on both sides, and a claim with no cite such as a before/after row, may quote either tree: the quote stands where the file shows it), at or within three lines of the line you give. The quotes are matched against that file, not against the diff, so read the cited file and copy an excerpt of it exactly; the diff need not show it.",
   ].join("\n");
 }

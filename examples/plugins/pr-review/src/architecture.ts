@@ -365,7 +365,7 @@ export function readArchitectureCheck(plan: ArchPlan, outputs: readonly string[]
 
 export interface TreeQuoteEntry {
   id: string;
-  tree: "head" | "base";
+  tree: "head" | "base" | "either";
   path: string;
   line: number;
   text: string;
@@ -385,22 +385,31 @@ export interface TreeQuotePlan {
  */
 const QUOTE_SCRIPT = String.raw`set -u; base="$1"; shift
 g() { git -c core.hooksPath=/dev/null "$@"; }
+chk() {
+  if [ "$1" = base ]; then
+    if ! g cat-file -e "$base:$path" 2>/dev/null; then echo missing; return; fi
+    g show "$base:$path" 2>/dev/null > "$GRAPHLOOM_REPORT_FILE.q"
+  else
+    if [ ! -f "$path" ]; then echo missing; return; fi
+    cat "$path" > "$GRAPHLOOM_REPORT_FILE.q"
+  fi
+  awk -v at="$line" 'function c(s) { gsub(/[ \t\r\n]+/, " ", s); sub(/^ /, "", s); sub(/ $/, "", s); return s } BEGIN { w = c(ENVIRON["QUOTE"]) } NR >= at - 3 && NR <= at + 3 { if (index(c($0), w) > 0) f = 1 } END { print (f ? "ok" : "nomatch") }' "$GRAPHLOOM_REPORT_FILE.q"
+}
 { i=0
 while [ "$#" -ge 4 ]; do
   tree="$1"; path="$2"; line="$3"; QUOTE="$4"; shift 4; i=$((i + 1))
   export QUOTE
-  if [ "$tree" = base ]; then
-    if ! g cat-file -e "$base:$path" 2>/dev/null; then echo "$i missing"; continue; fi
-    g show "$base:$path" 2>/dev/null > "$GRAPHLOOM_REPORT_FILE.q"
+  if [ "$tree" = either ]; then
+    v=$(chk head)
+    if [ "$v" != ok ]; then w=$(chk base); if [ "$w" = ok ] || [ "$v" = missing ]; then v=$w; fi; fi
   else
-    if [ ! -f "$path" ]; then echo "$i missing"; continue; fi
-    cat "$path" > "$GRAPHLOOM_REPORT_FILE.q"
+    v=$(chk "$tree")
   fi
-  awk -v at="$line" 'function c(s) { gsub(/[ \t\r\n]+/, " ", s); sub(/^ /, "", s); sub(/ $/, "", s); return s } BEGIN { w = c(ENVIRON["QUOTE"]) } NR >= at - 3 && NR <= at + 3 { if (index(c($0), w) > 0) f = 1 } END { print (f ? "ok" : "nomatch") }' "$GRAPHLOOM_REPORT_FILE.q" | sed "s/^/$i /"
+  echo "$i $v"
 done; rm -f "$GRAPHLOOM_REPORT_FILE.q"; echo "checked $i"; } > "$GRAPHLOOM_REPORT_FILE"`;
 
 /** The commands that verify the supported architecture claims' quotes against their trees (at most 14 quotes each). */
-export function treeQuotePlan(claims: ReadonlyArray<{ id: string; tree: "head" | "base"; quotes: ReadonlyArray<{ path: string; line: number; text: string }> }>, base: string | undefined): TreeQuotePlan {
+export function treeQuotePlan(claims: ReadonlyArray<{ id: string; tree: "head" | "base" | "either"; quotes: ReadonlyArray<{ path: string; line: number; text: string }> }>, base: string | undefined): TreeQuotePlan {
   const entries: TreeQuoteEntry[] = claims.flatMap((c) => c.quotes.map((q) => ({ id: c.id, tree: c.tree, path: normal(q.path), line: q.line, text: q.text })));
   if (entries.length === 0) return { commands: [], entries: [], sizes: [] };
   if (base === undefined) return { unavailable: "the checkout recorded no pinned base, so the diagram's quotes cannot be verified in their trees", commands: [], entries, sizes: [] };
@@ -425,9 +434,9 @@ export function readTreeQuotes(plan: TreeQuotePlan, outputs: readonly string[]):
     for (let k = 1; k <= size; k += 1) {
       const e = plan.entries[offset + k - 1]!;
       const verdict = lines.find((l) => l.startsWith(`${k} `))?.slice(`${k} `.length);
-      if (checked === undefined || Number(checked[1]) !== size || verdict === undefined) failed.set(e.id, failed.get(e.id) ?? `its quote ${JSON.stringify(e.text.slice(0, 60))} was not checked against the ${e.tree} tree`);
-      else if (verdict === "missing") failed.set(e.id, failed.get(e.id) ?? `its quote names no such file in the ${e.tree} tree (${e.path})`);
-      else if (verdict !== "ok") failed.set(e.id, failed.get(e.id) ?? `its quote ${JSON.stringify(e.text.slice(0, 60))} is not in the ${e.tree} tree at ${e.path}:${e.line} (within three lines)`);
+      if (checked === undefined || Number(checked[1]) !== size || verdict === undefined) failed.set(e.id, failed.get(e.id) ?? `its quote ${JSON.stringify(e.text.slice(0, 60))} was not checked against the ${e.tree === "either" ? "head or base" : e.tree} tree`);
+      else if (verdict === "missing") failed.set(e.id, failed.get(e.id) ?? `its quote names no such file in the ${e.tree === "either" ? "head or base" : e.tree} tree (${e.path})`);
+      else if (verdict !== "ok") failed.set(e.id, failed.get(e.id) ?? `its quote ${JSON.stringify(e.text.slice(0, 60))} is not in the ${e.tree === "either" ? "head or base" : e.tree} tree at ${e.path}:${e.line} (within three lines)`);
     }
     offset += size;
   });

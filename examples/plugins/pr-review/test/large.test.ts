@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { EvidenceRecord, JobSpec } from "@graphloom/sdk";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import { analyze, evidencePull } from "../src/analysis.js";
 import { LIST_CHECK_RUNS, GET_PULL, LIST_PULL_COMMITS, LIST_PULL_FILES, LIST_PULL_REVIEWS, LIST_PULL_REVIEW_COMMENTS, LIST_REVIEW_THREADS } from "../src/constants.js";
 import { definitionFor } from "../src/graph.js";
@@ -11,6 +15,9 @@ import { pullFile } from "../src/snapshot.js";
 import { reviewHtmlFrom } from "../src/html.js";
 import { reporterSections } from "../src/template.js";
 import { budgetShortfall, largeNeeds } from "../src/large.js";
+import { largeReporterInstruction } from "../src/largeprompts.js";
+import { reporterInstruction } from "../src/prompts.js";
+import { partitionAreas } from "../src/areas.js";
 import { claimTargets, readClaimCheck } from "../src/claims.js";
 import { readTreeQuotes, treeQuotePlan } from "../src/architecture.js";
 import { ProfileError, parseProfile } from "../src/profile.js";
@@ -647,5 +654,84 @@ describe("the item limit and the roles of large mode", () => {
     expect(options(agents(sim, "change-report-v1")[0]!)).toEqual({ model: "opus", effort: "high" });
     for (const j of sim.jobs.filter((x) => x.resultSchema === "claim-check-v1")) expect(options(j)).toEqual({ effort: "medium" });
     expect(options(agents(std, "change-report-v1")[0]!)).toEqual({ model: "opus", effort: "high" });
+  });
+});
+
+describe("quotes of a file cited on both sides, and of before/after rows (design §6.9)", () => {
+  const sections = reporterSections(profileOf(LARGE));
+  const file = pullFile({ path: "pkg/a.go", status: "modified", previousPath: null, additions: 1, deletions: 1, sha: null, patch: "@@ -1,2 +1,2 @@\n-old := 1\n+new := 2\n c", patchOmitted: false })!;
+  const head = { path: "pkg/a.go", side: "head" as const, start: 1, end: 1, symbol: "" };
+  const base = { ...head, side: "base" as const };
+  const reportWith = (item: Record<string, unknown>) => ({
+    purpose: { text: "t", source: "inferred" as const, quote: "" },
+    overview: "One.",
+    sections: sections.map((s, i) => ({ id: s.id, none: i !== 0, items: i === 0 ? [{ text: "changes a", cites: [head], facts: [], state: [], behavior: [], ...item }] : [] })),
+    notes: [],
+    architecture: { nodes: [], edges: [] },
+  });
+  const read = (r: ReturnType<typeof reportWith>, text: string, claim = "R1") => {
+    const targets = claimTargets(r, { sections }, { treeQuotes: true });
+    const out = readClaimCheck({ verdicts: targets.map((t) => ({ item: t.id, verdict: "supported", note: "", quotes: t.quotes === "none" ? [] : [{ path: "pkg/a.go", line: 1, text: t.id === claim ? text : "new := 2 line" }] })) }, targets, [file]);
+    if ("problems" in out) throw new Error(out.problems.join());
+    return out;
+  };
+
+  // Runs the plan's real command in a git repo whose base holds "old := 1 line" and whose head file holds "new := 2 line".
+  const dirs: string[] = [];
+  afterAll(() => dirs.forEach((d) => rmSync(d, { recursive: true, force: true })));
+  const failing = (reading: ReturnType<typeof read>): string[] => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "gl-quote-"));
+    dirs.push(dir);
+    const git = (...a: string[]) => spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...a], { cwd: dir, encoding: "utf8" });
+    git("init", "-q");
+    mkdirSync(path.join(dir, "pkg"));
+    writeFileSync(path.join(dir, "pkg/a.go"), "old := 1 line\nmore\n");
+    git("add", ".");
+    git("commit", "-q", "-m", "base");
+    const sha = git("rev-parse", "HEAD").stdout.trim();
+    writeFileSync(path.join(dir, "pkg/a.go"), "new := 2 line\nmore\n");
+    const plan = treeQuotePlan(reading.treeQuotes, sha);
+    const outputs = plan.commands.map((c) => {
+      const out = path.join(dir, "out.txt");
+      const r = spawnSync(c.argv[0]!, c.argv.slice(1), { cwd: dir, encoding: "utf8", env: { ...process.env, GRAPHLOOM_REPORT_FILE: out } });
+      expect(r.status, r.stderr).toBe(0);
+      return readFileSync(out, "utf8");
+    });
+    return [...readTreeQuotes(plan, outputs).keys()];
+  };
+
+  it("accepts a valid quote from either side of a file the item cites on both sides", () => {
+    const both = reportWith({ cites: [head, base] });
+    expect(read(both, "old := 1 line").treeQuotes.find((q) => q.id === "R1")!.tree).toBe("either");
+    expect(failing(read(both, "old := 1 line"))).toEqual([]);
+    expect(failing(read(both, "new := 2 line"))).toEqual([]);
+    expect(failing(read(both, "nothing like it"))).toEqual(["R1"]);
+    // One side only is still one tree: a head-only cite refuses the base text.
+    expect(failing(read(reportWith({}), "old := 1 line"))).toEqual(["R1"]);
+  });
+
+  it("checks a before/after row's quotes where the file shows them, base text for before and head text for after", () => {
+    const row = reportWith({ behavior: [{ case: "c", before: "was old", after: "is new" }] });
+    expect(failing(read(row, "old := 1 line", "R1.b1"))).toEqual([]);
+    expect(failing(read(row, "new := 2 line", "R1.b1"))).toEqual([]);
+    expect(failing(read(row, "nothing like it", "R1.b1"))).toEqual(["R1.b1"]);
+  });
+});
+
+describe("the sections of the large reporter prompt (design §6.9)", () => {
+  it("do not ask for every detector fact to be listed, which the 200-fact digest cap could not honour; the standard prompt does", () => {
+    const sim = run();
+    const fact = { id: "D1", section: "other", path: "docs/guide.md", side: "head" as const, line: 1, text: "File routed to this section: docs/guide.md added" };
+    const sections = reporterSections(profileOf(LARGE));
+    const files = [pullFile({ path: "docs/guide.md", status: "added", previousPath: null, additions: 1, deletions: 0, sha: null, patch: "@@ -0,0 +1 @@\n+x", patchOmitted: false })!];
+    const partition = partitionAreas(files, profileOf(LARGE).limits, []);
+    const base = { pr: { mode: "report" as const, owner: "o", repo: "r", number: 1, head: "h".repeat(40) }, snapshot: { pull: { title: "t", body: "b" } as never, files, commits: [] }, sections, facts: [fact], kind: "first" as const, feedback: [] as string[] };
+    const large = largeReporterInstruction({ ...base, partition });
+    expect(large).toContain("D1 [other]");
+    expect(large).not.toMatch(/each must be listed/);
+    expect(large).toContain("the plugin accounts for the facts you leave out");
+    expect(assignmentOf(agents(sim, "change-report-v1")[0]!)).not.toMatch(/each must be listed/);
+    const standard = reporterInstruction({ ...base, candidates: [] });
+    expect(standard).toMatch(/Detector facts for this section \(each must be listed in the "facts" of an item of this section\): D1/);
   });
 });

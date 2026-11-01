@@ -86,7 +86,7 @@ export interface ClaimTarget {
   tree?: "head" | "base";
   /**
    * Large mode (design §6.9): the claim's quotes are verified against the trees its cites name, each quote against the
-   * side of the cite that names its file (the head for a claim with no cite), because an item of a high-level report
+   * side of the cite that names its file (either tree for a file cited on both sides or a claim with no cite), because an item of a high-level report
    * may rest on lines that no patch shown to the reporter holds.
    */
   treeByCite?: true;
@@ -146,7 +146,7 @@ export interface ClaimReading {
   /** Verdict ids that matched no claim (unknown or ambiguous); those claims stay unjudged. */
   ignored: string[];
   /** Supported claims whose quotes a command still has to verify against the tree their cite names (design §6.10): the architecture diagram's. */
-  treeQuotes: Array<{ id: string; tree: "head" | "base"; quotes: Quote[] }>;
+  treeQuotes: Array<{ id: string; tree: "head" | "base" | "either"; quotes: Quote[] }>;
 }
 
 /**
@@ -214,14 +214,21 @@ export function readClaimCheck(output: unknown, targets: readonly ClaimTarget[],
     // Large mode: each quote is checked against the tree of the cite that names its file, not against the patch.
     if (treeByCite === true) {
       const named = (q: Quote): Cite | undefined => cites?.find((c) => c.path === q.path);
+      // A quote is checked in the tree of the cite that names its file; a file cited on both sides, or a claim with no cite
+      // (a before/after row), is checked in either tree: the quote stands where the file shows it.
+      const sideOf = (q: Quote): "head" | "base" | "either" => {
+        if (cites === undefined) return "either";
+        const sides = new Set(cites.filter((c) => c.path === q.path).map((c) => c.side));
+        return sides.size > 1 ? "either" : (sides.has("base") ? "base" : "head");
+      };
       const bad = quotes.find((q) => cites !== undefined && named(q) === undefined);
       if (quotes.length === 0) reading.weak.set(id, "supported without a quote");
       else if (bad !== undefined) reading.weak.set(id, `supported, but a quote is not from a file its cite names (${bad.path})`);
       else if (quotes.some((q) => collapse(q.text).length < MIN_QUOTE_CHARS || collapse(q.text).length > MAX_TREE_QUOTE_CHARS || q.line < 1)) reading.weak.set(id, `supported, but a quote is shorter than ${MIN_QUOTE_CHARS} or longer than ${MAX_TREE_QUOTE_CHARS} characters, or names no line`);
       else {
         reading.supported.add(id);
-        for (const side of ["head", "base"] as const) {
-          const mine = quotes.filter((q) => (named(q)?.side ?? "head") === side);
+        for (const side of ["head", "base", "either"] as const) {
+          const mine = quotes.filter((q) => sideOf(q) === side);
           if (mine.length > 0) reading.treeQuotes.push({ id, tree: side, quotes: mine });
         }
       }
