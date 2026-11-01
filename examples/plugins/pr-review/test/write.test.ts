@@ -52,19 +52,13 @@ describe("the report-write command", () => {
     expect(existsSync(path.join(dir, ".graphloom/review/review.md.tmp"))).toBe(false);
   });
 
-  it("cuts the markdown short, with a note, when it does not fit beside the JSON; the JSON is never cut", () => {
+  it("is one command only when the JSON and the markdown fit it together; otherwise there is none, and the artifacts are written in parts (parts.test.ts)", () => {
     const json = JSON.stringify({ pad: "j".repeat(150_000) });
     const markdown = `# Report\n${"m".repeat(200_000)}`;
-    const command = reportWriteCommand(json, markdown)!;
-    const written = writtenReport(command.argv)!;
-    expect(written.json).toBe(json);
-    expect(written.markdown.length).toBeLessThan(markdown.length);
-    expect(written.markdown).toMatch(/… \(cut short; see \.graphloom\/review\/report\.json\)\n$/);
-    expect(Buffer.byteLength(JSON.stringify({ commands: [command] }), "utf8")).toBeLessThanOrEqual(MAX_EXECUTOR_INPUT_BYTES);
-  });
-
-  it("refuses a JSON that cannot be written whole in one command", () => {
+    expect(reportWriteCommand(json, markdown)).toBeUndefined();
     expect(reportWriteCommand(JSON.stringify({ pad: "j".repeat(300_000) }), "# md")).toBeUndefined();
+    const fits = reportWriteCommand(JSON.stringify({ pad: "j".repeat(100_000) }), "# md")!;
+    expect(Buffer.byteLength(JSON.stringify({ commands: [fits] }), "utf8")).toBeLessThanOrEqual(MAX_EXECUTOR_INPUT_BYTES);
   });
 });
 

@@ -14,11 +14,12 @@
  */
 import type { EnvironmentCommand, EvidenceRecord } from "@graphloom/sdk";
 import { parseLedger, type Ledger } from "./commands.js";
-import { COMMAND, LEDGER_MOVED, QA_JSON, REPORT_JSON, ledgerRef } from "./constants.js";
+import { COMMAND, LEDGER_JSON_FILE, LEDGER_MD_FILE, LEDGER_MOVED, PART_BASE, QA_JSON, REPORT_JSON, ledgerRef } from "./constants.js";
 import { commandRuns, isObject, reportText, succeeded, type CommandRun } from "./evidence.js";
 import type { FinalAnswer } from "./answers.js";
 import type { PurposeRecord, Question } from "./questions.js";
 import type { PullRequest } from "./request.js";
+import { partCommands, sha256 } from "./parts.js";
 import { writeChunks } from "./write.js";
 
 export const LEDGER_SCHEMA = "graphloom-pr-ledger-v1";
@@ -87,13 +88,8 @@ export function ledgerMarkdown(i: LedgerInput): string {
   ].join("\n");
 }
 
-const WRITE = String.raw`set -eu; ref="$1"; old="$2"; msg="$3"; n="$4"; shift 4
-json=""; while [ "$n" -gt 0 ]; do json="$json$1"; shift; n=$((n - 1)); done
-md=""; for part in "$@"; do md="$md$part"; done
-export GIT_AUTHOR_NAME=graphloom GIT_AUTHOR_EMAIL=graphloom@localhost GIT_COMMITTER_NAME=graphloom GIT_COMMITTER_EMAIL=graphloom@localhost
-a=$(printf '%s' "$json" | git -c core.hooksPath=/dev/null hash-object -w --stdin)
-b=$(printf '%s' "$md" | git -c core.hooksPath=/dev/null hash-object -w --stdin)
-c=$(git -c core.hooksPath=/dev/null hash-object -w ` +
+const WRITE_TAIL =
+  String.raw`c=$(git -c core.hooksPath=/dev/null hash-object -w ` +
   QA_JSON +
   String.raw`)
 d=$(git -c core.hooksPath=/dev/null hash-object -w ` +
@@ -110,6 +106,31 @@ fi
 if git -c core.hooksPath=/dev/null update-ref "$ref" "$new" "$expect"; then echo "advanced $new"; else echo "ledger moved" >&2; exit ` +
   String(LEDGER_MOVED) +
   String.raw`; fi`;
+
+const GIT_IDENTITY = "export GIT_AUTHOR_NAME=graphloom GIT_AUTHOR_EMAIL=graphloom@localhost GIT_COMMITTER_NAME=graphloom GIT_COMMITTER_EMAIL=graphloom@localhost";
+
+const WRITE =
+  String.raw`set -eu; ref="$1"; old="$2"; msg="$3"; n="$4"; shift 4
+json=""; while [ "$n" -gt 0 ]; do json="$json$1"; shift; n=$((n - 1)); done
+md=""; for part in "$@"; do md="$md$part"; done
+` +
+  GIT_IDENTITY +
+  String.raw`
+a=$(printf '%s' "$json" | git -c core.hooksPath=/dev/null hash-object -w --stdin)
+b=$(printf '%s' "$md" | git -c core.hooksPath=/dev/null hash-object -w --stdin)
+` +
+  WRITE_TAIL;
+
+/** The same write for a ledger.json and ledger.md too large for one command: they were written as part sets (design §6.6) and are read from their files. */
+const WRITE_FILES =
+  String.raw`set -eu; ref="$1"; old="$2"; msg="$3"; jsonfile="$5"; mdfile="$6"
+` +
+  GIT_IDENTITY +
+  String.raw`
+a=$(git -c core.hooksPath=/dev/null hash-object -w "$jsonfile")
+b=$(git -c core.hooksPath=/dev/null hash-object -w "$mdfile")
+` +
+  WRITE_TAIL;
 
 /** What the ledger commit is for, as its message says. */
 export const ledgerMessage = (pr: PullRequest): string => `pr-review ${pr.owner}/${pr.repo}#${pr.number} at ${pr.head.slice(0, 12)}: report and Q&A`;
@@ -128,10 +149,24 @@ export function ledgerWriteCommand(pr: PullRequest, old: string, json: string, m
   return { id: COMMAND.ledgerWrite, argv };
 }
 
-/** The ledger files a `ledger-write` argv carried. */
-export function writtenLedger(argv: readonly string[]): { ref: string; old: string; json: string; markdown: string } | undefined {
+/**
+ * What advancing the ledger takes: the commands that first write the ledger files when they do not fit one command
+ * (a part set each, design §6.6), then the compare-and-swap itself. Undefined only for a ledger no part set can carry.
+ */
+export function ledgerWriteCommands(pr: PullRequest, old: string, json: string, markdown: string): { parts: EnvironmentCommand[]; write: EnvironmentCommand } {
+  const single = ledgerWriteCommand(pr, old, json, markdown);
+  if (single !== undefined) return { parts: [], write: single };
+  const parts = [...partCommands(PART_BASE.ledgerJson, LEDGER_JSON_FILE, json), ...partCommands(PART_BASE.ledgerMd, LEDGER_MD_FILE, markdown)];
+  const argv = ["sh", "-c", WRITE_FILES, COMMAND.ledgerWrite, ledgerRef(pr.owner, pr.repo, pr.number), old, ledgerMessage(pr), "files", LEDGER_JSON_FILE, LEDGER_MD_FILE, sha256(json), sha256(markdown)];
+  return { parts, write: { id: COMMAND.ledgerWrite, argv } };
+}
+
+/** The ledger files a `ledger-write` argv carried (empty for a write that reads them from part-set files). */
+export function writtenLedger(argv: readonly string[]): { ref: string; old: string; json: string; markdown: string; files?: { json: string; markdown: string } } | undefined {
+  if (argv[3] !== COMMAND.ledgerWrite) return undefined;
+  if (argv[7] === "files") return { ref: argv[4] ?? "", old: argv[5] ?? "", json: "", markdown: "", files: { json: argv[10] ?? "", markdown: argv[11] ?? "" } };
   const n = Number(argv[7]);
-  if (argv[3] !== COMMAND.ledgerWrite || !Number.isSafeInteger(n) || n < 0) return undefined;
+  if (!Number.isSafeInteger(n) || n < 0) return undefined;
   return { ref: argv[4] ?? "", old: argv[5] ?? "", json: argv.slice(8, 8 + n).join(""), markdown: argv.slice(8 + n).join("") };
 }
 
