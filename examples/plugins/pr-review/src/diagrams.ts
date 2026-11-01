@@ -14,7 +14,8 @@ import type { FinalFeature } from "./briefing.js";
 import { documentProblems, embeddedSvg, labelProblems, parseSvg, stylesFor, textNodes } from "./diagramsvg.js";
 import { clip } from "./escape.js";
 import { agentRuns, commandRuns, outputTail, succeeded, type AgentRun } from "./evidence.js";
-import { UNTRUSTED_PREAMBLE, untrusted } from "./prompts.js";
+import { feedbackBlock, UNTRUSTED_PREAMBLE, untrusted } from "./prompts.js";
+import type { FileSpill, Fitted } from "./fit.js";
 import type { FinalReport, StateEntry } from "./report.js";
 import { writeChunks } from "./write.js";
 
@@ -124,10 +125,26 @@ function stateSpec(s: StateDrawing): DiagramSpec {
   };
 }
 
-/** The diagrams the job draws, and the ids it leaves to the plugin (past `MAX_DIAGRAMS`). */
+/** The characters of diagram data (the JSON of each feature and lifecycle entry) one diagram job's assignment holds (`fit.ts`). */
+export const MAX_DIAGRAM_DATA_CHARS = 36_000;
+
+/**
+ * The diagrams the job draws, and the ids it leaves to the plugin: the first `MAX_DIAGRAMS` in order, as many as their
+ * data fits one assignment (`MAX_DIAGRAM_DATA_CHARS`); the rest, from the first that does not fit, are drawn by the plugin.
+ */
 export function diagramSpecs(input: DiagramInput): { drawn: DiagramSpec[]; overflow: string[] } {
-  const all = [...input.features.map(featureSpec), ...input.states.map(stateSpec)];
-  return { drawn: all.slice(0, MAX_DIAGRAMS), overflow: all.slice(MAX_DIAGRAMS).map((s) => s.id) };
+  const all = [
+    ...input.features.map((f) => ({ spec: featureSpec(f), chars: featureData(f).length })),
+    ...input.states.map((s) => ({ spec: stateSpec(s), chars: stateData(s).length })),
+  ];
+  const drawn: DiagramSpec[] = [];
+  let used = 0;
+  for (const { spec, chars } of all) {
+    if (drawn.length >= MAX_DIAGRAMS || used + chars > MAX_DIAGRAM_DATA_CHARS) break;
+    drawn.push(spec);
+    used += chars;
+  }
+  return { drawn, overflow: all.slice(drawn.length).map((x) => x.spec.id) };
 }
 
 /** How a diagram is drawn in the report: by the skill, with its embedded `<svg>`, or by the plugin, with the note `review.html` shows. */
@@ -172,15 +189,21 @@ export interface DiagramsAssignment {
   specs: readonly DiagramSpec[];
   kind: "first" | "correction";
   feedback: readonly string[];
+  reviewDir?: string;
 }
 
 /** The diagram job's assignment (design §6.10): the fixed choices, the data, the result. */
-export function diagramsInstruction(a: DiagramsAssignment): string {
+export const diagramsInstruction = (a: DiagramsAssignment): string => planDiagrams(a).text;
+
+/** The diagram job's assignment and the file of its complete feedback, when the correction's problems do not fit. */
+export function planDiagrams(a: DiagramsAssignment): Fitted {
+  const feedback = feedbackBlock(a.feedback, 1, a.reviewDir);
+  const spills: FileSpill[] = a.kind === "correction" ? feedback.spills : [];
   const features = a.specs.filter((s) => s.kind === "feature");
   const states = a.specs.filter((s) => s.kind === "state");
   const featureById = new Map(a.input.features.map((f) => [featureDiagramId(f.id), f] as const));
   const byId = new Map(a.input.states.map((s) => [s.id, s]));
-  return [
+  const text = [
     `You draw diagrams for the change report of ${a.owner}/${a.repo}#${a.number}. The data below was checked against the diff by an independent checker; it is the only thing you draw from. You are read-only: change nothing, and do not read the repository under review.`,
     "",
     UNTRUSTED_PREAMBLE,
@@ -211,8 +234,9 @@ export function diagramsInstruction(a: DiagramsAssignment): string {
     ]),
     "",
     `The result: diagrams, one entry for each id above and none other, each with id (exactly as given above) and html (the complete HTML document, at most ${MAX_DIAGRAM_BYTES} characters). Keep the quotes in the markup as the skill writes them.`,
-    ...(a.kind === "correction" ? ["", "Your previous result failed the checks below, which are the plugin's and the skill's own. Return the whole set again: a diagram that did not fail may come back unchanged, and each one that failed must be fixed.", ...a.feedback.map((f) => `- ${f}`)] : []),
+    ...(a.kind === "correction" ? ["", "Your previous result failed the checks below, which are the plugin's and the skill's own. Return the whole set again: a diagram that did not fail may come back unchanged, and each one that failed must be fixed.", ...feedback.lines] : []),
   ].join("\n");
+  return { text, spills };
 }
 
 // ---- the skill's checks as a command ----
@@ -328,7 +352,7 @@ export function diagramFlow(evidence: readonly EvidenceRecord[], input: DiagramI
     if (id.startsWith("feature:")) doc.features[id.slice("feature:".length)] = d;
     else doc.states[id] = d;
   };
-  for (const id of overflow) set(id, { via: "plugin", note: `drawn by the plugin: this report has more than ${MAX_DIAGRAMS} diagrams, and the diagram job draws the first ${MAX_DIAGRAMS} (the features' data flows, then the lifecycle entries in report order)` });
+  for (const id of overflow) set(id, { via: "plugin", note: `drawn by the plugin: this report has more diagrams than one diagram job takes (at most ${MAX_DIAGRAMS}, and ${MAX_DIAGRAM_DATA_CHARS} characters of data), and the diagram job draws the first ${drawn.length} (the features' data flows, then the lifecycle entries in report order)` });
   if (drawn.length === 0) return { state: "resolved", doc, refs: [] };
   const runs = agentRuns(evidence, DIAGRAMS_SCHEMA_NAME).slice(0, MAX_DIAGRAM_ATTEMPTS);
   const checks = commandRuns(evidence).filter((r) => r.command.id.startsWith(`${DIAGRAM_CHECK}-`));

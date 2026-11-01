@@ -18,7 +18,8 @@ import { checkThresholds, LIMITS } from "./metrics/crap.js";
 import { MAX_QUESTION_CHARS, type Question, type RequiredQuestion } from "./questions.js";
 import { changeItems, type ReportView } from "./reportview.js";
 import type { PullRequest } from "./request.js";
-import { pullText, UNTRUSTED_PREAMBLE } from "./prompts.js";
+import { feedbackBlock, pullText, UNTRUSTED_PREAMBLE } from "./prompts.js";
+import { clipText, fitLines, reviewFile, shrinkToFit, spillOf, type FileSpill, type Fitted } from "./fit.js";
 import type { Snapshot } from "./snapshot.js";
 import { citeLabel } from "./report.js";
 import { MAX_PATTERN_CHARS, MAX_RERUN_SEARCHES, MAX_SEARCH_PATHS, type Search } from "./searches.js";
@@ -57,11 +58,19 @@ function recordText(r: MetricsRecord): string {
   return `${r.function} ${r.path}:${r.startLine}-${r.endLine} (${r.change}): complexity ${r.complexity} (limit < ${LIMITS.complexity}), nesting ${r.nesting} (limit ≤ ${LIMITS.nesting})${base}, ${r.coverage?.source === "measured" ? `coverage ${r.coverage.covered} of ${r.coverage.total} statements (measured in the sandbox)` : "coverage unknown"}, CRAP ${th.crap.value}${th.crap.upperBound ? " (upper bound)" : ""}`;
 }
 
-/** The groundwork as text, in three levels of detail so it fits an executor input. */
-export function groundworkText(g: Groundwork, view: ReportView, level: 0 | 1 | 2 = 2): string {
+/** The symbols and functions a job is about: its groundwork shows these in full and the rest only in the groundwork file. */
+export interface GroundworkFocus {
+  symbols: ReadonlySet<string>;
+  functions: ReadonlySet<string>;
+}
+
+/** The groundwork as text, in three levels of detail so it fits an executor input; with a focus, only what the focus is about, and the rest in the file. */
+export function groundworkText(g: Groundwork, view: ReportView, level: 0 | 1 | 2 = 2, focus?: GroundworkFocus): string {
   const lines: string[] = [];
-  lines.push(`Symbols the pull request adds or modifies (${g.symbols.length}); an id such as S1 names one:`);
-  for (const s of g.symbols) {
+  const shown = focus === undefined ? g.symbols : g.symbols.filter((s) => focus.symbols.has(s.id));
+  const functions = focus === undefined ? undefined : new Set([...focus.functions, ...shown.map((s) => s.qualified)]);
+  lines.push(focus === undefined ? `Symbols the pull request adds or modifies (${g.symbols.length}); an id such as S1 names one:` : `Symbols the pull request adds or modifies (${g.symbols.length}); an id such as S1 names one. The ${shown.length} that these questions are about are shown here; the rest are in the groundwork file:`);
+  for (const s of shown) {
     lines.push(`${s.id} ${s.change} ${s.kind} ${s.qualified} ${s.path}:${s.startLine}-${s.endLine} ${s.exported ? "exported" : "unexported"}${s.item !== undefined ? ` (report item ${s.item})` : ""}`);
     if (level === 0) continue;
     if (level === 2 && s.change === "new") lines.push(`  signature: ${clip(s.signature, 200)}`);
@@ -77,16 +86,56 @@ export function groundworkText(g: Groundwork, view: ReportView, level: 0 | 1 | 2
     const tests = g.testMap.get(s.id) ?? [];
     lines.push(`  test map: ${tests.length === 0 ? "no covering test found in the pull request" : tests.slice(0, level === 2 ? 5 : 2).map((t) => `${t.kind} ${t.path}${t.line !== undefined ? `:${t.line}` : ""}`).join("; ")}`);
   }
-  if (g.prSimilar.length > 0) lines.push("", `New symbols of this pull request that look alike (token-shingle similarity): ${g.prSimilar.map((p) => `${p.a} ~ ${p.b} ${p.score}`).join("; ")}`);
-  lines.push("", `Measurements of the changed functions (${view.records.filter((r) => !r.test).length}):`);
-  for (const r of view.records.filter((x) => !x.test)) lines.push(recordText(r));
+  const similar = focus === undefined ? g.prSimilar : g.prSimilar.filter((p) => focus.symbols.has(p.a) || focus.symbols.has(p.b));
+  if (similar.length > 0) lines.push("", `New symbols of this pull request that look alike (token-shingle similarity): ${similar.map((p) => `${p.a} ~ ${p.b} ${p.score}`).join("; ")}`);
+  const records = view.records.filter((r) => !r.test && (functions === undefined || functions.has(r.function)));
+  lines.push("", `Measurements of the changed functions (${view.records.filter((r) => !r.test).length}${functions !== undefined ? `; the ${records.length} these questions are about are shown, the rest are in the groundwork file` : ""}):`);
+  for (const r of records) lines.push(recordText(r));
   const inv = g.inventory;
   lines.push("", `Dependency inventory (${inv.dependencies.length} declared; ${inv.packages.length} internal directories in the base)${inv.truncated.length > 0 ? `; ${inv.truncated.join("; ")}` : ""}:`);
-  const listed = level === 0 ? inv.dependencies.slice(0, 40) : inv.dependencies;
+  const listed = level === 0 || focus !== undefined ? inv.dependencies.slice(0, 40) : inv.dependencies;
   for (const d of listed) lines.push(`${d.ecosystem} ${d.name} ${d.version}${d.indirect ? " (indirect or dev)" : ""} [${d.manifest}] ${d.site !== undefined ? `use ${d.site}` : "no use found"} — ${sourceStatus(d)}`);
   if (listed.length < inv.dependencies.length) lines.push(`… and ${inv.dependencies.length - listed.length} more`);
   if (g.notes.length > 0) lines.push("", ...g.notes.map((n) => `Note: ${n}`));
   return lines.join("\n");
+}
+
+/** The characters of groundwork a job inlines whole; past that the groundwork is a file the job reads. */
+const GROUNDWORK_INLINE_CHARS = 24_000;
+/** The characters of the groundwork a job inlines for what it is about, beside the file. */
+const GROUNDWORK_FOCUS_CHARS = 20_000;
+/** The characters of the symbol index the questioner inlines beside the groundwork file. */
+const SYMBOL_INDEX_CHARS = 12_000;
+const GROUNDWORK_NAME = "groundwork";
+/** The characters of the groundwork file before it gives up detail (a file is written in parts of about 60,000 characters, one job each). */
+const GROUNDWORK_FILE_CHARS = 300_000;
+
+/**
+ * The groundwork as a job's assignment shows it: the whole text at the most detail that fits the inline budget; past it,
+ * the whole text as a file (`groundwork-<digest>.md`, level 2, no cut) and, inline, what the job is about (`focus`) or,
+ * with no focus, a count and an index of the symbols.
+ */
+export function groundworkBlock(g: Groundwork, view: ReportView, scale: number, dir: string | undefined, focus?: GroundworkFocus): { lines: string[]; spills: FileSpill[] } {
+  for (const level of [2, 1, 0] as const) {
+    const text = groundworkText(g, view, level);
+    if (text.length <= GROUNDWORK_INLINE_CHARS * scale) return { lines: [text], spills: [] };
+  }
+  // The file is at the most detail that is not past about five part writes (each part is one job); a job's own symbols are shown in full inline.
+  let fileText = "";
+  for (const level of [2, 1, 0] as const) {
+    fileText = groundworkText(g, view, level);
+    if (fileText.length <= GROUNDWORK_FILE_CHARS) break;
+  }
+  const spill = spillOf(GROUNDWORK_NAME, fileText);
+  const file = reviewFile(dir, spill.name);
+  const news = g.symbols.filter((s) => s.change === "new").length;
+  const head = `The groundwork is too large to list here (${g.symbols.length} symbols, ${news} of them new; ${g.inventory.dependencies.length} declared dependencies; ${view.records.filter((r) => !r.test).length} measured functions). It is in ${file}: every symbol with its id and place, the whole-repository searches over the base (the first hit lines of each), similarity candidates and test map where they fit, the symbols that look alike, the measurements of every changed function and the dependency inventory. Read the part you need there (search it by symbol id or name).`;
+  if (focus !== undefined) {
+    const body = groundworkText(g, view, 2, focus).split("\n");
+    return { lines: [head, "", ...fitLines(body, GROUNDWORK_FOCUS_CHARS * scale, (n) => `… and ${n} more groundwork lines for these questions, which are in ${file}`)], spills: [spill] };
+  }
+  const index = g.symbols.map((s) => `${s.id} ${s.change} ${s.kind} ${s.qualified} ${s.path}:${s.startLine}-${s.endLine}${s.item !== undefined ? ` (report item ${s.item})` : ""}`);
+  return { lines: [head, "", "The symbols, by id (their details are in the file):", ...fitLines(index, SYMBOL_INDEX_CHARS * scale, (n) => `… and ${n} more symbols, listed in ${file}`)], spills: [spill] };
 }
 
 /** The groundwork text at the most detail that fits. */
@@ -113,29 +162,51 @@ export interface QuestionerAssignment {
   kind: "first" | "correction";
   /** Where the base commit's files are exported, when they are (design §7.3). */
   baseDir?: string;
+  /** The absolute `.graphloom/review/` directory, where the report and the files an assignment points to are. */
+  reviewDir?: string;
 }
 
-/** The characters of required questions an assignment lists; a large pull request has more than fit one executor input. */
-const MAX_REQUIRED_CHARS = 70_000;
+/** The characters of required questions an assignment lists before the rest go to a file; a large pull request has more than fit one executor input. */
+const REQUIRED_INLINE_CHARS = 14_000;
+/** The characters of change items an assignment lists in full; past that, an index and the report's files. */
+const ITEMS_INLINE_CHARS = 14_000;
+const ITEMS_INDEX_CHARS = 14_000;
 
-/** The required questions as lines. Past the bound the rest is counted: the plugin asks each of them in its own wording, so none is dropped. */
-function requiredLines(required: readonly RequiredQuestion[]): string[] {
-  const lines: string[] = [];
-  let used = 0;
-  for (const q of required) {
-    const line = `- key ${JSON.stringify(q.key)} type ${q.type} item ${q.item} symbol ${JSON.stringify(q.symbol ?? "")}: ${q.text}`;
-    if (used + line.length > MAX_REQUIRED_CHARS) break;
-    lines.push(line);
-    used += line.length + 1;
-  }
-  if (lines.length < required.length) lines.push(`… and ${required.length - lines.length} more required questions, which are too many to list here: the plugin asks each of them in its own wording, so you need not return them.`);
-  return lines;
+/** The change items of the report as an assignment lists them: in full while they fit, else an index and the files that hold the report. */
+function itemsBlock(view: ReportView, scale: number, dir: string | undefined, label = "Change items"): string[] {
+  const all = changeItems(view);
+  const full = all.map((i) => `${i.id} [${i.section}] ${oneLine(i.text)} — ${i.cites.map((c) => citeLabel(c)).join(", ")}`);
+  if (full.join("\n").length <= ITEMS_INLINE_CHARS * scale) return [`${label} (${all.length}):`, ...(all.length === 0 ? ["(none)"] : full)];
+  const json = reviewFile(dir, "report.json");
+  const md = reviewFile(dir, "review.md");
+  const index = all.map((i) => `${i.id} [${i.section}] ${clipText(i.text, 140)} — ${i.cites.slice(0, 2).map((c) => citeLabel(c)).join(", ")}${i.cites.length > 2 ? ` (+${i.cites.length - 2} more cites)` : ""}`);
+  return [
+    `${label} (${all.length}): too many to list in full here. The finished, claim-checked report is in ${md} (readable) and ${json} (sections[].items[]: every item with its id, text and cites; and the measurements), written before this job. Read the items you need there. Each item's id with the start of its text and its first cites:`,
+    ...fitLines(index, ITEMS_INDEX_CHARS * scale, (n) => `… and ${n} more items, listed in ${json}`),
+  ];
+}
+
+/** The required questions: as lines while they fit, else the first ones and a file with all of them. */
+function requiredBlock(required: readonly RequiredQuestion[], scale: number, dir: string | undefined): { lines: string[]; spills: FileSpill[] } {
+  const all = required.map((q) => `- key ${JSON.stringify(q.key)} type ${q.type} item ${q.item} symbol ${JSON.stringify(q.symbol ?? "")}: ${q.text}`);
+  if (all.join("\n").length <= REQUIRED_INLINE_CHARS * scale) return { lines: all, spills: [] };
+  const spill = spillOf("required-questions", all.join("\n"));
+  const file = reviewFile(dir, spill.name);
+  const first = fitLines(all, REQUIRED_INLINE_CHARS * scale, () => "").slice(0, -1);
+  return { lines: [...first, `… and ${all.length - first.length} more required questions, which are too many to list here: all ${all.length} are in ${file}, in the same form. Phrase those too if you can; the plugin asks each one you leave out in its own wording, so you need not return them.`], spills: [spill] };
 }
 
 /** The questioner's assignment (design §7.1): ask, never answer. */
-export function questionerInstruction(a: QuestionerAssignment): string {
-  const items = changeItems(a.view).map((i) => `${i.id} [${i.section}] ${oneLine(i.text)} — ${i.cites.map((c) => citeLabel(c)).join(", ")}`);
-  return [
+export const questionerInstruction = (a: QuestionerAssignment): string => planQuestioner(a).text;
+
+/** The questioner's assignment and the files it points to: the report's items, the required questions and the groundwork, each inlined while it fits. */
+export function planQuestioner(a: QuestionerAssignment): Fitted {
+  return shrinkToFit((scale) => {
+    const items = itemsBlock(a.view, scale, a.reviewDir);
+    const required = requiredBlock(a.required, scale, a.reviewDir);
+    const groundwork = groundworkBlock(a.groundwork, a.view, scale, a.reviewDir);
+    const feedback = feedbackBlock(a.feedback, scale, a.reviewDir);
+    const text = [
     `You are the questioner for ${a.pr.owner}/${a.pr.repo}#${a.pr.number} at head ${a.pr.head}. Another agent wrote the change report; plugin rules decided which questions are required. You phrase and group the questions and may add others. You only ask: you never answer, and you are read-only.`,
     "",
     UNTRUSTED_PREAMBLE,
@@ -144,20 +215,21 @@ export function questionerInstruction(a: QuestionerAssignment): string {
     "",
     "Purposes. For each change item below whose purpose the pull request's title, body or a commit message states, put one entry in the purposes of your result: the item id, the source (title, body or commit) and a quote, copied exactly and at least 12 characters long, that states why the change is made. The quote is matched against the pull request's own text with whitespace collapsed; a quote that is not there is discarded and the purpose is asked instead. Leave out an item whose purpose nothing states.",
     "",
-    `Change items (${items.length}):`,
-    ...(items.length === 0 ? ["(none)"] : items),
+    ...items,
     "",
     `Required questions (${a.required.length}). Return every one in the questions of your result, with its key copied exactly, its type, item and symbol as listed (symbol is "" when none), and your own clearer wording in text (at most ${MAX_QUESTION_CHARS} characters, one question, no answer, no severity or verdict). You cannot drop or merge a required question; one you leave out is asked in the plugin's wording.`,
-    ...requiredLines(a.required),
+    ...required.lines,
     "",
     'You may add questions the rules do not require: key "", a type (purpose, existing-equivalent, reuse-library, common-logic, missing-test, split-function, complexity-coverage or other), an item id, a symbol id or "", and the text. Add one only where the change raises a question a maintainer would ask and the rules missed.',
     "",
     "Groundwork the plugin prepared (deterministic: symbol extraction, whole-repository searches over the base commit, similarity, the dependency inventory, the test map, measurements):",
-    fittingGroundwork(a.groundwork, a.view),
+    ...groundwork.lines,
     "",
     pullText(a.snapshot),
-    ...(a.kind === "correction" ? ["", "Your previous result failed deterministic validation. Return the whole corrected result; every problem below must be fixed:", ...a.feedback.map((f) => `- ${f}`)] : []),
+    ...(a.kind === "correction" ? ["", "Your previous result failed deterministic validation. Return the whole corrected result; every problem below must be fixed:", ...feedback.lines] : []),
   ].join("\n");
+    return { text, spills: [...required.spills, ...groundwork.spills, ...(a.kind === "correction" ? feedback.spills : [])] };
+  });
 }
 
 export interface AnswererAssignment {
@@ -171,14 +243,43 @@ export interface AnswererAssignment {
   only?: readonly string[];
   mountedDirs: readonly string[];
   baseDir?: string;
+  reviewDir?: string;
 }
 
 const questionLine = (q: Question): string => `${q.id} [${q.type}] item ${q.item}${q.symbol !== undefined ? ` symbol ${q.symbol}` : ""}${q.fn !== undefined ? ` function ${q.fn}` : ""}: ${oneLine(q.text)}`;
 
+/** The characters of questions an answerer's assignment lists before the rest go to a file (a large run asks a batch of at most 15). */
+const QUESTIONS_INLINE_CHARS = 20_000;
+
+/** What the questions are about: the symbols (of an item's questions with no symbol of their own, the first dozen of the item) and the functions. */
+function focusOf(questions: readonly Question[], g: Groundwork): GroundworkFocus {
+  const symbols = new Set<string>();
+  const functions = new Set<string>();
+  for (const q of questions) {
+    if (q.symbol !== undefined) symbols.add(q.symbol);
+    else for (const s of g.symbols.filter((x) => x.item === q.item).slice(0, 12)) symbols.add(s.id);
+    if (q.fn !== undefined) functions.add(q.fn);
+  }
+  return { symbols, functions };
+}
+
 /** The answerer's assignment (design §7.3): answer every question from the whole codebase. */
-export function answererInstruction(a: AnswererAssignment): string {
-  const asked = a.only !== undefined ? a.questions.filter((q) => a.only!.includes(q.id)) : a.questions;
-  return [
+export const answererInstruction = (a: AnswererAssignment): string => planAnswerer(a).text;
+
+/**
+ * The answerer's assignment and the files it points to. The questions of the job are inlined with their ids while they
+ * fit (a large run's batch always does); the groundwork is inlined while it fits, else it is a file and the assignment
+ * shows what these questions are about.
+ */
+export function planAnswerer(a: AnswererAssignment): Fitted {
+  return shrinkToFit((scale) => {
+    const asked = a.only !== undefined ? a.questions.filter((q) => a.only!.includes(q.id)) : a.questions;
+    const lines = asked.map(questionLine);
+    const inlineQuestions = lines.join("\n").length <= QUESTIONS_INLINE_CHARS * scale;
+    const all = spillOf("questions", lines.join("\n"));
+    const groundwork = groundworkBlock(a.groundwork, a.view, scale, a.reviewDir, focusOf(asked, a.groundwork));
+    const feedback = feedbackBlock(a.feedback, scale, a.reviewDir);
+    const text = [
     `You are the answerer for ${a.pr.owner}/${a.pr.repo}#${a.pr.number} at head ${a.pr.head}. Another agent asked the questions below about the pull request. Answer ${a.only !== undefined ? "only the questions listed below" : "every one"} from the report, the diff and the whole base codebase, its dependencies included. You are read-only: change nothing.`,
     "",
     UNTRUSTED_PREAMBLE,
@@ -194,14 +295,21 @@ export function answererInstruction(a: AnswererAssignment): string {
     "",
     `Return the answers of your result: one entry for ${a.only !== undefined ? "each question below" : "every question below, none left out"}. The question field is the bare id exactly as listed below (${asked.slice(0, 2).map((q) => q.id).join(" or ") || "Q1"}, never the type or the text after it); the result contract accepts no other value.`,
     `Questions (${asked.length}):`,
-    ...asked.map(questionLine),
+    ...(inlineQuestions
+      ? lines
+      : [
+          `There are too many to list here: they are in ${reviewFile(a.reviewDir, all.name)}, one per line in this form (id, type, item, symbol, function, text), and you answer every one of them. The first ones:`,
+          ...fitLines(lines, 12_000 * scale, (n) => `… and ${n} more questions, listed in ${reviewFile(a.reviewDir, all.name)}`),
+        ]),
     "",
     "Groundwork the plugin prepared:",
-    fittingGroundwork(a.groundwork, a.view),
+    ...groundwork.lines,
     "",
     pullText(a.snapshot),
-    ...(a.kind !== "first" ? ["", a.kind === "correction" ? "Your previous result failed deterministic validation. Return the whole corrected result; every problem below must be fixed:" : "The answer checker could not support the answers below. Return a corrected answer for each of them, and for no other question, searching again: fix what the checker found, or state that the question needs the author.", ...a.feedback.map((f) => `- ${f}`)] : []),
+    ...(a.kind !== "first" ? ["", a.kind === "correction" ? "Your previous result failed deterministic validation. Return the whole corrected result; every problem below must be fixed:" : "The answer checker could not support the answers below. Return a corrected answer for each of them, and for no other question, searching again: fix what the checker found, or state that the question needs the author.", ...feedback.lines] : []),
   ].join("\n");
+    return { text, spills: [...(inlineQuestions ? [] : [all]), ...groundwork.spills, ...(a.kind !== "first" ? feedback.spills : [])] };
+  });
 }
 
 export interface CheckerAssignment {
@@ -213,7 +321,11 @@ export interface CheckerAssignment {
   retry: boolean;
   mountedDirs: readonly string[];
   baseDir?: string;
+  reviewDir?: string;
 }
+
+/** The characters of questions and answers the checker's assignment lists in full before the answers go to a file. */
+const ANSWERS_INLINE_CHARS = 30_000;
 
 function answerText(a: Answer): string {
   const parts = [`status ${a.status}${a.none_found ? ", none found" : ""}: ${oneLine(a.answer)}`];
@@ -223,9 +335,26 @@ function answerText(a: Answer): string {
   return parts.join(" | ");
 }
 
+/** One answer as a short line: its status, the start of its text, and how many citations, searches and what proposal it has. */
+function answerSummary(a: Answer): string {
+  return `status ${a.status}${a.none_found ? ", none found" : ""}: ${clipText(a.answer, 160)} | ${a.citations.length} cite(s), ${a.searches.length} search(es)${a.proposal.kind !== "none" ? `, proposal ${a.proposal.kind}` : ""}`;
+}
+
 /** The answer checker's assignment (design §7.3): re-check the claims against the trees, with searches of its own. */
-export function answerCheckerInstruction(a: CheckerAssignment): string {
-  return [
+export const answerCheckerInstruction = (a: CheckerAssignment): string => planAnswerChecker(a).text;
+
+/**
+ * The answer checker's assignment and the files it points to. The questions and answers are inlined in full while they
+ * fit; past that, each answer is a short line here and the whole text, cites and searches of every answer are a file.
+ */
+export function planAnswerChecker(a: CheckerAssignment): Fitted {
+  return shrinkToFit((scale) => {
+    const blocks = a.questions.map((q) => `${q.id} [${q.type}] ${oneLine(q.text)}\n  ANSWER ${a.answers.has(q.id) ? answerText(a.answers.get(q.id)!) : "(none)"}${a.answers.has(q.id) && needsOwnSearch(q, a.answers.get(q.id)!) ? "\n  (this one needs searches of your own)" : ""}`);
+    const inline = blocks.join("\n").length <= ANSWERS_INLINE_CHARS * scale;
+    const full = spillOf("answers", blocks.join("\n"));
+    const file = reviewFile(a.reviewDir, full.name);
+    const compact = a.questions.map((q) => `${q.id} [${q.type}] ${clipText(q.text, 120)}\n  ANSWER ${a.answers.has(q.id) ? answerSummary(a.answers.get(q.id)!) : "(none)"}${a.answers.has(q.id) && needsOwnSearch(q, a.answers.get(q.id)!) ? " | this one needs searches of your own" : ""}`);
+    const text = [
     `You are the answer checker for ${a.pr.owner}/${a.pr.repo}#${a.pr.number} at head ${a.pr.head}. Another agent answered the questions below. Re-check its answers against the trees. You are read-only: change nothing, and run no code from the repository.`,
     "",
     UNTRUSTED_PREAMBLE,
@@ -237,11 +366,18 @@ export function answerCheckerInstruction(a: CheckerAssignment): string {
     SEARCH_HELP,
     "",
     `Questions and answers (${a.questions.length}):`,
-    ...a.questions.map((q) => `${q.id} [${q.type}] ${oneLine(q.text)}\n  ANSWER ${a.answers.has(q.id) ? answerText(a.answers.get(q.id)!) : "(none)"}${a.answers.has(q.id) && needsOwnSearch(q, a.answers.get(q.id)!) ? "\n  (this one needs searches of your own)" : ""}`),
+    ...(inline
+      ? blocks
+      : [
+          `The answers are too long to list in full here: each one's whole text, every citation (tree, path and lines) and every search, as the answerer gave them, are in ${file}, in the order below. Read it, and re-check against it. Each question with a short form of its answer:`,
+          ...fitLines(compact, 24_000 * scale, (n) => `… and ${n} more questions with their answers, listed in ${file}`),
+        ]),
     "",
     pullText(a.snapshot),
     ...(a.retry ? ["", "Your previous result left questions without a verdict, left out the searches of your own that a none-found or test answer needs, or did not follow the contract. Judge every question."] : []),
   ].join("\n");
+    return { text, spills: inline ? [] : [full] };
+  });
 }
 
 export interface NecessityAssignment {
@@ -256,14 +392,32 @@ export interface NecessityAssignment {
   /** The project's design principles, when the profile names a file (design §7.5.1). */
   principles?: PrinciplesContext;
   baseDir?: string;
+  reviewDir?: string;
+}
+
+/** The characters of principles an assignment lists; the file that holds them whole is the project's own. */
+const PRINCIPLES_CHARS = 10_000;
+
+/** The principle lines that fit, then the ids of the rest with where the project states them. */
+export function fitPrinciples(c: PrinciplesContext, line: (p: PrinciplesContext["applicable"][number], short: boolean) => string, scale: number): string[] {
+  // Every statement whole while they fit; shortened only past the budget, and then each shortened one says where its full text is.
+  const whole = c.applicable.map((p) => line(p, false));
+  if (whole.join("\n").length <= PRINCIPLES_CHARS * scale) return whole;
+  const lines = c.applicable.map((p, i) => {
+    const short = line(p, true);
+    return short === whole[i] ? short : `${short} [shortened; its full text: \`git show ${c.read.commit}:${c.read.path}\`]`;
+  });
+  const shown = fitLines(lines, PRINCIPLES_CHARS * scale, () => "").filter((l) => l !== "").length;
+  if (shown >= lines.length) return lines;
+  return [...lines.slice(0, shown), `- … and ${lines.length - shown} more principles that apply, each of which gets a verdict too (their ids: ${c.applicable.slice(shown).map((p) => p.id).join(", ")}): read their statements in ${c.read.path} at ${principlesFrom(c.read)} (\`git show ${c.read.commit}:${c.read.path}\`: the commit the principles were recorded from, which is not HEAD when the profile names a ref).`];
 }
 
 /** The principles that apply to the change, one block each, for N1's answerer. */
-const principleLines = (c: PrinciplesContext | undefined): string[] => {
+const principleLines = (c: PrinciplesContext | undefined, scale = 1): string[] => {
   if (c === undefined || c.read.file === "absent" || c.applicable.length === 0) return [];
   return [
     `The project's design principles (from ${c.read.path} at ${principlesFrom(c.read)}; each applies to this change). Inside part 2, give one verdict per principle in principles, each id exactly once: preserves (the change keeps it), breaks (the change violates it) or not-applicable (it does not bear on this change), with an explanation and citations (path, tree base or head, first and last line, a verbatim quote). preserves and breaks need at least one citation. Judge each principle against the changed lines and the code around them; a principle you cite as broken is a claim the checker will verify.`,
-    ...c.applicable.map((p) => `- ${p.id}: ${oneLine(p.statement)}${p.why !== undefined ? ` Why: ${oneLine(p.why)}` : ""}${p.source !== undefined ? ` Source: ${oneLine(p.source)}` : ""}`),
+    ...fitPrinciples(c, (p, short) => `- ${p.id}: ${short ? clipText(p.statement, 500) : oneLine(p.statement)}${p.why !== undefined ? ` Why: ${short ? clipText(p.why, 300) : oneLine(p.why)}` : ""}${p.source !== undefined ? ` Source: ${short ? clipText(p.source, 200) : oneLine(p.source)}` : ""}`, scale),
   ];
 };
 
@@ -275,9 +429,14 @@ const designDocLines = (docs: readonly string[], context: readonly ContextRef[])
 ];
 
 /** The answerer's assignment for the necessity question N1 (design §7.5): did the pull request fix a real thing, and does the fix fit the design? */
-export function necessityInstruction(a: NecessityAssignment): string {
-  const items = changeItems(a.view).map((i) => `${i.id} [${i.section}] ${oneLine(i.text)} — ${i.cites.map((c) => citeLabel(c)).join(", ")}`);
-  return [
+export const necessityInstruction = (a: NecessityAssignment): string => planNecessity(a).text;
+
+/** N1's assignment: the report's items in full while they fit, else an index and the report's files, which the report stage wrote. */
+export function planNecessity(a: NecessityAssignment): Fitted {
+  return shrinkToFit((scale) => {
+    const items = itemsBlock(a.view, scale, a.reviewDir, "The report's change items");
+    const feedback = feedbackBlock(a.feedback, scale, a.reviewDir);
+    const text = [
     `You are the answerer for ${a.pr.owner}/${a.pr.repo}#${a.pr.number} at head ${a.pr.head}, and the question is ${NECESSITY_ID}, the first question of the run: ${NECESSITY_TEXT} Answer it from the report, the diff and the whole base codebase, with evidence. You are read-only: change nothing.`,
     "",
     UNTRUSTED_PREAMBLE,
@@ -289,20 +448,21 @@ export function necessityInstruction(a: NecessityAssignment): string {
     "Reproduction (reproduction): a failing test on the base is optional evidence. This version of the plugin has no mechanism to run one, so write `not attempted: no reproduction mechanism in this version` and rely on the trace.",
     "Part 2, the design (design): does the fix fit the system's design? Search the repository's design and architecture documents, and the code comments that state intent, for what the system says about the behavior the change touches, for example the write path, the ordering of an acknowledgement and a flush, or who owns a responsibility. List every such search in design.searches (structured records, below), including the ones that found nothing. Cite each design statement in design.statements (path, tree base, first and last line, a verbatim quote) and the changed lines in design.changed (path, tree head, lines, a verbatim quote). Say in design.effect whether the change preserves or breaks those intents, or is unrelated to them, or that no design statement is stated; explain in design.explanation, for example: does replying after a flush make the write wait on the flush, against the write path design? preserves and breaks cite both a statement and the changed lines.",
     ...designDocLines(a.designDocs, a.context),
-    ...principleLines(a.principles),
+    ...principleLines(a.principles, scale),
     ...(a.principles === undefined || a.principles.applicable.length === 0 ? ["No design principle applies to this change: leave principles empty."] : []),
     "Part 3, a simpler or existing way (alternatives): is there one (the caller or another layer already handles it, or the fix belongs elsewhere)? Set exists, explain in alternatives.explanation, and cite where in alternatives.citations (path, tree base or head, lines, quote). Put any other search you ran in searches.",
     SEARCH_HELP,
     "Conclusion (conclusion), with its one-line rationale (rationale, one line): necessary (the failure is possible, the change keeps the design, no existing way does it); questionable (some part does not hold or is unclear); unnecessary (it rests on a cited ground: the claimed failure cannot happen on the base, the change breaks a cited design statement, or an existing way already does it); needs author (the answer depends on intent only the author can state). A conclusion of necessary or unnecessary needs a problem the pull request states, quoted.",
     "",
-    `The report's change items (${items.length}):`,
-    ...(items.length === 0 ? ["(none)"] : items),
+    ...items,
     "",
     pullText(a.snapshot),
     ...(a.kind !== "first"
-      ? ["", a.kind === "correction" ? "Your previous result failed deterministic validation. Return the whole corrected result; every problem below must be fixed:" : "The answer checker could not support your answer. Return a corrected answer, searching again: fix what the checker found, or conclude questionable or needs author.", ...a.feedback.map((f) => `- ${f}`)]
+      ? ["", a.kind === "correction" ? "Your previous result failed deterministic validation. Return the whole corrected result; every problem below must be fixed:" : "The answer checker could not support your answer. Return a corrected answer, searching again: fix what the checker found, or conclude questionable or needs author.", ...feedback.lines]
       : []),
   ].join("\n");
+    return { text, spills: a.kind !== "first" ? feedback.spills : [] };
+  });
 }
 
 const necessityLines = (a: Answer): string[] => {
@@ -335,11 +495,23 @@ export interface NecessityCheckerAssignment {
   /** The project's design principles, when the profile names a file (design §7.5.1). */
   principles?: PrinciplesContext;
   baseDir?: string;
+  reviewDir?: string;
 }
 
+/** The characters of N1's answer the checker's assignment lists in full before the whole answer is a file. */
+const NECESSITY_ANSWER_INLINE_CHARS = 16_000;
+
 /** The answer checker's assignment for N1 (design §7.5): verify every design statement, trace step and the conclusion. */
-export function necessityCheckerInstruction(a: NecessityCheckerAssignment): string {
-  return [
+export const necessityCheckerInstruction = (a: NecessityCheckerAssignment): string => planNecessityChecker(a).text;
+
+/** N1's checker assignment: the answer in full while it fits; past that its first lines here and the whole answer as a file. */
+export function planNecessityChecker(a: NecessityCheckerAssignment): Fitted {
+  return shrinkToFit((scale) => {
+    const lines = necessityLines(a.answer);
+    const inline = lines.join("\n").length <= NECESSITY_ANSWER_INLINE_CHARS * scale;
+    const full = spillOf("necessity-answer", lines.join("\n"));
+    const file = reviewFile(a.reviewDir, full.name);
+    const text = [
     `You are the answer checker for ${a.pr.owner}/${a.pr.repo}#${a.pr.number} at head ${a.pr.head}. Another agent answered the necessity question ${NECESSITY_ID} (${NECESSITY_TEXT}). Re-check its answer against the trees. You are read-only: change nothing, and run no code from the repository.`,
     "",
     UNTRUSTED_PREAMBLE,
@@ -350,7 +522,7 @@ export function necessityCheckerInstruction(a: NecessityCheckerAssignment): stri
     ...(a.principles !== undefined && a.principles.applicable.length > 0
       ? [
           `(6) every principle verdict (P lines below; the principles are the project's, from ${a.principles.read.path} at ${principlesFrom(a.principles.read)}): judge each one on its own in the principles of your verdict, one entry per principle id, with its id, a verdict and a note. supported when the verdict holds: a breaks verdict only when the cited code really violates the principle's statement as written (read the changed lines and the code around them yourself), a preserves verdict only when it really keeps it, a not-applicable verdict only when the principle truly does not bear on the change; partial or unsupported otherwise, with what you found in note. A principle verdict you do not support never makes the question's own verdict unsupported: that verdict covers T, D, C, A and the conclusion. The principles:`,
-          ...a.principles.applicable.map((p) => `    - ${p.id}: ${oneLine(p.statement)}`),
+          ...fitPrinciples(a.principles, (p, short) => `    - ${p.id}: ${short ? clipText(p.statement, 500) : oneLine(p.statement)}`, scale),
         ]
       : ["Leave the principles of your verdict empty: no design principle applies."]),
     SEARCH_HELP,
@@ -358,11 +530,18 @@ export function necessityCheckerInstruction(a: NecessityCheckerAssignment): stri
     ...designDocLines(a.designDocs, a.context),
     "",
     `${a.question.id} [${a.question.type}] ${oneLine(a.question.text)}`,
-    ...necessityLines(a.answer).map((l) => `  ${l}`),
+    ...(inline
+      ? lines.map((l) => `  ${l}`)
+      : [
+          `  The answer is too long to list in full here: all of it, with every numbered trace step, design statement, changed line and alternative, is in ${file}. Read it, and check against it. The first lines:`,
+          ...fitLines(lines, 10_000 * scale, (n) => `… and ${n} more lines of the answer, in ${file}`).map((l) => `  ${l}`),
+        ]),
     "",
     pullText(a.snapshot),
     ...(a.retry ? ["", "Your previous result left the question without a verdict, left out the searches of your own that this answer needs, or did not follow the contract. Judge it."] : []),
   ].join("\n");
+    return { text, spills: inline ? [] : [full] };
+  });
 }
 
 export type { FinalAnswer };

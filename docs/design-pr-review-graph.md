@@ -950,6 +950,37 @@ with the numbers if the run's remaining budget cannot cover them, so the
 maintainer can raise the profile's `budgets` instead of losing a run halfway.
 It is a floor: corrections and retries come on top.
 
+**Every assignment fits the executor's bound.** The coding-agent executor accepts an
+assignment of at most 64,000 characters, and a job past it stops the run
+"incompatible task". No agent job of the plugin can pass it, at any size of pull
+request. Each job builder fits its assignment in this order: (1) bulk input is a
+**file in the worktree's `.graphloom/review/`** the agent reads, written, as a
+bounded multi-part write ([§6.6](#66-output)), before the job that names it (the
+assignment gives the absolute path and says what the file holds), while a compact
+index stays inline (each item's or claim's id with the start of its text); (2) what
+must stay inline is cut with a note of what was left out and where to read it; (3) one
+guard in the job builder measures every assignment against the bound less a margin
+of 2,000 characters before dispatch, and a job that still does not fit stops with the
+job's name and what to shrink, never with the executor's message. A part that fits is
+inlined whole, as it always was; the file appears only past its inline budget.
+
+| Job | Inlined when it fits | Otherwise |
+|---|---|---|
+| Reporter (standard) | changed files, detector facts, state candidates | `reporter-input-<digest>.md` with all three, and an index of the facts |
+| Reporter (large) | the digest, already fitted | its file list, facts and interface patches cut, with counts |
+| Claim checker | every claim, with its text and cites | `claims-<digest>.md` with every claim; an index of the ids |
+| Diagram job | the data of every feature and lifecycle entry | the diagrams past 12, or past 36,000 characters of data, are drawn by the plugin |
+| N1 answerer | the report's change items | an index, and the `review.md` and `report.json` the Report stage wrote |
+| Questioner | change items, required questions, groundwork | the same index of items; `required-questions-<digest>.md`; `groundwork-<digest>.md` and an index of the symbols |
+| Answerer (each batch) | its questions, the groundwork | `groundwork-<digest>.md` and, inline, the groundwork of the batch's own symbols and functions |
+| Answer checker (each batch), N1 checker | the questions with their answers | `answers-<digest>.md` or `necessity-answer-<digest>.md` with the whole text, cites and searches |
+
+Every job also shows the pull request's text bounded: the title at 500 characters,
+the body at 8,000 and the first 20 commit messages (the plugin matches a stated
+purpose against the whole text). Feedback of a correction is listed to 8,000
+characters, with a count of the rest. The files are named by their content's digest,
+so a revised report or a corrected answer writes a new file and never reads an old one.
+
 ### 6.10 Features and their data flow
 
 The maintainer reads the briefing ([§6.1](#61-template)) to learn what the

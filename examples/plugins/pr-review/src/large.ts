@@ -79,8 +79,12 @@ export interface LargeNeeds {
 export const ASSUMED_ITEMS_PER_AREA = 2;
 /** Per item in large mode: purpose, existing-equivalent, reuse-library, common-logic and missing-test (design §7.6). */
 export const ASSUMED_QUESTIONS_PER_ITEM = 5;
-/** Jobs the stages around the agents need in any run (measurements, coverage, the groundwork's reads, the quote check of the claims, the writes with review.html and its appendix, the ledger). A multi-part write adds a job per part on top. */
-const FIXED_JOBS = 26;
+/**
+ * Jobs the stages around the agents need in any run (measurements, coverage, the groundwork's reads, the quote check of the
+ * claims, the writes with review.html and its appendix, the ledger, and the writes of the files the agents read instead of an
+ * assignment that is too long: the claims, the groundwork, the required questions). A multi-part write adds a job per part on top.
+ */
+const FIXED_JOBS = 34;
 /** The diagram job's agent invocations: the drawing and its one correction (design §6.10). */
 const DIAGRAM_INVOCATIONS = 2;
 /** The report's agent invocations: the reporter and its one claim check (a revision and corrections come on top). */
@@ -92,14 +96,14 @@ const FIXED_DECISIONS = 12;
 /**
  * The agent invocations, jobs and decisions large mode needs at least, for `areas` read areas: the reporter and its
  * check (and the commands that verify the quotes against the trees); the diagram job; the questioner; N1 (answerer and
- * checker, with their record); and per batch of questions an answerer, a citation check, a checker and a record.
+ * checker, with their record); and per batch of questions an answerer, a citation check, a checker, a record and the file of the answers the checker reads.
  * Corrections and retries come on top, which is why this is a floor and not a promise.
  */
 export function largeNeeds(areas: number): LargeNeeds {
   const questions = areas * ASSUMED_ITEMS_PER_AREA * ASSUMED_QUESTIONS_PER_ITEM;
   const batches = Math.max(1, Math.ceil(questions / QUESTION_BATCH_SIZE));
   const agentInvocations = REPORT_INVOCATIONS + 1 + 2 + batches * 2 + DIAGRAM_INVOCATIONS;
-  const jobs = REPORT_INVOCATIONS + REPORT_COMMAND_JOBS + 1 + 4 + batches * 4 + FIXED_JOBS + DIAGRAM_INVOCATIONS * 2;
+  const jobs = REPORT_INVOCATIONS + REPORT_COMMAND_JOBS + 1 + 4 + batches * 5 + FIXED_JOBS + DIAGRAM_INVOCATIONS * 2;
   return { areas, questions, batches, agentInvocations, jobs, decisions: jobs + FIXED_DECISIONS };
 }
 

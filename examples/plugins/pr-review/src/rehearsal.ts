@@ -36,6 +36,7 @@ import { fixtureDiagrams } from "./rehearsal-diagrams.js";
 import { assembleReport, asReporterOutput, numbered, type Cite, type FinalReport, type ReportContext, type ReportItem, type ReporterOutput, type StateEntry } from "./report.js";
 import { detectStateCandidates } from "./statecandidates.js";
 import { DOCS } from "./rehearsal-docs.js";
+import { HUGE_BODY, HUGE_COMMITS, HUGE_TITLE, hugeDiff, hugeHeadFiles, hugeHits, hugeSources, hugeStaticDocs } from "./rehearsal-huge.js";
 import type { Necessity } from "./necessity.js";
 import { BASE_FILES, FLAGS_GO, NEW_HEAD_FILES, RETENTION_TTL_GO, BACKOFF_GO, JITTER_GO, LIMIT_GO, SYNC_GO, SYNC_CHANGED, STREAM_ADDED_LINES, STREAM_CHANGED, STREAM_PATH, STREAM_WRITE_BASE_GO, STREAM_WRITE_GO, WRITE_PATH_DOC, PRINCIPLES_FILE } from "./rehearsal-fixtures.js";
 import { pinnedTexts } from "./questions.js";
@@ -599,7 +600,7 @@ function measuredRecords(doc: { records?: MetricsRecord[]; files?: FileIndex[] }
   });
 }
 
-function build(profile: Profile, pull: Pull, options: { body?: string; notes?: string[]; toolId?: string; corrections?: boolean; qa?: QaSpec; coverage?: string; report?: (files: readonly PullFile[], sectionIds: readonly string[]) => Core; features?: (files: readonly PullFile[]) => Feature[]; unsupported?: string[]; diagrams?: DiagramBehavior }): Built {
+function build(profile: Profile, pull: Pull, options: { body?: string; notes?: string[]; toolId?: string; corrections?: boolean; qa?: QaSpec; coverage?: string; report?: (files: readonly PullFile[], sectionIds: readonly string[]) => Core; features?: (files: readonly PullFile[]) => Feature[]; unsupported?: string[]; diagrams?: DiagramBehavior; headFiles?: Readonly<Record<string, string>> }): Built {
   const files = pull.files.map((f) => pullFile(fileItem(f))!);
   const facts = detectFacts(files, profile);
   const sections = reporterSections(profile);
@@ -653,7 +654,7 @@ function build(profile: Profile, pull: Pull, options: { body?: string; notes?: s
   const qa = qaScenario({
     profile,
     files,
-    headFiles: REHEARSAL_HEAD_FILES,
+    headFiles: options.headFiles ?? REHEARSAL_HEAD_FILES,
     sections,
     good: reported,
     records:
@@ -1031,6 +1032,63 @@ const FLAG_PULL = (body: string, title: string): Pull => ({
   doc: FLAGS_DOC,
   qa: { base: { defs: "banyand/cmd/server/flags.go:1:package server\nbanyand/cmd/server/flags.go:12:func registerFlags(cmd *cobra.Command) {" } },
 });
+
+
+/** The report of the huge pull request: sixty long items of four cites each, half of them features, as a reporter of #1445 would give. */
+function hugeReport(files: readonly PullFile[], sectionIds: readonly string[]): Core {
+  const goFiles = files.filter((f) => f.path.endsWith(".go"));
+  const sections = sectionIds.map((id) => ({ id, none: true, items: [] as ReportItem[] }));
+  const by = new Map(sections.map((s) => [s.id, s]));
+  for (let k = 0; k < 60; k += 1) {
+    const mine = Array.from({ length: 4 }, (_, j) => goFiles[(k * 4 + j) % goFiles.length]!);
+    const lead = `Module group ${k + 1} adds the rules of ${mine.map((f) => f.path).join(", ")}: each file declares four small exported functions that compute a value from the one before it, and the group is wired in by the area's package.`;
+    const text = `${lead} ${"It keeps the behavior of every earlier group and only adds new entry points, so no caller changes. ".repeat(6)}`.slice(0, 590);
+    by.get(k % 2 === 0 ? "features" : "other")!.items.push(item(text, mine.map(firstCite)));
+  }
+  for (const s of sections) s.none = s.items.length === 0;
+  return {
+    purpose: { text: `The pull request is titled "${HUGE_TITLE}".`, source: "stated", quote: HUGE_TITLE },
+    overview: `This pull request adds ${files.length} files in 24 areas, described below by the module group they belong to.`,
+    sections,
+    notes: [],
+  };
+}
+
+/** Three features of the huge pull request, each of eight stages and twelve flows over its files. */
+function hugeFeatures(files: readonly PullFile[]): Feature[] {
+  const goFiles = files.filter((f) => f.path.endsWith(".go"));
+  const kinds = ["source", "process", "transport", "store", "external", "sink", "process", "sink"] as const;
+  return [0, 1, 2].map((n): Feature => {
+    const at = (i: number): Cite => firstCite(goFiles[(n * 17 + i) % goFiles.length]!);
+    const stages = kinds.map((kind, i) => ({ id: `s${i + 1}`, label: `stage ${i + 1} of feature ${n + 1} in module ${((n * 17 + i) % 9) + 1}`, kind, cite: at(i) }));
+    const flows = Array.from({ length: 12 }, (_, i) => ({ from: `s${(i % 7) + 1}`, to: `s${(i % 7) + 2}`, label: `flow ${i + 1} of feature ${n + 1} carries the value onward`, cite: at((i % 7) + 1) }));
+    return { name: `Feature ${n + 1} across the module groups`, summary: `Feature ${n + 1} carries a value through eight stages.`, stages, flows };
+  });
+}
+
+/**
+ * The `large-assignments` scenario's pull request, at the scale of #1445 (216 files, 864 new symbols, 24 areas): not one of
+ * the registered scenarios, so the replays and the rehearsal tests stay small. Run it with `HUGE_LIMITS` and `files` set to
+ * `headFiles`; the test of `fit.ts` asserts that every agent assignment of the run fits the executor's bound.
+ */
+export function hugeRehearsal(config: unknown): { scenario: RehearsalScenario; headFiles: Record<string, string> } {
+  const profile = parseProfile(config);
+  const sources = hugeSources();
+  const pull: Pull = {
+    files: sources.map((s) => addedFile(s.path, s.text)),
+    title: HUGE_TITLE,
+    body: HUGE_BODY,
+    commits: HUGE_COMMITS,
+    diff: hugeDiff(),
+    doc: hugeStaticDocs().all,
+    qa: { base: { hits: hugeHits() }, answer: (_q, _sym, _record, dflt) => ({ ...dflt, answer: `${dflt.answer} ${"The searches and the cited lines show it. ".repeat(60)}`.slice(0, 1_900) }) },
+  };
+  const headFiles = hugeHeadFiles();
+  const built = build(profile, pull, { report: hugeReport, features: hugeFeatures, headFiles }).scenario;
+  const batches = hugeStaticDocs().batches;
+  const commandsOf = { ...built.commands, ...Object.fromEntries(Object.entries(batches).map(([id, doc]) => [id, { exitCode: 0, stdout: JSON.stringify(doc) }])) };
+  return { scenario: { ...built, commands: commandsOf }, headFiles };
+}
 
 /** The scenarios, for the profile the run is described with (design §16). */
 export function rehearsal(config: unknown): GraphRehearsal {
