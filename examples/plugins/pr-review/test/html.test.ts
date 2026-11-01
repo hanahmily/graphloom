@@ -225,6 +225,8 @@ describe("review.html when N1 stops the questions, and when a question needs the
     expect(verdict).toContain('<span class="badge bad">offline-idempotent: breaks</span>');
     const open = brief.slice(brief.indexOf("<h2>Open questions</h2>"));
     expect(open).toContain('<a href="review-appendix.html#q-N1"><strong>N1</strong></a>');
+    // The link has a target: the appendix's Necessity section carries the id.
+    expect(html).toMatch(/<details id="q-N1"[^>]*><summary><h2>Necessity<\/h2>/);
   });
 
   it("opens a question that needs the author and collapses the others", () => {

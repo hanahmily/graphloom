@@ -152,6 +152,9 @@ describe("deterministic validation of the briefing", () => {
     expect(problems(valid({ areas: [{ id: "A1", label: "stream path" }] })).join(" ")).toMatch(/this report has none, so leave it empty/);
     expect(problems(valid({ areas: [{ id: "A1", label: "stream path" }] }), { areaIds: ["A1", "A2"] })).toEqual([]);
     expect(problems(valid({ areas: [{ id: "A1", label: "a" }, { id: "A1", label: "b" }, { id: "A9", label: "c" }] }), { areaIds: ["A1", "A2"] }).join(" ")).toMatch(/appears twice[\s\S]*no area has this id/);
+    // A large pull request may have more than 40 areas: a label for each of them is valid.
+    const ids = Array.from({ length: 55 }, (_, i) => `A${i + 1}`);
+    expect(problems(valid({ areas: ids.map((id) => ({ id, label: `area ${id}` })) }), { areaIds: ids })).toEqual([]);
   });
 });
 

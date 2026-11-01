@@ -220,7 +220,8 @@ function necessityHtml(n: NecessityRecord | undefined, g: Github): string {
     n.decision.action === "ask-all" && n.decision.override === true ? para("Override: the operator asked for every question, so none was skipped.") : "",
     ...(a.notes.length > 0 ? [para(`Note: ${a.notes.join("; ")}.`)] : []),
   ].join("\n");
-  return details(`<h2>Necessity</h2> ${badge(CONCLUSION_CLASS[conclusion] ?? "grey", conclusion)}`, body, true, "sec");
+  // The briefing's open questions link N1 here (`#q-N1`), as they link every other question to its answer.
+  return details(`<h2>Necessity</h2> ${badge(CONCLUSION_CLASS[conclusion] ?? "grey", conclusion)}`, body, true, "sec", `q-${NECESSITY_ID}`);
 }
 
 // ---- briefing ----

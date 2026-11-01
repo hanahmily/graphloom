@@ -194,9 +194,11 @@ export function briefingProblems(b: Briefing, ctx: BriefingContext, final = fals
     if (entries.length > MAX_CHECK_PER_LIST) problems.push(`check.${list} has ${entries.length} entries, more than ${MAX_CHECK_PER_LIST}`);
     entries.forEach((e, i) => bulletProblems(e, ctx.files, `check.${list} ${i + 1}`, problems, tree));
   }
-  if (b.areas.length > MAX_AREA_LABELS) problems.push(`areas has ${b.areas.length} entries, more than ${MAX_AREA_LABELS}`);
   const seen = new Set<string>();
   const known = ctx.areaIds === undefined ? undefined : new Set(ctx.areaIds);
+  // One label per area: the bound is the pull request's own area count, not a fixed number (a large one may have more than 40).
+  const maxLabels = known === undefined ? MAX_AREA_LABELS : known.size;
+  if (b.areas.length > maxLabels) problems.push(`areas has ${b.areas.length} entries, more than the ${maxLabels} areas`);
   if (known === undefined && b.areas.length > 0) problems.push("areas labels the areas of a large pull request; this report has none, so leave it empty");
   b.areas.forEach((a, i) => {
     const at = `areas ${i + 1} (${JSON.stringify(a.id)})`;
