@@ -12,9 +12,10 @@
  * properties; judgement words are allowed (§6.5).
  */
 import { validateResultShape } from "@graphloom/sdk";
-import { ARCHITECTURE_SCHEMA, architectureProblems, assembleArchitecture, EMPTY_ARCHITECTURE, renderArchitectureMarkdown, type Architecture } from "./architecture.js";
+import { assembleBriefing, BRIEFING_PROPERTIES, BRIEFING_REQUIRED, briefingProblems, emptyBriefing, type AreaLabel, type Briefing, type FinalBriefing } from "./briefing.js";
+import { CITE_SCHEMA, citeProblem, findFile, type Cite } from "./cites.js";
 import type { Fact } from "./detectors.js";
-import { sideLines, type Side } from "./patch.js";
+import type { Side } from "./patch.js";
 import { quoteInPinned, type PinnedText } from "./questions.js";
 import { nameCovers, type StateCandidate } from "./statecandidates.js";
 import { fileNames, type PullFile } from "./snapshot.js";
@@ -39,15 +40,7 @@ export const MAX_PART_CHARS = 240;
 const MAX_NOTES = 10;
 const MAX_NOTE_CHARS = 400;
 
-export interface Cite {
-  path: string;
-  side: Side;
-  /** First and last line on `side`; 0 and 0 cite the file as a whole, which only a file with no patch text may do. */
-  start: number;
-  end: number;
-  /** A symbol that appears in the file's patch; empty when none. */
-  symbol: string;
-}
+export type { Cite };
 
 /** Why the change is made: quoted from the pull request's text, or marked as inferred from the diff. */
 export interface Purpose {
@@ -109,29 +102,22 @@ export interface ReporterOutput {
   overview: string;
   sections: ReporterSection[];
   notes: string[];
-  /** The components the change adds or modifies, and how they connect (design §6.10). */
-  architecture: Architecture;
+  /** One bullet for each new capability (design §6.1). */
+  whatsNew: Briefing["whatsNew"];
+  /** The data path of each new feature, at most three (design §6.10). */
+  features: Briefing["features"];
+  /** What the maintainer has to check, in five lists (design §6.1). */
+  check: Briefing["check"];
+  /** A short label for each area id of a large report. */
+  areas: AreaLabel[];
 }
-
-const CITE_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  required: ["path", "side", "start", "end", "symbol"],
-  properties: {
-    path: { type: "string" },
-    side: { type: "string", enum: ["head", "base"] },
-    start: { type: "integer" },
-    end: { type: "integer" },
-    symbol: { type: "string" },
-  },
-};
 
 const text = { type: "string" };
 const strict = (required: string[], properties: Record<string, unknown>): Record<string, unknown> => ({ type: "object", additionalProperties: false, required, properties });
 
 /** The reporter's result (`change-report-v1`): every property required, none extra, and no field for a severity, finding or verdict. */
-export const CHANGE_REPORT_SCHEMA = strict(["purpose", "overview", "sections", "notes", "architecture"], {
-  architecture: ARCHITECTURE_SCHEMA,
+export const CHANGE_REPORT_SCHEMA = strict(["purpose", "overview", ...BRIEFING_REQUIRED, "sections", "notes"], {
+  ...BRIEFING_PROPERTIES,
   purpose: strict(["text", "source", "quote"], { text, source: { type: "string", enum: ["stated", "inferred"] }, quote: text }),
   overview: text,
   sections: {
@@ -180,12 +166,14 @@ export interface ReportContext {
   large?: boolean;
   /** Large mode: files no agent read as patches (generated, or no patch from GitHub), by path, with what the report says of each. */
   unread?: ReadonlyMap<string, string>;
-  /** The pinned base commit, which the architecture diagram's tree check reads (design §6.10). */
+  /** The pinned base commit, which the claims' quotes are verified against in a large report (design §6.9). */
   base?: string;
+  /** Large mode: the ids of the areas, which the reporter labels (design §6.9). */
+  areaIds?: readonly string[];
 }
 
 /** What the deterministic rules judge: a reporter's output, or a final report in its shape (no summary check). */
-export type ReportLike = Pick<ReporterOutput, "sections" | "notes"> & Partial<Pick<ReporterOutput, "purpose" | "overview" | "architecture">>;
+export type ReportLike = Pick<ReporterOutput, "sections" | "notes"> & Partial<Pick<ReporterOutput, "purpose" | "overview" | keyof Briefing>>;
 
 const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
 
@@ -194,10 +182,6 @@ export function parseReporterOutput(output: unknown): { output: ReporterOutput }
   const shape = validateResultShape(output, CHANGE_REPORT_SCHEMA as unknown as Record<string, unknown>);
   if (shape.length > 0) return { problems: shape.slice(0, 20) };
   return { output: output as ReporterOutput };
-}
-
-function findFile(files: readonly PullFile[], path: string): PullFile | undefined {
-  return files.find((f) => f.path === path || f.previousPath === path);
 }
 
 const SENTENCE_SPLIT = /[.!?]+(?:\s+|$)/;
@@ -211,8 +195,10 @@ export function reportProblems(report: ReportLike, ctx: ReportContext, opts: { f
   const maxItemChars = MAX_ITEM_CHARS;
   // `summary: false` skips the summary rules (the final report has none of its own to check).
   if (!final && opts.summary !== false) summaryProblems(report, ctx, problems);
-  // The diagram's structural rules (design §6.10); its tree check is a command the graph runs (`architecturePlan`).
-  if (report.architecture !== undefined) problems.push(...architectureProblems(report.architecture, ctx.files));
+  // The briefing fields (design §6.1): bounds, stage and flow ids, citations.
+  if (report.whatsNew !== undefined && report.features !== undefined && report.check !== undefined && report.areas !== undefined) {
+    problems.push(...briefingProblems({ whatsNew: report.whatsNew, features: report.features, check: report.check, areas: report.areas }, { files: ctx.files, large: ctx.large, areaIds: ctx.areaIds }, final));
+  }
   const known = new Map(ctx.sections.map((s) => [s.id, s]));
   const seen = new Set<string>();
   for (const s of report.sections) {
@@ -343,32 +329,6 @@ export function partProblems(item: ReportItem, files: readonly PullFile[], at: s
   });
 }
 
-function citeProblem(c: Cite, files: readonly PullFile[], at: string, problems: string[], rangeRequired: boolean): void {
-  const file = findFile(files, c.path);
-  if (file === undefined) {
-    problems.push(`${at}: cites ${c.path}, which is not a file of the pull request`);
-    return;
-  }
-  const where = `${at}: ${c.path}`;
-  const hasPatch = file.parsed.lines.length > 0;
-  if (c.start === 0 && c.end === 0) {
-    if (hasPatch && rangeRequired) problems.push(`${where}: the file has patch text, so cite the lines (start and end on the ${c.side} side, inside a hunk), not 0 and 0 or a symbol alone; 0 and 0 is only for a file with no patch text`);
-  } else if (!Number.isInteger(c.start) || !Number.isInteger(c.end) || c.start < 1 || c.end < c.start) {
-    problems.push(`${where}: the lines ${c.start}-${c.end} are not a range (use 0 and 0 to cite a file with no patch text as a whole)`);
-  } else if (!hasPatch) {
-    problems.push(`${where}: the file has no patch text, so no lines of it can be cited; cite it as a whole`);
-  } else {
-    const lines = sideLines(file.parsed, c.side);
-    const missing = [];
-    for (let l = c.start; l <= c.end && missing.length < 3; l += 1) if (!lines.has(l)) missing.push(l);
-    if (missing.length > 0) problems.push(`${where}: line(s) ${missing.join(", ")} on the ${c.side} side are outside the file's hunks`);
-  }
-  if (c.symbol !== "") {
-    if (!hasPatch) problems.push(`${where}: the symbol ${JSON.stringify(c.symbol)} cannot be found: the file has no patch text`);
-    else if (!file.parsed.lines.some((l) => l.text.includes(c.symbol))) problems.push(`${where}: the symbol ${JSON.stringify(c.symbol)} does not appear in the file's patch`);
-  }
-}
-
 export interface FinalItem extends ReportItem {
   id: string;
   /** Plugin-written, not the reporter's: exempt from the claim check. */
@@ -392,9 +352,9 @@ export interface RemovedItem {
 
 /** A part of the report the claim check could not support, dropped while its item stays. */
 export interface RemovedPart {
-  /** The claim-check id: `purpose`, `overview`, `R3.s1` (a state entry, whole), `R3.b2` (a behavior row), `A.store` (a diagram node), `A.e3` (a diagram edge). */
+  /** The claim-check id: `purpose`, `overview`, `R3.s1` (a state entry, whole), `R3.b2` (a behavior row), `W2` (a what's-new bullet), `F1`, `F1.s2`, `F1.f3` (a feature, a stage, a flow), `C.risks.1` (a check entry). */
   id: string;
-  kind: "purpose" | "overview" | "state" | "behavior" | "node" | "edge";
+  kind: "purpose" | "overview" | "state" | "behavior" | "whatsNew" | "feature" | "stage" | "flow" | "check";
   /** The item it belonged to; empty for the summary. */
   item: string;
   /** What was dropped, in a few words: the entry's name or the row's case. */
@@ -414,8 +374,8 @@ export interface FinalReport {
   notes: string[];
   removed: RemovedItem[];
   removedParts: RemovedPart[];
-  /** The architecture diagram the claim check left standing (design §6.10). */
-  architecture: Architecture;
+  /** The briefing fields the claim check left standing (design §6.1). */
+  briefing: FinalBriefing;
 }
 
 /** The ids the report's items carry: `R1…` over the sections in template order. */
@@ -448,7 +408,7 @@ export const behaviorId = (item: string, row: number): string => `${item}.b${row
  * detector fact left without an item gets a plugin-written one, so coverage
  * holds without trusting a model (§6.4).
  */
-export function assembleReport(report: Pick<ReporterOutput, "sections" | "notes"> & Partial<Pick<ReporterOutput, "purpose" | "overview" | "architecture">>, removed: ReadonlyMap<string, string>, ctx: ReportContext): FinalReport {
+export function assembleReport(report: Pick<ReporterOutput, "sections" | "notes"> & Partial<Pick<ReporterOutput, "purpose" | "overview" | keyof Briefing>>, removed: ReadonlyMap<string, string>, ctx: ReportContext): FinalReport {
   const items = numbered(report, ctx);
   const gone: RemovedItem[] = [];
   const parts: RemovedPart[] = [];
@@ -478,8 +438,8 @@ export function assembleReport(report: Pick<ReporterOutput, "sections" | "notes"
   const overviewReason = removed.get("overview");
   if (purposeReason !== undefined) parts.push({ id: "purpose", kind: "purpose", item: "", label: report.purpose?.text ?? "", reason: purposeReason });
   if (overviewReason !== undefined) parts.push({ id: "overview", kind: "overview", item: "", label: report.overview ?? "", reason: overviewReason });
-  const arch = assembleArchitecture(report.architecture ?? EMPTY_ARCHITECTURE, removed);
-  parts.push(...arch.parts);
+  const brief = assembleBriefing({ ...emptyBriefing(), ...(report.whatsNew !== undefined ? { whatsNew: report.whatsNew } : {}), ...(report.features !== undefined ? { features: report.features } : {}), ...(report.check !== undefined ? { check: report.check } : {}), ...(report.areas !== undefined ? { areas: report.areas } : {}) }, removed);
+  parts.push(...brief.parts);
   let next = items.length;
   const cited = new Set(ctx.sections.flatMap((s) => bySection.get(s.id)!.flatMap((i) => i.cites.map((c) => c.path))));
   const accounted = new Set(ctx.sections.flatMap((s) => bySection.get(s.id)!.flatMap((i) => i.facts)));
@@ -558,16 +518,19 @@ export function assembleReport(report: Pick<ReporterOutput, "sections" | "notes"
     notes: report.notes,
     removed: gone,
     removedParts: parts,
-    architecture: arch.architecture,
+    briefing: brief.briefing,
   };
 }
 
 /** A final report in the reporter's shape (without its summary), so the same deterministic rules judge it. */
-export function asReporterOutput(final: FinalReport): Pick<ReporterOutput, "sections" | "notes" | "architecture"> {
+export function asReporterOutput(final: FinalReport): Pick<ReporterOutput, "sections" | "notes" | keyof Briefing> {
   return {
+    whatsNew: final.briefing.whatsNew,
+    features: final.briefing.features.map(({ name, summary, stages, flows }) => ({ name, summary, stages, flows })),
+    check: final.briefing.check,
+    areas: final.briefing.areas,
     sections: final.sections.map((s) => ({ id: s.id, none: s.none, items: s.items.map(({ text, cites, facts, state, behavior }) => ({ text, cites, facts, state, behavior })) })),
     notes: final.notes,
-    architecture: final.architecture,
   };
 }
 
@@ -629,16 +592,17 @@ const oneLine = (s: string): string => s.replace(/\s*\n\s*/g, " ").trim();
 const cell = (s: string): string => oneLine(s).replace(/\|/g, "\\|");
 const short = (s: string, n: number): string => (oneLine(s).length <= n ? oneLine(s) : `${oneLine(s).slice(0, n - 1)}…`);
 
-/** The summary at the top of the Report part: the purpose (stated with its quote, or marked inferred) and the overview. */
+/** The purpose as the briefing states it: quoted when the pull request states it, marked inferred otherwise. */
+export function purposeLine(summary: FinalSummary, removedParts: readonly RemovedPart[]): string {
+  const why = short(removedParts.find((x) => x.id === "purpose")?.reason ?? "", 120);
+  const p = summary.purpose;
+  return p === null ? `**Purpose:** not given: the claim check could not support it (${why}).` : p.source === "stated" ? `**Purpose** (stated: "${oneLine(p.quote)}"): ${oneLine(p.text)}` : `**Purpose** (inferred from the diff; the pull request does not state it): ${oneLine(p.text)}`;
+}
+
+/** The summary of the appendix: the overview of the mechanism (the purpose is in the briefing). */
 function summaryLines(summary: FinalSummary, removedParts: readonly RemovedPart[]): string[] {
   const why = (id: string): string => short(removedParts.find((p) => p.id === id)?.reason ?? "", 120);
-  const p = summary.purpose;
-  return [
-    "## Summary",
-    p === null ? `**Purpose:** not given: the claim check could not support it (${why("purpose")}).` : p.source === "stated" ? `**Purpose** (stated: "${oneLine(p.quote)}"): ${oneLine(p.text)}` : `**Purpose** (inferred from the diff; the pull request does not state it): ${oneLine(p.text)}`,
-    summary.overview === null ? `**Overview:** not given: the claim check could not support it (${why("overview")}).` : `**Overview:** ${oneLine(summary.overview)}`,
-    "",
-  ];
+  return ["## Summary", summary.overview === null ? `**Overview:** not given: the claim check could not support it (${why("overview")}).` : `**Overview:** ${oneLine(summary.overview)}`, ""];
 }
 
 /** An item's lifecycle block, behavior table and removed-part notes, indented under its line. */
@@ -658,7 +622,9 @@ function itemDetail(i: FinalItem, files: readonly PullFile[], removedParts: read
   return out;
 }
 
-/** The Report part of `review.md` (design §6.6). */
+const REMOVED_NOUN: Record<RemovedPart["kind"], string> = { purpose: "Purpose", overview: "Overview", state: "Lifecycle", behavior: "Behavior row", whatsNew: "What's-new bullet", feature: "Feature", stage: "Feature stage", flow: "Feature flow", check: "Check entry" };
+
+/** The Report part of the appendix of `review.md` (design §6.6): every change item, with its lifecycles and tables. */
 export function renderReport(final: FinalReport, header: ReportHeader): string {
   const added = header.files.reduce((n, f) => n + f.additions, 0);
   const deleted = header.files.reduce((n, f) => n + f.deletions, 0);
@@ -667,7 +633,6 @@ export function renderReport(final: FinalReport, header: ReportHeader): string {
     `${header.files.length} files, +${added} −${deleted}. Commits: ${header.commits}. GitHub checks at head: ${describeChecks(header.checks)}.`,
     "",
     ...summaryLines(final.summary, final.removedParts),
-    ...renderArchitectureMarkdown(final.architecture),
   ];
   for (const s of final.sections) {
     if (s.id === "measurements") continue;
@@ -680,9 +645,9 @@ export function renderReport(final: FinalReport, header: ReportHeader): string {
     }
     lines.push("");
   }
-  const dropped = final.removedParts.filter((x) => x.kind === "node" || x.kind === "edge");
+  const dropped = final.removedParts.filter((x) => x.kind !== "state" && x.kind !== "behavior" && x.kind !== "purpose" && x.kind !== "overview");
   if (dropped.length > 0) {
-    lines.push("## Removed by the claim check", ...dropped.map((p) => `- Architecture ${p.kind === "node" ? "component" : "connection"} \`${p.id}\` ${short(p.label, 80)}: ${short(p.reason, 160)}`), "");
+    lines.push("## Removed by the claim check", ...dropped.map((p) => `- ${REMOVED_NOUN[p.kind]} \`${p.id}\` ${short(p.label, 80)}: ${short(p.reason, 160)}`), "");
   }
   lines.push(`Notes: ${final.notes.length === 0 ? "none" : final.notes.map(oneLine).join(" | ")}`, "");
   return lines.join("\n");

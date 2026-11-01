@@ -3,14 +3,14 @@
 
 /**
  * The diagram documents a rehearsal's stand-in model returns for the `diagrams-v1` job (design §6.10, §16): small, plain
- * documents in the shape the diagram-design skill produces (its light minimal template, system fonts, an Architecture delta
+ * documents in the shape the diagram-design skill produces (its light minimal template, system fonts, a Data flow
  * or a State machine), drawn from the checked data alone with connectors the skill's geometry check accepts. They pass the
  * skill's own `self_check.py --offline` and `verify-geometry.py` (a test runs both on them when `python3` is there) and the
  * plugin's label rule, so a rehearsal exercises the whole diagram flow with a drawing that stands. They are test data, not a
- * layout engine: each node's connectors leave and enter its right side, one lane each.
+ * layout engine: each stage's connectors leave and enter its right side, one lane each.
  */
-import type { Architecture } from "./architecture.js";
-import { diagramSpecs, type DiagramInput, type DiagramSpec } from "./diagrams.js";
+import type { FinalFeature } from "./briefing.js";
+import { diagramSpecs, featureDiagramId, type DiagramInput, type DiagramSpec } from "./diagrams.js";
 import { esc, wrap } from "./escape.js";
 
 const MONO = "ui-monospace, monospace";
@@ -73,111 +73,70 @@ function maskedLabel(x: number, y: number, label: string, width: number): string
   });
 }
 
-// ---- Architecture delta ----
+// ---- Data flow ----
 
 interface PlacedBox {
   id: string;
   label: string;
   lines: string[];
-  status: string;
+  kind: string;
   y: number;
   h: number;
-  ports: number;
 }
 
 const BOX_X = 24;
 const BOX_W = 160;
 
-/** One panel of the delta: the nodes of one snapshot in a column, and their connectors on the right, one lane each. */
-function panel(arch: Architecture, snapshot: "before" | "after", dx: number, dy: number, lanes: number): { svg: string; width: number; height: number } {
-  const nodes = arch.nodes.filter((n) => (snapshot === "before" ? n.change !== "added" : true));
-  const known = new Set(nodes.map((n) => n.id));
-  const edges = arch.edges.filter((e) => (snapshot === "before" ? e.change !== "added" : e.change !== "removed") && e.from !== e.to && known.has(e.from) && known.has(e.to));
-  const degree = new Map(nodes.map((n) => [n.id, 0]));
-  edges.forEach((e) => {
+/** The Data flow document of one feature: its stages in a column, in the order given, the flows as connectors on their right, one lane each, every label in a column beside the lanes. */
+export function featureDocument(f: FinalFeature, spec: DiagramSpec): string {
+  const stages = f.stages;
+  const known = new Set(stages.map((n) => n.id));
+  const flows = f.flows.filter((e) => e.from !== e.to && known.has(e.from) && known.has(e.to));
+  const degree = new Map(stages.map((n) => [n.id, 0]));
+  flows.forEach((e) => {
     degree.set(e.from, degree.get(e.from)! + 1);
     degree.set(e.to, degree.get(e.to)! + 1);
   });
   let y = 16;
   const boxes = new Map<string, PlacedBox>();
-  for (const n of nodes) {
+  for (const n of stages) {
     const lines = wrap(n.label, 20, 8);
-    const ports = degree.get(n.id)!;
-    const h = up4(Math.max(28 + 14 * (1 + lines.length), 16 * (ports + 1)));
-    boxes.set(n.id, { id: n.id, label: n.label, lines, status: n.change === "added" ? "added" : n.change === "modified" ? "changed" : "unchanged", y, h, ports });
+    const h = up4(Math.max(28 + 14 * (1 + lines.length), 16 * (degree.get(n.id)! + 1)));
+    boxes.set(n.id, { id: n.id, label: n.label, lines, kind: n.kind, y, h });
     y += h + 32;
   }
-  const used = new Map(nodes.map((n) => [n.id, 0]));
+  const used = new Map(stages.map((n) => [n.id, 0]));
   const port = (id: string): number => {
     const k = used.get(id)! + 1;
     used.set(id, k);
     return boxes.get(id)!.y + 16 * k;
   };
-  // The lanes are 16 apart; every label stands in a column to the right of the last lane, level with the line it names, so no lane crosses one and the panel stays narrow.
+  // The lanes are 16 apart; every label stands in a column to the right of the last lane, level with the line it names, so no lane crosses one.
   const labelW = 144;
-  const labelX = BOX_X + BOX_W + 24 + 16 * lanes + 8;
-  const width = up4(labelX + labelW + 8);
-  const height = up4(Math.max(y, 120));
+  const labelX = BOX_X + BOX_W + 24 + 16 * Math.max(1, flows.length) + 8;
+  const width = up4(labelX + labelW + 8 + 24);
+  const height = up4(Math.max(y, 120) + 56);
   const paths: string[] = [];
   const labels: string[] = [];
-  edges.forEach((e, k) => {
+  flows.forEach((e, k) => {
     const lane = BOX_X + BOX_W + 24 + 16 * k;
     const ya = port(e.from);
     const yb = port(e.to);
     const x0 = BOX_X + BOX_W;
-    const dashed = e.change === "removed" ? ' stroke-dasharray="4,3"' : "";
-    const accent = e.change === "added" || e.change === "modified";
-    paths.push(`<path data-kind="relationship" data-object-id="e${k + 1}" data-status="${e.change === "modified" ? "changed" : e.change}" data-signature="${esc(`${e.kind};${e.label}`)}" data-from="${esc(e.from)}" data-to="${esc(e.to)}" d="M ${x0} ${ya} H ${lane} V ${yb} H ${x0}" fill="none" stroke="${accent ? "#bf4520" : "#4f5d75"}" stroke-width="1.2"${dashed} marker-end="url(#${accent ? "arrow-accent" : "arrow"})"/>`);
+    const focal = k === 0;
+    paths.push(`<path d="M ${x0} ${ya} H ${lane} V ${yb} H ${x0}" fill="none" stroke="${focal ? "#bf4520" : "#4f5d75"}" stroke-width="1.2" marker-end="url(#${focal ? "arrow-accent" : "arrow"})"/>`);
     if (e.label.trim() !== "") labels.push(...maskedLabel(labelX, ya - 6, e.label, labelW));
   });
-  const nodeSvg = [...boxes.values()].map((b) => {
-    const stroke = b.status === "added" ? "#bf4520" : "#2d3142";
-    const body = [
-      `<g data-kind="component" data-object-id="${esc(b.id)}" data-status="${b.status}" data-signature="${esc(b.label)}">`,
-      `<rect data-role="bounds" x="${BOX_X}" y="${b.y}" width="${BOX_W}" height="${b.h}" rx="6" fill="${b.status === "added" ? "rgba(191,69,32,0.08)" : "#ffffff"}" stroke="${stroke}" stroke-width="1"/>`,
-      text(BOX_X + 8, b.y + 16, b.id, { size: 9, fill: "#4f5d75", mono: true }),
+  const nodeSvg = [...boxes.values()].map((b) =>
+    [
+      "<g>",
+      `<rect x="${BOX_X}" y="${b.y}" width="${BOX_W}" height="${b.h}" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>`,
+      text(BOX_X + 8, b.y + 16, b.kind.toUpperCase(), { size: 9, fill: "#4f5d75", mono: true }),
       ...b.lines.map((l, i) => text(BOX_X + 8, b.y + 32 + 14 * i, l, { size: 12, weight: 600 })),
       "</g>",
-    ];
-    return body.join("");
-  });
-  const svg = [`<g data-snapshot="${snapshot}" data-grid="${width} ${height} 4" transform="translate(${dx} ${dy})">`, ...paths, ...labels, ...nodeSvg, "</g>"].join("\n");
-  return { svg, width, height };
-}
-
-/** The Architecture delta document of the checked architecture: Before, the Changes ledger, After. */
-export function architectureDocument(arch: Architecture, spec: DiagramSpec): string {
-  const label = new Map(arch.nodes.map((n) => [n.id, n.label] as const));
-  const entries: Array<{ change: string; target: string; lines: string[] }> = [];
-  for (const n of arch.nodes) if (n.change !== "unchanged") entries.push({ change: n.change === "added" ? "ADDED" : "CHANGED", target: n.id, lines: wrap(n.label, 28, 8) });
-  arch.edges.forEach((e, k) => {
-    if (e.change === "unchanged") return;
-    entries.push({ change: e.change === "added" ? "ADDED" : e.change === "removed" ? "REMOVED" : "CHANGED", target: `e${k + 1}`, lines: [...wrap(label.get(e.from) ?? e.from, 28, 8), "→", ...wrap(label.get(e.to) ?? e.to, 28, 8)] });
-  });
-  const lanes = Math.max(1, arch.edges.filter((e) => e.from !== e.to).length);
-  const before = panel(arch, "before", 24, 56, lanes);
-  const ledgerW = 232;
-  const afterX = 24 + before.width + 24 + ledgerW + 24;
-  const afterPanel = panel(arch, "after", afterX, 56, lanes);
-  const width = afterX + afterPanel.width + 24;
-  const rows = entries.map((e) => 14 * (1 + e.lines.length) + 12);
-  const ledgerHeight = rows.reduce((a, b) => a + b, 0);
-  const height = up4(Math.max(before.height, afterPanel.height, ledgerHeight + 24) + 56 + 24);
-  let y = 56 + 16;
-  const ledger = entries.map((e, i) => {
-    const out = `<text data-change="${e.change}" data-target="${esc(e.target)}" x="${before.width + 48}" y="${y}" fill="#2d3142" font-size="11" font-family="${SANS}"><tspan font-weight="600">${e.change}</tspan>${e.lines.map((l) => `<tspan x="${before.width + 48}" dy="14">${esc(l)}</tspan>`).join("")}</text>`;
-    y += rows[i]!;
-    return out;
-  });
-  const body = [
-    text(24, 36, "Before", { size: 11, weight: 600, mono: true }),
-    text(before.width + 48, 36, "Changes", { size: 11, weight: 600, mono: true }),
-    text(afterX, 36, "After", { size: 11, weight: 600, mono: true }),
-    ...ledger,
-    before.svg,
-    afterPanel.svg,
-  ].join("\n");
-  return document("arch-delta", "Architecture delta", "Architecture delta", spec.title, spec.description, width, height, body);
+    ].join(""),
+  );
+  return document("data-flow", "Data flow", f.name, spec.title, spec.description, width, height, [...paths, ...labels, ...nodeSvg].join("\n"));
 }
 
 // ---- State machine ----
@@ -242,7 +201,7 @@ export function fixtureDiagrams(input: DiagramInput): { diagrams: Array<{ id: st
   return {
     diagrams: drawn.map((spec) => ({
       id: spec.id,
-      html: spec.kind === "arch" ? architectureDocument(input.arch!, spec) : stateDocument(input.states.find((s) => s.id === spec.id)!.entry, spec),
+      html: spec.kind === "feature" ? featureDocument(input.features.find((f) => featureDiagramId(f.id) === spec.id)!, spec) : stateDocument(input.states.find((s) => s.id === spec.id)!.entry, spec),
     })),
   };
 }

@@ -2,12 +2,13 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 /**
- * The architecture diagram as SVG (design §6.10), by plugin code with no third-party tool: a layered layout (layers
- * by longest path from the nodes with no incoming edges, cycles broken at the back edges a depth-first search
- * finds, the order inside a layer by barycentre over a few sweeps), boxes coloured by `change`, edge labels and a
- * legend. `layoutArchitecture` is a pure, deterministic function of the diagram; `architectureSvg` draws its result.
+ * The data flow of a feature as SVG (design §6.10), by plugin code with no third-party tool: a layered layout (layers
+ * by longest path from the stages with no incoming flows, cycles broken at the back flows a depth-first search
+ * finds, the order inside a layer by barycentre over a few sweeps), boxes coloured by the stage's kind, flow labels and a
+ * legend. `layoutFlow` is a pure, deterministic function of the feature; `featureSvg` draws its result. It is the drawing
+ * the report falls back to when the diagram-design skill's drawing fails its checks.
  */
-import type { Architecture, ArchEdge, ArchNode } from "./architecture.js";
+import { STAGE_KINDS, type Feature, type Flow, type Stage, type StageKind } from "./briefing.js";
 import { esc, wrap } from "./escape.js";
 
 export const BOX_W = 176;
@@ -50,7 +51,7 @@ export interface PlacedEdge {
   box: Rect;
 }
 
-export interface ArchLayout {
+export interface FlowLayout {
   nodes: PlacedNode[];
   edges: PlacedEdge[];
   /** Node ids per layer, in order. */
@@ -63,7 +64,7 @@ export interface ArchLayout {
  * Back edges by depth-first search from the nodes in the order given, following edges in the order given: an edge to
  * a node still on the stack closes a cycle and is reversed for layering. Self-loops are ignored.
  */
-function backEdges(ids: readonly string[], edges: readonly ArchEdge[]): Set<number> {
+function backEdges(ids: readonly string[], edges: ReadonlyArray<Pick<Flow, "from" | "to">>): Set<number> {
   const out = new Map<string, Array<{ to: string; index: number }>>(ids.map((id) => [id, []]));
   edges.forEach((e, index) => {
     if (e.from !== e.to && out.has(e.from) && out.has(e.to)) out.get(e.from)!.push({ to: e.to, index });
@@ -84,13 +85,13 @@ function backEdges(ids: readonly string[], edges: readonly ArchEdge[]): Set<numb
 }
 
 /** The layout of a diagram: deterministic, and the boxes of one layer never overlap. */
-export function layoutArchitecture(arch: Architecture): ArchLayout {
-  const ids = arch.nodes.map((n) => n.id);
+export function layoutFlow(arch: { stages: readonly Pick<Stage, "id">[]; flows: readonly Pick<Flow, "from" | "to" | "label">[] }): FlowLayout {
+  const ids = arch.stages.map((n) => n.id);
   const known = new Set(ids);
-  const back = backEdges(ids, arch.edges);
+  const back = backEdges(ids, arch.flows);
   // The DAG: every edge between two different nodes, back edges reversed.
   const dag: Array<{ from: string; to: string }> = [];
-  arch.edges.forEach((e, index) => {
+  arch.flows.forEach((e, index) => {
     if (e.from === e.to || !known.has(e.from) || !known.has(e.to)) return;
     dag.push(back.has(index) ? { from: e.to, to: e.from } : { from: e.from, to: e.to });
   });
@@ -138,7 +139,7 @@ export function layoutArchitecture(arch: Architecture): ArchLayout {
   for (let s = 0; s < SWEEPS; s += 1) sweep(s % 2 === 0 ? down : up);
 
   // Back edges run in lanes above the boxes, so they never cross a box; each lane is 12 units higher than the one before.
-  const backCount = [...back].filter((i) => arch.edges[i]!.from !== arch.edges[i]!.to && known.has(arch.edges[i]!.from) && known.has(arch.edges[i]!.to)).length;
+  const backCount = [...back].filter((i) => arch.flows[i]!.from !== arch.flows[i]!.to && known.has(arch.flows[i]!.from) && known.has(arch.flows[i]!.to)).length;
   const top0 = 20 + 12 * backCount;
   const tallest = layers.reduce((m, l) => Math.max(m, l.length), 0);
   const columnHeight = tallest === 0 ? 0 : tallest * BOX_H + (tallest - 1) * GAP_Y;
@@ -152,7 +153,7 @@ export function layoutArchitecture(arch: Architecture): ArchLayout {
 
   // Parallel edges between one pair of nodes are spread, so they and their labels do not lie on one another.
   const pairs = new Map<string, number[]>();
-  arch.edges.forEach((e, index) => {
+  arch.flows.forEach((e, index) => {
     if (e.from === e.to || !placed.has(e.from) || !placed.has(e.to)) return;
     const key = [e.from, e.to].sort().join(">");
     pairs.set(key, [...(pairs.get(key) ?? []), index]);
@@ -162,7 +163,7 @@ export function layoutArchitecture(arch: Architecture): ArchLayout {
   const taken: Rect[] = [];
   const hits = (r: Rect, others: readonly Rect[]): boolean => others.some((o) => r.x < o.x + o.w && o.x < r.x + r.w && r.y < o.y + o.h && o.y < r.y + r.h);
   let lane = 0;
-  arch.edges.forEach((e, index) => {
+  arch.flows.forEach((e, index) => {
     const a = placed.get(e.from);
     const b = placed.get(e.to);
     if (a === undefined || b === undefined || e.from === e.to) return;
@@ -170,7 +171,7 @@ export function layoutArchitecture(arch: Architecture): ArchLayout {
     const forward = a.layer < b.layer;
     const sibs = pairs.get([e.from, e.to].sort().join(">"))!;
     const spread = (sibs.indexOf(index) - (sibs.length - 1) / 2) * 14;
-    const text = wrap(`${e.label}${e.kind === "call" ? "" : ` (${e.kind})`}`, 22, 2);
+    const text = wrap(e.label, 22, 2);
     const lw = Math.round(Math.max(...text.map((l) => l.length)) * 5.8 + 10);
     const lh = text.length * 12 + 4;
     const rectAt = (cx: number, cy: number): Rect => ({ x: Math.round(cx - lw / 2), y: Math.round(cy - lh / 2), w: lw, h: lh });
@@ -221,55 +222,49 @@ export function layoutArchitecture(arch: Architecture): ArchLayout {
   };
 }
 
-const FILL = { added: "#d7f0dd", modified: "#fdeccd", unchanged: "#eceff1" } as const;
-const STROKE = { added: "#2e8b57", modified: "#d98e04", unchanged: "#90a4ae" } as const;
-const EDGE_STROKE = { added: "#2e8b57", modified: "#d98e04", unchanged: "#78909c", removed: "#c62828" } as const;
+const FILL: Record<StageKind, string> = { source: "#dcebf9", process: "#eceff1", transport: "#fdeccd", store: "#d7f0dd", external: "#efe3f4", sink: "#fbe4e2" };
+const STROKE: Record<StageKind, string> = { source: "#3b78b5", process: "#90a4ae", transport: "#d98e04", store: "#2e8b57", external: "#8a5aa0", sink: "#b3261e" };
+const EDGE_STROKE = "#4a5a6a";
 
-function boxSvg(n: ArchNode, p: PlacedNode): string {
+function boxSvg(n: Stage, p: PlacedNode): string {
   const lines = wrap(n.label, 24, 2);
   const text = lines.map((l, i) => `<text x="${p.x + p.w / 2}" y="${p.y + 20 + i * 14}" text-anchor="middle" font-size="12.5" font-weight="600" fill="#1d2733">${esc(l)}</text>`).join("");
   return [
     `<g>`,
-    `<title>${esc(`${n.label} (${n.kind}, ${n.change}): ${n.paths.join(", ")}`)}</title>`,
-    `<rect x="${p.x}" y="${p.y}" width="${p.w}" height="${p.h}" rx="6" fill="${FILL[n.change]}" stroke="${STROKE[n.change]}" stroke-width="1.5"/>`,
+    `<title>${esc(`${n.label} (${n.kind})`)}</title>`,
+    `<rect x="${p.x}" y="${p.y}" width="${p.w}" height="${p.h}" rx="6" fill="${FILL[n.kind]}" stroke="${STROKE[n.kind]}" stroke-width="1.5"/>`,
     text,
-    `<text x="${p.x + p.w / 2}" y="${p.y + p.h - 7}" text-anchor="middle" font-size="10" fill="#4a5a6a">${esc(`${n.kind} · ${n.change}`)}</text>`,
+    `<text x="${p.x + p.w / 2}" y="${p.y + p.h - 7}" text-anchor="middle" font-size="10" fill="#4a5a6a">${esc(n.kind)}</text>`,
     `</g>`,
   ].join("");
 }
 
-/** The diagram as an inline SVG: coloured boxes, arrows with their labels, and a legend. Empty text when there is nothing to draw. */
-export function architectureSvg(arch: Architecture): string {
-  if (arch.nodes.length === 0) return "";
-  const layout = layoutArchitecture(arch);
-  const nodes = new Map(arch.nodes.map((n) => [n.id, n] as const));
+/** The feature's data flow as an inline SVG: boxes coloured by kind, arrows with their labels, and a legend of the kinds that occur. Empty text when there is nothing to draw. */
+export function featureSvg(f: Pick<Feature, "stages" | "flows"> & { name?: string }, uid = "fl"): string {
+  if (f.stages.length === 0) return "";
+  const layout = layoutFlow(f);
+  const nodes = new Map(f.stages.map((n) => [n.id, n] as const));
   const placed = new Map(layout.nodes.map((p) => [p.id, p] as const));
-  const marker = (change: ArchEdge["change"]): string => `<marker id="arrow-${change}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${EDGE_STROKE[change]}"/></marker>`;
+  const marker = `<marker id="${uid}-arrow-flow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${EDGE_STROKE}"/></marker>`;
   const edges = layout.edges.map((pe) => {
-    const e = arch.edges[pe.index]!;
-    const shown = pe.label;
+    const e = f.flows[pe.index]!;
     return [
       `<g>`,
-      `<title>${esc(`${nodes.get(e.from)!.label} → ${nodes.get(e.to)!.label}: ${e.label} (${e.kind}, ${e.change})`)}</title>`,
-      `<path d="${pe.path}" fill="none" stroke="${EDGE_STROKE[e.change]}" stroke-width="1.6"${e.change === "removed" ? ' stroke-dasharray="6 4"' : ""} marker-end="url(#arrow-${e.change})"/>`,
+      `<title>${esc(`${nodes.get(e.from)!.label} → ${nodes.get(e.to)!.label}: ${e.label}`)}</title>`,
+      `<path d="${pe.path}" fill="none" stroke="${EDGE_STROKE}" stroke-width="1.6" marker-end="url(#${uid}-arrow-flow)"/>`,
       `<rect x="${pe.box.x}" y="${pe.box.y}" width="${pe.box.w}" height="${pe.box.h}" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#d9e0e7" stroke-width="0.8"/>`,
-      ...shown.map((l, i) => `<text x="${pe.lx}" y="${pe.box.y + 12 + i * 12}" text-anchor="middle" font-size="10.5" fill="#33414f">${esc(l)}</text>`),
+      ...pe.label.map((l, i) => `<text x="${pe.lx}" y="${pe.box.y + 12 + i * 12}" text-anchor="middle" font-size="10.5" fill="#33414f">${esc(l)}</text>`),
       `</g>`,
     ].join("");
   });
   const legendY = layout.height - 30;
-  const swatch = (x: number, change: ArchNode["change"], label: string): string => `<rect x="${x}" y="${legendY}" width="16" height="12" rx="3" fill="${FILL[change]}" stroke="${STROKE[change]}"/><text x="${x + 22}" y="${legendY + 10}" font-size="11" fill="#33414f">${esc(label)}</text>`;
-  const legend = [
-    swatch(PAD, "added", "added"),
-    swatch(PAD + 84, "modified", "modified"),
-    swatch(PAD + 190, "unchanged", "unchanged (context)"),
-    `<line x1="${PAD + 340}" y1="${legendY + 6}" x2="${PAD + 372}" y2="${legendY + 6}" stroke="${EDGE_STROKE.removed}" stroke-width="1.6" stroke-dasharray="6 4"/><text x="${PAD + 378}" y="${legendY + 10}" font-size="11" fill="#33414f">removed connection</text>`,
-  ].join("");
+  const kinds = STAGE_KINDS.filter((k) => f.stages.some((s) => s.kind === k));
+  const legend = kinds.map((k, i) => `<rect x="${PAD + i * 96}" y="${legendY}" width="16" height="12" rx="3" fill="${FILL[k]}" stroke="${STROKE[k]}"/><text x="${PAD + i * 96 + 22}" y="${legendY + 10}" font-size="11" fill="#33414f">${esc(k)}</text>`).join("");
   return [
-    `<svg viewBox="0 0 ${layout.width} ${layout.height}" width="${layout.width}" height="${layout.height}" role="img" aria-label="Architecture diagram: ${arch.nodes.length} components, ${arch.edges.length} connections" font-family="system-ui, -apple-system, Segoe UI, Roboto, sans-serif">`,
-    `<defs>${(["added", "modified", "unchanged", "removed"] as const).map(marker).join("")}</defs>`,
+    `<svg viewBox="0 0 ${Math.max(layout.width, PAD * 2 + kinds.length * 96)} ${layout.height}" width="${Math.max(layout.width, PAD * 2 + kinds.length * 96)}" height="${layout.height}" role="img" aria-label="Data flow: ${f.stages.length} stages, ${f.flows.length} flows" font-family="system-ui, -apple-system, Segoe UI, Roboto, sans-serif">`,
+    `<defs>${marker}</defs>`,
     ...edges,
-    ...arch.nodes.map((n) => boxSvg(n, placed.get(n.id)!)),
+    ...f.stages.map((n) => boxSvg(n, placed.get(n.id)!)),
     legend,
     `</svg>`,
   ].join("\n");

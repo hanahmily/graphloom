@@ -6,15 +6,15 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { ARCH_ID, diagramCheckCommand, stateIds, DIAGRAM_CHECK_SCRIPT, diagramFlow, diagramInputOf, diagramSpecs, drawingOf, MAX_DIAGRAMS, MAX_DIAGRAM_BYTES, readAttempt, type DiagramInput } from "../src/diagrams.js";
+import { diagramCheckCommand, featureDiagramId, stateIds, DIAGRAM_CHECK_SCRIPT, diagramFlow, diagramInputOf, diagramSpecs, drawingOf, MAX_DIAGRAMS, MAX_DIAGRAM_BYTES, readAttempt, type DiagramInput } from "../src/diagrams.js";
 import { documentProblems, embeddedSvg, labelProblems, normalizeLabel, parseSvg, svgProblems, textNodes } from "../src/diagramsvg.js";
 import { htmlProblems, parseReportDoc } from "../src/html.js";
 import { largeNeeds } from "../src/large.js";
 import { agentRuns } from "../src/evidence.js";
 import { LARGE_LIMITS, REHEARSAL_HEAD, REHEARSAL_MERGE_BASE, rehearsal } from "../src/rehearsal.js";
-import { architectureDocument, fixtureDiagrams, stateDocument } from "../src/rehearsal-diagrams.js";
-import { recordedHtml, recordedReport } from "../src/parts.js";
-import type { Architecture } from "../src/architecture.js";
+import { featureDocument, fixtureDiagrams, stateDocument } from "../src/rehearsal-diagrams.js";
+import { recordedAppendix, recordedHtml, recordedReport } from "../src/parts.js";
+import type { FinalFeature } from "../src/briefing.js";
 import type { StateEntry } from "../src/report.js";
 import { BANYANDB, root, scenarioWith, simulate, type Simulation } from "./support.js";
 
@@ -24,18 +24,20 @@ const python = spawnSync("python3", ["-I", "-c", "import sys; print(sys.version_
 const cite = { path: "a.go", side: "head" as const, start: 1, end: 2 };
 const scite = { ...cite, symbol: "" };
 
-const ARCH: Architecture = {
-  nodes: [
-    { id: "flags", label: "Server flags", kind: "cli", change: "modified", paths: [], cite },
-    { id: "ttl", label: "Retention parser", kind: "package", change: "added", paths: [], cite },
-    { id: "store", label: "Schema store", kind: "storage", change: "unchanged", paths: [], cite },
-    { id: "cron", label: "Cron scheduler library", kind: "external", change: "added", paths: [], cite },
+const FEATURE: FinalFeature = {
+  id: "F1",
+  name: "Retention sweep",
+  summary: "A flag sets how long a group keeps data, and a sweep removes what expired.",
+  stages: [
+    { id: "flags", label: "Server flags", kind: "source", cite: scite },
+    { id: "ttl", label: "Retention parser", kind: "process", cite: scite },
+    { id: "store", label: "Schema store", kind: "store", cite: scite },
+    { id: "cron", label: "Cron scheduler library", kind: "external", cite: scite },
   ],
-  edges: [
-    { from: "flags", to: "ttl", label: "parses retention", kind: "call", change: "added", cite },
-    { from: "ttl", to: "store", label: "validates against max", kind: "data", change: "modified", cite },
-    { from: "flags", to: "cron", label: "schedules cleanup", kind: "import", change: "added", cite },
-    { from: "flags", to: "store", label: "old direct write", kind: "call", change: "removed", cite },
+  flows: [
+    { from: "flags", to: "ttl", label: "parses retention", cite: scite },
+    { from: "ttl", to: "store", label: "validates against max", cite: scite },
+    { from: "cron", to: "ttl", label: "schedules cleanup", cite: scite },
   ],
 };
 const ENTRY: StateEntry = {
@@ -49,12 +51,12 @@ const ENTRY: StateEntry = {
   ],
   reads: [{ where: "the write callback", decision: "replies with the first error when stored is zero", cite: scite }],
 };
-const INPUT: DiagramInput = { arch: ARCH, states: [{ id: "state:R3:stored count", item: "R3", entry: ENTRY }] };
+const INPUT: DiagramInput = { features: [FEATURE], states: [{ id: "state:R3:stored count", item: "R3", entry: ENTRY }] };
 
 const specsOf = (input: DiagramInput) => diagramSpecs(input).drawn;
-const archSpec = specsOf(INPUT)[0]!;
+const featureSpec = specsOf(INPUT)[0]!;
 const stateSpec = specsOf(INPUT)[1]!;
-const archDoc = architectureDocument(ARCH, archSpec);
+const featureDoc = featureDocument(FEATURE, featureSpec);
 const stateDoc = stateDocument(ENTRY, stateSpec);
 
 const reportOf = (sim: Simulation): { json: string; doc: ReturnType<typeof parseReportDoc> } => {
@@ -67,12 +69,17 @@ const htmlOf = (sim: Simulation): string => {
   if (h.state !== "read") throw new Error("no review.html");
   return h.value;
 };
+const appendixOf = (sim: Simulation): string => {
+  const h = recordedAppendix(sim.evidence, true);
+  if (h.state !== "read") throw new Error("no review-appendix.html");
+  return h.value;
+};
 const diagramJobs = (sim: Simulation) => sim.jobs.filter((j) => j.kind === "agent" && j.resultSchema === "diagrams-v1");
 const checkJobs = (sim: Simulation) => sim.jobs.filter((j) => j.kind === "command" && j.instruction.startsWith("Check the diagram documents"));
 
 describe("the vendored diagram-design skill", () => {
   it("is present with its license and its provenance, and its files are pinned by the manifest", () => {
-    for (const rel of ["SKILL.md", "LICENSE", "VENDORED.md", "scripts/self_check.py", "scripts/verify-geometry.py", "assets/template.html", "references/type-architecture-delta.md", "references/type-state.md", "references/style-guide.md", "references/primitives-core.md", "references/output-spec.md", "references/layout-budget.md"]) {
+    for (const rel of ["SKILL.md", "LICENSE", "VENDORED.md", "scripts/self_check.py", "scripts/verify-geometry.py", "assets/template.html", "references/type-data-flow.md", "references/type-state.md", "references/style-guide.md", "references/primitives-core.md", "references/output-spec.md", "references/layout-budget.md"]) {
       expect(existsSync(path.join(MOUNT, rel)), rel).toBe(true);
     }
     expect(readFileSync(path.join(MOUNT, "LICENSE"), "utf8")).toMatch(/^MIT License[\s\S]*Cathryn Lavery/);
@@ -118,24 +125,24 @@ describe("the label rule", () => {
   });
 
   it("judges every <text> and <tspan> of a drawing and nothing in <title> or <desc>", () => {
-    const parsed = parseSvg(archDoc);
+    const parsed = parseSvg(featureDoc);
     if ("problem" in parsed) throw new Error(parsed.problem);
     const texts = textNodes(parsed.root);
-    expect(texts).toEqual(expect.arrayContaining(["Before", "Changes", "After", "ADDED", "Server flags", "Retention parser"]));
-    expect(texts.join(" ")).not.toContain("Architecture delta");
-    expect(labelProblems(texts, archSpec.phrases)).toEqual([]);
+    expect(texts).toEqual(expect.arrayContaining(["SOURCE", "Server flags", "Retention parser", "parses retention"]));
+    expect(texts.join(" ")).not.toContain("Data flow");
+    expect(labelProblems(texts, featureSpec.phrases)).toEqual([]);
   });
 
   it("refuses a drawing with one added text, naming it", () => {
-    const tampered = archDoc.replace("</svg>", '<text x="8" y="20" font-size="9">this change makes the system faster</text></svg>');
-    const r = drawingOf(tampered, archSpec, "dd1");
+    const tampered = featureDoc.replace("</svg>", '<text x="8" y="20" font-size="9">this change makes the system faster</text></svg>');
+    const r = drawingOf(tampered, featureSpec, "dd1");
     expect("problems" in r && r.problems.join(" ")).toMatch(/this change makes the system faster.*not a label of the data/);
   });
 });
 
 describe("the inertness of a drawing and of its document (design 6.11)", () => {
   it("accepts the skill-shaped documents, and embeds the <svg> the plugin re-serialized", () => {
-    for (const [doc, spec] of [[archDoc, archSpec], [stateDoc, stateSpec]] as const) {
+    for (const [doc, spec] of [[featureDoc, featureSpec], [stateDoc, stateSpec]] as const) {
       expect(documentProblems(doc)).toEqual([]);
       const r = drawingOf(doc, spec, "dd1");
       if (!("svg" in r)) throw new Error(JSON.stringify(r));
@@ -151,7 +158,7 @@ describe("the inertness of a drawing and of its document (design 6.11)", () => {
   });
 
   it("covers the skill's own shipped examples: their <svg> embeds, and the Google Fonts link of their document is refused", () => {
-    for (const name of ["example-architecture-delta.html", "example-state.html"]) {
+    for (const name of ["example-data-flow.html", "example-state.html"]) {
       const html = readFileSync(path.join(MOUNT, "assets", name), "utf8");
       const parsed = parseSvg(html);
       if ("problem" in parsed) throw new Error(parsed.problem);
@@ -162,7 +169,7 @@ describe("the inertness of a drawing and of its document (design 6.11)", () => {
 
   describe("the document's stylesheet (design 6.11)", () => {
     const withStyle = (css: string, firstTextClass = "ink"): string => {
-      const doc = archDoc.replace("</style>", `${css}</style>`);
+      const doc = featureDoc.replace("</style>", `${css}</style>`);
       // The first <text> inside the <svg> takes the class.
       const at = doc.indexOf("<text ", doc.indexOf("<svg"));
       return `${doc.slice(0, at)}<text class="${firstTextClass}" ${doc.slice(at + "<text ".length)}`;
@@ -170,7 +177,7 @@ describe("the inertness of a drawing and of its document (design 6.11)", () => {
     const textTag = (svg: string): string => /<text class="ink"[^>]*>|<text [^>]*fill="#123456"[^>]*>/.exec(svg)?.[0] ?? svg.match(/<text [^>]*>/)![0];
 
     it("resolves a class rule into presentation attributes, and leaves no class behind", () => {
-      const r = drawingOf(withStyle(".ink { fill: #123456; font-weight: 700 }"), archSpec, "dd1");
+      const r = drawingOf(withStyle(".ink { fill: #123456; font-weight: 700 }"), featureSpec, "dd1");
       if (!("svg" in r)) throw new Error(JSON.stringify(r));
       const tag = textTag(r.svg);
       expect(tag).toContain('fill="#123456"');
@@ -182,19 +189,19 @@ describe("the inertness of a drawing and of its document (design 6.11)", () => {
     it("refuses a var() in an SVG attribute, which would lose its definition with the stylesheet", () => {
       const doc = withStyle(":root { --paper: #f5f5f5 }").replace(/<rect ([^>]*?)fill="[^"]*"/, '<rect $1fill="var(--paper)"');
       expect(doc).toContain('fill="var(--paper)"');
-      const r = drawingOf(doc, archSpec, "dd1");
+      const r = drawingOf(doc, featureSpec, "dd1");
       expect("problems" in r ? r.problems.join(" ") : "embedded").toMatch(/var\(\), which the embedded drawing cannot resolve/);
     });
 
     it("resolves several classes on one element in stylesheet order, not class-attribute order", () => {
-      const r = drawingOf(withStyle(".node { fill: #ffffff } .added { fill: #ee8800 }", "added node"), archSpec, "dd1");
+      const r = drawingOf(withStyle(".node { fill: #ffffff } .added { fill: #ee8800 }", "added node"), featureSpec, "dd1");
       if (!("svg" in r)) throw new Error(JSON.stringify(r));
       expect(r.svg).toMatch(/<text [^>]*fill="#ee8800"/);
       expect(r.svg).not.toMatch(/<text [^>]*fill="#ffffff"/);
     });
 
     it("resolves var(--x) from :root, with a fallback, and a rule that lists several classes", () => {
-      const r = drawingOf(withStyle(":root { --accent: #abcdef } .a, .ink { stroke: var(--accent); fill: var(--none, #010203) }"), archSpec, "dd1");
+      const r = drawingOf(withStyle(":root { --accent: #abcdef } .a, .ink { stroke: var(--accent); fill: var(--none, #010203) }"), featureSpec, "dd1");
       if (!("svg" in r)) throw new Error(JSON.stringify(r));
       expect(textTag(r.svg)).toContain('stroke="#abcdef"');
       expect(textTag(r.svg)).toContain('fill="#010203"');
@@ -207,13 +214,13 @@ describe("the inertness of a drawing and of its document (design 6.11)", () => {
       ["a rule on the drawing's elements by tag", "svg text { fill: red }", /svg text/],
       ["a descendant or attribute selector", ".frame .ink, rect[x] { fill: red }", /rect\[x\]|\.frame \.ink/],
     ])("refuses %s, so the correction or the fallback handles it", (_name, css, expected) => {
-      const r = drawingOf(withStyle(css), archSpec, "dd1");
+      const r = drawingOf(withStyle(css), featureSpec, "dd1");
       expect("problems" in r, JSON.stringify(r)).toBe(true);
       expect("problems" in r && r.problems.join(" | ")).toMatch(expected);
     });
 
     it("ignores the page's own rules (body, svg sizing, media queries) and a class no rule names", () => {
-      const r = drawingOf(withStyle("body { margin: 0 } svg { display: block } @media print { svg { min-width: 0 } } .frame { max-width: 9px }", "unstyled"), archSpec, "dd1");
+      const r = drawingOf(withStyle("body { margin: 0 } svg { display: block } @media print { svg { min-width: 0 } } .frame { max-width: 9px }", "unstyled"), featureSpec, "dd1");
       expect("svg" in r, JSON.stringify(r)).toBe(true);
       expect("svg" in r && r.svg).not.toContain("unstyled");
     });
@@ -226,13 +233,13 @@ describe("the inertness of a drawing and of its document (design 6.11)", () => {
       const started = Date.now();
       const doc = wrap(`${"<g>".repeat(15_000)}${"</g>".repeat(15_000)}`);
       expect(Buffer.byteLength(doc)).toBeLessThan(MAX_DIAGRAM_BYTES);
-      const r = drawingOf(doc, archSpec, "dd1");
+      const r = drawingOf(doc, featureSpec, "dd1");
       expect("problems" in r && r.problems.join(" | ")).toMatch(/nested more than 64/);
       expect(Date.now() - started).toBeLessThan(3_000);
     });
 
     it("refuses more elements than the report embeds, during the parse", () => {
-      const r = drawingOf(wrap("<g/>".repeat(7_000)), archSpec, "dd1");
+      const r = drawingOf(wrap("<g/>".repeat(7_000)), featureSpec, "dd1");
       expect("problems" in r && r.problems.join(" | ")).toMatch(/more than the 6000 elements/);
     });
 
@@ -243,20 +250,20 @@ describe("the inertness of a drawing and of its document (design 6.11)", () => {
   });
 
   it("scales the embedded <svg> to its container instead of forcing a minimum width, and asks the job for a viewBox that fits a report page", () => {
-    const r = drawingOf(archDoc, archSpec, "dd1");
+    const r = drawingOf(featureDoc, featureSpec, "dd1");
     expect("svg" in r && r.svg).toContain('style="width:100%;height:auto"');
-    const sim = simulate({ scenarioName: "architecture-diagram" });
+    const sim = simulate({ scenarioName: "feature-data-flow" });
     const text = (diagramJobs(sim)[0]!.input as { assignment: string }).assignment;
     expect(text).toMatch(/viewBox at most 1200 wide/);
     expect(text).toMatch(/doc-inline/);
   });
 
   it("writes its own title and description, never the model's", () => {
-    const tampered = archDoc.replace(/(<desc[^>]*>)[^<]*/, "$1The system is now ten times faster");
-    const r = drawingOf(tampered, archSpec, "dd1");
+    const tampered = featureDoc.replace(/(<desc[^>]*>)[^<]*/, "$1The system is now ten times faster");
+    const r = drawingOf(tampered, featureSpec, "dd1");
     if (!("svg" in r)) throw new Error(JSON.stringify(r));
     expect(r.svg).not.toContain("ten times faster");
-    expect(r.svg).toContain(archSpec.description);
+    expect(r.svg).toContain(featureSpec.description);
   });
 
   it.each([
@@ -272,9 +279,9 @@ describe("the inertness of a drawing and of its document (design 6.11)", () => {
     ["a style attribute", (d: string) => d.replace("<rect ", '<rect style="background:url(https://x.test/a.png)" '), /style|url\(/],
     ["a dangling reference", (d: string) => d.replace('marker-end="url(#arrow)"', 'marker-end="url(#nowhere)"'), /nowhere/],
   ])("refuses %s", (_name, tamper, expected) => {
-    const doc = tamper(archDoc);
-    if (doc === archDoc) return;
-    const r = drawingOf(doc, archSpec, "dd1");
+    const doc = tamper(featureDoc);
+    if (doc === featureDoc) return;
+    const r = drawingOf(doc, featureSpec, "dd1");
     expect("problems" in r, JSON.stringify(r)).toBe(true);
     expect("problems" in r && r.problems.join(" | ")).toMatch(expected);
   });
@@ -295,12 +302,12 @@ describe("the inertness of a drawing and of its document (design 6.11)", () => {
   });
 
   it("bounds a document's size", () => {
-    const r = drawingOf(`${archDoc}<!-- ${"x".repeat(MAX_DIAGRAM_BYTES)} -->`, archSpec, "dd1");
+    const r = drawingOf(`${featureDoc}<!-- ${"x".repeat(MAX_DIAGRAM_BYTES)} -->`, featureSpec, "dd1");
     expect("problems" in r && r.problems[0]).toMatch(/more than the 160000 allowed/);
   });
 
   it("makes the written review.html fail its own inertness check if a raw drawing slipped in", () => {
-    const html = `<!doctype html>\n<html lang="en"><head><meta charset="utf-8"></head><body><main>${archDoc.slice(archDoc.indexOf("<svg"), archDoc.lastIndexOf("</svg>") + 6).replace("</svg>", "<script>x()</script></svg>")}</main></body></html>`;
+    const html = `<!doctype html>\n<html lang="en"><head><meta charset="utf-8"></head><body><main>${featureDoc.slice(featureDoc.indexOf("<svg"), featureDoc.lastIndexOf("</svg>") + 6).replace("</svg>", "<script>x()</script></svg>")}</main></body></html>`;
     expect(htmlProblems(html, GITHUB).join(" ")).toMatch(/<script|script/);
   });
 });
@@ -314,8 +321,8 @@ describe.skipIf(!python)("the skill's own checks on the fixture documents (pytho
     return file;
   };
 
-  it("passes self_check.py --offline and verify-geometry.py on the architecture delta and the state machine", () => {
-    for (const [name, html] of [["arch.html", archDoc], ["state.html", stateDoc]] as const) {
+  it("passes self_check.py --offline and verify-geometry.py on the data flow and the state machine", () => {
+    for (const [name, html] of [["flow.html", featureDoc], ["state.html", stateDoc]] as const) {
       const file = write(name, html);
       const a = run("self_check.py", file, "--offline");
       expect(`${a.stdout}${a.stderr}`, name).toMatch(/^OK /);
@@ -328,7 +335,7 @@ describe.skipIf(!python)("the skill's own checks on the fixture documents (pytho
 
   it("passes on every document the rehearsal's stand-in model returns, in every scenario, and they pass the label rule", () => {
     const seen = new Set<string>();
-    for (const name of ["report", "complex-function", "state-lifecycle", "architecture-diagram", "diagram-corrected", "diagram-skill-check-fails"]) {
+    for (const name of ["report", "complex-function", "state-lifecycle", "feature-data-flow", "diagram-corrected", "diagram-skill-check-fails"]) {
       const scenario = rehearsal(BANYANDB).scenarios[name]!;
       const sim = simulate({ scenarioName: name });
       // The last reply of a scenario that ends in a drawing that stands; the fallback scenario's drawings are bad on purpose.
@@ -350,7 +357,7 @@ describe.skipIf(!python)("the skill's own checks on the fixture documents (pytho
   it("passes on the documents of a large report too", () => {
     const sim = simulate({ scenario: scenarioWith("large-pull-request", () => undefined, { limits: LARGE_LIMITS }), config: { limits: LARGE_LIMITS }, maxSteps: 250 });
     const docs = (agentRuns(sim.evidence, "diagrams-v1").at(-1)!.output as { diagrams: Array<{ id: string; html: string }> }).diagrams;
-    expect(docs.map((d) => d.id)).toEqual([ARCH_ID]);
+    expect(docs.map((d) => d.id)).toEqual(["feature:F1"]);
     for (const d of docs) {
       const file = write("large.html", d.html);
       expect(run("self_check.py", file, "--offline").stdout).toMatch(/^OK /);
@@ -359,7 +366,7 @@ describe.skipIf(!python)("the skill's own checks on the fixture documents (pytho
   });
 
   it("fails self_check.py --offline on a document with a Google Fonts link, so the check is the real one", () => {
-    const file = write("font.html", archDoc.replace("</head>", '<link href="https://fonts.googleapis.com/css2?family=Geist" rel="stylesheet"></head>'));
+    const file = write("font.html", featureDoc.replace("</head>", '<link href="https://fonts.googleapis.com/css2?family=Geist" rel="stylesheet"></head>'));
     expect(run("self_check.py", file, "--offline").status).not.toBe(0);
   });
 
@@ -368,8 +375,8 @@ describe.skipIf(!python)("the skill's own checks on the fixture documents (pytho
       const command = diagramCheckCommand(1, 0, html, MOUNT)!;
       return spawnSync(command.argv[0]!, command.argv.slice(1), { encoding: "utf8", cwd: scratch, env: { ...process.env, TMPDIR: scratch } });
     };
-    expect(exec(archDoc).status).toBe(0);
-    const bad = exec(archDoc.replace("</head>", '<link href="https://fonts.googleapis.com/css2?family=Geist" rel="stylesheet"></head>'));
+    expect(exec(featureDoc).status).toBe(0);
+    const bad = exec(featureDoc.replace("</head>", '<link href="https://fonts.googleapis.com/css2?family=Geist" rel="stylesheet"></head>'));
     expect(bad.status).toBe(1);
     expect(`${bad.stdout}${bad.stderr}`).toMatch(/Google Fonts|offline|font/i);
     expect(DIAGRAM_CHECK_SCRIPT).toContain("python3 -I");
@@ -390,7 +397,7 @@ describe("the diagram job in the graph", () => {
       expect(jobs[1]!.continueFrom).toBeDefined();
       const second = (jobs[1]!.input as { assignment: string }).assignment;
       expect(second).toMatch(/Your previous result failed the checks below/);
-      expect(second).toMatch(/arch: .*this change makes the system faster.*not a label of the data/);
+      expect(second).toMatch(/feature:F1: .*this change makes the system faster.*not a label of the data/);
       // The checks run only on a drawing that passed the plugin's own: the first attempt has none, the correction has one.
       const ids = checkJobs(sim).flatMap((j) => (j.input as { commands: Array<{ id: string }> }).commands.map((c) => c.id));
       expect(ids).toEqual(["diagram-check-2-0"]);
@@ -398,13 +405,12 @@ describe("the diagram job in the graph", () => {
 
     it("records the skill's drawing in report.json and embeds it in review.html in a scrolling wrapper, with no fallback note", () => {
       const { doc } = reportOf(sim);
-      expect(doc!.diagrams!.arch).toMatchObject({ via: "diagram-design" });
+      expect(doc!.diagrams!.features.F1).toMatchObject({ via: "diagram-design" });
       const html = htmlOf(sim);
-      const arch = html.slice(html.indexOf("<h2>Architecture</h2>"), html.indexOf("<h2>Change map</h2>"));
-      expect(arch).toMatch(/<div class="scroll"><svg class="dd" role="img" aria-labelledby="dd1-title dd1-desc"/);
-      expect(arch).not.toContain("drawn by the plugin");
-      expect(arch).toContain("Before");
-      expect(arch).toContain("Changes");
+      const flow = html.slice(html.indexOf("<h2>Data flow per new feature</h2>"), html.indexOf("<h2>What you need to check</h2>"));
+      expect(flow).toMatch(/<div class="scroll"><svg class="dd" role="img" aria-labelledby="dd1-title dd1-desc"/);
+      expect(flow).not.toContain("drawn by the plugin");
+      expect(flow).toContain("Nightly retention sweep");
       expect(htmlProblems(html, GITHUB)).toEqual([]);
     });
   });
@@ -416,15 +422,15 @@ describe("the diagram job in the graph", () => {
       expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "report ready" } });
       expect(diagramJobs(sim)).toHaveLength(2);
       const { doc } = reportOf(sim);
-      const arch = doc!.diagrams!.arch!;
-      expect(arch).toMatchObject({ via: "plugin" });
-      expect((arch as { note: string }).note).toMatch(/^drawn by the plugin: the diagram-design drawing failed its checks \(.*<script/);
+      const drawn = doc!.diagrams!.features.F1!;
+      expect(drawn).toMatchObject({ via: "plugin" });
+      expect((drawn as { note: string }).note).toMatch(/^drawn by the plugin: the diagram-design drawing failed its checks \(.*<script/);
       const html = htmlOf(sim);
-      const section = html.slice(html.indexOf("<h2>Architecture</h2>"), html.indexOf("<h2>Change map</h2>"));
+      const section = html.slice(html.indexOf("<h2>Data flow per new feature</h2>"), html.indexOf("<h2>What you need to check</h2>"));
       expect(section).toMatch(/<p>drawn by the plugin: the diagram-design drawing failed its checks \(/);
       expect(section).toContain("<svg");
       expect(section).not.toContain('class="dd"');
-      expect(section).toContain("Server command");
+      expect(section).toContain("Nightly sweep");
     });
   });
 
@@ -439,9 +445,11 @@ describe("the diagram job in the graph", () => {
       const { doc } = reportOf(sim);
       expect(Object.values(doc!.diagrams!.states)).toHaveLength(2);
       expect(Object.values(doc!.diagrams!.states).every((d) => d.via === "diagram-design")).toBe(true);
-      const html = htmlOf(sim);
+      // The lifecycle diagrams are the appendix's; the briefing has no feature to draw.
+      const html = appendixOf(sim);
       expect((html.match(/<svg class="dd"/g) ?? []).length).toBe(2);
       expect(html).not.toContain("drawn by the plugin");
+      expect(htmlOf(sim)).not.toMatch(/<svg/);
     });
 
     it("confines the check job: a read-only job with no network, the plugin's directory read-only, and the skill's own scripts on a scratch file", () => {
@@ -469,7 +477,7 @@ describe("the diagram job in the graph", () => {
     it("tells the agent where the skill is, which references to read and the fixed choices", () => {
       const mount = "/plugin/vendor/diagram-design";
       expect(assignment).toContain(`${mount}/SKILL.md`);
-      for (const r of ["type-architecture-delta.md", "type-state.md", "style-guide.md", "primitives-core.md", "output-spec.md", "layout-budget.md"]) expect(assignment).toContain(`${mount}/references/${r}`);
+      for (const r of ["type-data-flow.md", "type-state.md", "style-guide.md", "primitives-core.md", "output-spec.md", "layout-budget.md"]) expect(assignment).toContain(`${mount}/references/${r}`);
       expect(assignment).toContain(`${mount}/assets/template.html`);
       expect(assignment).toMatch(/"keep default"/);
       expect(assignment).toMatch(/Font source: system/);
@@ -497,12 +505,12 @@ describe("the diagram job in the graph", () => {
   });
 
   it("gives the diagram job the diagrammer role: the reporter's harness, model and effort when the profile names none, its own when it does", () => {
-    const base = simulate({ scenarioName: "architecture-diagram" });
+    const base = simulate({ scenarioName: "feature-data-flow" });
     expect((diagramJobs(base)[0]!.input as { harness: string; harnessOptions?: unknown })).toMatchObject({ harness: "claude-code", harnessOptions: { model: "opus", effort: "high" } });
-    const own = simulate({ scenarioName: "architecture-diagram", config: { harnesses: { ...(BANYANDB.harnesses as object), diagrammer: { harness: "claude-code", model: "sonnet", effort: "medium" } } } });
+    const own = simulate({ scenarioName: "feature-data-flow", config: { harnesses: { ...(BANYANDB.harnesses as object), diagrammer: { harness: "claude-code", model: "sonnet", effort: "medium" } } } });
     expect(diagramJobs(own)[0]!.input).toMatchObject({ harness: "claude-code", harnessOptions: { model: "sonnet", effort: "medium" } });
     // The reporter's settings, whatever the profile once said of other reporters.
-    const other = simulate({ scenarioName: "architecture-diagram", config: { harnesses: { ...(BANYANDB.harnesses as object), reporter: { harness: "claude-code", model: "haiku", effort: "low" } } } });
+    const other = simulate({ scenarioName: "feature-data-flow", config: { harnesses: { ...(BANYANDB.harnesses as object), reporter: { harness: "claude-code", model: "haiku", effort: "low" } } } });
     expect(diagramJobs(other)[0]!.input).toMatchObject({ harnessOptions: { model: "haiku", effort: "low" } });
   });
 
@@ -515,7 +523,7 @@ describe("the diagram job in the graph", () => {
     expect(order.at(-1)).toBe("diagrams-v1");
     const html = htmlOf(sim);
     expect(html).toMatch(/<svg class="dd"/);
-    expect(html).toContain("Before");
+    expect(html).toContain("pkg/alpha rules");
     expect(htmlProblems(html, GITHUB)).toEqual([]);
   });
 
@@ -525,7 +533,7 @@ describe("the diagram job in the graph", () => {
     expect(largeNeeds(1)).toMatchObject({ agentInvocations: 9, jobs: 41 });
   });
 
-  it("draws nothing when the report has no architecture and no lifecycle entry, and says nothing of it", () => {
+  it("draws nothing when the report has no feature and no lifecycle entry, and says nothing of it", () => {
     const sim = simulate({ scenarioName: "report" });
     expect(diagramJobs(sim)).toHaveLength(0);
     expect(checkJobs(sim)).toHaveLength(0);
@@ -537,29 +545,30 @@ describe("the stop message", () => {
   it("names review.html first, and review.md as its plain-text copy for agents and session open", () => {
     const sim = simulate({ scenarioName: "report" });
     const stop = sim.final.action.type === "stop" ? sim.final.action.stop : undefined;
-    expect(stop!.blocker).toMatch(/^the report is \.graphloom\/review\/review\.html; review\.md beside it is its plain-text copy for agents and graphloom session open/);
+    expect(stop!.blocker).toMatch(/^the report is the briefing \.graphloom\/review\/review\.html, with the appendix \.graphloom\/review\/review-appendix\.html; review\.md beside them is the plain-text copy of both for agents and graphloom session open/);
     expect(stop!.blocker!.indexOf("review.html")).toBeLessThan(stop!.blocker!.indexOf("review.md"));
   });
 });
 
 describe("the flow, from the evidence alone", () => {
   it("resolves at once when there is nothing to draw, and notes the diagrams past the limit as the plugin's", () => {
-    expect(diagramFlow([], { arch: undefined, states: [] }, "/plugin")).toMatchObject({ state: "resolved", doc: { states: {} } });
-    const many: DiagramInput = { arch: ARCH, states: Array.from({ length: 14 }, (_, i) => ({ id: `state:R${i}:s`, item: `R${i}`, entry: { ...ENTRY, name: "s" } })) };
+    expect(diagramFlow([], { features: [], states: [] }, "/plugin")).toMatchObject({ state: "resolved", doc: { states: {} } });
+    const many: DiagramInput = { features: [FEATURE], states: Array.from({ length: 14 }, (_, i) => ({ id: `state:R${i}:s`, item: `R${i}`, entry: { ...ENTRY, name: "s" } })) };
     const { drawn, overflow } = diagramSpecs(many);
     expect(drawn).toHaveLength(MAX_DIAGRAMS);
-    expect(drawn[0]!.id).toBe(ARCH_ID);
+    expect(drawn[0]!.id).toBe(featureDiagramId("F1"));
     expect(overflow).toHaveLength(3);
     expect(diagramFlow([], many, "/plugin")).toMatchObject({ state: "agent", kind: "first" });
   });
 
-  it("derives the diagrams of a report from what the claim check left: the architecture, and a state:<item>:<name> id for each entry", () => {
+  it("derives the diagrams of a report from what the claim check left: the features, and a state:<item>:<name> id for each entry", () => {
     const input = diagramInputOf({
-      architecture: ARCH,
+      briefing: { whatsNew: [], features: [FEATURE], check: { surfaces: [], behavior: [], compatibility: [], risks: [], tests: [] }, areas: [] },
       sections: [{ id: "features", title: "Features", none: false, items: [{ id: "R1", text: "t", cites: [], facts: [], state: [ENTRY, ENTRY], behavior: [] }] }],
     });
     expect(input.states.map((s) => s.id)).toEqual(["state:R1:stored count", "state:R1:stored count:2"]);
-    expect(diagramInputOf({ architecture: { nodes: [], edges: [] }, sections: [] }).arch).toBeUndefined();
+    expect(diagramInputOf({ briefing: { whatsNew: [], features: [], check: { surfaces: [], behavior: [], compatibility: [], risks: [], tests: [] }, areas: [] }, sections: [] }).features).toEqual([]);
+    expect(input.features.map((f) => f.id)).toEqual(["F1"]);
   });
 
   it("refuses a result that returns an id it was not asked for, or an id twice, or none", () => {
@@ -570,7 +579,7 @@ describe("the flow, from the evidence alone", () => {
     const extra = readAttempt(run([...good, { id: "state:R9:x", html: "<svg/>" }]), specs);
     expect([...extra.values()].every((d) => "problems" in d)).toBe(true);
     const twice = readAttempt(run([...good, good[0]!]), specs);
-    expect(twice.get(ARCH_ID)).toMatchObject({ problems: [expect.stringMatching(/2 diagrams were returned/)] });
+    expect(twice.get(featureDiagramId("F1"))).toMatchObject({ problems: [expect.stringMatching(/2 diagrams were returned/)] });
     const none = readAttempt(run([good[0]!]), specs);
     expect(none.get(stateSpec.id)).toMatchObject({ problems: [expect.stringMatching(/no diagram was returned/)] });
     expect([...readAttempt({ ...run(good), status: "failed" }, specs).values()].every((d) => "problems" in d)).toBe(true);
@@ -581,10 +590,10 @@ describe("report.json and review.html agree", () => {
   it("embeds exactly the svg report.json holds, at the Report stage and at the Answers stage", () => {
     const sim = simulate({ scenarioName: "diagram-corrected" });
     const { doc } = reportOf(sim);
-    const arch = doc!.diagrams!.arch as { svg: string };
-    expect(htmlOf(sim)).toContain(arch.svg);
+    const flow = doc!.diagrams!.features.F1 as { svg: string };
+    expect(htmlOf(sim)).toContain(flow.svg);
     const early = recordedHtml(sim.evidence, false);
-    expect(early.state === "read" && early.value.includes(arch.svg)).toBe(true);
+    expect(early.state === "read" && early.value.includes(flow.svg)).toBe(true);
   });
 });
 

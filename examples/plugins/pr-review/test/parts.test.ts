@@ -10,7 +10,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { GIT_ENV } from "../src/commands.js";
 import { LEDGER_MOVED, ledgerRef, PART_BASE, REPORT_JSON, REVIEW_MD } from "../src/constants.js";
 import { ledgerWriteCommand, ledgerWriteCommands, writtenLedger } from "../src/ledger.js";
-import { htmlWriteCommands, MAX_PART_CHUNKS, partCommands, readParts, recordedHtml, recordedReport, reportWriteCommands, sha256, splitParts } from "../src/parts.js";
+import { htmlWriteCommands, MAX_PART_CHUNKS, partCommands, readParts, recordedAppendix, recordedHtml, recordedReport, reportWriteCommands, sha256, splitParts } from "../src/parts.js";
 import { htmlProblems } from "../src/html.js";
 import { validatorById } from "../src/validators.js";
 import { BANYANDB, candidateEvidence, simulate } from "./support.js";
@@ -274,11 +274,12 @@ describe("a large pull request whose artifacts pass one write command", () => {
   const sim = simulate({ scenarioName: "large-artifacts", maxSteps: 400, budgets: { agentInvocations: 400, jobs: 400, decisions: 400 } });
   const ids = (prefix: string): string[] => sim.jobs.flatMap((j) => (j.input as { commands?: Array<{ id: string }> }).commands?.map((c) => c.id) ?? []).filter((id) => id.startsWith(prefix));
 
-  it("completes: report.json and review.html are written in parts, no write fails for size, and every requirement is met", () => {
+  it("completes: report.json and the appendix are written in parts, no write fails for size, and every requirement is met", () => {
     expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "report ready" } });
     expect(sim.receipts.every((r) => r.valid)).toBe(true);
     expect(ids("report-json-p").length).toBeGreaterThanOrEqual(2);
-    expect(ids("review-html-p").length).toBeGreaterThanOrEqual(2);
+    expect(ids("review-appendix-html-p").length).toBeGreaterThanOrEqual(2);
+    expect(ids("review-html-p").length).toBeGreaterThanOrEqual(1);
     expect(ids("report-write")).toEqual([]);
     expect(sim.jobs.some((j) => j.instruction.startsWith("Write part 2 of"))).toBe(true);
   });
@@ -303,8 +304,9 @@ describe("a large pull request whose artifacts pass one write command", () => {
     const swapped = [...reported];
     [swapped[first], swapped[second]] = [swapped[second]!, swapped[first]!];
     expect(verdictOf("change-report", swapped)).toMatchObject({ status: "failed", reason: expect.stringMatching(/out of order/) });
-    // review.html is part of the requirement: an altered part of it fails too, and so does markup that is not inert.
+    // review.html and review-appendix.html are part of the requirement: an altered part of either fails too, and so does markup that is not inert.
     expect(verdictOf("change-report", withCommand("review-html-p1", (a) => a.map((x, k) => (k === 10 ? `${x}!` : x))))).toMatchObject({ status: "failed", reason: expect.stringMatching(/review\.html was not written whole/) });
+    expect(verdictOf("change-report", withCommand("review-appendix-html-p2", (a) => a.map((x, k) => (k === 10 ? `${x}!` : x))))).toMatchObject({ status: "failed", reason: expect.stringMatching(/review-appendix\.html was not written whole/) });
   });
 
   it("rejects a review.html whose written bytes carry a script, even when they are what a part set declares", () => {
@@ -322,11 +324,15 @@ describe("a large pull request whose artifacts pass one write command", () => {
     const json = (report as { value: { json: string } }).value.json;
     expect(json.length).toBeGreaterThan(236_000);
     expect(JSON.parse(json)).toMatchObject({ schema: "pr-change-report-v1", mode: "large" });
+    // The briefing stays small however large the pull request is; the appendix holds the items and is the part that grows.
     const html = recordedHtml(sim.evidence, false);
     expect(html.state).toBe("read");
-    expect((html as { value: string }).value.length).toBeGreaterThan(236_000);
+    expect((html as { value: string }).value.length).toBeLessThan(236_000);
+    const appendix = recordedAppendix(sim.evidence, false);
+    expect(appendix.state).toBe("read");
+    expect((appendix as { value: string }).value.length).toBeGreaterThan(236_000);
     const md = (report as { value: { markdown: string } }).value.markdown;
-    expect(md).toContain("# Report");
+    expect(md).toContain("\n## Report\n");
     void REVIEW_MD;
   });
 });

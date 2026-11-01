@@ -7,7 +7,7 @@
  * read-only to confirm a claim, as the standard reporter does.
  */
 import { MAX_EXECUTOR_INPUT_BYTES } from "@graphloom/sdk";
-import { ARCHITECTURE_PROMPT } from "./architecture.js";
+import { BRIEFING_AREAS_PROMPT, BRIEFING_PROMPT } from "./briefing.js";
 import type { Partition } from "./areas.js";
 import type { Fact } from "./detectors.js";
 import { buildDigest, INTERFACE_PATCH_BYTES, type Digest } from "./digest.js";
@@ -103,10 +103,14 @@ export function largeReporterInstruction(a: LargeReporterAssignment): string {
       "",
       "Describe what the code does, in the present tense, factually. Do not evaluate it: no findings, no severities, no verdict, no recommendation. The result has no field for them.",
       "",
-      "Describe the pull request at a high level, in three parts.",
+      "Describe the pull request at a high level. The first fields of your result are a briefing, and the maintainer reads it first.",
+      BRIEFING_PROMPT,
+      BRIEFING_AREAS_PROMPT,
+      "In this report the cites of the briefing (what is new, the stages and flows of the features, the check entries) may name any file of the head or of the base, also one the pull request does not change (a hop of the data's path that the change only feeds into), and lines you read in the tree: each claim's quote is verified against the file its cite names, in the tree it names. Give such a cite by repository-relative path, side and lines.",
+      "",
+      "After the briefing, the rest of the report is in two parts, the appendix the maintainer opens afterwards.",
       `1. The summary. "purpose" is why the pull request exists: set source to "stated" and quote an excerpt (at least 12 characters, copied exactly) of the title, the body or a commit message, when the pull request's own text says it; otherwise set source to "inferred" with an empty quote and say what the change implies (at most ${MAX_PURPOSE_CHARS} characters). "overview" is two to four sentences on how the whole change is organised (at most ${MAX_OVERVIEW_CHARS} characters).`,
       `2. One item per conceptual change, usually one per area or per subsystem: what it adds or alters and the mechanism, in the template section it belongs to. Its cites are the files and lines it rests on, and an item may cite several files. Aim for few, coarse items. State and behavior are not required in this report: give empty arrays for "state" and "behavior" unless an interface patch above shows a change that a reader would expect a row for.`,
-      "3. " + ARCHITECTURE_PROMPT,
       "",
       "The template. Every section below must appear exactly once in the sections of your result, with its id, either with items or with none set to true. Each item is one conceptual change.",
       ...a.sections.map((s) => sectionText(s, [])),
@@ -127,7 +131,7 @@ export function largeReporterInstruction(a: LargeReporterAssignment): string {
             "",
             a.kind === "correction"
               ? "Your previous result failed deterministic validation. Return the whole corrected report; every problem below must be fixed:"
-              : "The claim check could not support the claims below (ids: purpose, overview, R3 an item, R3.s1 a state entry, R3.b1 a behavior row, A.store an architecture node, A.e2 an architecture edge). Return the whole revised report: fix each (cite and describe only what the code shows), or drop it. A claim that stays unsupported is removed from the report.",
+              : "The claim check could not support the claims below (ids: purpose, overview, R3 an item, R3.s1 a state entry, R3.b1 a behavior row, W2 a what's-new bullet, F1 a feature, F1.s2 a stage, F1.f3 a flow, C.risks.1 a check entry). Return the whole revised report: fix each (cite and describe only what the code shows), or drop it. A claim that stays unsupported is removed from the report.",
             ...a.feedback.map((f) => `- ${f}`),
           ]),
     ].join("\n");

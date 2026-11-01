@@ -16,6 +16,8 @@ export default defineConfig({
     poolOptions: { forks: { execArgv: ["--max-old-space-size=2048"] } },
     // Bundles are copied alone for repair qualification; only use the repo-root setup when present.
     globalSetup: existsSync(sharedSetup) ? [sharedSetup] : [],
+    // The large-artifacts scenario replays a thousand files through the graph, step by step; a run takes about five seconds on a quiet machine.
+    testTimeout: 30_000,
     include: ["test/**/*.test.ts"],
   },
 });

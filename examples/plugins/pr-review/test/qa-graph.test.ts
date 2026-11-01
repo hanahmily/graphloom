@@ -91,6 +91,7 @@ describe("answer-finds-existing-helper", () => {
       "answers/command/Check the answers'",
       "answers/command/Write .graphloom/review/qa.json and",
       "answers/command/Write .graphloom/review/review.html",
+      "answers/command/Write .graphloom/review/review-appendix.html",
       "answers/command/Advance the pull",
     ]);
   });
@@ -267,7 +268,7 @@ describe("answer-checker-contradicts", () => {
 
   it("verifies the corrected answer's citation before the second check", () => {
     const order = qaJobs(sim).filter((j) => j.stageId === "answers").map((j) => (j.kind === "agent" ? `${j.resultSchema}` : j.instruction.split(" ")[0]!));
-    expect(order).toEqual(["answers-v1", "Check", "answer-check-v1", "answers-revision-v1", "Check", "answer-check-v1", "Check", "Write", "Write", "Advance"]);
+    expect(order).toEqual(["answers-v1", "Check", "answer-check-v1", "answers-revision-v1", "Check", "answer-check-v1", "Check", "Write", "Write", "Write", "Advance"]);
     expect(commandIds(qaJobs(sim).filter((j) => j.instruction.startsWith("Check the answers'"))).filter((id) => /^cite-\d+$/.test(id))).toEqual(["cite-1"]);
   });
 

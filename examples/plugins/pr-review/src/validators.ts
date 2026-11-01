@@ -18,9 +18,9 @@ import { admissibleDecision, effectiveConclusion, necessityJson, NECESSITY_ID, t
 import { describeReasons, isLarge } from "./mode.js";
 import { requiredQuestions, statedPurposes } from "./questions.js";
 import { principlesRecord } from "./principles.js";
-import { htmlProblems, reviewHtmlFrom } from "./html.js";
+import { htmlPagesFrom, htmlProblems } from "./html.js";
 import { writtenLedger } from "./ledger.js";
-import { readParts, recordedHtml, recordedNecessityJson, recordedQa, recordedReport, sha256 } from "./parts.js";
+import { readParts, recordedAppendix, recordedHtml, recordedNecessityJson, recordedQa, recordedReport, sha256 } from "./parts.js";
 
 const passed = (reason: string): ValidationResult => ({ status: "passed", reason });
 const failed = (reason: string): ValidationResult => ({ status: "failed", reason });
@@ -115,8 +115,10 @@ export function measurementsOf(evidence: readonly EvidenceRecord[], analysis: An
 export interface Outputs {
   json: string;
   markdown: string;
-  /** `review.html`, rendered from `report.json` with the Q&A pending (design §6.11). */
+  /** `review.html`, the briefing, rendered from `report.json` with the Q&A pending (design §6.11). */
   html: string;
+  /** `review-appendix.html`, rendered likewise. */
+  appendix: string;
 }
 
 /** Where the report's diagrams stand (design §6.10), from the evidence: the graph and the validators ask the same function. */
@@ -129,10 +131,11 @@ export function outputsOf(evidence: readonly EvidenceRecord[], profile: Profile,
   const drawn = diagramsOf(evidence, flow);
   const input = { pr, snapshot: analysis.snapshot, base: pinnedBase(evidence), final: flow.final, facts: analysis.facts, measurements, profile, mode: analysis.snapshot.mode, ...(drawn.state === "resolved" ? { diagrams: drawn.doc } : {}), ...(flow.info !== undefined ? { large: flow.info } : {}) };
   const json = reportJson(input);
-  return { json, markdown: reviewMarkdown(input), html: reviewHtmlFrom(json)! };
+  const pages = htmlPagesFrom(json)!;
+  return { json, markdown: reviewMarkdown(input), html: pages.review, appendix: pages.appendix };
 }
 
-/** The deterministic check of the written bytes of `review.html` (design §6.11): self-contained and inert. */
+/** The deterministic check of the written bytes of `review.html` and `review-appendix.html` (design §6.11): self-contained and inert. */
 export function writtenHtmlProblems(html: string, pr: PullRequest, base: string | undefined): string[] {
   return htmlProblems(html, { owner: pr.owner, repo: pr.repo, head: pr.head, base });
 }
@@ -160,6 +163,12 @@ export const changeReport: Validator = profiled((input, profile) => {
   if (h.value !== want.html) return failed("review.html is not the report the evidence recomputes");
   const inert = writtenHtmlProblems(h.value, c.pr, pinnedBase(input.evidence));
   if (inert.length > 0) return failed(`review.html is not self-contained and inert: ${inert.slice(0, 3).join("; ")}`);
+  const ap = recordedAppendix(input.evidence, false);
+  if (ap.state === "none") return inconclusive("review-appendix.html has not been written");
+  if (ap.state === "failed") return failed(`review-appendix.html was not written whole: ${ap.reason}`);
+  if (ap.value !== want.appendix) return failed("review-appendix.html is not the appendix the evidence recomputes");
+  const inertAppendix = writtenHtmlProblems(ap.value, c.pr, pinnedBase(input.evidence));
+  if (inertAppendix.length > 0) return failed(`review-appendix.html is not self-contained and inert: ${inertAppendix.slice(0, 3).join("; ")}`);
   const items = flow.final.sections.reduce((n, s) => n + s.items.length, 0);
   return passed(
     `every template section is present (${flow.final.sections.length}), with ${items} cited item(s) or None; every citation lies in the pull request's diff; every changed file and detector fact is cited; ${flow.final.removed.length} item(s) removed by the claim check; ${REPORT_JSON} and ${REVIEW_MD} are written as recomputed`,
@@ -318,6 +327,12 @@ export const answersComplete: Validator = profiled((input, profile) => {
   if (h.value !== w.texts.html) return failed("review.html is not what the evidence recomputes from report.json, qa.json and necessity.json");
   const inert = writtenHtmlProblems(h.value, start.pr, start.ctx.base);
   if (inert.length > 0) return failed(`review.html is not self-contained and inert: ${inert.slice(0, 3).join("; ")}`);
+  const ap = recordedAppendix(input.evidence, true);
+  if (ap.state === "none") return inconclusive("review-appendix.html has not been written whole with the answers");
+  if (ap.state === "failed") return failed(`review-appendix.html was not written whole: ${ap.reason}`);
+  if (ap.value !== w.texts.appendix) return failed("review-appendix.html is not what the evidence recomputes from report.json, qa.json and necessity.json");
+  const inertAppendix = writtenHtmlProblems(ap.value, start.pr, start.ctx.base);
+  if (inertAppendix.length > 0) return failed(`review-appendix.html is not self-contained and inert: ${inertAppendix.slice(0, 3).join("; ")}`);
   if (w.ledger === undefined || w.old === undefined) return w.problem !== undefined ? failed(w.problem) : inconclusive("the ledger value Fetch read is not in the evidence");
   const lw = commandRuns(input.evidence, COMMAND.ledgerWrite).at(-1);
   if (lw === undefined) return inconclusive("the ledger has not been advanced");

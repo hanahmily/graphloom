@@ -14,12 +14,15 @@ directory (`vendor/` is exempt in `scripts/check-headers.mjs`).
 | `scripts/self_check.py` | `skills/diagram-design/scripts/self_check.py` |
 | `scripts/verify-geometry.py` | `scripts/verify-geometry.py` (the repository root, not the skill directory) |
 
-Kept: `SKILL.md`; the references the `diagrams-v1` job reads (`type-architecture-delta.md`,
-`type-state.md`, `style-guide.md`, `primitives-core.md`, `output-spec.md`, `layout-budget.md`) and the
-ones `SKILL.md` routes through (`type-architecture.md`, `semantic-patterns.md`, `profiles.md`,
-`primitive-annotation.md`); the light minimal `template.html` and the two examples of the types drawn
-(`example-architecture-delta.html`, `example-state.html`); and the two checks the plugin runs
-(`self_check.py`, `verify-geometry.py`; both import only the Python standard library).
+Kept: `SKILL.md`; the references the `diagrams-v1` job reads (`type-data-flow.md`, `type-state.md`,
+`style-guide.md`, `primitives-core.md`, `output-spec.md`, `layout-budget.md`) and the ones `SKILL.md`
+routes through (`type-architecture-delta.md` and `type-architecture.md`, which an earlier version of the
+job drew with and which stay in the subset, `semantic-patterns.md`, `profiles.md`,
+`primitive-annotation.md`); the light minimal `template.html` and the examples of the types drawn
+(`example-data-flow.html`, `example-state.html`, and the earlier `example-architecture-delta.html`); and
+the two checks the plugin runs (`self_check.py`, `verify-geometry.py`; both import only the Python
+standard library). `type-data-flow.md` and `example-data-flow.html` were added for version 0.16, copied
+from the same commit as the rest.
 
 Left out: the other 40 type references, the icon set, the import and export references and scripts,
 the dark and full templates and every other example, and the screenshots and gallery assets. Links in

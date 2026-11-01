@@ -31,7 +31,7 @@ export function largeContext(ctx: ReportContext, partition: Partition): ReportCo
   const generated = partition.areas.find((a) => a.id === GENERATED_AREA);
   const unread = new Map<string, string>([...(generated?.paths ?? []).map((p) => [p, GENERATED_NOTE] as const), ...partition.omitted.map((p) => [p, OMITTED_NOTE] as const)]);
   const { candidates: _lifecycle, ...rest } = ctx;
-  return { ...rest, large: true, unread };
+  return { ...rest, large: true, unread, areaIds: partition.areas.map((a) => a.id) };
 }
 
 /** The areas of a finished large report, with the items that cite their files and the items the claim check removed. */
@@ -79,7 +79,7 @@ export interface LargeNeeds {
 export const ASSUMED_ITEMS_PER_AREA = 2;
 /** Per item in large mode: purpose, existing-equivalent, reuse-library, common-logic and missing-test (design §7.6). */
 export const ASSUMED_QUESTIONS_PER_ITEM = 5;
-/** Jobs the stages around the agents need in any run (measurements, coverage, the groundwork's reads, the architecture tree check, the writes with review.html, the ledger). A multi-part write adds a job per part on top. */
+/** Jobs the stages around the agents need in any run (measurements, coverage, the groundwork's reads, the quote check of the claims, the writes with review.html and its appendix, the ledger). A multi-part write adds a job per part on top. */
 const FIXED_JOBS = 24;
 /** The diagram job's agent invocations: the drawing and its one correction (design §6.10). */
 const DIAGRAM_INVOCATIONS = 2;

@@ -131,17 +131,21 @@ describe("necessity-unnecessary: a #1443-like change that breaks the write path 
     expect(qa.questions[0]!.answer).toMatchObject({ status: "answered", check: { verdict: "supported" } });
   });
 
-  it("renders N1 at the top of review.md, before the Report, then Report, Measurements and the skip note", () => {
+  it("renders N1 at the head of the appendix of review.md, before the Report, then Report, Measurements and the skip note, and says it in the briefing", () => {
     const md = sim.qa!.markdown;
-    expect(md.indexOf("# Necessity")).toBeGreaterThan(0);
-    expect(md.indexOf("# Necessity")).toBeLessThan(md.indexOf("# Report"));
-    expect(md.indexOf("# Report")).toBeLessThan(md.indexOf("# Measurements"));
-    expect(md.indexOf("# Measurements")).toBeLessThan(md.indexOf("# Q&A"));
-    expect(md).toContain("Contents: Necessity · Report · Measurements · Q&A");
+    expect(md.indexOf("\n# Appendix\n")).toBeGreaterThan(md.indexOf("\n# Briefing\n"));
+    expect(md.indexOf("\n## Necessity\n")).toBeGreaterThan(md.indexOf("\n# Appendix\n"));
+    expect(md.indexOf("\n## Necessity\n")).toBeLessThan(md.indexOf("\n## Report\n"));
+    expect(md.indexOf("\n## Report\n")).toBeLessThan(md.indexOf("\n## Measurements\n"));
+    expect(md.indexOf("\n## Measurements\n")).toBeLessThan(md.indexOf("\n## Q&A\n"));
+    expect(md).toContain("Contents: Briefing · Appendix (Necessity · Report · Measurements · Q&A)");
+    const briefing = md.slice(md.indexOf("\n# Briefing\n"), md.indexOf("\n# Appendix\n"));
+    expect(briefing).toContain("- N1, is it necessary: unnecessary");
+    expect(briefing).toMatch(/\n## Open questions\n- \*\*N1 \[necessity\] /);
     expect(md).toContain("**N1 — Is this change necessary?** Conclusion: **unnecessary**.");
-    expect(md).toContain("## 1. Is the problem real on the base?");
-    expect(md).toContain("## 2. Does the fix fit the system's design?");
-    expect(md).toContain("## 3. Is there a simpler or existing way?");
+    expect(md).toContain("### 1. Is the problem real on the base?");
+    expect(md).toContain("### 2. Does the fix fit the system's design?");
+    expect(md).toContain("### 3. Is there a simpler or existing way?");
     expect(md).toContain("Effect: **breaks**.");
     expect(md).toContain(`\`${WRITE_PATH_DOC.path}:${WRITE_PATH_DOC.line}\` "${WRITE_PATH_DOC.quote}"`);
     expect(md.trimEnd().endsWith("Remaining questions skipped: the change was judged unnecessary (see N1).")).toBe(true);

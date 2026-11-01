@@ -2,11 +2,12 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { describe, expect, it } from "vitest";
+import { emptyBriefing } from "../src/briefing.js";
 import { claimTargets, readClaimCheck } from "../src/claims.js";
 import { detectFacts } from "../src/detectors.js";
 import { pinnedTexts } from "../src/questions.js";
 import { STREAM_CHANGED, STREAM_PATH } from "../src/rehearsal-fixtures.js";
-import { assembleReport, asReporterOutput, citedLines, citeLabel, renderReport, reportProblems, type Cite, type FinalReport, type ReportContext, type ReportItem, type ReporterOutput, type StateEntry } from "../src/report.js";
+import { assembleReport, asReporterOutput, citedLines, citeLabel, purposeLine, renderReport, reportProblems, type Cite, type FinalReport, type ReportContext, type ReportItem, type ReporterOutput, type StateEntry } from "../src/report.js";
 import { pullFile, type PullFile } from "../src/snapshot.js";
 import { detectStateCandidates } from "../src/statecandidates.js";
 import { reporterSections } from "../src/template.js";
@@ -76,7 +77,8 @@ const report = (over: Partial<ReporterOutput> = {}, item: ReportItem = change())
     return { id: s.id, none: items.length === 0, items };
   }),
   notes: [],
-  architecture: { nodes: [], edges: [] },
+  ...emptyBriefing(),
+  whatsNew: [{ text: "Reports a failed batch.", cites: [at("CHANGES.md", 4)] }],
   ...over,
 });
 const problems = (r: ReporterOutput, c: ReportContext = ctx): string[] => reportProblems(r, c);
@@ -109,10 +111,11 @@ describe("the summary", () => {
     const stated = renderReport(assembleReport(report(), new Map(), ctx), header).split("\n");
     expect(stated.slice(0, 3)).toEqual(["# Report", expect.stringMatching(/^2 files, /), ""]);
     expect(stated[3]).toBe("## Summary");
-    expect(stated[4]).toBe('**Purpose** (stated: "replies with the first error when nothing was stored"): Report a failed batch to the sender.');
-    expect(stated[5]).toMatch(/^\*\*Overview:\*\* Rev counts the events it stores/);
-    const inferred = renderReport(assembleReport(report({ purpose: { text: "Make failures visible.", source: "inferred", quote: "" } }), new Map(), ctx), header);
-    expect(inferred).toContain("**Purpose** (inferred from the diff; the pull request does not state it): Make failures visible.");
+    expect(stated[4]).toMatch(/^\*\*Overview:\*\* Rev counts the events it stores/);
+    // The purpose is the briefing's: quoted when stated, marked when inferred.
+    const line = (r: ReporterOutput) => purposeLine(assembleReport(r, new Map(), ctx).summary, []);
+    expect(line(report())).toBe('**Purpose** (stated: "replies with the first error when nothing was stored"): Report a failed batch to the sender.');
+    expect(line(report({ purpose: { text: "Make failures visible.", source: "inferred", quote: "" } }))).toContain("**Purpose** (inferred from the diff; the pull request does not state it): Make failures visible.");
   });
 });
 
@@ -207,7 +210,7 @@ describe("citations always read as path:line", () => {
 
 describe("the claim targets and their reading", () => {
   it("makes a claim of the purpose, the overview, each item, each entry with each of its steps, and each behavior row", () => {
-    expect(claimTargets(report(), { sections }).map((t) => t.id)).toEqual(["purpose", "overview", "R1", "R1.s1", "R1.s1.t1", "R1.s1.r1", "R1.s2", "R1.s2.t1", "R1.s2.r1", "R1.b1", "R2"]);
+    expect(claimTargets(report(), { sections }).map((t) => t.id)).toEqual(["purpose", "overview", "R1", "R1.s1", "R1.s1.t1", "R1.s1.r1", "R1.s2", "R1.s2.t1", "R1.s2.r1", "R1.b1", "R2", "W1"]);
   });
 
   it("lets a stated purpose stand without a diff quote (its own quote was matched against the pull request's text), and an inferred one needs one", () => {
@@ -265,7 +268,7 @@ describe("what the claim check removes: the item stays, the entry or row goes, a
     expect(final.summary).toEqual({ purpose: null, overview: null });
     expect(final.removedParts.map((p) => [p.id, p.kind])).toEqual([["purpose", "purpose"], ["overview", "overview"]]);
     const text = renderReport(final, header);
-    expect(text).toContain("**Purpose:** not given: the claim check could not support it (unsupported: the title says otherwise).");
+    expect(purposeLine(final.summary, final.removedParts)).toContain("**Purpose:** not given: the claim check could not support it (unsupported: the title says otherwise).");
     expect(text).toContain("**Overview:** not given: the claim check could not support it (partial: names a mechanism no item has).");
   });
 
