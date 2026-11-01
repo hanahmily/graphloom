@@ -8,7 +8,7 @@ import { diagramSpecs, MAX_DIAGRAM_DATA_CHARS } from "../src/diagrams.js";
 import type { Fact } from "../src/detectors.js";
 import type { ClaimTarget } from "../src/claims.js";
 import { planChecker, planReporter, pullText } from "../src/prompts.js";
-import { planAnswerer, planNecessityChecker } from "../src/qaprompts.js";
+import { planAnswerer, planNecessity, planNecessityChecker } from "../src/qaprompts.js";
 import { reporterSections } from "../src/template.js";
 import type { Question } from "../src/questions.js";
 import type { Groundwork } from "../src/groundwork.js";
@@ -188,5 +188,64 @@ describe("principles past the inline budget", () => {
     expect(tail).toContain("more principles that apply");
     expect(tail).toContain("git show 13c5f4fb80df012a73c646a8e63a67d492e1c683:skills/design-principles/SKILL.md");
     expect(tail).not.toContain("git show HEAD:");
+  });
+});
+
+describe("a repair keeps every problem and every statement it is given", () => {
+  const sections = reporterSections(profileOf());
+  const snapshot = { ...(pull as object), files: [] } as never;
+  const reporter = { pr: PR, snapshot, sections, facts: [], candidates: [], reviewDir: DIR };
+  const problems = (n: number): string[] => Array.from({ length: n }, (_, i) => `R${i + 1}: unsupported, ${"the diff does not show this claim; ".repeat(9)}(problem ${i + 1})`);
+
+  it("lists the problems of a revision whole while they fit", () => {
+    const plan = planReporter({ ...reporter, kind: "revision", feedback: problems(5) });
+    expect(plan.spills).toEqual([]);
+    expect(plan.text).toContain("(problem 5)");
+  });
+
+  it("writes every problem of a revision to a file past the inline budget, and tells the reporter to address each", () => {
+    const feedback = problems(120);
+    const plan = planReporter({ ...reporter, kind: "revision", feedback });
+    expect(plan.text.length).toBeLessThanOrEqual(ASSIGNMENT_BUDGET_CHARS);
+    const spill = plan.spills.find((x) => x.name.startsWith("feedback-"))!;
+    expect(plan.text).toContain(`${DIR}/${spill.name}`);
+    expect(plan.text).toMatch(/address every problem in it, none left out/);
+    expect(plan.text).not.toContain("the check reports the rest again");
+    for (const f of feedback) expect(spill.text).toContain(f);
+    expect(plan.spills.filter((x) => x.name.startsWith("feedback-"))).toHaveLength(1);
+    // A first assignment has no feedback to write.
+    expect(planReporter({ ...reporter, kind: "first", feedback }).spills.some((x) => x.name.startsWith("feedback-"))).toBe(false);
+  });
+
+  it("does the same for N1's corrections", () => {
+    const feedback = problems(120);
+    const n1 = planNecessity({ pr: PR, snapshot, view: { items: [], records: [] }, designDocs: [], context: [], kind: "correction", feedback, reviewDir: DIR });
+    expect(n1.text.length).toBeLessThanOrEqual(ASSIGNMENT_BUDGET_CHARS);
+    expect(n1.spills.some((x) => x.name.startsWith("feedback-") && x.text.includes("(problem 120)"))).toBe(true);
+  });
+
+  const principle = (i: number, n: number) => ({ id: `p-${i}`, statement: `${"s".repeat(n - 4)}#${String(i).padStart(2, "0")}`, why: "", applies: [], source: "maintainer" });
+  const ctxOf = (many: ReturnType<typeof principle>[]) => ({ read: { path: "skills/design-principles/SKILL.md", ref: "r", commit: "13c5f4fb80df012a73c646a8e63a67d492e1c683", file: "present", text: "", truncated: false }, parsed: { principles: many, notes: [] }, applicable: many, inapplicable: [], changed: false }) as never;
+  const checkerBase = { pr: PR, snapshot, question: { id: "N1", type: "necessity", item: "", text: "Is it necessary?", origin: "required", key: "" } as Question, answer: { question: "N1", answer: "", status: "answered", none_found: false, citations: [], searches: [], inventory: [], metrics: [], proposal: { kind: "none" } } as never, designDocs: [], context: [], retry: false, reviewDir: DIR };
+
+  it("keeps principle statements whole when the assignment fits, in N1's answerer and checker", () => {
+    const many = Array.from({ length: 8 }, (_, i) => principle(i, 1_000));
+    const answerer = planNecessity({ pr: PR, snapshot, view: { items: [], records: [] }, designDocs: [], context: [], kind: "first", feedback: [], principles: ctxOf(many), reviewDir: DIR });
+    const checker = planNecessityChecker({ ...checkerBase, principles: ctxOf(many) });
+    for (const text of [answerer.text, checker.text]) for (const p of many) expect(text).toContain(p.statement);
+    expect(answerer.text).not.toContain("[shortened");
+  });
+
+  it("shortens statements only when it must, and gives every shortened one its full-text source", () => {
+    const many = Array.from({ length: 40 }, (_, i) => principle(i, 1_000));
+    const texts = [planNecessity({ pr: PR, snapshot, view: { items: [], records: [] }, designDocs: [], context: [], kind: "first", feedback: [], principles: ctxOf(many), reviewDir: DIR }).text, planNecessityChecker({ ...checkerBase, principles: ctxOf(many) }).text];
+    for (const text of texts) {
+      const lines = text.split("\n").filter((l) => /^\s*- p-\d+:/.test(l));
+      expect(lines.length).toBeGreaterThan(0);
+      for (const l of lines) {
+        expect(l.length).toBeLessThan(1_000);
+        expect(l).toContain("git show 13c5f4fb80df012a73c646a8e63a67d492e1c683:skills/design-principles/SKILL.md");
+      }
+    }
   });
 });

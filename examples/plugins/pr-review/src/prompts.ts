@@ -75,9 +75,18 @@ export interface ReporterAssignment {
 const FEEDBACK_CHARS = 8_000;
 const MAX_FEEDBACK_LINE = 600;
 
-/** The feedback of a correction or a revision as list lines, within a budget, with a note of the rest. */
-export function feedbackLines(feedback: readonly string[], scale = 1): string[] {
-  return fitLines(feedback.map((f) => `- ${clipText(f, MAX_FEEDBACK_LINE)}`), FEEDBACK_CHARS * scale, (n) => `- … and ${n} more problems, which are too many to list here: fix what is listed, the check reports the rest again`);
+/**
+ * The feedback of a correction or a revision: every problem inline while they fit. Past the budget the complete list is a file
+ * (`feedback-<digest>.md`, written before the job) and the assignment lists the start of each problem and tells the agent to
+ * read the file and address every one: a repair has one chance, so no problem is left out.
+ */
+export function feedbackBlock(feedback: readonly string[], scale = 1, dir?: string): { lines: string[]; spills: FileSpill[] } {
+  const full = feedback.map((f) => `- ${f}`);
+  if (full.join("\n").length <= FEEDBACK_CHARS * scale) return { lines: full, spills: [] };
+  const spill = spillOf("feedback", full.join("\n"));
+  const file = reviewFile(dir, spill.name);
+  const shown = fitLines(feedback.map((f) => `- ${clipText(f, MAX_FEEDBACK_LINE)}`), FEEDBACK_CHARS * scale, (n) => `- … and ${n} more problems, listed in ${file}`);
+  return { lines: [`There are ${feedback.length} problems, too many to list in full here: every one of them, complete, is in ${file}. Read that file and address every problem in it, none left out; the check does not give you a second chance at one you skip. The start of each:`, ...shown], spills: [spill] };
 }
 
 /** The characters of changed files, detector facts and state candidates the standard reporter's assignment inlines before they go to a file. */
@@ -101,6 +110,7 @@ export function planReporter(a: ReporterAssignment): Fitted {
     const input = spillOf("reporter-input", [`Changed files (${files.length}):`, ...files, "", `Detector facts (${a.facts.length}):`, ...(a.facts.length === 0 ? ["(none)"] : factLines), ...(a.candidates.length > 0 ? ["", `State the patches introduce (${a.candidates.length}): ${candidateText}`] : [])].join("\n"));
     const inputFile = reviewFile(a.reviewDir, input.name);
     const spills: FileSpill[] = spill ? [input] : [];
+    const feedback = feedbackBlock(a.feedback, scale, a.reviewDir);
     const text = [
     `You are the reporter for ${a.pr.owner}/${a.pr.repo}#${a.pr.number} at head ${a.pr.head}. Write a neutral, cited account of exactly what this pull request changes, so its maintainer can understand it. You are read-only: change nothing.`,
     "",
@@ -153,10 +163,10 @@ export function planReporter(a: ReporterAssignment): Fitted {
           a.kind === "correction"
             ? "Your previous result failed deterministic validation. Return the whole corrected report; every problem below must be fixed:"
             : "The claim check could not support the claims below against the diff (ids: purpose, overview, R3 an item, R3.s1 a state entry, R3.s1.t1 a transition, R3.s1.r1 a read, R3.b1 a behavior row, W2 a what's-new bullet, F1 a feature, F1.s2 a stage, F1.f3 a flow, C.risks.1 a check entry). Return the whole revised report: fix each (cite and describe only what the diff shows), or drop it. A claim that stays unsupported is removed from the report: an item, or the whole lifecycle entry or row it belongs to.",
-          ...feedbackLines(a.feedback, scale),
+          ...feedback.lines,
         ]),
   ].join("\n");
-    return { text, spills };
+    return { text, spills: [...spills, ...(a.kind === "first" ? [] : feedback.spills)] };
   });
 }
 

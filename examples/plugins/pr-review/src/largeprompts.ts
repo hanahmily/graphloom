@@ -7,13 +7,13 @@
  * read-only to confirm a claim, as the standard reporter does.
  */
 import { MAX_EXECUTOR_INPUT_BYTES } from "@graphloom/sdk";
-import { ASSIGNMENT_BUDGET_CHARS, MAX_ASSIGNMENT_CHARS } from "./fit.js";
+import { ASSIGNMENT_BUDGET_CHARS, MAX_ASSIGNMENT_CHARS, type Fitted } from "./fit.js";
 import { BRIEFING_AREAS_PROMPT, BRIEFING_PROMPT } from "./briefing.js";
 import type { Partition } from "./areas.js";
 import type { Fact } from "./detectors.js";
 import { buildDigest, INTERFACE_PATCH_BYTES, type Digest } from "./digest.js";
 import { MAX_ITEM_CHARS, MAX_LARGE_REPORTER_ITEMS, MAX_OVERVIEW_CHARS, MAX_PURPOSE_CHARS } from "./report.js";
-import { factText, feedbackLines, pullText, sectionText, untrusted, UNTRUSTED_PREAMBLE } from "./prompts.js";
+import { factText, feedbackBlock, pullText, sectionText, untrusted, UNTRUSTED_PREAMBLE } from "./prompts.js";
 import type { PullRequest } from "./request.js";
 import type { Snapshot } from "./snapshot.js";
 import type { Section } from "./template.js";
@@ -35,6 +35,7 @@ export interface LargeReporterAssignment {
   facts: readonly Fact[];
   kind: "first" | "correction" | "revision";
   feedback: string[];
+  reviewDir?: string;
 }
 
 const jsonBytes = (s: string): number => Buffer.byteLength(JSON.stringify(s), "utf8");
@@ -87,7 +88,11 @@ function digestText(a: LargeReporterAssignment, digest: Digest, budgets: { files
 }
 
 /** The reporter's assignment in large mode (design §6.9): a high-level, cited account from a bounded digest. */
-export function largeReporterInstruction(a: LargeReporterAssignment): string {
+export const largeReporterInstruction = (a: LargeReporterAssignment): string => planLargeReporter(a).text;
+
+/** The large reporter's assignment and the file that holds the complete feedback of a correction or a revision, when it does not fit. */
+export function planLargeReporter(a: LargeReporterAssignment): Fitted {
+  const feedback = feedbackBlock(a.feedback, 1, a.reviewDir);
   const build = (cap: number, budgets = { files: FILES_BUDGET_CHARS, facts: FACTS_BUDGET_CHARS }): string => {
     const digest = buildDigest(a.snapshot.files, a.partition, a.sections, cap);
     const { head, patches } = digestText(a, digest, budgets);
@@ -129,7 +134,7 @@ export function largeReporterInstruction(a: LargeReporterAssignment): string {
             a.kind === "correction"
               ? "Your previous result failed deterministic validation. Return the whole corrected report; every problem below must be fixed:"
               : "The claim check could not support the claims below (ids: purpose, overview, R3 an item, R3.s1 a state entry, R3.b1 a behavior row, W2 a what's-new bullet, F1 a feature, F1.s2 a stage, F1.f3 a flow, C.risks.1 a check entry). Return the whole revised report: fix each (cite and describe only what the code shows), or drop it. A claim that stays unsupported is removed from the report.",
-            ...feedbackLines(a.feedback),
+            ...feedback.lines,
           ]),
     ].join("\n");
   };
@@ -150,7 +155,7 @@ export function largeReporterInstruction(a: LargeReporterAssignment): string {
     else break;
     text = build(cap, budgets);
   }
-  return text;
+  return { text, spills: a.kind === "first" ? [] : feedback.spills };
 }
 
 /** What the claim checker is told in large mode: the report is high level, and its quotes come from the trees its cites name. */

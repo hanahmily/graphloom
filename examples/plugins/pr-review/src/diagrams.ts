@@ -14,7 +14,8 @@ import type { FinalFeature } from "./briefing.js";
 import { documentProblems, embeddedSvg, labelProblems, parseSvg, stylesFor, textNodes } from "./diagramsvg.js";
 import { clip } from "./escape.js";
 import { agentRuns, commandRuns, outputTail, succeeded, type AgentRun } from "./evidence.js";
-import { feedbackLines, UNTRUSTED_PREAMBLE, untrusted } from "./prompts.js";
+import { feedbackBlock, UNTRUSTED_PREAMBLE, untrusted } from "./prompts.js";
+import type { FileSpill, Fitted } from "./fit.js";
 import type { FinalReport, StateEntry } from "./report.js";
 import { writeChunks } from "./write.js";
 
@@ -188,15 +189,21 @@ export interface DiagramsAssignment {
   specs: readonly DiagramSpec[];
   kind: "first" | "correction";
   feedback: readonly string[];
+  reviewDir?: string;
 }
 
 /** The diagram job's assignment (design §6.10): the fixed choices, the data, the result. */
-export function diagramsInstruction(a: DiagramsAssignment): string {
+export const diagramsInstruction = (a: DiagramsAssignment): string => planDiagrams(a).text;
+
+/** The diagram job's assignment and the file of its complete feedback, when the correction's problems do not fit. */
+export function planDiagrams(a: DiagramsAssignment): Fitted {
+  const feedback = feedbackBlock(a.feedback, 1, a.reviewDir);
+  const spills: FileSpill[] = a.kind === "correction" ? feedback.spills : [];
   const features = a.specs.filter((s) => s.kind === "feature");
   const states = a.specs.filter((s) => s.kind === "state");
   const featureById = new Map(a.input.features.map((f) => [featureDiagramId(f.id), f] as const));
   const byId = new Map(a.input.states.map((s) => [s.id, s]));
-  return [
+  const text = [
     `You draw diagrams for the change report of ${a.owner}/${a.repo}#${a.number}. The data below was checked against the diff by an independent checker; it is the only thing you draw from. You are read-only: change nothing, and do not read the repository under review.`,
     "",
     UNTRUSTED_PREAMBLE,
@@ -227,8 +234,9 @@ export function diagramsInstruction(a: DiagramsAssignment): string {
     ]),
     "",
     `The result: diagrams, one entry for each id above and none other, each with id (exactly as given above) and html (the complete HTML document, at most ${MAX_DIAGRAM_BYTES} characters). Keep the quotes in the markup as the skill writes them.`,
-    ...(a.kind === "correction" ? ["", "Your previous result failed the checks below, which are the plugin's and the skill's own. Return the whole set again: a diagram that did not fail may come back unchanged, and each one that failed must be fixed.", ...feedbackLines(a.feedback)] : []),
+    ...(a.kind === "correction" ? ["", "Your previous result failed the checks below, which are the plugin's and the skill's own. Return the whole set again: a diagram that did not fail may come back unchanged, and each one that failed must be fixed.", ...feedback.lines] : []),
   ].join("\n");
+  return { text, spills };
 }
 
 // ---- the skill's checks as a command ----

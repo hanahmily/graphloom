@@ -61,7 +61,7 @@ import {
   REVIEW_HTML,
   REVIEW_MD,
 } from "./constants.js";
-import { checkBatch, DIAGRAMMER_JOB, DIAGRAMS_REFERENCES, DIAGRAMS_SCHEMA, DIAGRAMS_SCHEMA_NAME, diagramInputOf, diagramsInstruction, MAX_DIAGRAM_BYTES, MAX_DIAGRAMS, SKILL_DIR, skillMount } from "./diagrams.js";
+import { checkBatch, DIAGRAMMER_JOB, DIAGRAMS_REFERENCES, DIAGRAMS_SCHEMA, DIAGRAMS_SCHEMA_NAME, diagramInputOf, planDiagrams, MAX_DIAGRAM_BYTES, MAX_DIAGRAMS, SKILL_DIR, skillMount } from "./diagrams.js";
 import { commandRuns, describeCommand, environmentOutput, outputTail, succeeded, validatorEvidence, type CommandRun } from "./evidence.js";
 import { INTERFACE_PATCH_BYTES } from "./digest.js";
 import { LIMITS } from "./metrics/crap.js";
@@ -69,7 +69,7 @@ import { CHANGE_REPORT_SCHEMA, MAX_ITEM_CHARS } from "./report.js";
 import { CLAIM_CHECK_SCHEMA } from "./claims.js";
 import { REPORTER_SCHEMA_NAME, REVISION_SCHEMA_NAME, reportSpec, type ReportFlow } from "./flow.js";
 import { budgetShortfall, largeNeeds } from "./large.js";
-import { largeCheckScope, largeReporterInstruction } from "./largeprompts.js";
+import { largeCheckScope, planLargeReporter } from "./largeprompts.js";
 import { measurementState, metricsDiffCommand, staticBaseCommand, staticCommand } from "./measurements.js";
 import { coverageCommand, coverageConfinement, missingProbe, sandboxEnvironmentChecks, type CoveragePlan } from "./coverage.js";
 import { planChecker, planReporter } from "./prompts.js";
@@ -575,7 +575,7 @@ function report(ctx: Context, view: RunView): GraphDecision {
         if (short !== undefined) return stop({ reason: "budgets exhausted", blocker: short, retryable: false }, "stop before the reporter: the run's budgets cannot cover large mode");
       }
       const planned = large
-        ? { text: largeReporterInstruction({ pr, snapshot: analysis.snapshot, partition: analysis.snapshot.partition!, sections: analysis.sections, facts: analysis.facts, kind: flow.kind, feedback: flow.feedback }), spills: [] as FileSpill[] }
+        ? planLargeReporter({ pr, snapshot: analysis.snapshot, partition: analysis.snapshot.partition!, sections: analysis.sections, facts: analysis.facts, kind: flow.kind, feedback: flow.feedback, ...(reviewDirOf(view) !== undefined ? { reviewDir: reviewDirOf(view)! } : {}) })
         : planReporter({ pr, snapshot: analysis.snapshot, sections: analysis.sections, facts: analysis.facts, candidates: analysis.ctx.candidates ?? [], kind: flow.kind, feedback: flow.feedback, ...(reviewDirOf(view) !== undefined ? { reviewDir: reviewDirOf(view)! } : {}) });
       const assignment = planned.text;
       const written = writeSpills(view, REPORT_STAGE, planned.spills);
@@ -635,7 +635,10 @@ function diagramStep(ctx: Context, view: RunView, analysis: Analysis, flow: Extr
     case "agent": {
       const root = environmentOutput(view.evidence, ENV_PLUGIN_ROOT)!;
       const mount = skillMount(root);
-      const assignment = diagramsInstruction({ owner: pr.owner, repo: pr.repo, number: pr.number, mount, input: diagramInputOf(flow.final), specs: d.specs, kind: d.kind, feedback: d.feedback });
+      const planned = planDiagrams({ owner: pr.owner, repo: pr.repo, number: pr.number, mount, input: diagramInputOf(flow.final), specs: d.specs, kind: d.kind, feedback: d.feedback, ...(reviewDirOf(view) !== undefined ? { reviewDir: reviewDirOf(view)! } : {}) });
+      const assignment = planned.text;
+      const written = writeSpills(view, REPORT_STAGE, planned.spills);
+      if (written !== undefined) return written;
       const from = d.kind === "first" ? undefined : jobSession(view, REPORT_STAGE, DIAGRAMMER_JOB);
       const references = idRefs({ [DIAGRAMS_REFERENCES[0]!]: idSet(d.specs.map((s) => s.id)) });
       const job = agentJob(ctx, view, { jobId: DIAGRAMMER_JOB, purpose: "diagnostic", instruction: "Draw the features' data flows and the lifecycle state machines with the diagram-design skill", schema: DIAGRAMS_SCHEMA_NAME, harness: profile.roles.diagrammer, role: "diagrammer", assignment, readOnlyBinds: [mount], references, ...(from !== undefined ? { continueFrom: from } : {}) }, analysis.snapshot.files);

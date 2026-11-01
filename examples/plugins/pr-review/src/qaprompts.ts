@@ -18,7 +18,7 @@ import { checkThresholds, LIMITS } from "./metrics/crap.js";
 import { MAX_QUESTION_CHARS, type Question, type RequiredQuestion } from "./questions.js";
 import { changeItems, type ReportView } from "./reportview.js";
 import type { PullRequest } from "./request.js";
-import { feedbackLines, pullText, UNTRUSTED_PREAMBLE } from "./prompts.js";
+import { feedbackBlock, pullText, UNTRUSTED_PREAMBLE } from "./prompts.js";
 import { clipText, fitLines, reviewFile, shrinkToFit, spillOf, type FileSpill, type Fitted } from "./fit.js";
 import type { Snapshot } from "./snapshot.js";
 import { citeLabel } from "./report.js";
@@ -205,6 +205,7 @@ export function planQuestioner(a: QuestionerAssignment): Fitted {
     const items = itemsBlock(a.view, scale, a.reviewDir);
     const required = requiredBlock(a.required, scale, a.reviewDir);
     const groundwork = groundworkBlock(a.groundwork, a.view, scale, a.reviewDir);
+    const feedback = feedbackBlock(a.feedback, scale, a.reviewDir);
     const text = [
     `You are the questioner for ${a.pr.owner}/${a.pr.repo}#${a.pr.number} at head ${a.pr.head}. Another agent wrote the change report; plugin rules decided which questions are required. You phrase and group the questions and may add others. You only ask: you never answer, and you are read-only.`,
     "",
@@ -225,9 +226,9 @@ export function planQuestioner(a: QuestionerAssignment): Fitted {
     ...groundwork.lines,
     "",
     pullText(a.snapshot),
-    ...(a.kind === "correction" ? ["", "Your previous result failed deterministic validation. Return the whole corrected result; every problem below must be fixed:", ...feedbackLines(a.feedback, scale)] : []),
+    ...(a.kind === "correction" ? ["", "Your previous result failed deterministic validation. Return the whole corrected result; every problem below must be fixed:", ...feedback.lines] : []),
   ].join("\n");
-    return { text, spills: [...required.spills, ...groundwork.spills] };
+    return { text, spills: [...required.spills, ...groundwork.spills, ...(a.kind === "correction" ? feedback.spills : [])] };
   });
 }
 
@@ -277,6 +278,7 @@ export function planAnswerer(a: AnswererAssignment): Fitted {
     const inlineQuestions = lines.join("\n").length <= QUESTIONS_INLINE_CHARS * scale;
     const all = spillOf("questions", lines.join("\n"));
     const groundwork = groundworkBlock(a.groundwork, a.view, scale, a.reviewDir, focusOf(asked, a.groundwork));
+    const feedback = feedbackBlock(a.feedback, scale, a.reviewDir);
     const text = [
     `You are the answerer for ${a.pr.owner}/${a.pr.repo}#${a.pr.number} at head ${a.pr.head}. Another agent asked the questions below about the pull request. Answer ${a.only !== undefined ? "only the questions listed below" : "every one"} from the report, the diff and the whole base codebase, its dependencies included. You are read-only: change nothing.`,
     "",
@@ -304,9 +306,9 @@ export function planAnswerer(a: AnswererAssignment): Fitted {
     ...groundwork.lines,
     "",
     pullText(a.snapshot),
-    ...(a.kind !== "first" ? ["", a.kind === "correction" ? "Your previous result failed deterministic validation. Return the whole corrected result; every problem below must be fixed:" : "The answer checker could not support the answers below. Return a corrected answer for each of them, and for no other question, searching again: fix what the checker found, or state that the question needs the author.", ...feedbackLines(a.feedback, scale)] : []),
+    ...(a.kind !== "first" ? ["", a.kind === "correction" ? "Your previous result failed deterministic validation. Return the whole corrected result; every problem below must be fixed:" : "The answer checker could not support the answers below. Return a corrected answer for each of them, and for no other question, searching again: fix what the checker found, or state that the question needs the author.", ...feedback.lines] : []),
   ].join("\n");
-    return { text, spills: [...(inlineQuestions ? [] : [all]), ...groundwork.spills] };
+    return { text, spills: [...(inlineQuestions ? [] : [all]), ...groundwork.spills, ...(a.kind !== "first" ? feedback.spills : [])] };
   });
 }
 
@@ -397,8 +399,14 @@ export interface NecessityAssignment {
 const PRINCIPLES_CHARS = 10_000;
 
 /** The principle lines that fit, then the ids of the rest with where the project states them. */
-export function fitPrinciples(c: PrinciplesContext, line: (p: PrinciplesContext["applicable"][number]) => string, scale: number): string[] {
-  const lines = c.applicable.map(line);
+export function fitPrinciples(c: PrinciplesContext, line: (p: PrinciplesContext["applicable"][number], short: boolean) => string, scale: number): string[] {
+  // Every statement whole while they fit; shortened only past the budget, and then each shortened one says where its full text is.
+  const whole = c.applicable.map((p) => line(p, false));
+  if (whole.join("\n").length <= PRINCIPLES_CHARS * scale) return whole;
+  const lines = c.applicable.map((p, i) => {
+    const short = line(p, true);
+    return short === whole[i] ? short : `${short} [shortened; its full text: \`git show ${c.read.commit}:${c.read.path}\`]`;
+  });
   const shown = fitLines(lines, PRINCIPLES_CHARS * scale, () => "").filter((l) => l !== "").length;
   if (shown >= lines.length) return lines;
   return [...lines.slice(0, shown), `- … and ${lines.length - shown} more principles that apply, each of which gets a verdict too (their ids: ${c.applicable.slice(shown).map((p) => p.id).join(", ")}): read their statements in ${c.read.path} at ${principlesFrom(c.read)} (\`git show ${c.read.commit}:${c.read.path}\`: the commit the principles were recorded from, which is not HEAD when the profile names a ref).`];
@@ -409,7 +417,7 @@ const principleLines = (c: PrinciplesContext | undefined, scale = 1): string[] =
   if (c === undefined || c.read.file === "absent" || c.applicable.length === 0) return [];
   return [
     `The project's design principles (from ${c.read.path} at ${principlesFrom(c.read)}; each applies to this change). Inside part 2, give one verdict per principle in principles, each id exactly once: preserves (the change keeps it), breaks (the change violates it) or not-applicable (it does not bear on this change), with an explanation and citations (path, tree base or head, first and last line, a verbatim quote). preserves and breaks need at least one citation. Judge each principle against the changed lines and the code around them; a principle you cite as broken is a claim the checker will verify.`,
-    ...fitPrinciples(c, (p) => `- ${p.id}: ${clipText(p.statement, 500)}${p.why !== undefined ? ` Why: ${clipText(p.why, 300)}` : ""}${p.source !== undefined ? ` Source: ${clipText(p.source, 200)}` : ""}`, scale),
+    ...fitPrinciples(c, (p, short) => `- ${p.id}: ${short ? clipText(p.statement, 500) : oneLine(p.statement)}${p.why !== undefined ? ` Why: ${short ? clipText(p.why, 300) : oneLine(p.why)}` : ""}${p.source !== undefined ? ` Source: ${short ? clipText(p.source, 200) : oneLine(p.source)}` : ""}`, scale),
   ];
 };
 
@@ -427,6 +435,7 @@ export const necessityInstruction = (a: NecessityAssignment): string => planNece
 export function planNecessity(a: NecessityAssignment): Fitted {
   return shrinkToFit((scale) => {
     const items = itemsBlock(a.view, scale, a.reviewDir, "The report's change items");
+    const feedback = feedbackBlock(a.feedback, scale, a.reviewDir);
     const text = [
     `You are the answerer for ${a.pr.owner}/${a.pr.repo}#${a.pr.number} at head ${a.pr.head}, and the question is ${NECESSITY_ID}, the first question of the run: ${NECESSITY_TEXT} Answer it from the report, the diff and the whole base codebase, with evidence. You are read-only: change nothing.`,
     "",
@@ -449,10 +458,10 @@ export function planNecessity(a: NecessityAssignment): Fitted {
     "",
     pullText(a.snapshot),
     ...(a.kind !== "first"
-      ? ["", a.kind === "correction" ? "Your previous result failed deterministic validation. Return the whole corrected result; every problem below must be fixed:" : "The answer checker could not support your answer. Return a corrected answer, searching again: fix what the checker found, or conclude questionable or needs author.", ...feedbackLines(a.feedback, scale)]
+      ? ["", a.kind === "correction" ? "Your previous result failed deterministic validation. Return the whole corrected result; every problem below must be fixed:" : "The answer checker could not support your answer. Return a corrected answer, searching again: fix what the checker found, or conclude questionable or needs author.", ...feedback.lines]
       : []),
   ].join("\n");
-    return { text, spills: [] };
+    return { text, spills: a.kind !== "first" ? feedback.spills : [] };
   });
 }
 
@@ -513,7 +522,7 @@ export function planNecessityChecker(a: NecessityCheckerAssignment): Fitted {
     ...(a.principles !== undefined && a.principles.applicable.length > 0
       ? [
           `(6) every principle verdict (P lines below; the principles are the project's, from ${a.principles.read.path} at ${principlesFrom(a.principles.read)}): judge each one on its own in the principles of your verdict, one entry per principle id, with its id, a verdict and a note. supported when the verdict holds: a breaks verdict only when the cited code really violates the principle's statement as written (read the changed lines and the code around them yourself), a preserves verdict only when it really keeps it, a not-applicable verdict only when the principle truly does not bear on the change; partial or unsupported otherwise, with what you found in note. A principle verdict you do not support never makes the question's own verdict unsupported: that verdict covers T, D, C, A and the conclusion. The principles:`,
-          ...fitPrinciples(a.principles, (p) => `    - ${p.id}: ${clipText(p.statement, 500)}`, scale),
+          ...fitPrinciples(a.principles, (p, short) => `    - ${p.id}: ${short ? clipText(p.statement, 500) : oneLine(p.statement)}`, scale),
         ]
       : ["Leave the principles of your verdict empty: no design principle applies."]),
     SEARCH_HELP,
