@@ -16,7 +16,7 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "886fe090bb2d449f416b68cc504097e84804c812bc2073268973036b808756ca",
+    "sourceTree": "763e77736f0206eb525286036b617a7404968ece7b24aecd20ee22858d1a9497",
     "packageLock": "3421bfa0f57e7eefa54f392ab26c37cd5184bc317f0183f7b468a18b15412cab",
     "files": {
       "package.json": "c39f1a6c7062f47febfe778fef81cacd20cf499378922a544c8c09ec40fbbfd3",
@@ -63,8 +63,8 @@
       "src/constants.ts": "5167ea88f088f367f4ab4798a6d7513648c7cf361c6c3aa2810d2285ab60ea3c",
       "src/coverage.ts": "8d5417bc88cb49cb399dc28fa4db61c32da4cea22898c4ff0f9bd6221f81c688",
       "src/detectors.ts": "f2a8b0926ee6c71ad5292efd8399380c16f9598495eda2fc17a8d54c79d221c6",
-      "src/diagrams.ts": "7b391f9404103e835be1cb1bac1ca005792fd7ccb38cf5a76bbb19b461803b60",
-      "src/diagramsvg.ts": "dc64323cc937340a2a23b10b3ed0cb7f2ea59d6023a35d0aaab4d7c86a269529",
+      "src/diagrams.ts": "b16b3f87297e60ce4355f6e74f7a1e6e0d20b5be03f60a04a02f1ffd120c2646",
+      "src/diagramsvg.ts": "c58efff16dc083e3a86d41e82f9fde3d5184e757cc52ef6697090650067fe0b8",
       "src/escape.ts": "3179eb6d23b9640d40d08044fee09ab85d41c605977d41a016005a75209b7c98",
       "src/evidence.ts": "8ac679d44549e11f94b9b226b394faebfaee72cd9a68cd377132286bfcf60366",
       "src/flow.ts": "a8d12f8a3dfe519c938b76ee96c21d8ce7241f0686e3a99906f7a48a285da78f",
@@ -134,7 +134,7 @@
       "test/coverage.test.ts": "e0d3c240d1b161ac801bb5c5e67a201daf9daaa73dfde7dec78f4056e049a2e9",
       "test/crap.test.ts": "e2494e348e47ee1a6e5022d6745ba02b186cd3d74c95711148b37ef1de002eea",
       "test/detectors.test.ts": "cb780849cbe65e86cc7a536c7b98e995192a6c4fb1c92bb5c7c0f7aaf715d7dc",
-      "test/diagrams.test.ts": "e8b0c335485ac7e2a2bc134a796b6fc6236005694604ce0de88a4bf1565680d3",
+      "test/diagrams.test.ts": "daa7c52b771011ea3b092acefc3b9c709790adbecdd907f019126967d96a095b",
       "test/git.test.ts": "67fdb5892a0f040e869f31422b7e82daba8ae1c1a34a3257aaf64b89f2fa9ab3",
       "test/gometrics.test.ts": "d8b4ce32aa4ac8314eecfa9b7c6762e7527cce6dc0f302f7f975a737f92a9c62",
       "test/graph.test.ts": "2387017ab84d30b0eb1d45c15d76df18b81c1087b0b1375f4bd05d04b4a44942",

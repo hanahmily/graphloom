@@ -338,7 +338,7 @@ function classesUsed(root: SvgElement): Set<string> {
  * attribute or a combinator that reaches a class the drawing uses, a property with no presentation attribute, an undefined
  * variable), is a problem, so the correction or the fallback handles the drawing. The page's own rules are ignored.
  */
-export function stylesFor(html: string, root: SvgElement): { classes: Map<string, Array<[string, string]>> } | { problems: string[] } {
+export function stylesFor(html: string, root: SvgElement): { classes: Map<string, Array<[string, string, number]>> } | { problems: string[] } {
   const used = classesUsed(root);
   const problems: string[] = [];
   const add = (p: string): void => {
@@ -358,7 +358,10 @@ export function stylesFor(html: string, root: SvgElement): { classes: Map<string
     else if (/var\(/.test(v)) add(`${owner}: a var() the plugin does not resolve`);
     return v;
   };
-  const classes = new Map<string, Array<[string, string]>>();
+  // Every class rule is one selector, so they tie on specificity: the later declaration in the stylesheet wins. Each
+  // declaration keeps its place (`seq`) so an element with several classes resolves as the cascade would.
+  const classes = new Map<string, Array<[string, string, number]>>();
+  let seq = 0;
   for (const r of rules) {
     for (const raw of r.selector.split(",")) {
       const sel = raw.trim();
@@ -375,7 +378,7 @@ export function stylesFor(html: string, root: SvgElement): { classes: Map<string
           const resolved = resolve(value, sel);
           const bad = badValue(resolved);
           if (bad !== undefined) add(`the rule ${sel} sets ${prop} to ${bad}`);
-          list.push([prop, resolved]);
+          list.push([prop, resolved, seq++]);
         }
         classes.set(cls, list);
       } else if (/^(?::root|html)$/.test(sel) || PAGE_SELECTORS.test(sel)) continue;
@@ -402,7 +405,7 @@ const withPrefix = (value: string, uid: string): string => value.replace(/url\(\
  * no stylesheet: `styles` (from `stylesFor`) is written into each element as presentation attributes, over the ones it
  * had, as the cascade would, and no `class` is left.
  */
-export function embeddedSvg(root: SvgElement, uid: string, title: string, description: string, styles?: ReadonlyMap<string, ReadonlyArray<readonly [string, string]>>): { svg: string } | { problems: string[] } {
+export function embeddedSvg(root: SvgElement, uid: string, title: string, description: string, styles?: ReadonlyMap<string, ReadonlyArray<readonly [string, string, number?]>>): { svg: string } | { problems: string[] } {
   const problems = svgProblems(root);
   const box = viewBoxOf(root);
   if (box === undefined) problems.push("the <svg> has no usable viewBox (four numbers, each side at most 20000)");
@@ -418,12 +421,13 @@ export function embeddedSvg(root: SvgElement, uid: string, title: string, descri
     }
     if (depth > 0 && styles !== undefined) {
       const cls = el.attrs.find(([k]) => k === "class")?.[1].split(/\s+/) ?? [];
-      for (const c of cls) {
-        for (const [prop, value] of styles.get(c) ?? []) {
-          const at = attrs.findIndex(([k]) => k === prop);
-          if (at >= 0) attrs[at] = [prop, REFERENCING.has(prop) ? withPrefix(value, uid) : value];
-          else attrs.push([prop, REFERENCING.has(prop) ? withPrefix(value, uid) : value]);
-        }
+      // In stylesheet order, not class-attribute order: `.node{fill:white} .added{fill:orange}` makes
+      // class="added node" orange, as the checked document renders it.
+      const decls = cls.flatMap((c) => [...(styles.get(c) ?? [])]).sort((a, b) => (a[2] ?? 0) - (b[2] ?? 0));
+      for (const [prop, value] of decls) {
+        const at = attrs.findIndex(([k]) => k === prop);
+        if (at >= 0) attrs[at] = [prop, REFERENCING.has(prop) ? withPrefix(value, uid) : value];
+        else attrs.push([prop, REFERENCING.has(prop) ? withPrefix(value, uid) : value]);
       }
     }
     let children: Array<SvgElement | string> = el.children.map((c) => (typeof c === "string" ? c : rename(c, depth + 1)));

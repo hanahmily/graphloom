@@ -58,14 +58,22 @@ export interface DiagramInput {
   states: StateDrawing[];
 }
 
-/** The ids of an item's lifecycle entries, `state:<item id>:<entry name>`; a name an item uses twice gets `:2`, `:3`. */
+/**
+ * The ids of an item's lifecycle entries, `state:<item id>:<entry name>`; a name an item uses twice gets `:2`, `:3`,
+ * skipping any suffix another entry's name already occupies (`foo`, `foo`, `foo:2` give `foo`, `foo:3`, `foo:2`).
+ */
 export function stateIds(item: string, entries: ReadonlyArray<{ name: string }>): string[] {
-  const seen = new Map<string, number>();
+  const literal = new Set(entries.map((e) => `state:${item}:${e.name}`));
+  const taken = new Set<string>();
   return entries.map((e) => {
     const base = `state:${item}:${e.name}`;
-    const n = (seen.get(base) ?? 0) + 1;
-    seen.set(base, n);
-    return n === 1 ? base : `${base}:${n}`;
+    let id = base;
+    for (let n = 2; taken.has(id); n += 1) {
+      id = `${base}:${n}`;
+      while (literal.has(id) && id !== base) id = `${base}:${(n += 1)}`;
+    }
+    taken.add(id);
+    return id;
   });
 }
 

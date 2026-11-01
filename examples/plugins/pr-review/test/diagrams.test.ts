@@ -6,7 +6,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { ARCH_ID, diagramCheckCommand, DIAGRAM_CHECK_SCRIPT, diagramFlow, diagramInputOf, diagramSpecs, drawingOf, MAX_DIAGRAMS, MAX_DIAGRAM_BYTES, readAttempt, type DiagramInput } from "../src/diagrams.js";
+import { ARCH_ID, diagramCheckCommand, stateIds, DIAGRAM_CHECK_SCRIPT, diagramFlow, diagramInputOf, diagramSpecs, drawingOf, MAX_DIAGRAMS, MAX_DIAGRAM_BYTES, readAttempt, type DiagramInput } from "../src/diagrams.js";
 import { documentProblems, embeddedSvg, labelProblems, normalizeLabel, parseSvg, svgProblems, textNodes } from "../src/diagramsvg.js";
 import { htmlProblems, parseReportDoc } from "../src/html.js";
 import { largeNeeds } from "../src/large.js";
@@ -177,6 +177,13 @@ describe("the inertness of a drawing and of its document (design 6.11)", () => {
       expect(tag).toContain('font-weight="700"');
       expect(r.svg).not.toContain('class="ink"');
       expect(r.svg.match(/class="/g)).toHaveLength(1);
+    });
+
+    it("resolves several classes on one element in stylesheet order, not class-attribute order", () => {
+      const r = drawingOf(withStyle(".node { fill: #ffffff } .added { fill: #ee8800 }", "added node"), archSpec, "dd1");
+      if (!("svg" in r)) throw new Error(JSON.stringify(r));
+      expect(r.svg).toMatch(/<text [^>]*fill="#ee8800"/);
+      expect(r.svg).not.toMatch(/<text [^>]*fill="#ffffff"/);
     });
 
     it("resolves var(--x) from :root, with a fallback, and a rule that lists several classes", () => {
@@ -571,5 +578,15 @@ describe("report.json and review.html agree", () => {
     expect(htmlOf(sim)).toContain(arch.svg);
     const early = recordedHtml(sim.evidence, false);
     expect(early.state === "read" && early.value.includes(arch.svg)).toBe(true);
+  });
+});
+
+describe("lifecycle diagram ids", () => {
+  it("gives every entry its own id, even when a suffix collides with a literal name", () => {
+    const ids = stateIds("R1", [{ name: "foo" }, { name: "foo" }, { name: "foo:2" }]);
+    expect(new Set(ids).size).toBe(3);
+    expect(ids).toEqual(["state:R1:foo", "state:R1:foo:3", "state:R1:foo:2"]);
+    expect(stateIds("R1", [{ name: "foo:2" }, { name: "foo" }, { name: "foo" }])).toEqual(["state:R1:foo:2", "state:R1:foo", "state:R1:foo:3"]);
+    expect(stateIds("R2", [{ name: "a" }, { name: "b" }])).toEqual(["state:R2:a", "state:R2:b"]);
   });
 });
