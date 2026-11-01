@@ -547,3 +547,42 @@ describe("the requirements say what large mode does", () => {
     expect(text("answers-grounded")).toContain("fresh session");
   });
 });
+
+describe("recording an answered batch", () => {
+  type Reply = { output: { answers: Array<Record<string, any>> } };
+  const cite = (path: string) => ({ path, tree: "head", start: 1, end: 1, quote: "package" });
+
+  it("verifies and records the answers in question order, whatever order the answerer returned them in", () => {
+    const sim = run((s) => {
+      const b2 = structuredClone(s.results["answers-v1"]![1]!) as Reply;
+      b2.output.answers[0]!.citations = [cite("pkg/alpha/alpha.go")];
+      b2.output.answers[1]!.citations = [cite("pkg/beta/beta.go")];
+      b2.output.answers.reverse();
+      s.results["answers-v1"] = [s.results["answers-v1"]![0]!, b2 as never];
+      s.commands!["cite-b2-1"] = { exitCode: 0, stdout: "1 ok\n2 ok\nchecked 2\n" };
+    });
+    expect(stopOf(sim)).toMatchObject({ reason: "report ready" });
+    expect(sim.receipts.every((r) => r.valid)).toBe(true);
+  });
+
+  it("accepts a recorded downgrade: an answered missing-test answer the checker rejected twice becomes needs author without a test outline", () => {
+    const sim = run((s) => {
+      const b1 = structuredClone(s.results["answers-v1"]![0]!) as Reply;
+      const missing = b1.output.answers.find((a) => a.proposal.kind === "test")!;
+      Object.assign(missing, { status: "answered", answer: "pkg/alpha/alpha_test.go covers these functions.", citations: [cite("pkg/alpha/alpha_test.go")], proposal: { kind: "none", splits: [], testFile: "", testName: "", cases: [], assertion: "" } });
+      s.results["answers-v1"] = [b1 as never, s.results["answers-v1"]![1]!];
+      s.results["answers-revision-v1"] = [{ output: { answers: [missing] } }];
+      const checks = s.results["answer-check-v1"]!;
+      const round = structuredClone(checks[1]!) as { output: { verdicts: Array<Record<string, any>> } };
+      const v = round.output.verdicts.find((x) => x.question === missing.question)!;
+      Object.assign(v, { verdict: "unsupported", note: "the cited test does not exist", searches: [{ pattern: "alpha_test", tree: "base", paths: [], ignoreCase: false, hits: 0 }] });
+      s.results["answer-check-v1"] = [checks[0]!, round as never, round as never, checks[2]!];
+      s.commands!["cite-b1-1"] = { exitCode: 0, stdout: "1 ok\nchecked 1\n" };
+    });
+    expect(stopOf(sim)).toMatchObject({ reason: "report ready" });
+    expect(sim.receipts.every((r) => r.valid)).toBe(true);
+    const q = qa(sim).questions.find((x: { type: string }) => x.type === "missing-test");
+    expect(q.answer.status).toBe("needs author");
+    expect(q.answer.check.verdict).toBe("downgraded");
+  });
+});

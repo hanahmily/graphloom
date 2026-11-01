@@ -225,7 +225,12 @@ function checkBatchRecord(evidence: readonly EvidenceRecord[], value: unknown, i
   if (JSON.stringify(value.questions) !== JSON.stringify(batch.map((q) => q.id))) return { problem: `it covers ${JSON.stringify(value.questions)}, not the batch's ${batch.map((q) => q.id).join(", ")}` };
   const final = value.final as FinalAnswer[];
   if (JSON.stringify(final.map((a) => a.question)) !== JSON.stringify(batch.map((q) => q.id))) return { problem: "its answers are not the batch's questions in order" };
-  const problems = answerProblems(final, actx);
+  // The deterministic rules judge what the answerer said: a downgraded answer is judged as it was before the downgrade
+  // (its proposal fits that status), and the downgrade itself is checked apart: needs author, the statement kept.
+  const shown = final.map((a) => (a.check.verdict === "downgraded" ? { ...a, status: a.history.at(-1)?.status ?? a.status } : a));
+  const downgrade = final.filter((a) => a.check.verdict === "downgraded" && (a.status !== "needs author" || a.history.length === 0 || a.history.at(-1)!.answer !== a.answer));
+  if (downgrade.length > 0) return { problem: `answer(s) ${downgrade.map((a) => a.question).join(", ")} are marked downgraded without being needs author with their statement recorded` };
+  const problems = answerProblems(shown, actx);
   if (problems.length > 0) return { problem: `its answers fail the deterministic rules: ${problems.slice(0, 3).join("; ")}` };
   const verified = verificationOutcome(evidence, verificationPlan(final, actx, base, batchCitePrefix(index)));
   if (verified.state === "failed") return { problem: verified.reason };
