@@ -289,6 +289,33 @@ describe("a finding's place in the ledger across three heads", () => {
   });
 });
 
+describe("recording a published review keeps non-ASCII text whole in a ledger far past one pipe buffer", () => {
+  it("merges into a 250 KB ledger of CJK and emoji findings without altering a character", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "pr-review-utf8-"));
+    try {
+      await sh("git", ["init", "-q", "-b", "main", dir], { env });
+      const findings = Array.from({ length: 120 }, (_, i) => ({ head: hexOf("a"), id: `F${i + 1}`, origin: "round2", state: "open", path: "pkg/a.go", line: 1, text: `${"漢字かな한글".repeat(60)} ${"😀🎉".repeat(60)} ${i}`, history: [] }));
+      const text = JSON.stringify({ schema: "graphloom-pr-ledger-v1", heads: [{ sha: hexOf("a") }], qa: [], findings });
+      expect(Buffer.byteLength(text, "utf8")).toBeGreaterThan(150_000);
+      await writeFile(path.join(dir, "ledger.json"), text);
+      for (const name of ["ledger.md", "qa.json", "report.json"]) await writeFile(path.join(dir, name), "{}\n");
+      await sh("git", ["add", "-A"], { cwd: dir, env });
+      await sh("git", ["commit", "-q", "-m", "answers"], { cwd: dir, env });
+      await sh("git", ["update-ref", REF, (await sh("git", ["rev-parse", "HEAD"], { cwd: dir, env })).stdout.trim()], { cwd: dir, env });
+      const plan = planReview({ pull: { ...PULL }, head: hexOf("b"), nonce: "n", round1: { schema: ROUND1_SCHEMA, head: hexOf("b"), necessity: "necessary", issues: [] }, draft: { comments: [], summary: "" } as never });
+      const patch = JSON.stringify({ ...ledgerPatch({ ...PULL, head: hexOf("b") }, plan, { reviewId: 1, url: null, how: "created" }, new Map()), head: hexOf("a") });
+      for (const part of partCommands("publish-patch", ".graphloom/review/ledger/publish-patch.json", patch)) await sh(part.argv[0]!, part.argv.slice(1), { cwd: dir, env });
+      const c = ledgerPublishedCommand({ ...PULL, head: hexOf("a") }, JSON.parse(patch), process.execPath);
+      await sh(c.argv[0]!, c.argv.slice(1), { cwd: dir, env });
+      const after = (await sh("git", ["show", `${REF}:ledger.json`], { cwd: dir, env, maxBuffer: 10_000_000 })).stdout;
+      expect(after).not.toContain("�");
+      expect((JSON.parse(after) as { findings: Array<{ text: string }> }).findings.map((f) => f.text)).toEqual(findings.map((f) => f.text));
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 /** A real repository holding the ledger across runs, as the Answers and Publish stages advance it. */
 describe("a pull request reviewed on three heads", () => {
   const dirs: string[] = [];

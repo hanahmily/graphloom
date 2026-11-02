@@ -16,7 +16,7 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "b5eef5de5220d3078d943e8842eff43d43ca46e8a0ab1038646ba085b540ca78",
+    "sourceTree": "0b3c794a3953440112773da1056829fa0d4e7b8d9335170203fd7871b89e8ec4",
     "packageLock": "6ba71af10b9d0d39ffa547982c2d11c9bf2f20b5206cae3ee15e0af6a0b7068e",
     "files": {
       "package.json": "e0fde4edb6e3b710a67b68a941637cc4f7da87709e6b66e2af48f54b61601f71",
@@ -85,7 +85,7 @@
       "src/inventory.ts": "46c5db65903805751277146a19b13fba56e6e50386dbd66a1d175e512eef6e66",
       "src/large.ts": "df5668953dfd4a7523cab6e1149c4c6333ff30fb8f47c99a7748c139e24d6b14",
       "src/largeprompts.ts": "b50da707490a766448e948fc0877c0547a18f6cf0498eeff0d829ff837883255",
-      "src/ledger.ts": "9e8398d7ee8103bd419f7235c52d7014d485f1e09f4017043360281498bc4c08",
+      "src/ledger.ts": "1c38263a021022248135a0c9f232dbedc34c7fb366822510fbf0e8ef9336501a",
       "src/measurements.ts": "5afae805325553a3f26f2988d42e9312ec21126a1207398fb1cc67337256e0f4",
       "src/metrics/coverage.ts": "3f023ced01890cabbb5dab176f99a4e3877ed13fa3bf76983f731f1b77cd10ff",
       "src/metrics/crap.ts": "0b40d4785ab3b1da37a1fbc32029fb2f346930c7f23182fb1779c22df230e7eb",
@@ -111,7 +111,7 @@
       "src/profile.ts": "53716e77f733273a99d125976eda08506b36cb587e4f48a58d0eb547c3f7ef35",
       "src/prompts.ts": "b1b4b72c212b3636b60946cfb93067e13352278184334b2468a0d06a9254e422",
       "src/proof.ts": "f5a4fdd4626b694644b97368bea1a8dfba465ab510ef612fcaee12fd6d95b59d",
-      "src/publish.ts": "acf535d4eb18e2b9860c7000044e567ad4c248f17c1f39ef774487c91f45cb0a",
+      "src/publish.ts": "ec8a03e966d81a41eb9424799e2d8b0fba1fd0135a648298df79719560d8237b",
       "src/qa.ts": "0b14e71facde333da1b63a9c14117e41bd3dd6fe438fd76d56426045ac0809ab",
       "src/qaflow.ts": "073e3c6943b02d2fbf5ab8830356513bebcf2d79f2243c145a93e27873912667",
       "src/qaprompts.ts": "d1ba6cdd9cd04f7663017f9930b6c9c4538ebb56ef7c0d4ab5be45ba99281568",
@@ -176,14 +176,14 @@
       "test/principles.test.ts": "e2dc1d61772987aac8b722997726baa511a7aaa686304feed6e8f8c6a5c71580",
       "test/profile.test.ts": "41eed6a232317dd4e1a52f89cb3827597e7f2b5976cd9e0a3a21a32a411fb3e4",
       "test/publish.test.ts": "19fa3c07a92d1f036a86ff2dc21e1692da3428844976246369b0f4eca38a53bd",
-      "test/qa-git.test.ts": "2d281e1a19d6fe057294f563844864972a347e6c956f2b5c570396bb5ed6d230",
+      "test/qa-git.test.ts": "1f89d938dc72fb7a6d9ddd0c668977b22d0bcab6782af3d0de2b8dc00914c002",
       "test/qa-graph.test.ts": "65a3b3249d96f1fd89cc22e8025a7853866432b9255647da5edbe43aa467d028",
       "test/qa-ids-searches.test.ts": "c6901388c91b774a130dfa4126acf9be37b5e3a3789f4ad4b9878f603396b542",
       "test/qa-units.test.ts": "d50544a525fcd78f93570a346205354324681011672c72bdee67687396a4153b",
       "test/rehearsal-docs.test.ts": "348ec40ab564e45a023985a48ed4f0139e34fb9f90dc37419a1c886c85cb7890",
       "test/report-analysis.test.ts": "106ebb6ceef88a3ac3004319f18e4a1ef24fffe711c7190368f11cfdc5d9b25c",
       "test/report.test.ts": "d2586ad91970641d18267741275d675907de1e2978203300f42f774cf76e600e",
-      "test/rereview.test.ts": "21fad860abb73fcb474aa24304256fce7b5d6146c719d46ed203d86ab135fa11",
+      "test/rereview.test.ts": "747b9c03de75ea181941942c317747fb3727bdd2e656ee8c59ca7824e4d191b9",
       "test/reuse.test.ts": "2f153341f66ed857253b561c885f50da2b6255c6a791793fea9ae0386b56b75c",
       "test/review-principles.test.ts": "7f3abc02bc6fec3b48ed7efd4eabdb6a0a1b9bc33bbca4ca0ca32671147b998e",
       "test/review-units.test.ts": "0c41c47a9aef9cd9a35c0130e2ee49fb103a1c2aa26ed898e92169145b4d925c",
@@ -197,7 +197,7 @@
       "test/tsmetrics.test.ts": "15e64d695be1bc3e92e75bd0b0f03bbc84ff4637e789885db66ff4e34dd907cd",
       "test/validate.test.ts": "5e75eef9e625e98a50452eacf261bde3813eabbec3f1e62ee15c562634e18170",
       "test/visual.test.ts": "a23ae60d3086cdc48a6f99255e397c20cd0290ba9c2ea3b1f411719e7e140751",
-      "test/write.test.ts": "d52841a50c71064a9610bcccfd159dfcaa1f04e68cf23e5d2481a8d63264fdd9"
+      "test/write.test.ts": "3c2ef671b14c6628c60b27f76caf7bb7209e6baabbc4037b2e6350a73b2b9279"
     }
   }
 }

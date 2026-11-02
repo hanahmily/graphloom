@@ -72,3 +72,22 @@ describe("secretFindings (design 12.3)", () => {
     expect(secretFindings("commit 0123456789abcdef0123456789abcdef01234567 and ghp_ short and AKIA123")).toEqual([]);
   });
 });
+
+describe("the chunks a file is written in never cut a character", () => {
+  const text = `${"a".repeat(3_999)}😀${"漢".repeat(2_500)}${"😀🎉".repeat(2_100)}${"é".repeat(4_001)}tail`;
+
+  it("splits on character boundaries: no lone surrogate, every chunk valid UTF-8 text, and the chunks join back to the text", () => {
+    const chunks = writeChunks(text);
+    expect(chunks.length).toBeGreaterThanOrEqual(5);
+    expect(chunks.join("")).toBe(text);
+    for (const c of chunks) {
+      expect(c.length).toBeLessThanOrEqual(4_000);
+      expect(Buffer.from(c, "utf8").toString("utf8")).toBe(c);
+      expect(c).not.toMatch(/[\ud800-\udbff]$/);
+      expect(c).not.toMatch(/^[\udc00-\udfff]/);
+    }
+    // The emoji that straddles the 4,000th unit is carried whole into the next chunk.
+    expect(chunks[0]!.length).toBe(3_999);
+    expect(chunks[1]!.startsWith("😀")).toBe(true);
+  });
+});

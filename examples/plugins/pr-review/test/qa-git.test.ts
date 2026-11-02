@@ -338,7 +338,9 @@ describe("the ledger compare-and-swap (design 9.1)", () => {
 
   it("reads a prior ledger with about 200 KB of findings in parts that each fit a command report, and joins them against their digest", () => {
     const dir = setup();
-    const findings = Array.from({ length: 200 }, (_, i) => ({ head: "a".repeat(40), id: `F${i + 1}`, origin: "round2", key: `k${i}`, state: "open", path: "pkg/a.go", line: i + 1, text: `finding ${i} ${i === 0 ? "é☃ café" : ""} ${"x".repeat(1000)}`, history: [{ head: "a".repeat(40), status: "open" }], github: { head: "a".repeat(40), reviewId: 1, commentId: i, inline: true } }));
+    // CJK (3 bytes each) and emoji (a surrogate pair, 4 bytes) in every finding: pipes, argv chunks and report parts all cut this text at many places.
+    const mixed = (i: number): string => `finding ${i} ${"漢字かな한글".repeat(40)} ${"😀🎉".repeat(30)} ${"x".repeat(300)}`;
+    const findings = Array.from({ length: 200 }, (_, i) => ({ head: "a".repeat(40), id: `F${i + 1}`, origin: "round2", key: `k${i}`, state: "open", path: "pkg/a.go", line: i + 1, text: mixed(i), history: [{ head: "a".repeat(40), status: "open" }], github: { head: "a".repeat(40), reviewId: 1, commentId: i, inline: true } }));
     const big = JSON.stringify({ schema: "graphloom-pr-ledger-v1", pull: { owner: "o", repo: "r", number: 1 }, heads: [{ sha: "a".repeat(40) }], purposes: [], qa: [], findings });
     expect(big.length).toBeGreaterThan(200_000);
     const writes = ledgerWriteCommands(pr, "absent", big, "# big\n");
@@ -361,8 +363,9 @@ describe("the ledger compare-and-swap (design 9.1)", () => {
     expect(state.state).toBe("read");
     const value = (state as { value: { findings: Array<{ id: string; text: string }> } }).value;
     expect(value.findings).toHaveLength(200);
-    expect(value.findings[0]!.text).toContain("é☃ café");
-    expect(value.findings[199]!.text).toContain("finding 199");
+    // Every finding comes back character for character: no replacement character, nothing cut mid-character.
+    expect(value.findings.map((f) => f.text)).toEqual(findings.map((f) => f.text));
+    expect(JSON.stringify(value)).not.toContain("\ufffd");
     // A part from another read, or one missing its digest, is never joined.
     const tampered = evidence.map((e, i) => (i === 2 ? { ...e, payload: { command: { ...(e.payload as { command: object }).command, stdoutTail: "graphloom-prior 2 99 " + "0".repeat(64) + "\nx" } } } : e)) as EvidenceRecord[];
     expect(priorState(tampered, sha)).toMatchObject({ state: "unreadable", reason: expect.stringContaining("not of the same read") });

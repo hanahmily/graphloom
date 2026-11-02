@@ -188,7 +188,7 @@ export function writtenLedger(argv: readonly string[]): { ref: string; old: stri
  * Q&A (a #1445-sized one passed 89 KB), past what a command report holds whole, so the command prints only these
  * (`node` reads the JSON; git's own status fails the command, since a pipe would hide it).
  */
-const PRIOR_EXTRACT = String.raw`let s="";process.stdin.on("data",(d)=>{s+=d}).on("end",()=>{const v=JSON.parse(s);const c=(t)=>typeof t==="string"&&t.length>4000?t.slice(0,4000):t;
+const PRIOR_EXTRACT = String.raw`let s="";process.stdin.setEncoding("utf8");process.stdin.on("data",(d)=>{s+=d}).on("end",()=>{const v=JSON.parse(s);const c=(t)=>typeof t==="string"&&t.length>4000?t.slice(0,4000):t;
 const qa=(Array.isArray(v.qa)?v.qa:[]).map((q)=>({id:q.id,type:q.type,key:q.key,symbol:q.symbol,item:q.item,status:q.status,state:q.state}));
 const findings=(Array.isArray(v.findings)?v.findings:[]).map((f)=>({...f,body:c(f.body),text:c(f.text)}));
 const r=JSON.stringify({schema:v.schema,heads:v.heads,qa,findings}).replace(/[\u007f-\uffff]/g,(m)=>"\\u"+m.charCodeAt(0).toString(16).padStart(4,"0"));

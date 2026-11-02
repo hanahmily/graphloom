@@ -453,7 +453,7 @@ export function publishFlow(evidence: readonly EvidenceRecord[], plan: ReviewPla
 // ---- the ledger ----
 
 /** The code `ledger-published` runs over the ledger's `ledger.json` and the patch: `SAME` when the ledger already holds this review. */
-const MERGE = String.raw`let s="";process.stdin.on("data",(d)=>{s+=d}).on("end",()=>{
+const MERGE = String.raw`let s="";process.stdin.setEncoding("utf8");process.stdin.on("data",(d)=>{s+=d}).on("end",()=>{
 const v=JSON.parse(s);const p=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
 const heads=Array.isArray(v.heads)?v.heads:[];const h=heads.find((x)=>x.sha===p.head);
 if(h&&h.reviewId===p.reviewId){process.stdout.write("SAME");return}
