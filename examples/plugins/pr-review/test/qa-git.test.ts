@@ -314,8 +314,8 @@ describe("the ledger compare-and-swap (design 9.1)", () => {
     const second = git(dir, ["rev-parse", ref]);
     expect(git(dir, ["rev-parse", `${second}^`])).toBe(first);
     expect(git(dir, ["log", "--format=%an", "-1", ref])).toBe("graphloom");
-    // The prior read keeps the schema and the heads only.
-    expect(JSON.parse(run(dir, priorShowCommand(first, process.execPath)).report)).toEqual({ schema: "graphloom-pr-ledger-v1" });
+    // The prior read keeps the schema, the heads, the questions' ids and keys and the posted items.
+    expect(JSON.parse(run(dir, priorShowCommand(first, process.execPath)).report)).toEqual({ schema: "graphloom-pr-ledger-v1", qa: [], findings: [] });
   });
 
   it("reads the heads of a prior ledger far larger than a command report holds, and fails when git cannot read it", () => {
@@ -328,7 +328,8 @@ describe("the ledger compare-and-swap (design 9.1)", () => {
     const sha = git(dir, ["rev-parse", ref]);
     const read = run(dir, priorShowCommand(sha, process.execPath));
     expect(read.code, read.stderr).toBe(0);
-    expect(JSON.parse(read.report)).toEqual({ schema: "graphloom-pr-ledger-v1", heads });
+    expect(JSON.parse(read.report)).toMatchObject({ schema: "graphloom-pr-ledger-v1", heads, findings: [] });
+    expect(read.report.length).toBeLessThan(100_000);
     expect(run(dir, priorShowCommand("f".repeat(40), process.execPath)).code).not.toBe(0);
   });
 

@@ -31,8 +31,10 @@ const comment = (c: ScriptedComment): ReviewComment => ({
   ...c,
 } as ReviewComment);
 
-/** A pass's reply: the comments, and a summary that says every one of the `total` files was reviewed. */
-export const passReply = (total: number, comments: readonly ScriptedComment[]): RehearsalReply => ({ output: { comments: comments.map(comment), summary: { total_files: total, reviewed_files: total, skipped: [] } } });
+/** A pass's reply: the comments, a summary that says every one of the `total` files was reviewed, and the judgments of the earlier findings it was given (none by default). */
+export const passReply = (total: number, comments: readonly ScriptedComment[], prior: ReadonlyArray<{ finding: string; status: "still_present" | "fixed"; reason?: string }> = []): RehearsalReply => ({
+  output: { comments: comments.map(comment), summary: { total_files: total, reviewed_files: total, skipped: [] }, prior: prior.map((p) => ({ reason: "read the code at its place on this head", ...p })) },
+});
 
 export interface ScriptedVerdict {
   finding: string;

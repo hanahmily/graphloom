@@ -108,7 +108,7 @@ passed.
 | Three aspect reviewers, each on its own rules | Correctness, maintainability and security reviewers run open-code-review's delegation workflow over the same files, each with a custom rule file that replaces ocr's built-in rules. A pass whose rule groups are not all `custom` fails, so no aspect is ever reviewed with the generic rule. The reviewers share the answerer's harness and context; each finding is verified in a fresh session on a different harness, which is the independent check ([§8.1](#81-review), [§13.1](#131-roles)) |
 | Reviewers prove bugs with tests, not only by reading | A finding that claims wrong behavior carries a test the reviewer wrote. The graph reruns it in the Docker sandbox, as an overlay that never enters the PR checkout. The finding is `proven` only when the test fails on the head in its own assertion and the verifier judges that it shows the claimed bug. Unproven behavioral findings are never posted as P0 or P1 and never make the verdict `request-changes` ([§8.2](#82-reproducing-tests)) |
 | Fixes are suggestions only | Small, verified fixes become GitHub ` ```suggestion ` blocks. Nothing is committed or pushed |
-| One run reviews one head; a later head continues from the ledger | A run reads the ledger (ids and continuity) and records the posted review's ids in it. Re-checking, on a new head, what the earlier review posted is part 2 of 0.21 ([§9](#9-incremental-re-review), [§18](#version-021-two-rounds-one-run-per-head-and-a-posted-review)) |
+| One run reviews one head; a later head continues from the ledger | A run reads the ledger: ids continue (`F<n>`, `Q<n>`), each earlier open item is re-checked on the new head (fixed, or still open with a link to its comment), and round 2 waits until round 1's earlier issues are fixed. The posted review's id and its items' ids and statuses go back into the ledger ([§9](#9-incremental-re-review), [§18](#version-022-fix-checking-on-a-later-head)) |
 | The per-PR ledger is durable and needs no extra permission | It is a Git ref in the operator's review clone, `refs/graphloom/pr-review/<owner>/<repo>/<N>/ledger`, advanced by compare-and-swap ([§9.1](#91-where-the-ledger-lives)) |
 
 ## 2. The run: two rounds and no human
@@ -133,7 +133,10 @@ previous runs left ([§9.1](#91-where-the-ledger-lives)).
      postable findings, with the verdict as its first line. The run then ends,
      `complete`, with the verdict and the review's link in its result. A round
      that found issues says `round 1: changes requested`; the next run, on the
-     head the author pushes after, is where round 2 happens.
+     head the author pushes after, is where round 2 happens, once round 1's earlier
+     issues are fixed. A run on a later head also says what became of the items
+     an earlier review posted (fixed in which commit, or still open) and counts the
+     open ones in its verdict ([§9](#9-incremental-re-review)).
 - **`… at <sha>, asking every question.`** (`task new … --all-questions`) asks
   every question even when N1 judges the change unnecessary and the checker
   supports it ([§7.5](#75-the-necessity-question-n1)).
@@ -2348,7 +2351,13 @@ head and the event is always `COMMENT`.
      findings (a Q&A question in the draft is round 1's, never posted twice);
    - the **verdict as the body's first line**: `Review passed` when round 1
      has no open issue and round 2 no open postable finding, else
-     `Changes requested: <n> open` (the number of items posted);
+     `Changes requested: <n> open` (the open items: the ones posted now and, since 0.22, the
+     earlier heads' items that are still open);
+   - since 0.22, on a later head, an **Earlier items** section of the body: each earlier open
+     item as `fixed in <sha7>` or `still open` with a link to its earlier comment
+     ([§9.3](#93-re-checking-earlier-findings)). A still-open item is not posted again, unless
+     its old thread is outdated on GitHub (or a round-2 finding's anchor was not found again),
+     when it is commented again at its place on this head, with its same marker;
    - an item with a diff anchor (a hunk of the file's patch at the head, on its
      side) is an inline comment, at most 50; the others are in the body;
    - each item ends with its marker, `<!-- graphloom-finding: N1 -->`,
@@ -2386,7 +2395,9 @@ head and the event is always `COMMENT`.
    reads' results) and are written to the ledger by `ledger-published`: one
    more commit that sets `reviewId` (and `reviewed`, `round1`, `verdict`,
    `open`) on the head and a `github` entry (`reviewId`, `commentId`, `inline`)
-   on each item (a compacted item's whole text as `body`), by compare-and-swap from the
+   on each item (a compacted item's whole text as `body`; since 0.22 also its text, key and
+   anchor, and each earlier item's status for this head, with a `withdrawn` entry for each
+   finding a verifier dismissed), by compare-and-swap from the
    ref's value it reads in the same command. The patch can be far past one argument, so
    it is written first as a bounded part set with a digest (`publish-patch-p<k>`, as
    `report.json` is) and the command reads the file, so a ledger another run advanced since is built upon and a review
@@ -2399,17 +2410,22 @@ the variable and resume.
 ## 9. Incremental re-review
 
 A run reviews one head and ends ([§2](#2-the-run-two-rounds-and-no-human)); what a
-later run does with the earlier runs' ledger is this section. **Status (0.21,
-part 1):** a run reads the ledger for continuity (the heads it has seen, and the
-ids of what an earlier review posted) and writes to it: this head's report and
-Q&A after Answers, and the posted review's ids after Publish
-([§8.5](#85-publish)). Everything that **re-checks** earlier posted items on a new
-head, [§9.2](#92-mapping-a-new-head-to-the-last-reviewed-one) to
-[§9.4](#94-rounds), item 3 (whether an earlier round-1 issue or round-2 finding
-is fixed, statuses, and holding round 2 until round 1's earlier issues are fixed), is
-**part 2 of 0.21** ([§18](#version-021-two-rounds-one-run-per-head-and-a-posted-review)).
-The seams it will use are in part 1: every posted item carries its marker and
-its ledger `github` ids, and every ledger item carries the `head` it was posted on.
+later run does with the earlier runs' ledger is this section. **Status (0.22):**
+a run reads the ledger whole in Fetch (`ledger-prior`) and uses it three ways.
+**Continuity:** `Q<n>` and `F<n>` continue across heads, and the same issue on
+a new head maps to its earlier id by a stable key
+([§9.1](#91-where-the-ledger-lives)). **Re-checking:** every earlier open item
+is judged on the new head, round 1's by the Q&A it runs as usual and round 2's
+by the aspect reviewers and their verifiers
+([§9.3](#93-re-checking-earlier-findings), [§9.4](#94-rounds)); closed items are
+never raised again. **Reporting:** the posted review lists each earlier item as
+fixed (in which commit) or still open (with a link to its comment), counts the
+open ones in its verdict ([§8.5](#85-publish)), and the ledger records each
+item's status per head. Not implemented: the commit and file mapping of
+[§9.2](#92-mapping-a-new-head-to-the-last-reviewed-one) (round 2's scope on a
+new head is the same as on a first), the rerun of a proven finding's test
+(there are no reproducing tests yet), a verifier's judgment of an author's
+dispute, and the threads' own resolution state as an input.
 
 ### 9.1 Where the ledger lives
 
@@ -2432,13 +2448,32 @@ to publishing. Posted comments still end with
 `<!-- graphloom-finding: F3 -->` (or `Q3`), so the ledger can be seeded from
 them if the ref is lost.
 
-`ledger.json` holds `heads: [{ sha, base, commits: [{ sha, patchId }],
-filePatchIds, facts, runId, reported, reviewed, reviewId?, round1?, verdict?, open? }]`, `qa:
-[{ id, type, symbol, item, status, answer, state, history[], github? }]` and `findings`
+`ledger.json` holds `heads: [{ sha, base, files, commits, facts, reported, reviewed, reviewId?, round1?, verdict?, open?, reviewUrl? }]`, `qa:
+[{ id, type, key, symbol, item, status, answer, state, history[], github? }]` and `findings`
 (issue-fix's [ledger](design-issue-fix-graph.md#the-findings-ledger) plus
-anchors and GitHub ids; in 0.21 each posted item is `{ head, id, origin, path, line, state, github: { reviewId, commentId, inline } }`). `F<n>` and `Q<n>` continue across runs (part 2: in part 1 a run numbers from 1, so an id is only unique with its `head`).
+anchors and GitHub ids). Since 0.22 there is **one entry for each posted item id**, whatever head
+posted it: `{ head (first posted), id, origin, key, state, path, line, endLine?, side?, aspect?,
+severity?, kind?, anchorText?, patchId?, hunk?, text, body?, github: { head, reviewId, commentId,
+inline }, fixedIn?, history: [{ head, status, reason?, carried?, reposted? }] }`, where `state` is
+`open`, `fixed`, or `withdrawn` (a finding a verifier dismissed, never posted, kept so it is not
+raised again). The Answers stage carries the earlier entries into the ledger it writes; Publish
+updates them (`ledger-published`). The ledger records, per head, each item's status.
+
+`F<n>` and `Q<n>` **continue across runs**: a new finding takes the number after the highest `F`
+in the ledger, and a question whose **stable key** the ledger holds keeps its id (a new question
+takes the number after the highest `Q`). The key of a round-1 item is its type and subject: the
+symbol (path and qualified name), the measured function (path and name), else the change item's
+first cited path (the reporter's item ids and text differ from head to head, the cited path does
+not); `N1` is `necessity|N1`; two questions with one key are told apart by order. The key of a
+round-2 finding is its aspect and its anchor (the file and the text of the commented line).
+`qa.json` carries each question's key (`stable`). A first run, with no ledger, numbers from 1 as
+before.
 
 ### 9.2 Mapping a new head to the last reviewed one
+
+**Not implemented in 0.22.** A later run reviews the whole scope of its head as a first
+run does, and re-checks the earlier items against it ([§9.3](#93-re-checking-earlier-findings)); the
+delta report and the unmatched-commit scope below are later work.
 
 L is the last head with base Lb: the last reported head for the deltas, the
 last reviewed head for the review scope. H is the new head with base Hb. The
@@ -2458,34 +2493,57 @@ from `Hb...H`.
 
 ### 9.3 Re-checking earlier findings
 
-Open prior findings are re-anchored to H: shifted with an unchanged per-file
-patch, else found by `anchorText` within ±20 lines, else marked outdated.
-Every pass of the finding's aspect gives them a `prior` status, with their
-thread (`isResolved`, `isOutdated`, replies as untrusted data). A proven
-finding's recorded test is also rerun on H, in the sandbox, with the same
-mechanism ([§8.2](#82-reproducing-tests)). A test that now passes is the
-evidence for `fixed`. One that still fails keeps the finding open, whatever
-the pass says.
+**Round 2** (`src/prior.ts`, `src/priorreview.ts`, `src/review.ts`). Each earlier open
+round-2 finding is re-anchored to the new head: shifted when its file's patch is unchanged
+(the patch with its hunk numbers stripped has the same id, so the finding moves by its hunk's
+offset), else found by its `anchorText` within ±20 lines of its old place in the new patch,
+else marked outdated; a finding whose file is no longer in the pull request is `fixed` (its
+file left the change), and one whose file lies outside this review's scope (large mode) is
+carried open, not re-checked. The rest are given to their aspect's reviewer in its first pass, as
+`prior` findings (their text is data): the reviewer returns a `prior` entry for each, `still_present`
+or `fixed`, with a reason. The verifier confirms the ones still present like a new finding: `confirmed`
+keeps it open, `refuted` (with quotes of the head that the tree check verifies) makes it `fixed`,
+and anything it cannot settle leaves it open. A finding the reviewer calls `fixed` is closed
+without a verifier job. A prior finding never makes the sweep run another pass; new findings do,
+as before. The record of the aspect (`pr-review-aspect-v1`) has a `prior` list with each one's
+outcome (`open` or `fixed`, and `how`: the reviewer, the verifier, the file leaving the change, or
+carried).
 
-| Thread or pass says | Result | Review body says |
+**Round 1** is not a second mechanism: a later head's round 1 runs as usual and each earlier open
+round-1 issue is then `fixed` (its question is now answered with no blocking category, or its
+subject is gone: no question with that id remains) or still open (it is still an issue on this
+head). When N1 is judged unnecessary and the other questions are skipped, an earlier issue about
+one of them is left open, not re-checked. `round1.json` records this as `prior`. The author's
+replies on the issue's earlier GitHub thread (from the snapshot's review threads, other than the
+first author's) are given to the answer checker, as untrusted data, in the assignment for that
+question (and for N1), so it can check what they claim against the code; they decide nothing.
+
+| This head says | Result | Review body says |
 |---|---|---|
-| `resolved` on another head | `fixed` | fixed in `<sha>` |
-| `still_present` | still open; new inline comment only if the old thread is outdated | still open (link) |
-| The author disputes it | The verifier judges the argument: `confirmed` keeps it open, `refuted` makes it `withdrawn` | disputed: still applies because … / withdrawn after the author's reply |
-| `withdrawn` by the reviewer | re-verified | withdrawn |
-| Resolved on GitHub without a fix | `resolved-by-maintainer` | not listed |
-| `drafted`, never published | carried into the next draft | as new |
+| Round 1: the item is no longer an issue | `fixed` | fixed in `<sha>` |
+| Round 1: still an issue | still open; no new comment unless its old thread is outdated | still open (link to the earlier comment) |
+| `fixed` by the reviewer, or the verifier refutes `still_present` | `fixed` | fixed in `<sha>` |
+| `still_present` and confirmed (or not settled) | still open; a new inline comment only if the old thread is outdated on GitHub or the anchor was not found again | still open (link), or "its old thread is outdated, so it is commented again" |
+| Round 2 did not run (round 1 has open issues), or the file is outside the scope | still open, not re-checked | still open (link), with the reason |
+| A new finding a verifier dismissed | recorded `withdrawn` | not listed |
 
-Status goes in the **review body** with thread links. REST review submission
-cannot reply in threads, and the single-review rule outweighs that.
-Replying in threads is deferred ([§19](#19-deferred-items)).
+Not in 0.22: a proven finding's recorded test rerun on the head (there are no reproducing tests,
+[§8.2](#82-reproducing-tests)), a verifier judging the author's dispute of a finding, and
+`resolved-by-maintainer` from a thread resolved on GitHub without a fix. A thread's
+`isOutdated` is read from the snapshot; its other state is not.
 
-**Never raised again:** `fixed`, `withdrawn`, `dismissed`,
-`dropped-by-maintainer` and `resolved-by-maintainer` are closed. A new comment
-overlapping one is suppressed before verification. The only exception is
-issue-fix's regression rule: a `fixed` or `dismissed` finding reopens when it
-is named again, confirmed, and its refutation quotes no longer match. The two
-maintainer states never reopen.
+Status goes in the **review body** with links (`…/pull/<n>#discussion_r<commentId>`, or the
+review's own link for an item posted in a body). REST review submission cannot reply in threads,
+and the single-review rule outweighs that. Replying in threads is deferred
+([§19](#19-deferred-items)).
+
+**Never raised again:** `fixed` and `withdrawn` items are closed. A new comment of a pass that
+overlaps a closed finding (or an earlier one being re-checked) on the same file and side, at its
+place on the new head, is dropped before verification and counted in the pass record
+(`suppressed`). The older issue-fix regression rule (a fixed finding reopens when it is named again
+and its refutation no longer matches) is not applied: a closed finding stays closed. A round-1
+issue that comes back after being fixed is a new issue with the same id (its status history shows
+`fixed` and then `open`).
 
 ### 9.4 Rounds
 
@@ -2523,17 +2581,18 @@ reviews one head.
 3. **No issue: round 2 in the same run.** Review, Draft and Publish run, and the
    review posted is round 2's: the draft's postable findings, with the verdict
    `Review passed` when there are none.
-4. **A later run, on a new head.** It reads the ledger and continues. Once round
-   1's previously posted issues are fixed on the new head, it goes to round 2.
-   Round 1 and round 2 can both check whether their earlier posted comments are
-   fixed on the PR's new head, and the posted review gives its verdict: the review
-   passed, or not. **This is part 2 of 0.21 and is not implemented in part 1**:
-   a run does not read earlier items' state, does not re-check them and does not
-   gate round 2 on them; every run on a new head decides round 1 afresh and posts.
+4. **A later run, on a new head.** It reads the ledger, continues its ids and runs round 1 on
+   the new head as usual, then re-checks every earlier round-1 issue
+   ([§9.3](#93-re-checking-earlier-findings)). **Round 2 runs only when no round-1 issue,
+   earlier or new, is open.** When it runs, it re-checks the earlier round-2 findings and reviews the
+   head; when it does not, the earlier findings are carried, still open. The review posted says
+   what became of each earlier item, and its verdict is `Review passed` only when no round-1
+   issue is open and no round-2 postable finding is open, counting the earlier ones still open:
+   otherwise `Changes requested: <n> open`. A still-open item is not posted again.
 
 The three-pass cap of the earlier version, "from round
 `review.discoveryRounds + 1` on only new proven P0 and P1 findings in scope are
-posted", is part of the same re-review work and is not applied in part 1. Q&A is
+posted", is not applied (there are no proven findings yet). Q&A is
 not limited by rounds: every new symbol is always asked about and answered.
 
 ## 10. Draft format, edits, and comment style
@@ -3434,6 +3493,38 @@ What 0.11 does, where this document leaves it open:
   Q&A that does not fit still stops the run "incompatible task" and says so.
   (0.12 lifts this: [§6.6](#66-output), multi-part writes.)
 
+### Version 0.22: fix checking on a later head
+
+Part 2 of the maintainer's two-round decision ([version 0.21](#version-021-two-rounds-one-run-per-head-and-a-posted-review)).
+The workflow, unchanged: round 1, and if it has issues post them; after they are fixed on a later head,
+round 2; on each head, round 1 and round 2 check whether their earlier posted comments are fixed, and the
+posted review gives the verdict. One run still reviews one head, nothing waits or polls, and the
+review is always a `COMMENT`.
+
+- **Continuity** ([§9.1](#91-where-the-ledger-lives)): Fetch reads the prior ledger whole
+  (`ledger-prior`, now also its questions' keys and its posted items); `Q<n>` and `F<n>` continue
+  across heads. A question's id is kept by its stable key (type and subject); a new finding numbers on from the
+  ledger's last `F`. `qa.json` carries `stable`, the ledger's `qa` entries carry `key`, and the Answers
+  stage carries the earlier posted items into the ledger it writes (it wrote `findings: []` before).
+- **Round-1 re-check** ([§9.3](#93-re-checking-earlier-findings)): the head's round 1 runs as usual;
+  each earlier open issue is then `fixed` or still open, recorded in `round1.json` as `prior`.
+  The author's replies on the issue's thread (from the snapshot, untrusted) go to the answer checker
+  for that question. Round 2 runs only when no round-1 issue, earlier or new, is open
+  (the gate is unchanged: `round1.issues` holds every open issue).
+- **Round-2 re-check** ([§9.3](#93-re-checking-earlier-findings)): earlier open findings are
+  re-anchored to the new head (shift, else ±20 lines, else outdated; file gone: fixed), given to
+  their aspect's reviewer as `prior` (contract `pr-code-review-v1` gains a required `prior` list:
+  `still_present` or `fixed` for each), and the ones still present are verified like new
+  findings. A new comment over a closed or an earlier finding is dropped before verification.
+  Findings a verifier dismissed are recorded `withdrawn`.
+- **Publish** ([§8.5](#85-publish)): the body's **Earlier items** section (fixed in `<sha7>`, or still
+  open with a link to the earlier comment); no new comment for a still-open item unless its thread is
+  outdated; verdict `Review passed` only when nothing is open, earlier items included. The ledger
+  records each item's status per head.
+- **Not in 0.22:** the commit/file mapping of [§9.2](#92-mapping-a-new-head-to-the-last-reviewed-one),
+  the rerun of a proven finding's test, judging an author's dispute of a finding, and the thread's
+  resolution state as an input.
+
 ### Version 0.21: two rounds, one run per head, and a posted review
 
 The maintainer's decision: **the graph includes no human.** The maintainer no
@@ -3486,14 +3577,9 @@ run does; part 2 is what a later run does with the earlier runs' posts.
   **Publish**; 13 requirements. The run ends `complete`, with the verdict and the
   review's link in the result.
 
-**Part 2 (later in 0.21), not implemented:** on a new head, read the ledger and
-check whether the items an earlier run posted are fixed (round 1's issues and
-round 2's findings: statuses `fixed` / still open, the posted review's verdict),
-and hold round 2 until round 1's earlier issues are fixed
-([§9.3](#93-re-checking-earlier-findings), [§9.4](#94-rounds), item 4). The seams
-are in part 1: markers on every posted item, `github` ids and `head` on every
-ledger item, and the `round1` and `reviewId` the head records. Until then every
-run decides round 1 afresh on its head and posts.
+**Part 2 (0.22.0)** is what a later run does with the earlier runs' posts:
+[version 0.22](#version-022-fix-checking-on-a-later-head). Until then (0.21.x) every
+run decided round 1 afresh on its head and posted.
 
 ### Version 0.20: the design principles reach the aspect reviewers
 

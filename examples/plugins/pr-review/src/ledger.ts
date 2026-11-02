@@ -40,6 +40,8 @@ export interface LedgerHead {
 export interface LedgerQa {
   id: string;
   type: string;
+  /** The question's stable key (design §9.4): its type and subject, which maps the same question on a later head to this id. */
+  key: string;
   symbol: string | null;
   item: string;
   status: string;
@@ -63,17 +65,24 @@ export interface LedgerInput {
 export function ledgerJson(i: LedgerInput, prior: unknown): string {
   const priorHeads = isObject(prior) && Array.isArray(prior.heads) ? (prior.heads as LedgerHead[]).filter((h) => isObject(h) && typeof h.sha === "string" && h.sha !== i.pr.head) : [];
   const answers = new Map(i.answers.map((a) => [a.question, a] as const));
+  const current = new Set(i.questions.map((q) => q.id));
+  // Questions an earlier head asked and this one did not stay in the ledger (id and key), so their ids are never reused; the posted items stay too.
+  const carried = isObject(prior) && Array.isArray(prior.qa) ? (prior.qa as unknown[]).filter((q) => isObject(q) && typeof q.id === "string" && !current.has(q.id)) : [];
+  const findings = isObject(prior) && Array.isArray(prior.findings) ? prior.findings : [];
   const head: LedgerHead = { sha: i.pr.head, base: i.base, files: i.files, commits: i.commits, facts: i.facts, reported: true, reviewed: false };
   return JSON.stringify({
     schema: LEDGER_SCHEMA,
     pull: { owner: i.pr.owner, repo: i.pr.repo, number: i.pr.number },
     heads: [...priorHeads, head],
     purposes: i.purposes,
-    qa: i.questions.map((q): LedgerQa => {
-      const a = answers.get(q.id);
-      return { id: q.id, type: q.type, symbol: q.symbol ?? q.fn ?? null, item: q.item, status: a?.status ?? "unanswered", answer: (a?.answer ?? "").slice(0, ANSWER_CHARS), state: "open", history: a?.history ?? [] };
-    }),
-    findings: [],
+    qa: [
+      ...i.questions.map((q): LedgerQa => {
+        const a = answers.get(q.id);
+        return { id: q.id, type: q.type, key: q.stable ?? "", symbol: q.symbol ?? q.fn ?? null, item: q.item, status: a?.status ?? "unanswered", answer: (a?.answer ?? "").slice(0, ANSWER_CHARS), state: "open", history: a?.history ?? [] };
+      }),
+      ...carried,
+    ],
+    findings,
   });
 }
 
@@ -172,11 +181,16 @@ export function writtenLedger(argv: readonly string[]): { ref: string; old: stri
 }
 
 /**
- * The part of the prior `ledger.json` a new ledger keeps: its schema and its heads. A large run's ledger is mostly its
+ * The part of the prior `ledger.json` a new ledger keeps: its schema, its heads, its questions' ids and keys (not their answers)
+ * and its posted items, which a later run continues from (design §9) and this ledger carries on. A large run's ledger is mostly its
  * Q&A (a #1445-sized one passed 89 KB), past what a command report holds whole, so the command prints only these
  * (`node` reads the JSON; git's own status fails the command, since a pipe would hide it).
  */
-const PRIOR_EXTRACT = 'let s="";process.stdin.on("data",(d)=>{s+=d}).on("end",()=>{const v=JSON.parse(s);process.stdout.write(JSON.stringify({schema:v.schema,heads:v.heads}))})';
+const PRIOR_EXTRACT =
+  'let s="";process.stdin.on("data",(d)=>{s+=d}).on("end",()=>{const v=JSON.parse(s);const c=(t)=>typeof t==="string"&&t.length>4000?t.slice(0,4000):t;' +
+  'const qa=(Array.isArray(v.qa)?v.qa:[]).map((q)=>({id:q.id,type:q.type,key:q.key,symbol:q.symbol,item:q.item,status:q.status,state:q.state}));' +
+  'const findings=(Array.isArray(v.findings)?v.findings:[]).map((f)=>({...f,body:c(f.body),text:c(f.text)}));' +
+  'process.stdout.write(JSON.stringify({schema:v.schema,heads:v.heads,qa,findings}))})';
 
 /** Reads the prior ledger's schema and heads, so the new one keeps its heads. `node` is the Node binary to run (the plugin's own). */
 export const priorShowCommand = (old: string, node = "node"): EnvironmentCommand => ({

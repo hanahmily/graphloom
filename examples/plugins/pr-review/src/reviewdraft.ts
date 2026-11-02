@@ -14,6 +14,7 @@ import { composeDraft, draftJson, draftMarkdown, qaInputFrom, withReview, type D
 import { htmlPagesFrom, parseReportDoc } from "./html.js";
 import { partCommands, readParts, recordedNecessityJson, recordedQa, recordedRecord, recordedReport, type Written } from "./parts.js";
 import { effectivePacks } from "./packs.js";
+import { registryFromEvidence } from "./prior.js";
 import type { Profile } from "./profile.js";
 import type { PullRequest } from "./request.js";
 import { aspectRecordId, parseAspectRecord, type AspectRecord } from "./review.js";
@@ -45,7 +46,7 @@ export function round1Computed(evidence: readonly EvidenceRecord[], analysis: An
   if (report.state !== "read") return { state: "pending", reason: "report.json was not written" };
   const necessity = recordedNecessityJson(evidence);
   if (necessity.state === "failed") return { state: "pending", reason: `necessity.json does not read back: ${necessity.reason}` };
-  const record = round1Record({ head: pr.head, necessity: necessity.state === "read" ? necessity.value : undefined, qa: qa.value.json, files: analysis.snapshot.files, itemCites: itemCitesOf(report.value.json), packs: effectivePacks(profile) });
+  const record = round1Record({ head: pr.head, necessity: necessity.state === "read" ? necessity.value : undefined, qa: qa.value.json, files: analysis.snapshot.files, itemCites: itemCitesOf(report.value.json), packs: effectivePacks(profile), prior: registryFromEvidence(evidence).items });
   return record === undefined ? { state: "pending", reason: "qa.json is not a Q&A file" } : { state: "ready", record };
 }
 

@@ -24,7 +24,7 @@ const HEAD = REHEARSAL_HEAD;
 const NONCE = "op42";
 const PULL = { owner: "apache", repo: "skywalking-banyandb", number: 7, head: HEAD };
 
-const issue = (id: string, over: Partial<Round1Issue> = {}): Round1Issue => ({ id, kinds: ["needs-author"], status: "needs author", body: `**needs the author** (${id}). Why?`, anchored: false, ...over });
+const issue = (id: string, over: Partial<Round1Issue> = {}): Round1Issue => ({ id, key: `needs-author|item|${id}`, kinds: ["needs-author"], status: "needs author", body: `**needs the author** (${id}). Why?`, anchored: false, ...over });
 const round1 = (issues: Round1Issue[]): Round1Record => ({ schema: ROUND1_SCHEMA, head: HEAD, necessity: "necessary", issues });
 const entry = (id: string, over: Partial<DraftEntry> = {}): DraftEntry => ({ id, kind: "finding", aspects: ["correctness"], severity: "P2", proof: { state: "non-behavioral" }, path: "pkg/a.go", side: "RIGHT", line: 12, anchored: true, body: "The loop drops the error.", ...over });
 const draft = (comments: DraftEntry[], summary = "Reviewed the whole pull request."): Draft => ({ comments, summary }) as unknown as Draft;
@@ -396,7 +396,7 @@ describe("the ledger advance that records the published review, against a real r
 
   it("records a patch of about 200 KiB, written as a part set that fits the executor input and read from its file, not an argument", async () => {
     const { dir } = await ledgerRepo();
-    const big = patchOf({ items: Array.from({ length: 140 }, (_, i) => ({ id: `Q${i + 1}`, origin: "round1" as const, path: null, line: null, inline: false, commentId: null, body: `${i}:${"b".repeat(2_000)}` })) });
+    const big = patchOf({ items: Array.from({ length: 140 }, (_, i) => ({ id: `Q${i + 1}`, origin: "round1" as const, path: null, line: null, inline: false, commentId: null, body: `${i}:${"b".repeat(2_000)}`, text: `${i}:${"b".repeat(2_000)}` })) });
     const json = JSON.stringify(big);
     expect(json.length).toBeGreaterThan(200_000);
     const parts = partCommands("publish-patch", ".graphloom/review/ledger/publish-patch.json", json);

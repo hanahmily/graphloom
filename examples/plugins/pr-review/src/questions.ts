@@ -115,6 +115,8 @@ export interface Question {
   /** `required` when plugin rules demand it, `added` when the questioner raised it. */
   origin: "required" | "added";
   key: string;
+  /** The stable key the ledger keeps (design §9.4): the question's type and subject, set once the run's questions are known. */
+  stable?: string;
 }
 
 export interface QuestionInputs {
