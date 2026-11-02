@@ -85,7 +85,7 @@ import { harnessName, parseProfile, ProfileError, reviewerRole, verifierRole, RO
 import { ASPECTS, ruleGroups, ruleFileText, type Aspect } from "./aspects.js";
 import { aspectFlow, aspectRecordId, aspectRecordJson, ASPECT_RECORD_SCHEMA, findingsOf, REVIEW_REFERENCES, REVIEW_SCHEMA, REVIEW_SCHEMA_NAME, VERIFY_REFERENCES, VERIFY_SCHEMA, VERIFY_SCHEMA_NAME, type AspectRecord } from "./review.js";
 import { chooseScope, approvalOf, scopeRecordJson, selectBase, seedReason, sha256 as scopeSha, SCOPE_RECORD_ID, SCOPE_SCHEMA, summaryFor, type ScopeRecord } from "./reviewscope.js";
-import { planReviewer, planVerifier } from "./reviewprompts.js";
+import { planReviewer, planVerifier, round1Verdicts } from "./reviewprompts.js";
 import { draftWrites, readingOrder, recordedAspect, recordedRules, recordedScope, ruleCommands } from "./reviewdraft.js";
 import { scopeLine, DRAFT_SCHEMA } from "./draft.js";
 import { prepareTask } from "./prepare.js";
@@ -94,15 +94,15 @@ import { secretFindings } from "./secrets.js";
 import { readInput, snapshotState, type PullFile, type ReadSpec } from "./snapshot.js";
 import { CLAIM_CHECK_SCHEMA_NAME } from "./claims.js";
 import { diagramsOf, outputsOf, validatorById, writtenHtmlProblems } from "./validators.js";
-import { appendixWriteCommands, htmlWriteCommands, partCommands, recordCommands, reportWriteCommands } from "./parts.js";
+import { appendixWriteCommands, htmlWriteCommands, partCommands, recordCommands, recordedNecessityJson, reportWriteCommands } from "./parts.js";
 import { ANSWER_CHECK_REFERENCES, ANSWER_CHECK_SCHEMA, ANSWER_CHECK_SCHEMA_NAME, ANSWERS_REFERENCES, ANSWERS_REVISION_SCHEMA_NAME, ANSWERS_SCHEMA, ANSWERS_SCHEMA_NAME, answersFlow } from "./answers.js";
 import { baseDirIn } from "./basetree.js";
 import { sourceDirs } from "./inventory.js";
 import { ledgerRead, priorShowCommand, writtenLedger } from "./ledger.js";
 import { QUESTIONS_REFERENCES, QUESTIONS_SCHEMA, QUESTIONS_SCHEMA_NAME, requiredQuestions, type Question } from "./questions.js";
 import { CLAIM_CHECK_REFERENCES } from "./claims.js";
-import { necessityQuestion, NECESSITY_ID, NECESSITY_REFERENCES, NECESSITY_REVISION_SCHEMA_NAME, NECESSITY_SCHEMA, NECESSITY_SCHEMA_NAME, type NecessityRecord } from "./necessity.js";
-import { principlesReadCommand, type Principle } from "./principles.js";
+import { necessityQuestion, NECESSITY_ID, NECESSITY_REFERENCES, NECESSITY_REVISION_SCHEMA_NAME, NECESSITY_SCHEMA, NECESSITY_SCHEMA_NAME, parseNecessityRecord, type NecessityRecord } from "./necessity.js";
+import { principlesContext, principlesReadCommand, principlesReading, type Principle, type PrinciplesContext } from "./principles.js";
 import { planAnswerChecker, planAnswerer, planNecessity, planNecessityChecker, planQuestioner } from "./qaprompts.js";
 import { questionItems } from "./reportview.js";
 import { afterNecessity, answerBatches, answerContext, batchedAnswers, batchRecordId, batchRecordJson, answerWrites, necessityFlow, necessityRecordCommands, necessityRecordOf, qaContext, qaOutputs, questionSet, questionerFlow, recordedNecessity, type QaContext } from "./qaflow.js";
@@ -193,7 +193,7 @@ export function definitionFor(profile: Profile): GraphDefinition {
     },
     {
       id: REQUIREMENT_CODE_REVIEW,
-      statement: `Unless the operator declined the review layer (the run is then report only, and this requirement passes on that decline): for each of the aspects correctness, maintainability and security, a read-only ${harnessName(profile.roles[reviewerRole("correctness")])} reviewer swept the review's scope with the aspect's rule file, and every finding it raised has a verdict from the aspect's verifier (${ASPECTS.map((a) => `${a}: ${harnessName(profile.roles[verifierRole(a)])}`).join(", ")}), a fresh read-only session on a harness other than the reviewer's. The Review stage is entered in Review mode or after the operator's --approve review-layer. The scope is the whole pull request; in large mode it is the files of the areas the operator picked (--approve review-layer --input areas=A3,A17), or without a list the areas that the briefing's risks, behavior and compatibility entries cite (a default that cites none, or a list that names no readable area, stops the run and asks for areas), and it is recorded once, in a review-scope record, with the review base session (the latest operator conversation of the Answers stage by endedAt, else the answerer's own session) and the reason every reviewer was seeded and not forked (forking is not available in this version, or the base's context is over review.fork.maxParentTokens (default ${profile.review.fork.maxParentTokens}), or its transcript was omitted). Each reviewer starts a fresh session seeded with review.md and the deterministic conversation summary (the maintainer's messages verbatim and each agent answer cut to 1 KiB, at most 32 KiB, the oldest agent answers cut first, every cut marked), which recomputes from the recorded conversations. Each aspect's effective rule file (the shipped rules with the profile's review.aspects.<aspect>.rules entries) is written to .graphloom/review/rules/<aspect>.json, every file of the scope falls under one of its entries, and the reviewer is told which. Each pass reviews every file of the scope and skips none, its comments are checked (a file of the scope, a side, a range, an aspect, a kind: a correctness finding is behavioral; a severity), and P3 nits are counted and not verified. The sweep follows issue-fix's review convergence on one candidate: every finding of a pass is verified in one pr-finding-verification-v1 job, a confirmation needs its own path:line witness, a refutation needs one to three quotes that the head's files show (otherwise the finding is disputed, as is one the verifier left uncertain or gave no verdict), another pass runs while a finding of the last pass is confirmed or disputed, at most 4 passes, and a sweep that ends at the cap is recorded unsaturated and does not fail the stage. A finding the verifier calls behavioral is unproven in this version (reproducing tests arrive with a later part of the review layer), so it is never drafted as P0 or P1. Each aspect's sweep is recorded in a review-aspect-<aspect> record, from which the validator recomputes the findings, their states and the harnesses.`,
+      statement: `Unless the operator declined the review layer (the run is then report only, and this requirement passes on that decline): for each of the aspects correctness, maintainability and security, a read-only ${harnessName(profile.roles[reviewerRole("correctness")])} reviewer swept the review's scope with the aspect's rule file, and every finding it raised has a verdict from the aspect's verifier (${ASPECTS.map((a) => `${a}: ${harnessName(profile.roles[verifierRole(a)])}`).join(", ")}), a fresh read-only session on a harness other than the reviewer's. The Review stage is entered in Review mode or after the operator's --approve review-layer. The scope is the whole pull request; in large mode it is the files of the areas the operator picked (--approve review-layer --input areas=A3,A17), or without a list the areas that the briefing's risks, behavior and compatibility entries cite (a default that cites none, or a list that names no readable area, stops the run and asks for areas), and it is recorded once, in a review-scope record, with the review base session (the latest operator conversation of the Answers stage by endedAt, else the answerer's own session) and the reason every reviewer was seeded and not forked (forking is not available in this version, or the base's context is over review.fork.maxParentTokens (default ${profile.review.fork.maxParentTokens}), or its transcript was omitted). Each reviewer starts a fresh session seeded with review.md and the deterministic conversation summary (the maintainer's messages verbatim and each agent answer cut to 1 KiB, at most 32 KiB, the oldest agent answers cut first, every cut marked), which recomputes from the recorded conversations. Each aspect's effective rule file (the shipped rules with the profile's review.aspects.<aspect>.rules entries) is written to .graphloom/review/rules/<aspect>.json, every file of the scope falls under one of its entries, and the reviewer is told which. When the profile names a design principles file (design §8.1), each reviewer's assignment also lists the principles that apply to the review's scope (a glob matches a file of it, or the principle names none), with the file's path and commit and N1's verdict and the checker's judgment for each, and a comment that says the change breaks a principle names its id in the principle field (empty otherwise, and always empty when none applies); an id that was not given to the reviewer is rejected, and the verifier is shown the principle's statement and confirms only code that contradicts it as written. Each pass reviews every file of the scope and skips none, its comments are checked (a file of the scope, a side, a range, an aspect, a kind: a correctness finding is behavioral; a severity), and P3 nits are counted and not verified. The sweep follows issue-fix's review convergence on one candidate: every finding of a pass is verified in one pr-finding-verification-v1 job, a confirmation needs its own path:line witness, a refutation needs one to three quotes that the head's files show (otherwise the finding is disputed, as is one the verifier left uncertain or gave no verdict), another pass runs while a finding of the last pass is confirmed or disputed, at most 4 passes, and a sweep that ends at the cap is recorded unsaturated and does not fail the stage. A finding the verifier calls behavioral is unproven in this version (reproducing tests arrive with a later part of the review layer), so it is never drafted as P0 or P1. Each aspect's sweep is recorded in a review-aspect-<aspect> record, from which the validator recomputes the findings, their states and the harnesses.`,
       evidenceSchema: VERIFY_SCHEMA_NAME,
     },
     {
@@ -1098,6 +1098,14 @@ function review(ctx: Context, view: RunView): GraphDecision {
   const s = scope.value;
   const base = pinnedBase(view.evidence);
   const files = new Set(s.files);
+  // The design principles that apply to the review's scope, and what round 1 concluded of them (design §8.1); none when the profile names no file or none applies.
+  const configured = profile.questions.principles;
+  const reading = configured !== undefined && base !== undefined ? principlesReading(view.evidence, configured, base) : undefined;
+  const scoped: PrinciplesContext | undefined = reading?.state === "read" ? principlesContext(reading.read, s.files.map((path) => ({ path }))) : undefined;
+  const reviewPrinciples = scoped !== undefined && scoped.read.file === "present" && scoped.applicable.length > 0 ? scoped : undefined;
+  const principleIds = new Set((reviewPrinciples?.applicable ?? []).map((p) => p.id));
+  const necessityRecord = recordedNecessityJson(view.evidence);
+  const round1 = round1Verdicts(necessityRecord.state === "read" ? parseNecessityRecord(necessityRecord.value) : undefined);
   const records: AspectRecord[] = [];
   let from = view.evidence.findIndex((e) => e.ref === scope.refs.at(-1));
   const mounted: string[] = [];
@@ -1112,7 +1120,7 @@ function review(ctx: Context, view: RunView): GraphDecision {
       continue;
     }
     const earlier = findingsOf(records);
-    const f = aspectFlow(view.evidence.slice(from + 1), { aspect, scope: files, earlier, base, retryable: (r) => isStaleFailure(r.record, view) });
+    const f = aspectFlow(view.evidence.slice(from + 1), { aspect, scope: files, principles: principleIds, earlier, base, retryable: (r) => isStaleFailure(r.record, view) });
     const reviewDir = reviewDirOf(view);
     const baseDir = baseTreeDir(view, { baseTree: true });
     switch (f.state) {
@@ -1134,19 +1142,20 @@ function review(ctx: Context, view: RunView): GraphDecision {
           context: s.context,
           known: f.known,
           feedback: f.feedback,
+          ...(reviewPrinciples !== undefined ? { principles: reviewPrinciples, round1 } : {}),
           ...(baseDir !== undefined ? { baseDir } : {}),
           ...(reviewDir !== undefined ? { reviewDir } : {}),
         });
         const written = writeSpills(view, REVIEW_STAGE, planned.spills);
         if (written !== undefined) return written;
         const known = ["", ...f.known.map((k) => k.id)];
-        const job = agentJob(ctx, view, { jobId: role, stageId: REVIEW_STAGE, purpose: "review", instruction: `Review the ${aspect} aspect (pass ${f.n})`, schema: REVIEW_SCHEMA_NAME, harness: profile.roles[role], role, assignment: planned.text, readOnlyBinds: mounted, references: idRefs({ [REVIEW_REFERENCES[0]!]: idSet(known) }) }, analysis.snapshot.files);
+        const job = agentJob(ctx, view, { jobId: role, stageId: REVIEW_STAGE, purpose: "review", instruction: `Review the ${aspect} aspect (pass ${f.n})`, schema: REVIEW_SCHEMA_NAME, harness: profile.roles[role], role, assignment: planned.text, readOnlyBinds: mounted, references: idRefs({ [REVIEW_REFERENCES[0]!]: idSet(known), [REVIEW_REFERENCES[1]!]: idSet(["", ...principleIds], (id) => oneLineText(reviewPrinciples?.applicable.find((p) => p.id === id)?.statement ?? "").slice(0, 300)) }) }, analysis.snapshot.files);
         if ("problem" in job) return refused(job);
         return dispatchAgent(view, job, `review the ${aspect} aspect (pass ${f.n}) in a fresh read-only ${harnessName(profile.roles[role])} session, seeded with review.md and the conversation summary (${s.context.reason})`);
       }
       case "verify": {
         const role = verifierRole(aspect);
-        const planned = planVerifier({ pr, snapshot: analysis.snapshot, aspect, pass: f.n, findings: f.findings, feedback: f.feedback, ...(baseDir !== undefined ? { baseDir } : {}), ...(reviewDir !== undefined ? { reviewDir } : {}) });
+        const planned = planVerifier({ pr, snapshot: analysis.snapshot, aspect, pass: f.n, findings: f.findings, feedback: f.feedback, ...(scoped !== undefined ? { principles: new Map(scoped.parsed.principles.map((p) => [p.id, p] as const)) } : {}), ...(baseDir !== undefined ? { baseDir } : {}), ...(reviewDir !== undefined ? { reviewDir } : {}) });
         const written = writeSpills(view, REVIEW_STAGE, planned.spills);
         if (written !== undefined) return written;
         const job = agentJob(ctx, view, { jobId: role, stageId: REVIEW_STAGE, purpose: "review", instruction: `Verify the ${aspect} pass ${f.n} findings`, schema: VERIFY_SCHEMA_NAME, harness: profile.roles[role], role, assignment: planned.text, readOnlyBinds: mounted, references: idRefs({ [VERIFY_REFERENCES[0]!]: idSet(f.findings.map((x) => x.id)) }) }, analysis.snapshot.files);

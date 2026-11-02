@@ -45,6 +45,8 @@ export interface DraftEntry {
   suggestion?: string;
   /** Other findings of other aspects on overlapping lines, linked into this entry. */
   linked?: string[];
+  /** The design principle the finding says the change breaks (design §8.1). */
+  principle?: string;
 }
 
 export interface AspectView {
@@ -134,6 +136,7 @@ function entryOf(members: readonly Finding[], files: readonly PullFile[], reason
   const file = files.find((x) => x.path === primary.path);
   const isAnchored = anchored(file, primary.side, primary.startLine, primary.endLine);
   const notes = [...new Set(members.flatMap((f) => f.notes))];
+  const principle = members.find((f) => f.principle !== undefined)?.principle;
   return {
     id: primary.id,
     kind: "finding",
@@ -146,7 +149,8 @@ function entryOf(members: readonly Finding[], files: readonly PullFile[], reason
     ...(primary.endLine > primary.startLine ? { startLine: primary.startLine } : {}),
     line: primary.endLine,
     anchored: isAnchored,
-    body: scrub([primary.content, ...(primary.verdict !== undefined && primary.verdict.verdict === "confirmed" && primary.verdict.witness !== "" ? [`Verified independently: ${oneLine(primary.verdict.reason)} (${primary.verdict.witness}).`] : []), ...(reason !== undefined && notes.length > 0 ? [`Note: ${notes.join("; ")}.`] : [])].join("\n\n")),
+    ...(principle !== undefined ? { principle } : {}),
+    body: scrub([primary.content, ...(principle !== undefined ? [`Breaks the project's design principle \`${principle}\`.`] : []), ...(primary.verdict !== undefined && primary.verdict.verdict === "confirmed" && primary.verdict.witness !== "" ? [`Verified independently: ${oneLine(primary.verdict.reason)} (${primary.verdict.witness}).`] : []), ...(reason !== undefined && notes.length > 0 ? [`Note: ${notes.join("; ")}.`] : [])].join("\n\n")),
     ...(kept !== undefined && "text" in kept ? { suggestion: kept.text } : {}),
     ...(members.length > 1 ? { linked: members.filter((f) => f !== primary).map((f) => f.id) } : {}),
   };
@@ -271,7 +275,7 @@ export function composeDraft(i: DraftInput): Draft {
     aspects: views,
     findings,
   };
-  const summary = summaryText(i.scope, views, comments, judgment, q.selected.length, dismissed.length, recommended);
+  const summary = summaryText(i.scope, confirmed.filter((f) => f.principle !== undefined), views, comments, judgment, q.selected.length, dismissed.length, recommended);
   return {
     schema: DRAFT_SCHEMA,
     pull: i.pull,
@@ -306,11 +310,12 @@ export function baseLine(b: ScopeRecord["base"]): string {
   return "none (no session was recorded)";
 }
 
-function summaryText(scope: ScopeRecord, aspects: readonly AspectView[], comments: readonly DraftEntry[], judgment: readonly DraftEntry[], questions: number, dismissed: number, recommended: Verdict): string {
+function summaryText(scope: ScopeRecord, principled: readonly Finding[], aspects: readonly AspectView[], comments: readonly DraftEntry[], judgment: readonly DraftEntry[], questions: number, dismissed: number, recommended: Verdict): string {
   const confirmed = aspects.reduce((n, a) => n + a.confirmed, 0);
   const text = [
     `Reviewed ${scopeLine(scope)} for ${ASPECTS.join(", ")}, with every finding verified by an independent reader.`,
     `${confirmed} finding${confirmed === 1 ? "" : "s"} confirmed: ${comments.filter((c) => c.kind === "finding").length} drafted as comments, ${judgment.filter((j) => j.proof?.state === "unproven").length} confirmed but unproven for lack of a reproducing test.`,
+    ...(principled.length > 0 ? [`Confirmed breaks of the project's design principles: ${principled.map((f) => `${f.id} breaks ${f.principle}`).join(", ")}.`] : []),
     `${judgment.filter((j) => j.reason?.startsWith("disputed")).length} disputed, ${dismissed} dismissed, ${questions} question${questions === 1 ? "" : "s"} for the author.`,
     `Recommended verdict: ${recommended}${recommended === "approve" ? " (drafted as comment)" : ""}.`,
   ].join(" ");
@@ -335,7 +340,7 @@ const aspectTitle = (a: Aspect): string => `${a.charAt(0).toUpperCase()}${a.slic
 const lines = (e: DraftEntry): string => (e.startLine !== undefined ? `${e.startLine}-${e.line}` : `${e.line}`);
 
 function entryMarkdown(e: DraftEntry, level: "####" | "###"): string[] {
-  const head = [e.id, e.kind === "question" ? "question" : e.reason === undefined ? e.severity ?? "" : "", ...(e.aspects.length > 0 ? [e.aspects.join(", ")] : []), ...(e.proof?.state === "non-behavioral" ? ["non-behavioral"] : []), ...(e.reason !== undefined ? [e.reason] : []), `${e.path}:${lines(e)}`, e.side].filter((x) => x !== "");
+  const head = [e.id, e.kind === "question" ? "question" : e.reason === undefined ? e.severity ?? "" : "", ...(e.aspects.length > 0 ? [e.aspects.join(", ")] : []), ...(e.principle !== undefined ? [`breaks principle ${e.principle}`] : []), ...(e.proof?.state === "non-behavioral" ? ["non-behavioral"] : []), ...(e.reason !== undefined ? [e.reason] : []), `${e.path}:${lines(e)}`, e.side].filter((x) => x !== "");
   const out = [`${level} ${head.join(" · ")}${e.anchored ? "" : " · not in the diff (goes in the review body)"}`, e.body];
   if (e.suggestion !== undefined) out.push("```suggestion", e.suggestion, "```");
   if (e.linked !== undefined && e.linked.length > 0) out.push(`Also raised as ${e.linked.join(", ")}.`);
@@ -378,7 +383,7 @@ const countBy = (fs: readonly Finding[], state: Finding["state"]): number => fs.
 
 const findingLine = (f: Finding, reviewerOf: (a: Aspect) => string): string => {
   const proof = proofOf(f);
-  return `${f.id} · ${f.aspect} · ${f.path}:${f.startLine}${f.endLine > f.startLine ? `-${f.endLine}` : ""}${f.side === "LEFT" ? " (base)" : ""} · ${f.state}${f.verdict !== undefined ? ` (verifier ${reviewerOf(f.raisedBy)}: ${f.verdict.verdict})` : ""} · ${proof.state === "unproven" ? `unproven: ${proof.reason}` : proof.state}: ${clip(oneLine(f.content), 160)}`;
+  return `${f.id} · ${f.aspect} · ${f.path}:${f.startLine}${f.endLine > f.startLine ? `-${f.endLine}` : ""}${f.side === "LEFT" ? " (base)" : ""} · ${f.state}${f.principle !== undefined ? ` · breaks principle ${f.principle}` : ""}${f.verdict !== undefined ? ` (verifier ${reviewerOf(f.raisedBy)}: ${f.verdict.verdict})` : ""} · ${proof.state === "unproven" ? `unproven: ${proof.reason}` : proof.state}: ${clip(oneLine(f.content), 160)}`;
 };
 
 /** The Review part of the briefing in `review.md`: findings by severity with counts, each one line. */
@@ -404,7 +409,7 @@ export function reviewBriefingMarkdown(d: Draft): string {
 export function reviewAppendixMarkdown(d: Draft): string {
   const out = ["## Review: findings and draft", "", "### Findings"];
   for (const f of d.review.findings) {
-    out.push(`#### ${f.id} · ${f.aspect} · ${f.severity} · ${f.kind} · ${f.state}`, `${f.path}:${f.startLine}-${f.endLine} (${f.side === "RIGHT" ? "head" : "base"}), raised in pass ${f.pass} of the ${f.raisedBy} sweep.`, f.content);
+    out.push(`#### ${f.id} · ${f.aspect} · ${f.severity} · ${f.kind} · ${f.state}${f.principle !== undefined ? ` · breaks principle ${f.principle}` : ""}`, `${f.path}:${f.startLine}-${f.endLine} (${f.side === "RIGHT" ? "head" : "base"}), raised in pass ${f.pass} of the ${f.raisedBy} sweep.`, f.content);
     if (f.evidence !== "") out.push(`The reviewer read: ${f.evidence}`);
     if (f.verdict !== undefined) out.push(`Verifier: ${f.verdict.verdict}${f.verdict.witness !== "" ? ` at ${f.verdict.witness}` : ""}: ${f.verdict.reason}${f.verdict.quotes.length > 0 ? ` Quotes: ${f.verdict.quotes.map((q) => `${q.path}:${q.line} "${clip(oneLine(q.text), 80)}"`).join("; ")}.` : ""}`);
     if (f.notes.length > 0) out.push(`Notes: ${f.notes.join("; ")}.`);

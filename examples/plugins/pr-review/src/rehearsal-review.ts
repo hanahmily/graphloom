@@ -27,6 +27,7 @@ const comment = (c: ScriptedComment): ReviewComment => ({
   finding: "",
   evidence: "read the function and its callers",
   distinct: false,
+  principle: "",
   ...c,
 } as ReviewComment);
 

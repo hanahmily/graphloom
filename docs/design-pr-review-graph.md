@@ -1864,6 +1864,9 @@ line appears only when the pull request changes the file. A broken principle als
 appears in the conclusion line: "Design principle broken (the checker supports
 it): offline-idempotent."
 
+**Round 2.** The aspect reviewers get the same principles to find code-level
+breaks that N1's design-level verdict did not cite
+([§8.1](#81-review), "Design principles in round 2").
 
 ### 7.6 Questions in large mode
 
@@ -1991,6 +1994,46 @@ scope, each for one aspect:
 | `correctness` | Each feature does what the report and the PR say: logic, edge cases, error handling, concurrency, data integrity, API contracts | Readability and structure; exploitability |
 | `maintainability` | Readability, structure and naming, duplication, coupling, test quality | What the Q&A already answers (reuse, duplication against the codebase, complexity splits, missing tests), unless the pass adds something the answer lacks; whether behavior is correct or safe |
 | `security` | Input validation, injection, authentication and authorization, secrets, unsafe deserialization, resource exhaustion and denial of service, dependency risk | Defects with no attacker-controlled input or trust boundary, which are correctness |
+
+**Design principles in round 2.** The review has two rounds. Round 1, the report
+and the Q&A, is the design-level review: N1 judges the change against the
+project's principles ([§7.5.1](#751-project-design-principles)). Round 2, these
+reviewers, is about details, functionality and algorithms, and it is given the
+same principles so it can find violations in the code. When the profile names a
+principles file (`questions.principles`) and the file is present, each
+reviewer's assignment lists the principles that apply to **its scope** (a glob
+matches a file of the review's scope, or the principle names none: the §7.5.1
+rule applied to the scope, not to the whole pull request), through the same
+bounded listing as N1's (a long list is shortened, the rest named by id with
+the `git show <commit>:<path>` that reads them), with the file's path and the
+ref or commit it was read at. Beside each principle is what round 1
+concluded: N1's verdict and the answer checker's judgment from
+`necessity.json` (`round 1: breaks; checker: supported`; `checker: no
+judgment` when it gave none). The reviewer looks for concrete code-level breaks
+that N1 did not cite; a break N1 already recorded is not raised again unless the
+comment cites a different concrete site. A comment that says the change breaks a
+principle names its id in `principle` (a field of `pr-code-review-v1`, `""` for
+every other comment), cites the violating lines and quotes in `content` how the
+code contradicts the statement. When the profile names no principles file, the
+file is absent, or no principle applies to the scope, the assignment says
+nothing about principles and `principle` must be `""`.
+
+`principle` is constrained like the other ids of the contract: the job lists
+`""` and the ids it gave this reviewer (`references`, [§7.3](#ids)), and plugin
+code rejects any other id with the ids to use, so a correction goes back to the
+same session. A recorded finding carries `principle` only when it names one;
+records written before it existed read as `""`. The verifier's block for a
+finding with a principle also shows the principle's statement, and the verifier
+confirms it only when the cited code really contradicts the statement as
+written, not a stricter or different reading of it; otherwise it refutes the
+finding or leaves it uncertain, as for any finding. A finding with a principle
+is otherwise an ordinary finding (aspect, kind, severity, the proof rule, the
+sweep). The draft shows it: the entry's body says `Breaks the project's design
+principle <id>.`, `draft.json` carries `principle` on the entry and the
+finding, draft.md and the finding lines of review.md say `breaks principle
+<id>`, the review grid's tooltip and the appendix's finding say so, and the
+draft summary has a line listing each confirmed principle finding (`F3 breaks
+offline-idempotent`).
 
 **Where each reviewer session starts.** The maintainer's conversation with
 the answerer is context the reviewers need: what the maintainer asked, what
@@ -3335,6 +3378,24 @@ What 0.11 does, where this document leaves it open:
   as before, so their size is bounded by what one command carries; a report or
   Q&A that does not fit still stops the run "incompatible task" and says so.
   (0.12 lifts this: [§6.6](#66-output), multi-part writes.)
+
+### Version 0.20: the design principles reach the aspect reviewers
+
+The maintainer's two-round view of the review: round 1 (the report and the Q&A, where N1
+judges the project's design principles) is the architecture and design review; round 2 (the
+aspect reviewers) is about details, functionality and algorithms, and must be able to find
+code-level violations of the same principles. What 0.20 does ([§8.1](#81-review), "Design
+principles in round 2"):
+
+- Each reviewer's assignment lists the principles that apply to its scope, with the
+  file's path and ref or commit and N1's verdict and the checker's judgment for each, and
+  asks for breaks N1 did not cite. With no principles file, or none that applies, it says
+  nothing about principles.
+- `pr-code-review-v1` gains `principle` (`""` or an id given to the reviewer, constrained
+  like the other ids); the verifier sees the statement and confirms a contradiction only as
+  written; the draft, `draft.json`, `review.md`, `review.html` and the appendix show
+  `breaks principle <id>`, and the draft summary lists the confirmed ones.
+- A recorded finding without `principle` reads as naming none.
 
 ### Version 0.19: a visual-only report; large PRs asked per high-level change; one question, one answer
 

@@ -18,7 +18,7 @@ import { treeQuotePlan, readTreeQuotes, type TreeQuotePlan } from "./treequotes.
 
 export const REVIEW_SCHEMA_NAME = "pr-code-review-v1";
 export const VERIFY_SCHEMA_NAME = "pr-finding-verification-v1";
-export const REVIEW_REFERENCES = ["comments[].finding"];
+export const REVIEW_REFERENCES = ["comments[].finding", "comments[].principle"];
 export const VERIFY_REFERENCES = ["verdicts[].finding"];
 /** Passes one aspect may run on the head (issue-fix's `MAX_SWEEP_PASSES`); hitting it is noted unsaturated and does not fail the stage. */
 export const MAX_SWEEP_PASSES = 4;
@@ -52,7 +52,7 @@ export const REVIEW_SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["path", "side", "start_line", "end_line", "aspect", "kind", "severity", "content", "suggestion", "finding", "evidence", "distinct"],
+        required: ["path", "side", "start_line", "end_line", "aspect", "kind", "severity", "content", "suggestion", "finding", "evidence", "distinct", "principle"],
         properties: {
           path: { type: "string" },
           side: { type: "string", enum: [...SIDES] },
@@ -66,6 +66,8 @@ export const REVIEW_SCHEMA = {
           finding: { type: "string" },
           evidence: { type: "string" },
           distinct: { type: "boolean" },
+          // The id of a design principle (design §8.1) the comment says the change breaks; "" for none. The job constrains it to the ids given to this reviewer.
+          principle: { type: "string" },
         },
       },
     },
@@ -120,6 +122,8 @@ export interface ReviewComment {
   finding: string;
   evidence: string;
   distinct: boolean;
+  /** The design principle the comment says the change breaks (design §8.1); "" or absent for none. */
+  principle?: string;
 }
 
 export interface PassSummary {
@@ -163,6 +167,8 @@ export interface Finding {
   suggestion: string;
   evidence: string;
   distinct: boolean;
+  /** The design principle the finding says the change breaks; absent for none (and in records written before it existed). */
+  principle?: string;
   state: FindingState;
   /** The passes that raised it again by name. */
   reaffirmed: number[];
@@ -182,6 +188,8 @@ export interface PassContext {
   scope: ReadonlySet<string>;
   /** The ids of findings already raised in this review (any aspect). */
   known: ReadonlySet<string>;
+  /** The ids of the design principles given to this reviewer (design §8.1); none means a comment names no principle. */
+  principles?: ReadonlySet<string>;
 }
 
 export interface ParsedPass {
@@ -213,6 +221,10 @@ export function parsePass(output: unknown, ctx: PassContext): ParsedPass | { pro
     if (typeof c.content !== "string" || c.content.trim() === "" || c.content.length > MAX_CONTENT_CHARS) problems.push(`${at}.content must be text of at most ${MAX_CONTENT_CHARS} characters`);
     if (typeof c.finding !== "string" || (c.finding !== "" && !ctx.known.has(c.finding))) problems.push(`${at}.finding must be "" for a new finding, or the id of one already reported`);
     if (typeof c.suggestion !== "string" || typeof c.evidence !== "string" || typeof c.distinct !== "boolean") problems.push(`${at} needs suggestion and evidence (text, "" for none) and distinct (true or false)`);
+    // A result without the field (a recorded one, or an executor that left it out) names no principle.
+    if (c.principle !== undefined && (typeof c.principle !== "string" || (c.principle !== "" && !(ctx.principles ?? new Set<string>()).has(c.principle)))) {
+      problems.push(`${at}.principle must be "" or ${ctx.principles !== undefined && ctx.principles.size > 0 ? `one of the principle ids you were given (${[...ctx.principles].join(", ")})` : "empty: no design principle was given to you"}`);
+    }
     if (problems.length === 0 || problems.every((p) => !p.startsWith(at))) comments.push(c as unknown as ReviewComment);
   });
   const s = output.summary as Record<string, unknown>;
@@ -350,6 +362,8 @@ export type AspectFlow =
 export interface AspectSpec {
   aspect: Aspect;
   scope: ReadonlySet<string>;
+  /** The ids of the design principles given to this aspect's reviewer (design §8.1). */
+  principles?: ReadonlySet<string>;
   /** The findings the earlier aspects recorded: their ids are known, and numbering goes on after them. */
   earlier: readonly Finding[];
   base: string | undefined;
@@ -466,7 +480,7 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
         retries += 1;
         continue;
       }
-      const parsed = ev.run.contract?.status === "invalid" ? { problems: ev.run.contract.problems.slice(0, 20) } : parsePass(ev.run.output, { aspect: spec.aspect, scope: spec.scope, known: known() });
+      const parsed = ev.run.contract?.status === "invalid" ? { problems: ev.run.contract.problems.slice(0, 20) } : parsePass(ev.run.output, { aspect: spec.aspect, scope: spec.scope, known: known(), ...(spec.principles !== undefined ? { principles: spec.principles } : {}) });
       if ("problems" in parsed) {
         retries += 1;
         feedback = parsed.problems;
@@ -496,6 +510,7 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
           merged += 1;
           if (SEVERITIES.indexOf(c.severity) < SEVERITIES.indexOf(twin.severity)) twin.severity = c.severity;
           if (c.kind === "behavioral") twin.kind = "behavioral";
+          if (twin.principle === undefined && c.principle !== undefined && c.principle !== "") twin.principle = c.principle;
           twin.notes.push(`merged with another comment of pass ${n} on overlapping lines`);
           continue;
         }
@@ -514,6 +529,7 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
           suggestion: c.suggestion,
           evidence: oneLine(c.evidence),
           distinct: c.distinct,
+          ...(c.principle !== undefined && c.principle !== "" ? { principle: c.principle } : {}),
           state: "pending",
           reaffirmed: [],
           notes: [],

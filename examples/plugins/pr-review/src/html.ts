@@ -169,7 +169,7 @@ function findingHtml(f: Finding, d: Draft, g: Github, full: boolean): string {
   const proof = proofOf(f);
   const verifier = d.review.aspects.find((a) => a.aspect === f.raisedBy)?.verifier ?? "?";
   const cite = citeLink(g, { path: f.path, side: f.side === "RIGHT" ? "head" : "base", start: f.startLine, end: f.endLine });
-  const summary = `<span class="rid">${esc(f.id)}</span> ${badge("grey", f.aspect)} ${badge(STATE_CLASS[f.state] ?? "grey", f.state)} ${badge(proof.state === "unproven" ? "warn" : "ok", proof.state === "unproven" ? "unproven" : proof.state)} ${esc(clip(f.content.replace(/\s+/g, " "), 140))} <span class="muted">${cite}</span>`;
+  const summary = `<span class="rid">${esc(f.id)}</span> ${badge("grey", f.aspect)} ${badge(STATE_CLASS[f.state] ?? "grey", f.state)} ${badge(proof.state === "unproven" ? "warn" : "ok", proof.state === "unproven" ? "unproven" : proof.state)} ${f.principle !== undefined ? `${badge("bad", `breaks principle ${f.principle}`)} ` : ""}${esc(clip(f.content.replace(/\s+/g, " "), 140))} <span class="muted">${cite}</span>`;
   const body = [
     `<p>${esc(f.content)}</p>`,
     f.evidence !== "" ? `<p class="muted">The reviewer read: ${esc(f.evidence)}</p>` : "",

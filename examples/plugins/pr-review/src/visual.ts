@@ -373,7 +373,7 @@ function reviewSection(d: Draft | undefined, l: VisualLinks): string {
     const here = live.filter((f) => f.aspect === aspect && f.severity === severity);
     if (here.length === 0) return tile("grey", "0", `no ${severity} finding of ${aspect}`, undefined, " cell empty");
     const worst = FINDING_ORDER.find((t) => here.some((f) => findingTone(f) === t))!;
-    const tip = here.map((f) => `${f.id} ${findingTone(f)}: ${clip(f.content, 140)} (${f.path}:${f.startLine})`).join("\n");
+    const tip = here.map((f) => `${f.id} ${findingTone(f)}${f.principle !== undefined ? ` (breaks principle ${f.principle})` : ""}: ${clip(f.content, 140)} (${f.path}:${f.startLine})`).join("\n");
     return tile(FINDING_TONE[worst], `<strong>${here.length}</strong>`, `${severity} ${aspect}\n${tip}`, appendixAt(l, `f-${here[0]!.id}`), " cell");
   };
   const head = `<span class="fh"></span>${SEVERITIES.map((s) => `<span class="fh">${esc(s)}</span>`).join("")}`;
