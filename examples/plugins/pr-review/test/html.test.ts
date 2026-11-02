@@ -53,12 +53,13 @@ describe("review.html, the visual report of a standard report (design 6.11)", ()
   it("renders no text list, table, paragraph or fold: only tiles, diagrams, labels and badges", () => {
     expect(html).not.toMatch(/<(ul|ol|li|table|thead|tbody|tr|td|th|pre|details|summary|blockquote|q)[\s>]/);
     expect(html).not.toMatch(/<p[\s>](?![^<]*class="sub")/);
-    expect(html).not.toContain('class="cites"');
+    // The reason cards under the risk map (one line of at most 200 characters for each entry, its cites as links) are the one place cites show.
+    expect(html.replace(/<div class="rcards">.*?<\/section>/s, "")).not.toContain('class="cites"');
     expect(html).not.toContain("Stages and flows, with their cites");
   });
 
   it("puts text beyond a short label only in a tooltip: every visible text node is short", () => {
-    const body = html.slice(html.indexOf("<body>"));
+    const body = html.slice(html.indexOf("<body>")).replace(/<span class="rt"[^>]*>[^<]*<\/span>/g, "");
     // The SVG of a diagram carries its own labels (each at most 60 characters); everything else is a tile, a chip or a legend entry.
     const visible = [...body.replace(/<(desc|title)\b[^>]*>[^<]*<\/\1>/g, "").matchAll(/>([^<>]+)</g)].map((m) => m[1]!.replace(/&[a-z#0-9]+;/g, "x").trim()).filter((t) => t !== "");
     expect(visible.length).toBeGreaterThan(20);
@@ -105,7 +106,7 @@ describe("review.html, the visual report of a standard report (design 6.11)", ()
     expect(html).not.toMatch(/<script|<link|<img|<iframe|\ssrc=|\sonclick=/i);
     const hrefs = [...html.matchAll(/href="([^"]*)"/g)].map((m) => m[1]!);
     expect(hrefs.length).toBeGreaterThan(5);
-    expect(hrefs.every((h) => h.startsWith("https://github.com/apache/skywalking-banyandb/") || /^review-appendix\.html(#[\w.:-]+)?$/.test(h))).toBe(true);
+    expect(hrefs.every((h) => h.startsWith("https://github.com/apache/skywalking-banyandb/") || /^(review-appendix\.html)?(#[\w.:-]+)?$/.test(h))).toBe(true);
   });
 
   it("is of a reasonable size: inline SVG, no embedded images", () => {
@@ -591,7 +592,8 @@ describe("the inertness check on the written bytes (design 6.11)", () => {
     expect(bad(wrap('<a href="https://github.com/apache/skywalking-banyandb/blob/main/pkg/a.go">x</a>')).join()).toMatch(/blob\/main/);
     expect(bad(wrap(`<a href="https://github.com/apache/skywalking-banyandb/commit/${"f".repeat(40)}">x</a>`)).join()).toMatch(/commit/);
     expect(bad(wrap('<a href="javascript:alert(1)">x</a>')).join()).toMatch(/javascript/);
-    expect(bad(wrap('<a href="#top">x</a>')).length).toBeGreaterThan(0);
+    expect(bad(wrap('<a href="#">x</a>')).length).toBeGreaterThan(0);
+    expect(bad(wrap('<a href="#area-A3">x</a>'))).toEqual([]);
     expect(bad(wrap('<a href="other.html">x</a>')).join()).toMatch(/other\.html/);
     expect(bad(wrap('<a href="review-appendix.html#q-Q1">x</a>'))).toEqual([]);
     expect(bad(wrap('<a href="review.html">x</a>'))).toEqual([]);

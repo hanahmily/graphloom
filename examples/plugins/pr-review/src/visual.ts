@@ -26,6 +26,8 @@ export interface VisualLinks {
   head: string;
   base?: string;
   appendix: string;
+  /** A citation as the report writes it elsewhere: a link to the file at the pinned head or base on GitHub. */
+  cite: (c: { path: string; side?: string; tree?: string; start: number; end: number }) => string;
 }
 
 const FONT = 'font-family="system-ui, -apple-system, Segoe UI, Roboto, sans-serif"';
@@ -210,16 +212,54 @@ export function areaRisk(area: RiskArea, check: ReportDoc["briefing"]["check"]):
   return { kind, entries: RISK_KINDS.flatMap((k) => found.get(k) ?? []) };
 }
 
+/** One check entry that cites an area, with its kind and the cites inside the area. */
+export interface AreaReason {
+  kind: RiskKind;
+  text: string;
+  cites: ReportDoc["briefing"]["check"]["risks"][number]["cites"];
+}
+
+/** The entries of the check lists that cite an area, in the colour precedence (risk first), then the order of the list. */
+export function areaReasons(area: RiskArea, check: ReportDoc["briefing"]["check"]): AreaReason[] {
+  const found: AreaReason[] = [];
+  for (const list of CHECK_LISTS) {
+    const kind = KIND_OF_LIST[list];
+    if (kind === undefined) continue;
+    for (const e of check[list]) {
+      const cites = e.cites.filter((c) => area.paths.has(c.path));
+      if (cites.length > 0) found.push({ kind, text: e.text, cites });
+    }
+  }
+  return RISK_KINDS.flatMap((k) => found.filter((f) => f.kind === k));
+}
+
+/** The element id of an area's reason card, the target of its rectangle's link. */
+export const areaAnchor = (id: string): string => `area-${id.replace(/[^A-Za-z0-9_.:-]/g, "_")}`;
+
+const MAX_CARD_CITES = 3;
+
+/** The card of a coloured area: id, label and colour badge; one line for each check entry; the findings located in its files as chips. */
+function areaCard(area: RiskArea, kind: RiskKind, reasons: readonly AreaReason[], findings: readonly Finding[], l: VisualLinks): string {
+  const lines = reasons.map((x) => {
+    const shown = x.cites.slice(0, MAX_CARD_CITES).map((c) => l.cite(c)).join(" ");
+    const more = x.cites.length > MAX_CARD_CITES ? ` <span class="muted" title="${esc(x.cites.slice(MAX_CARD_CITES).map((c) => c.path).join(", "))}">+${x.cites.length - MAX_CARD_CITES}</span>` : "";
+    return `<div class="re"><span class="rk ${x.kind}">${esc(RISK_NAMES[x.kind])}</span> <span class="rt" title="${esc(x.text)}">${esc(clip(x.text, 200))}</span> <span class="cites">${shown}${more}</span></div>`;
+  });
+  const chips = findings.map((f) => `<a class="fchip ${findingTone(f)}" href="${esc(appendixAt(l, `f-${f.id}`))}" title="${esc(`${f.id} ${f.severity} ${findingTone(f)}: ${clip(f.content, 140)} (${f.path}:${f.startLine})`)}">${esc(f.id)} ${esc(f.severity)}</a>`);
+  return `<div class="rcard" id="${esc(areaAnchor(area.id))}"><div class="rh"><span class="aid">${esc(area.id)}</span> <span class="rl" title="${esc(area.label)}">${esc(clip(area.label, 60))}</span> <span class="rb ${kind}">${esc(RISK_NAMES[kind])}</span></div><div class="rlines">${lines.join("")}</div>${chips.length > 0 ? `<div class="fchips">${chips.join("")}</div>` : ""}</div>`;
+}
+
 const MAP_W = 960;
 const MAP_H = 400;
 const CHAR_W = 6.4;
 
-function riskSection(r: ReportDoc): string {
+function riskSection(r: ReportDoc, l: VisualLinks, d: Draft | undefined): string {
   const areas = riskAreas(r);
   if (areas.length === 0) return `<section class="vis" id="risk"><h2>Risk map</h2>${tile("grey", "no changed lines", "no area has changed lines")}</section>`;
   const rects = squarify(areas.map((a) => ({ id: a.id, value: a.lines })), 0, 0, MAP_W, MAP_H);
   const byId = new Map(areas.map((a) => [a.id, a] as const));
   const cells: string[] = [];
+  const kinds = new Map<string, RiskKind>();
   const counts = new Map<RiskKind, number>();
   const where = new Map<string, { x: number; y: number; w: number; h: number }>();
   for (const rect of rects) {
@@ -227,15 +267,18 @@ function riskSection(r: ReportDoc): string {
     where.set(area.id, rect);
     const { kind, entries } = areaRisk(area, r.briefing.check);
     counts.set(kind, (counts.get(kind) ?? 0) + 1);
+    kinds.set(area.id, kind);
     const room = Math.floor((rect.w - 10) / CHAR_W);
     const full = `${area.id} ${area.label}`;
     const text = rect.h < 18 || room < area.id.length ? "" : full.length <= room ? full : room >= area.id.length + 4 ? clip(full, room) : area.id;
     const tip = [`${area.id} ${area.label} (${area.lines} lines changed)`, ...(entries.length === 0 ? [RISK_NAMES.none] : entries)].join("\n");
-    cells.push(
+    const cell = [
       `<g><title>${esc(tip)}</title><rect x="${rect.x.toFixed(1)}" y="${rect.y.toFixed(1)}" width="${rect.w.toFixed(1)}" height="${rect.h.toFixed(1)}" fill="${RISK_FILL[kind]}" stroke="#ffffff" stroke-width="2"/>`,
       text === "" ? "" : `<text x="${(rect.x + 6).toFixed(1)}" y="${(rect.y + 15).toFixed(1)}" font-size="11" font-weight="600" fill="#1d2733">${esc(text)}</text>`,
       `</g>`,
-    );
+    ].join("");
+    // A coloured area links to its reason card; an area with nothing to check has none.
+    cells.push(kind === "none" ? cell : `<a href="#${esc(areaAnchor(area.id))}">${cell}</a>`);
   }
   // The hotspot functions, as dots at the bottom of their area, left to right.
   const dots: string[] = [];
@@ -255,7 +298,9 @@ function riskSection(r: ReportDoc): string {
   const svg = [`<svg viewBox="0 0 ${MAP_W} ${MAP_H}" width="${MAP_W}" height="${MAP_H}" role="img" aria-label="${esc(`Risk map of ${areas.length} areas, sized by lines changed`)}" ${FONT}>`, ...cells, ...dots, `</svg>`].join("");
   const legend = RISK_KINDS.map((k) => `<span class="key"><span class="sw" style="background:${RISK_FILL[k]}"></span>${esc(RISK_NAMES[k])} ${counts.get(k) ?? 0}</span>`).join("");
   const hot = `<span class="key"><span class="sw dot"></span>hotspot function</span>`;
-  return `<section class="vis" id="risk"><h2>Risk map</h2><div class="scroll">${svg}</div><div class="legend">${legend}${hot}</div></section>`;
+  const live = (d?.review.findings ?? []).filter((f) => f.state !== "dismissed");
+  const cards = RISK_KINDS.flatMap((k) => areas.filter((a) => kinds.get(a.id) === k && k !== "none")).map((a) => areaCard(a, kinds.get(a.id)!, areaReasons(a, r.briefing.check), live.filter((f) => a.paths.has(f.path)), l));
+  return `<section class="vis" id="risk"><h2>Risk map</h2><div class="scroll">${svg}</div><div class="legend">${legend}${hot}</div>${cards.length > 0 ? `<div class="rcards">${cards.join("")}</div>` : ""}</section>`;
 }
 
 // ---- 5. the question status grid ----
@@ -343,7 +388,7 @@ function reviewSection(d: Draft | undefined, l: VisualLinks): string {
 
 /** The sections of `review.html` after the header strip, in order: verdict and scope, data flow, risk map, questions and, when the review layer ran, the review. */
 export function visualSections(i: HtmlInput, l: VisualLinks): string[] {
-  return [verdictSection(i, l), flowsSection(i.report), riskSection(i.report), questionsSection(i, l), reviewSection(i.review, l)].filter((x) => x !== "");
+  return [verdictSection(i, l), flowsSection(i.report), riskSection(i.report, l, i.review), questionsSection(i, l), reviewSection(i.review, l)].filter((x) => x !== "");
 }
 
 export const VISUAL_CSS = `
@@ -360,4 +405,12 @@ section.vis>h2{display:block;margin:0 0 8px}section.vis h3{display:block;margin:
 .fgrid{display:grid;grid-template-columns:repeat(5,auto);gap:4px 6px;align-items:center}.fh{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);text-align:center}.tile.cell{min-width:56px}.tile.empty{opacity:.45}
 .legend{display:flex;flex-wrap:wrap;gap:4px 16px;margin-top:8px;font-size:12px;color:var(--muted)}.key{display:inline-flex;align-items:center;gap:5px}
 .sw{display:inline-block;width:12px;height:12px;border-radius:2px;border:1px solid #b0bec5}.sw.ok{background:var(--okbg);border-color:var(--ok)}.sw.warn{background:var(--warnbg);border-color:var(--warn)}.sw.bad{background:var(--badbg);border-color:var(--bad)}.sw.grey{background:var(--greybg)}.sw.dot{background:#1d2733;border-radius:50%}
+.rcards{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:8px;margin-top:10px}
+.rcard{border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:12px;background:var(--greybg)}.rcard:target{outline:3px solid #1f4f82;outline-offset:1px;background:#fff}
+.rh{display:flex;gap:6px;align-items:center;flex-wrap:wrap}.aid{font-weight:700}.rl{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rb,.rk{display:inline-block;border-radius:3px;padding:0 5px;font-size:10px;font-weight:600;color:#1d2733;white-space:nowrap}
+.rb.risk,.rk.risk{background:#e8847b}.rb.compatibility,.rk.compatibility{background:#f0a35e}.rb.behavior,.rk.behavior{background:#f2d16b}.rb.surface,.rk.surface{background:#7fb2e0}
+.rlines{margin:4px 0 0}.re{margin:3px 0}.rcard .cites{font-size:11px}
+.fchips{display:flex;flex-wrap:wrap;gap:4px;margin-top:5px}.fchip{font-size:11px;font-weight:600;border-radius:3px;padding:0 5px;text-decoration:none;color:var(--ink);border:1px solid #90a4ae;background:var(--greybg)}
+.fchip.confirmed{background:var(--badbg);border-color:var(--bad)}.fchip.disputed{background:var(--warnbg);border-color:var(--warn)}
 `;

@@ -1186,7 +1186,11 @@ appendix.
    tooltip is the area's label and the one-line `check` entries that cite it. The
    hotspot functions (the top 5 by CRAP, then complexity, [§6.8](#68-measurements);
    a test file's functions are not ranked) are small dots in their area, each with
-   a tooltip.
+   a tooltip. Under the map, one compact reason card for each coloured area (none for
+   a grey one) lists the `check` entries that cite it, each with its category tag,
+   its text and its cites as GitHub links, and the live review findings in its
+   files as chips that link to the appendix; the area's rectangle links to its card
+   (`#area-<id>`, highlighted with `:target`, no script).
 5. **Question status grid:** one tile for each question, N1 first, then grouped by
    the high-level change the questions are about (`W1`…; the report's item ids in
    standard mode), coloured answered green, partially answered amber, needs author
