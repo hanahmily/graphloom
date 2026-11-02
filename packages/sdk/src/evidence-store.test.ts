@@ -187,3 +187,23 @@ describe("writeEvidenceBlobs durability", () => {
     expect(calls.slice(calls.findIndex((c) => c.startsWith("rename ")) + 1)).toEqual([`fsync ${path.join("run", "evidence", "sha256")}`]);
   });
 });
+
+describe("JSON keys that are also Object.prototype's", () => {
+  it("keeps an own __proto__ key through externalization and hydration, eager and lazy", () => {
+    const payload = JSON.parse(`{"__proto__":{"tag":"keep"},"big":${JSON.stringify("x".repeat(20_000))}}`) as Record<string, unknown>;
+    expect(Object.prototype.hasOwnProperty.call(payload, "__proto__")).toBe(true);
+    const moved = externalizePayload(payload);
+    expect(moved.externalized.length).toBeGreaterThan(0);
+    expect(Object.prototype.hasOwnProperty.call(moved.payload as object, "__proto__")).toBe(true);
+    const blobs = new Map(moved.blobs.map((b) => [b.sha256, b.text] as const));
+    const read = (part: { sha256: string }): unknown => JSON.parse(blobs.get(part.sha256)!);
+    const record = { ref: "ev-1", kind: "command", payload: moved.payload, externalized: moved.externalized } as unknown as EvidenceRecord;
+    const eager = hydrateRecord(record, read as never);
+    expect(stableHash(eager.payload)).toBe(stableHash(payload));
+    expect((eager.payload as Record<string, unknown>)["__proto__"]).toEqual({ tag: "keep" });
+    const lazy = structuredClone(record);
+    installLazyPayload(lazy, read as never);
+    expect(Object.prototype.hasOwnProperty.call(lazy.payload as object, "__proto__")).toBe(true);
+    expect(stableHash(lazy.payload)).toBe(stableHash(payload));
+  });
+});

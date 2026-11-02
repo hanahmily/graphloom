@@ -178,10 +178,15 @@ export async function writeMigrationBackups(stateDir: string, migrated: Migrated
  * caller (saveRunState) last.
  */
 export async function writeMigratedSideFiles(stateDir: string, migrated: MigratedStateFiles): Promise<void> {
+  // Each renamed file's directory, and the parent of every directory created on the way, is synced before the
+  // caller commits state.json: a file whose rename is not yet durable could vanish after a crash while the
+  // committed state already refers to it (evidence blobs, for one).
+  const dirs = new Set<string>();
   for (const [name, text] of Object.entries(migrated.files)) {
     if (name === "state.json" || migrated.original[name] === text) continue;
-    await writeDurable(resolveInside(stateDir, name), text);
+    await writeDurable(resolveInside(stateDir, name), text, dirs);
   }
+  for (const dir of dirs) await syncDirectory(dir);
   for (const name of Object.keys(migrated.original)) {
     if (name !== "state.json" && migrated.files[name] === undefined) await rm(resolveInside(stateDir, name), { force: true });
   }
@@ -198,8 +203,17 @@ function resolveInside(dir: string, name: string): string {
   return file;
 }
 
-async function writeDurable(file: string, text: string): Promise<void> {
-  await mkdir(path.dirname(file), { recursive: true });
+async function writeDurable(file: string, text: string, dirs: Set<string> = new Set()): Promise<void> {
+  const dir = path.dirname(file);
+  const created = await mkdir(dir, { recursive: true });
+  // mkdir returns the first directory it created: that one and every directory below it up to `dir` are new.
+  if (created !== undefined) {
+    for (let d = dir; ; d = path.dirname(d)) {
+      dirs.add(path.dirname(d));
+      if (d === created || path.dirname(d) === d) break;
+    }
+  }
+  dirs.add(dir);
   const tmp = `${file}.${process.pid}.tmp`;
   const handle = await open(tmp, "w");
   try {
@@ -209,4 +223,18 @@ async function writeDurable(file: string, text: string): Promise<void> {
     await handle.close();
   }
   await rename(tmp, file);
+}
+
+/** fsync a directory, so the entries renamed or created in it survive a crash; skipped where the file system cannot. */
+async function syncDirectory(dir: string): Promise<void> {
+  let handle;
+  try {
+    handle = await open(dir, "r");
+    await handle.sync();
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== "EINVAL" && code !== "ENOTSUP" && code !== "EISDIR" && code !== "EPERM" && code !== "EACCES") throw err;
+  } finally {
+    await handle?.close();
+  }
 }

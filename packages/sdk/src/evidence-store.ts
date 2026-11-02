@@ -316,8 +316,9 @@ export function externalizePayload(payload: unknown, threshold: number = DEFAULT
       }
     }
     if (Array.isArray(value)) return { value: kids.map((k) => k.value), size: total };
-    const next: Record<string, unknown> = {};
-    for (const k of kids) next[k.key as string] = k.value;
+    // Object.fromEntries defines own properties, so a JSON key such as "__proto__" survives the round trip
+    // (assignment into {} would call the inherited prototype setter instead).
+    const next = Object.fromEntries(kids.map((k) => [k.key as string, k.value]));
     return { value: next, size: total };
   };
 
@@ -332,7 +333,8 @@ function withPartAt(node: unknown, at: ReadonlyArray<string | number>, depth: nu
   if (!isContainer(node)) throw new EvidenceUnavailableError("", `externalized path ${JSON.stringify(at)} does not exist in the payload`);
   const key = at[depth]!;
   const copy = (Array.isArray(node) ? [...node] : { ...node }) as Record<string | number, unknown>;
-  copy[key] = withPartAt(copy[key], at, depth + 1, part);
+  // defineProperty, not assignment: a JSON key such as "__proto__" stays an own property.
+  Object.defineProperty(copy, key, { value: withPartAt(Object.prototype.hasOwnProperty.call(copy, key) ? copy[key] : undefined, at, depth + 1, part), enumerable: true, writable: true, configurable: true });
   return copy;
 }
 
