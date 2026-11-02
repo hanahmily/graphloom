@@ -170,10 +170,17 @@ export function writtenLedger(argv: readonly string[]): { ref: string; old: stri
   return { ref: argv[4] ?? "", old: argv[5] ?? "", json: argv.slice(8, 8 + n).join(""), markdown: argv.slice(8 + n).join("") };
 }
 
-/** Reads the prior ledger's `ledger.json`, so the new one keeps its heads. */
-export const priorShowCommand = (old: string): EnvironmentCommand => ({
+/**
+ * The part of the prior `ledger.json` a new ledger keeps: its schema and its heads. A large run's ledger is mostly its
+ * Q&A (a #1445-sized one passed 89 KB), past what a command report holds whole, so the command prints only these
+ * (`node` reads the JSON; git's own status fails the command, since a pipe would hide it).
+ */
+const PRIOR_EXTRACT = 'let s="";process.stdin.on("data",(d)=>{s+=d}).on("end",()=>{const v=JSON.parse(s);process.stdout.write(JSON.stringify({schema:v.schema,heads:v.heads}))})';
+
+/** Reads the prior ledger's schema and heads, so the new one keeps its heads. `node` is the Node binary to run (the plugin's own). */
+export const priorShowCommand = (old: string, node = "node"): EnvironmentCommand => ({
   id: COMMAND.ledgerPrior,
-  argv: ["sh", "-c", 'set -eu; git -c core.hooksPath=/dev/null show "$1:ledger.json" > "$GRAPHLOOM_REPORT_FILE"', COMMAND.ledgerPrior, old],
+  argv: ["sh", "-c", 'set -eu; j=$(git -c core.hooksPath=/dev/null show "$1:ledger.json"); printf \'%s\' "$j" | "$2" -e "$3" > "$GRAPHLOOM_REPORT_FILE"', COMMAND.ledgerPrior, old, node, PRIOR_EXTRACT],
 });
 
 export interface LedgerReading {

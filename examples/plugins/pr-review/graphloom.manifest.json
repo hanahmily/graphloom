@@ -16,7 +16,7 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "daf4a0013d2d1f3535810e9d4ee9de5335ca91bcb13f431caf8d05ef22fbabfa",
+    "sourceTree": "9657655088dd7d597b155620b4b936107dba52037103a5ded33dc45ddf466862",
     "packageLock": "f89858c4b3ae79d64aaf0947f30e2368659d8a4863c4be1008c7ffb3c9cb2d0d",
     "files": {
       "package.json": "9b3a63095fc43bf939ad500284a72a7357e1f26b88825d164ff53291087c7ae3",
@@ -76,7 +76,7 @@
       "src/fit.ts": "71f7e1484bf1abc6b73441a230a7fad5d268a2164723c23ff09ea87437b07bba",
       "src/flow.ts": "a83792504b417f9554861a954948b7b2eaf7b1cd33dddb7166b2e7222cc3cbb9",
       "src/flowlayout.ts": "18175cd7867230794ee384eeae0719ce29b61cb32004f471d6b9c932013dcc94",
-      "src/graph.ts": "429c198c3058ce9848584a200a9441a146fc3308c670758fe970916c0bb37651",
+      "src/graph.ts": "834a3513a24524f23bb35af437cc35a2a275272d8641c500cdda66e83d1ccdef",
       "src/groundwork.ts": "5a12d35f33eee1ef6a136449a48e4dccd1c0e6971a92a01e814d6c5dabfeabd7",
       "src/html.ts": "3ca6e0a8098680dbc3a345e773f5f5821fea3dad08f74cf33b899ab14f1de824",
       "src/htmlsvg.ts": "8516c3d13419eab655f9d1ddf4cfb8f386cdd49e6bfd0ffd497b64dfc96b6b70",
@@ -85,7 +85,7 @@
       "src/inventory.ts": "46c5db65903805751277146a19b13fba56e6e50386dbd66a1d175e512eef6e66",
       "src/large.ts": "df5668953dfd4a7523cab6e1149c4c6333ff30fb8f47c99a7748c139e24d6b14",
       "src/largeprompts.ts": "b50da707490a766448e948fc0877c0547a18f6cf0498eeff0d829ff837883255",
-      "src/ledger.ts": "1d9d38d76a0de9cfbaf383aa06578ba9ab9ac8b55aaeb5befe88d70ae08939f1",
+      "src/ledger.ts": "710e045c41814037681dc9454e2a56530b3ad8db33a64efae5511251cdf2cb29",
       "src/measurements.ts": "5afae805325553a3f26f2988d42e9312ec21126a1207398fb1cc67337256e0f4",
       "src/metrics/coverage.ts": "3f023ced01890cabbb5dab176f99a4e3877ed13fa3bf76983f731f1b77cd10ff",
       "src/metrics/crap.ts": "0b40d4785ab3b1da37a1fbc32029fb2f346930c7f23182fb1779c22df230e7eb",
@@ -170,7 +170,7 @@
       "test/prepare.test.ts": "e8b0fe6ec4c0004a827fdd176face6fc77fb251d5fc1ed598467981a7eeffab6",
       "test/principles.test.ts": "e2dc1d61772987aac8b722997726baa511a7aaa686304feed6e8f8c6a5c71580",
       "test/profile.test.ts": "01c2f8704e662ee313d70236d641380dff21c1d288e21335f298560a7d4a8379",
-      "test/qa-git.test.ts": "92f3ee0f6c2df49deb0becbb0f1b912ebd4e40c8ead9c88c6b29b1267549641e",
+      "test/qa-git.test.ts": "830ef007365e9412270373ea88e52018601c6f31cf98ddb8873ed4ee89375ab3",
       "test/qa-graph.test.ts": "b0762bb31c5701a25f9333e8727a5e7991297e304ad1571400208e4c70e45347",
       "test/qa-ids-searches.test.ts": "b4fafab6ea7bf78b012d75a63934ad65dcec2f382ba95d60202ed29f51a97546",
       "test/qa-units.test.ts": "d50544a525fcd78f93570a346205354324681011672c72bdee67687396a4153b",
