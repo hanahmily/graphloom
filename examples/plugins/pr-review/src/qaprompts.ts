@@ -222,7 +222,9 @@ export function planQuestioner(a: QuestionerAssignment): Fitted {
     `Required questions (${a.required.length}). Return every one in the questions of your result, with its key copied exactly, its type, item and symbol as listed (symbol is "" when none), and your own clearer wording in text (at most ${MAX_QUESTION_CHARS} characters, one question, no answer, no severity or verdict). You cannot drop or merge a required question; one you leave out is asked in the plugin's wording.`,
     ...required.lines,
     "",
-    'You may add questions the rules do not require: key "", a type (purpose, existing-reuse-common, missing-test, split-function, complexity-coverage or other), an item id, a symbol id or "", and the text. Add one only where the change raises a question a maintainer would ask and the rules missed.',
+    a.large === true
+      ? "Do not add questions: in a large pull request the required questions, one set for each high-level change, are all that is asked (an added question is refused). Phrase the required ones; leave key \"\" out of your result."
+      : 'You may add questions the rules do not require: key "", a type (purpose, existing-reuse-common, missing-test, split-function, complexity-coverage or other), an item id, a symbol id or "", and the text. Add one only where the change raises a question a maintainer would ask and the rules missed.',
     "",
     "Groundwork the plugin prepared (deterministic: symbol extraction, whole-repository searches over the base commit, similarity, the dependency inventory, the test map, measurements):",
     ...groundwork.lines,

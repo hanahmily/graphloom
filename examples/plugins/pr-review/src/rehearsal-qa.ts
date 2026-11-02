@@ -213,7 +213,7 @@ export function qaScenario(i: QaInput): QaScenario {
   const required = requiredQuestions({ view, groundwork, large }, stated);
   const asked = required.filter((r) => !(spec.omit ?? []).includes(r.type));
   const questionerOutput: QuestionerOutput = { purposes, questions: asked.map((r) => ({ key: r.key, type: r.type, item: r.item, symbol: r.symbol ?? "", text: r.text })) };
-  const questions = finalQuestions(required, questionerOutput, groundwork);
+  const questions = finalQuestions(required, questionerOutput, groundwork, large);
   // The answerer and its checker.
   const manifest = base.manifests ?? { "go.mod": DEFAULT_GO_MOD };
   const deps = declaredDependencies(parseManifests(Object.entries(manifest).map(([p, t]) => `===== graphloom manifest ${p}\n${t}`).join("\n") + "\n# end\n").files);

@@ -1886,6 +1886,17 @@ numbering, the enums and the batches of at most 15 are as they were. Standard mo
 keeps the report's items and one `existing-reuse-common` question for each new
 symbol, beside `missing-test`, `split-function` and `complexity-coverage`.
 
+**No question is added in large mode.** The questioner phrases the required ones and
+adds none (its prompt says so, validation refuses an addition, and the plugin drops
+one that gets through), so the set is exactly N1 and three questions for each
+high-level change: at most 16, one batch.
+
+**When the briefing keeps no capability** (the claim check removed every `whatsNew`
+bullet), the report's coarsest change items stand in as the high-level changes for
+purpose, `existing-reuse-common` and `missing-test` alike: the features section's
+items first, then the other change items, at most five, numbered `W1`… with their
+text marked "(report item R<n>; the claim check kept no capability)".
+
 **Not asked in large mode:** `split-function`, `complexity-coverage`, `weak-test`,
 anything per symbol or per function. The **measurements still run and show every
 function**, the over-limit ones visible in the table ([§6.8](#68-measurements)), so

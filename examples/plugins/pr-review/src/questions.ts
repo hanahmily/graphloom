@@ -265,7 +265,7 @@ export function statedPurposes(output: QuestionerOutput | undefined, view: Repor
 }
 
 /** Every deterministic problem with a questioner result; empty when it passes. */
-export function questionerProblems(output: QuestionerOutput, view: ReportView, groundwork: Groundwork, required: readonly RequiredQuestion[]): string[] {
+export function questionerProblems(output: QuestionerOutput, view: ReportView, groundwork: Groundwork, required: readonly RequiredQuestion[], large = false): string[] {
   const problems: string[] = [];
   const items = new Set(questionItems(view).map((i) => i.id));
   const symbols = new Set(groundwork.symbols.map((s) => s.id));
@@ -286,7 +286,8 @@ export function questionerProblems(output: QuestionerOutput, view: ReportView, g
       seen.add(q.key);
     } else {
       added += 1;
-      if (!ADDABLE.includes(q.type)) problems.push(`${at}: a question of type ${q.type} cannot be added`);
+      if (large) problems.push(`${at}: no question is added in large mode (the high-level changes' own questions are all that is asked); phrase the required ones`);
+      else if (!ADDABLE.includes(q.type)) problems.push(`${at}: a question of type ${q.type} cannot be added`);
     }
   });
   if (added > MAX_ADDED_QUESTIONS) problems.push(`${added} questions added, more than ${MAX_ADDED_QUESTIONS}`);
@@ -297,7 +298,7 @@ export function questionerProblems(output: QuestionerOutput, view: ReportView, g
 }
 
 /** The questions the Q&A asks: the required ones, phrased by the questioner when it did, then the ones it added; each with its `Q<n>` id. */
-export function finalQuestions(required: readonly RequiredQuestion[], output: QuestionerOutput | undefined, groundwork: Pick<Groundwork, "symbols">): Question[] {
+export function finalQuestions(required: readonly RequiredQuestion[], output: QuestionerOutput | undefined, groundwork: Pick<Groundwork, "symbols">, large = false): Question[] {
   const byKey = new Map((output?.questions ?? []).filter((q) => q.key !== "").map((q) => [q.key, q] as const));
   const out: Omit<Question, "id">[] = required.map((r) => {
     const phrased = byKey.get(r.key)?.text.trim();
@@ -305,7 +306,8 @@ export function finalQuestions(required: readonly RequiredQuestion[], output: Qu
   });
   const symbols = new Set(groundwork.symbols.map((s) => s.id));
   let n = 0;
-  for (const q of output?.questions ?? []) {
+  // Large mode adds nothing: N1 and three questions for each high-level change are the whole set (design §7.6).
+  for (const q of large ? [] : (output?.questions ?? [])) {
     if (q.key !== "") continue;
     // An addition that repeats a required question's type, item and symbol is that question's phrasing, not another.
     if (required.some((r) => r.type === q.type && r.item === q.item && (r.symbol ?? "") === q.symbol)) continue;

@@ -7,8 +7,9 @@
  */
 import { describe, expect, it } from "vitest";
 import { ANSWERS_SCHEMA, ANSWER_CHECK_SCHEMA, answerProblems, assemble, readAnswerCheck, unmeasuredAbsences, verificationPlan, type Answer, type AnswerContext, type FinalAnswer } from "../src/answers.js";
-import { QUESTION_TYPES, REUSE_TYPE, requiredQuestions, type Question } from "../src/questions.js";
-import { highLevelId, type ReportView, type ViewItem } from "../src/reportview.js";
+import { QUESTION_TYPES, REUSE_TYPE, finalQuestions, questionerProblems, requiredQuestions, type Question } from "../src/questions.js";
+import { planQuestioner } from "../src/qaprompts.js";
+import { coarsestChanges, highLevelId, type ReportView, type ViewItem } from "../src/reportview.js";
 import { evidencePull } from "../src/analysis.js";
 import { qaContext, type QaContext } from "../src/qaflow.js";
 import { profileOf, simulate } from "./support.js";
@@ -125,5 +126,54 @@ describe("the required questions in large mode, for each high-level change", () 
     expect(reuse.text).toContain(complex.ctx.groundwork.symbols[0]!.path);
     const missing = qs.find((q) => q.type === "missing-test" && q.item === "W1")!;
     expect(missing.text).toMatch(/Which tests cover this change, W1 "capability 1"/);
+  });
+});
+
+describe("large mode adds no question, and falls back to the coarsest items when the briefing kept no capability", () => {
+  const complex = contextOf("complex-function");
+  const view = (n: number): ReportView => ({ ...complex.ctx.view, changes: Array.from({ length: n }, (_, i) => ({ id: highLevelId(i + 1), section: "highlevel", text: `capability ${i + 1}`, cites: [{ path: "pkg/a.go", side: "head" as const, start: 1, end: 9, symbol: "" }], facts: [] })) });
+  const required = requiredQuestions({ view: view(5), groundwork: complex.ctx.groundwork, large: true }, new Map());
+  const output = {
+    purposes: [],
+    questions: [
+      ...required.map((r) => ({ key: r.key, type: r.type, item: r.item, symbol: "", text: r.text })),
+      { key: "", type: "split-function" as const, item: "W1", symbol: "", text: "could it be split?" },
+      { key: "", type: "complexity-coverage" as const, item: "W2", symbol: "", text: "which tests?" },
+    ],
+  };
+
+  it("refuses an added question in large mode, and accepts it in standard mode", () => {
+    expect(questionerProblems(output, view(5), complex.ctx.groundwork, required, true).join("|")).toMatch(/question 16: no question is added in large mode.*question 17: no question is added in large mode/);
+    expect(questionerProblems(output, view(5), complex.ctx.groundwork, required)).toEqual([]);
+  });
+
+  it("keeps five changes at N1 and 15 questions: an addition that gets through is dropped", () => {
+    expect(finalQuestions(required, output, complex.ctx.groundwork, true)).toHaveLength(15);
+    expect(finalQuestions(required, output, complex.ctx.groundwork)).toHaveLength(17);
+  });
+
+  it("does not invite the questioner to add questions in large mode", () => {
+    const base = { pr: { mode: "report" as const, owner: "o", repo: "r", number: 1, head: "a".repeat(40) }, snapshot: { pull: { title: "t", body: "b" }, commits: [] } as never, view: view(5), groundwork: complex.ctx.groundwork, required, feedback: [], kind: "first" as const };
+    const large = planQuestioner({ ...base, large: true }).text;
+    expect(large).toContain("Do not add questions");
+    expect(large).not.toContain("split-function, complexity-coverage or other");
+    expect(planQuestioner(base).text).toContain("You may add questions");
+  });
+
+  const items = (sections: string[]): ViewItem[] => sections.map((section, i) => ({ id: `R${i + 1}`, section, text: `item ${i + 1}`, cites: [{ path: `pkg/f${i}.go`, side: "head" as const, start: 1, end: 2, symbol: "" }], facts: [] }));
+
+  it("uses the report's coarsest items, features first, at most five, as the changes when the briefing kept none", () => {
+    const changes = coarsestChanges(items(["config", "interfaces", "features", "background", "features", "schema", "claims", "other"]));
+    expect(changes.map((c) => [c.id, c.text.match(/report item (R\d+)/)![1]])).toEqual([["W1", "R3"], ["W2", "R5"], ["W3", "R1"], ["W4", "R2"], ["W5", "R4"]]);
+    expect(changes[0]!.text).toContain("the claim check kept no capability");
+    expect(coarsestChanges([])).toEqual([]);
+  });
+
+  it("asks purpose, reuse and missing-test for each of them alike, not purpose alone", () => {
+    const sections = ["features", "features", "config"];
+    const changes = coarsestChanges(items(sections));
+    const qs = requiredQuestions({ view: { ...complex.ctx.view, items: items(sections), changes }, groundwork: complex.ctx.groundwork, large: true }, new Map());
+    expect(qs).toHaveLength(9);
+    for (const c of changes) expect(qs.filter((q) => q.item === c.id).map((q) => q.type).sort()).toEqual(["existing-reuse-common", "missing-test", "purpose"]);
   });
 });
