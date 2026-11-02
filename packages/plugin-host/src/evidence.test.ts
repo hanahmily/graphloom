@@ -5,7 +5,10 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// Child processes and thousand-record fixtures: generous limits so a loaded machine does not fail them.
+vi.setConfig({ testTimeout: 120_000, hookTimeout: 120_000 });
 import {
   EVIDENCE_STORE_ENV,
   evidenceBlobPath,
@@ -66,7 +69,7 @@ async function child(storeDir: string | undefined): Promise<PluginHost> {
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env[EVIDENCE_STORE_ENV];
   if (storeDir !== undefined) env[EVIDENCE_STORE_ENV] = storeDir;
-  const host = await createChildPluginHost({ entryModule: entry, workerModule: workerJs, activeVersion: "evidence-reader@1.0.0", generation: 1, env });
+  const host = await createChildPluginHost({ entryModule: entry, workerModule: workerJs, activeVersion: "evidence-reader@1.0.0", generation: 1, env, callbackTimeoutMs: 60_000 });
   hosts.push(host);
   return host;
 }

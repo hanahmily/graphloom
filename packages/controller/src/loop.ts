@@ -1747,7 +1747,11 @@ function mapHostFailureCode(
   }
 }
 
-export function toRunView(state: DurableRunState): RunView {
+/**
+ * `inline` is for a read-only consumer whose evidence is already hydrated (replay): the records are sent as they
+ * are, with no safety-valve externalization, so building the view never writes into the run's evidence store.
+ */
+export function toRunView(state: DurableRunState, options: { inline?: boolean } = {}): RunView {
   const view: RunView = {
     runId: state.runId,
     task: {
@@ -1756,7 +1760,7 @@ export function toRunView(state: DurableRunState): RunView {
     },
     current: structuredClone(state.current),
     receipts: structuredClone(state.receipts),
-    evidence: structuredClone(evidenceForView(state.stateDir, state.evidence)),
+    evidence: structuredClone(options.inline === true ? state.evidence : evidenceForView(state.stateDir, state.evidence)),
     outstanding: structuredClone(state.outstanding),
     budgets: { ...state.budgets },
     validatorBindings: structuredClone(state.validatorBindings),

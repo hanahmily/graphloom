@@ -211,7 +211,8 @@ export async function replayRun(recorded: DurableRunState, host: PluginHost): Pr
   }
 
   const replayedState: DurableRunState = { ...recorded, definition, evidence: reclassifiedEvidence };
-  const view = toRunView(replayedState);
+  // Hydrated and read-only: no safety-valve externalization, which would write blobs into the recorded run.
+  const view = toRunView(replayedState, { inline: true });
   let nextDecision: ReplayReport["nextDecision"];
   try {
     const decided = await host.advance(ctx, view);

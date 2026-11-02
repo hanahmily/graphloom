@@ -297,9 +297,31 @@ function withPartAt(node: unknown, at: ReadonlyArray<string | number>, depth: nu
   return copy;
 }
 
+/** True when `a` is a proper prefix of `b`, or equal to it. */
+function isPathPrefix(a: ReadonlyArray<string | number>, b: ReadonlyArray<string | number>): boolean {
+  return a.length <= b.length && a.every((key, i) => b[i] === key);
+}
+
+/** The first pair of externalized parts one of which lies inside (or is) the other, or undefined when the paths are disjoint. */
+export function overlappingParts(parts: readonly ExternalizedPart[]): [ExternalizedPart, ExternalizedPart] | undefined {
+  for (let i = 0; i < parts.length; i += 1) {
+    for (let j = i + 1; j < parts.length; j += 1) {
+      if (isPathPrefix(parts[i]!.path, parts[j]!.path) || isPathPrefix(parts[j]!.path, parts[i]!.path)) return [parts[i]!, parts[j]!];
+    }
+  }
+  return undefined;
+}
+
+/** Throws when two externalized paths overlap: a part stored with a descendant still null would hydrate wrongly. */
+export function assertDisjointParts(parts: readonly ExternalizedPart[]): void {
+  const clash = overlappingParts(parts);
+  if (clash !== undefined) throw new Error(`externalized parts overlap: ${JSON.stringify(clash[0].path)} and ${JSON.stringify(clash[1].path)}`);
+}
+
 /** The record with every externalized part read back in and `externalized` dropped; the same record when it has none. */
 export function hydrateRecord<T extends EvidenceRecord>(record: T, read: EvidencePartReader): T {
   if (record.externalized === undefined) return record;
+  assertDisjointParts(record.externalized);
   let payload: unknown = record.payload;
   for (const part of record.externalized) payload = withPartAt(payload, part.path, 0, read(part));
   const { externalized: _done, ...rest } = record;
@@ -314,6 +336,7 @@ export function hydrateRecord<T extends EvidenceRecord>(record: T, read: Evidenc
  */
 export function installLazyPayload(record: EvidenceRecord, read: EvidencePartReader, cache: Map<string, unknown> = new Map()): void {
   if (record.externalized === undefined) return;
+  assertDisjointParts(record.externalized);
   for (const part of record.externalized) {
     let parent: unknown = record.payload;
     for (let i = 0; i < part.path.length - 1 && isContainer(parent); i += 1) parent = (parent as Record<string | number, unknown>)[part.path[i]!];

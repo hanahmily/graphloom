@@ -14,11 +14,16 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promi
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// Child processes and thousand-record fixtures: generous limits so a loaded machine does not fail them.
+vi.setConfig({ testTimeout: 120_000, hookTimeout: 120_000 });
 import {
   createScriptedGraph,
   dispatch,
   hydrateRecord,
+  installLazyPayload,
+  overlappingParts,
   stableHash,
   stop,
   validate,
@@ -31,9 +36,9 @@ import {
 import { createScriptedRunner } from "@graphloom/runner";
 import { createInProcessPluginHost } from "@graphloom/plugin-host";
 import { createAdmissionTools } from "@graphloom/supervisor";
-import { createController, loadRunState, saveRunState, toRunView } from "./index.js";
+import { createController, loadRunState, replayRun, saveRunState, toRunView } from "./index.js";
 import { deleteRun } from "./delete-run.js";
-import { evidenceStoreDir, externalizeRecord, hydrateEvidence } from "./evidence.js";
+import { evidenceReaderFor, evidenceStoreDir, externalizeRecord, hydrateEvidence } from "./evidence.js";
 import { createSupervisorInspection, type InspectionHooks } from "./inspection.js";
 import { CURRENT_STATE_FORMAT, migrateStateFiles, migrationPath, STATE_FORMATS } from "./state-migrations/index.js";
 import type { DurableRunState } from "./state.js";
@@ -348,5 +353,51 @@ describe("the supervisor's evidence tool", () => {
     expect(result).toContain("big");
     expect(result.length).toBeLessThan(8_300);
     expect(result).toContain("truncated");
+  });
+});
+
+describe("re-externalizing a record", () => {
+  it("stores a parent whole, with the descendant read back in, when a lower threshold reaches it, so paths never overlap", async () => {
+    const { stateDir } = await stoppedState();
+    const body: Record<string, string> = { big: "B".repeat(10_000) };
+    for (let i = 0; i < 60; i += 1) body[`f${i}`] = `${i}`.repeat(45).slice(0, 90);
+    const original: EvidenceRecord = { ref: "ev-g1-55-ffffffff", kind: "other", generation: 1, payload: { id: "k", body } };
+    const first = externalizeRecord(stateDir, original);
+    expect(first.externalized!.map((p) => p.path)).toEqual([["body", "big"]]);
+    const second = externalizeRecord(stateDir, first, 4_096);
+    expect(overlappingParts(second.externalized!)).toBeUndefined();
+    expect(second.externalized!.map((p) => p.path)).toEqual([["body"]]);
+    expect((second.payload as { id: string }).id).toBe("k");
+    expect(stableHash(hydrateEvidence(stateDir, [second])[0])).toBe(stableHash(original));
+    // The same through the lazy getters the worker installs.
+    const lazy = JSON.parse(JSON.stringify(second)) as EvidenceRecord;
+    installLazyPayload(lazy, evidenceReaderFor(stateDir));
+    expect(stableHash(lazy.payload)).toBe(stableHash(original.payload));
+    // Overlapping references are refused rather than hydrated wrongly.
+    const bad = { ...second, externalized: [...second.externalized!, first.externalized![0]!] };
+    expect(() => hydrateEvidence(stateDir, [bad])).toThrow(/overlap/);
+  });
+});
+
+describe("replay is read-only", () => {
+  it("answers on hydrated evidence over 8 MB and writes nothing under the run's evidence store", async () => {
+    const { state, stateDir } = await stoppedState();
+    const records: EvidenceRecord[] = Array.from({ length: 3_000 }, (_, i) => ({
+      ref: `ev-g1-${i + 1}-99999999`,
+      kind: "other" as const,
+      generation: 1,
+      payload: { note: { id: i, text: `n${i}`.repeat(1_900) } },
+    }));
+    const recorded: DurableRunState = { ...state, evidence: [...state.evidence, ...records] };
+    expect(JSON.stringify(records).length).toBeGreaterThan(8 * 1024 * 1024);
+    const listing = (): string[] => readdirSync(path.join(evidenceStoreDir(stateDir), "sha256"), { recursive: true }).map(String).sort();
+    const before = listing();
+    const host = createInProcessPluginHost(
+      createScriptedGraph({ definition, advances: [(view: RunView) => stop({ reason: `saw ${view.evidence.length}`, blocker: "none" }, "stop")] }),
+      { activeVersion: "fixture@1.0.0" },
+    );
+    const report = await replayRun(recorded, host);
+    expect(report.nextDecision).toMatchObject({ decision: { action: { stop: { reason: `saw ${recorded.evidence.length}` } } } });
+    expect(listing()).toEqual(before);
   });
 });

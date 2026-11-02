@@ -14,6 +14,7 @@ import {
   DEFAULT_EXTERNALIZE_THRESHOLD,
   readEvidencePart,
   externalizePayload,
+  assertDisjointParts,
   hydrateRecord,
   isEvidenceUnavailable,
   writeEvidenceBlobs,
@@ -48,10 +49,24 @@ export function evidenceReaderFor(stateDir: string): EvidencePartReader {
  */
 export function externalizeRecord(stateDir: string, record: EvidenceRecord, threshold: number = DEFAULT_EXTERNALIZE_THRESHOLD): EvidenceRecord {
   if (record.payload === undefined || record.payload === null) return record;
-  const out = externalizePayload(record.payload, threshold);
-  if (out.externalized.length === 0) return record;
-  writeEvidenceBlobs(evidenceStoreDir(stateDir), out.blobs);
-  return { ...record, payload: out.payload, externalized: [...(record.externalized ?? []), ...out.externalized] };
+  let payload: unknown = record.payload;
+  let kept = record.externalized ?? [];
+  for (;;) {
+    const out = externalizePayload(payload, threshold);
+    if (out.externalized.length === 0) return payload === record.payload ? record : { ...record, payload, externalized: kept };
+    // A new part that contains parts stored earlier is stored whole: read those descendants back in first and
+    // go again, so the stored part holds their content and no recorded path lies inside another.
+    const inside = kept.filter((old) => out.externalized.some((p) => p.path.length < old.path.length && p.path.every((key, i) => old.path[i] === key)));
+    if (inside.length === 0) {
+      writeEvidenceBlobs(evidenceStoreDir(stateDir), out.blobs);
+      const next = { ...record, payload: out.payload, externalized: [...kept, ...out.externalized] };
+      assertDisjointParts(next.externalized);
+      return next;
+    }
+    const read = evidenceReaderFor(stateDir);
+    payload = hydrateRecord({ ...record, payload, externalized: inside }, read).payload;
+    kept = kept.filter((old) => !inside.includes(old));
+  }
 }
 
 export function externalizeRecords(stateDir: string, records: readonly EvidenceRecord[], threshold?: number): EvidenceRecord[] {
