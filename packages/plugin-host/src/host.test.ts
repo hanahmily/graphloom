@@ -160,9 +160,11 @@ describe("createChildPluginHost", () => {
         generation: 1,
         workerModule: workerJs,
         callbackTimeoutMs: 3_000,
+        // The worker's bound comes from its environment (GRAPHLOOM_MAX_WIRE_BYTES): 16 MB here keeps the request small.
+        env: { ...process.env, GRAPHLOOM_MAX_WIRE_BYTES: "16000000" },
       }),
     );
-    // Large enough to exceed the wire byte cap once serialized as part of the request.
+    // Large enough to exceed the worker's wire byte bound once serialized as part of the request.
     const huge: RunView = { ...view(), task: { request: "x".repeat(17_000_000) } };
     const result = await host.advance(ctx("op-huge"), huge);
     expect(result.ok).toBe(false);
@@ -178,6 +180,7 @@ describe("createChildPluginHost", () => {
         generation: 1,
         workerModule: workerJs,
         callbackTimeoutMs: 3_000,
+        env: { ...process.env, GRAPHLOOM_MAX_WIRE_BYTES: "16000000" },
       }),
     );
     const huge: RunView = { ...view(), task: { request: "x".repeat(17_000_000) } };
