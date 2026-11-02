@@ -16,7 +16,7 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "20eb51b149d3df5accb25d35e90221530ff3976f10c2a943d0c83cddda015461",
+    "sourceTree": "55b48119eeaafd3ef67bb90a9a528a3345b01ad9ff98a44c3dafd6f11cb5c155",
     "packageLock": "161ed552815dbe9b2c78580f3bfebc6562a62c6eb06ea7d3ad1fcf70fd86447a",
     "files": {
       "package.json": "3f6bbf796f12a261375d265ea6836f28e0bcee5f53ecbc3d4cbabcabf5a315c8",
@@ -125,7 +125,7 @@
       "src/report.ts": "8b803e681167157329502067881b79076b40074d8c0f836c198f083f4d15dff8",
       "src/reportview.ts": "f9bde12087f558d82a6b4087e3fef1f5108f87d640906170c7d2f4cfd8167156",
       "src/request.ts": "a41061d3921d0a431f2eb3b858ed7683ddfb760d72ca2f89c5660200309ea5c4",
-      "src/review.ts": "db3a79d552f790be0d21656d1d827fccfefb6d0a57986a17eec919b6c0901833",
+      "src/review.ts": "2ddd5951521a6ec682e4f93b20a39a24187e30572148c337d5f0adef35633d91",
       "src/reviewdraft.ts": "21212fbeaa2754244740e4f8cd4e704bfdad5ca83a28774b638c7c7f3e7e8682",
       "src/reviewprompts.ts": "02a98e852620d81f8125a6e1441eddc345444d9f8c69cd31db7e14f9014011e9",
       "src/reviewscope.ts": "606c7e41bcb0533019ef2f30d1887c4002dd3db3999a8cd4422bb7cf12e19b2a",
@@ -176,7 +176,7 @@
       "test/rehearsal-docs.test.ts": "348ec40ab564e45a023985a48ed4f0139e34fb9f90dc37419a1c886c85cb7890",
       "test/report-analysis.test.ts": "5905c5a7928f11307146d002de7ff472cc17ceba31d17176459a149d040d3f59",
       "test/report.test.ts": "d2586ad91970641d18267741275d675907de1e2978203300f42f774cf76e600e",
-      "test/review-units.test.ts": "5fd8526964c57d85d07240b866b9e6f17ee2496beab46e9e70ef5e2a45b2f52f",
+      "test/review-units.test.ts": "d8cb0c0a498ee8d98d4fe219017a94d73908f2f250693916e0a414aae0a56e8c",
       "test/review.test.ts": "4f171f70dfa43cdf42775168838c8c09b0df2eb6c97fd5291622ad70e56644bc",
       "test/scope.test.ts": "594904c01dde39cf2c3ef211707e9ad853ee79e9840bfbb0e78fe685cbb23611",
       "test/static-batches.test.ts": "d5f9f472c56aec8c3770cc584c1ea3f5cbcec3a67faf095f1e4bc2c4d59a7e7a",

@@ -259,8 +259,11 @@ export function parseVerification(output: unknown, pending: ReadonlySet<string>)
   return problems.length > 0 ? { problems } : { verdicts, ignored };
 }
 
-/** `path:line` with a real path and a positive line: what a confirmation's own call path must name. */
-const WITNESS = /^[^\s:][^\n:]*\.[A-Za-z0-9]+:[1-9][0-9]*/;
+/**
+ * `path:line` with a repository-relative path and a positive line: what a confirmation's own call path must name.
+ * The path needs no extension (Makefile:12, Dockerfile:8, bin/build:3), is not absolute and has no `..` segment.
+ */
+export const WITNESS = /^(?!\/)(?!(?:[^\n:]*\/)?\.\.(?:\/|:))[^\s:][^\n:]*:[1-9][0-9]*/;
 
 /** The quotes a refutation pins, when they are usable (1 to 3, a relative path, a positive line, at least eight characters). */
 function quoteProblem(v: FindingVerdict): string | undefined {

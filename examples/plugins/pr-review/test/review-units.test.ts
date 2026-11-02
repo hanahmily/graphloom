@@ -316,3 +316,11 @@ describe("the findings a reviewer must not raise again", () => {
     expect(planned.text).toContain("F3 [");
   });
 });
+
+describe("a confirmation's witness", () => {
+  it("is a repository path and a positive line, with or without an extension", async () => {
+    const { WITNESS } = await import("../src/review.js");
+    for (const ok of ["pkg/a.go:12", "Makefile:12", "Dockerfile:8", "bin/build:3", "api/v1/x.proto:1 in Write"]) expect(WITNESS.test(ok), ok).toBe(true);
+    for (const bad of ["somewhere in the function", "pkg/a.go", "pkg/a.go:0", "/etc/passwd:1", "../x.go:3", "pkg/../x.go:3", ":12"]) expect(WITNESS.test(bad), bad).toBe(false);
+  });
+});
