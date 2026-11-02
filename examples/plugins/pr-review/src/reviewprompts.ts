@@ -158,7 +158,18 @@ export function planVerifier(a: VerifierAssignment): Fitted {
       "Nothing is downgraded: a P0 or P1 with thin evidence still gets a verdict, and one you cannot decide is `uncertain`.",
       "",
       `Findings (${a.findings.length}):`,
-      ...(inline ? full : [`The findings are too long to list in full: each one's whole claim, evidence and suggestion are in ${reviewFile(a.reviewDir, spill.name)}, in the order below; read it. In short:`, ...a.findings.map((f) => findingBlock(f, false))]),
+      ...(inline
+        ? full
+        : [
+            `The findings are too long to list in full: each one's whole claim, evidence and suggestion are in ${reviewFile(a.reviewDir, spill.name)}, in the order below; read it. In short:`,
+            // The short index is bounded too (at any scale): past its budget, the remaining findings are named by id only,
+            // and the file holds every one of them whole.
+            ...fitLines(
+              a.findings.map((f) => findingBlock(f, false)),
+              20_000 * scale,
+              (left) => `- … and ${left} more finding${left === 1 ? "" : "s"}, in the file only: ${a.findings.slice(a.findings.length - left).map((f) => f.id).join(", ")}. Each still gets a verdict.`,
+            ),
+          ]),
       "",
       pullText(a.snapshot),
       ...(a.feedback.length > 0 ? ["", "Your previous result did not follow the contract; correct every problem:", ...fb.lines] : []),

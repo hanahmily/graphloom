@@ -312,7 +312,13 @@ export function conversationSummary(chain: readonly Conversation[], max: number 
   const d = smallest(n - 1, (k) => fit(render(allAnswers.slice(k), k)));
   const left = Math.min(d, n - 1);
   text = render(allAnswers.slice(left), left);
-  return { text, bytes: bytes(text), cuts: cuts + left, turns: total };
+  if (fit(text)) return { text, bytes: bytes(text), cuts: cuts + left, turns: total };
+  // Not even the newest turn fits whole (one very long maintainer message): it is cut too, with its marker, so the
+  // summary never passes its bound.
+  const last = allAnswers[n - 1]!;
+  const room = smallest(bytes(last.operator), (b) => !fit(render([{ ...last, operator: cutBytes(last.operator, b) }], n - 1))) - 1;
+  text = render([{ ...last, operator: cutBytes(last.operator, Math.max(0, room)) }], n - 1);
+  return { text, bytes: bytes(text), cuts: cuts + (n - 1) + 1, turns: total };
 }
 
 /** Why every reviewer is seeded, not forked: the transcript was omitted, the base is over the token bound, or (always, in this version) forking does not exist. */

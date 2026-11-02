@@ -324,3 +324,27 @@ describe("a confirmation's witness", () => {
     for (const bad of ["somewhere in the function", "pkg/a.go", "pkg/a.go:0", "/etc/passwd:1", "../x.go:3", "pkg/../x.go:3", ":12"]) expect(WITNESS.test(bad), bad).toBe(false);
   });
 });
+
+describe("assignment and summary bounds with very large inputs", () => {
+  it("keeps the verifier's assignment within the bound for 100 long findings, all of them in the spill file", async () => {
+    const { planVerifier } = await import("../src/reviewprompts.js");
+    const findings = Array.from({ length: 100 }, (_, i) => ({
+      id: `F${i + 1}`, aspect: "correctness", raisedBy: "correctness", pass: 1, path: "pkg/transfer/importer/apply.go", side: "RIGHT", startLine: 10 + i, endLine: 12 + i,
+      severity: "P2", kind: "behavioral", content: "c".repeat(1_000), suggestion: "s".repeat(300), evidence: "e".repeat(300), distinct: true, state: "open", reaffirmed: [], notes: [],
+    }));
+    const planned = planVerifier({ pr: { mode: "review", owner: "o", repo: "r", number: 1, head: "h".repeat(40) } as never, snapshot: { pull: { title: "t", body: "b" }, commits: [] } as never, aspect: "correctness", pass: 1, findings: findings as never, feedback: [], reviewDir: "/review" });
+    const text = (planned as { text: string }).text;
+    expect(text.length).toBeLessThanOrEqual(62_000);
+    expect(text).toContain("F100");
+    const spilled = ((planned as { spills: Array<{ text: string }> }).spills ?? []).map((s) => s.text).join("\n");
+    for (const f of findings) expect(spilled).toContain(`${f.id} [`);
+  });
+
+  it("cuts even the newest maintainer message, marked, when it alone would pass the summary's bound", () => {
+    const turns = [...Array.from({ length: 2_000 }, (_, i) => turn(`short ${i}`)), turn("n".repeat(40_000))];
+    const s = conversationSummary([conversation(turns)]);
+    expect(s.bytes).toBeLessThanOrEqual(SEED_MAX_BYTES);
+    expect(s.text).toContain("… [cut]");
+    expect(s.text).toContain("nnnn");
+  });
+});
