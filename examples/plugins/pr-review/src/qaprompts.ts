@@ -22,6 +22,7 @@ import { feedbackBlock, pullText, UNTRUSTED_PREAMBLE } from "./prompts.js";
 import { clipText, fitLines, reviewFile, shrinkToFit, spillOf, type FileSpill, type Fitted } from "./fit.js";
 import type { Snapshot } from "./snapshot.js";
 import { citeLabel } from "./report.js";
+import { repliesBlock, type QuestionReplies } from "./replies.js";
 import { MAX_PATTERN_CHARS, MAX_RERUN_SEARCHES, MAX_SEARCH_PATHS, type Search } from "./searches.js";
 
 const MAX_GROUNDWORK_CHARS = 120_000;
@@ -324,6 +325,8 @@ export interface CheckerAssignment {
   answers: ReadonlyMap<string, Answer>;
   retry: boolean;
   mountedDirs: readonly string[];
+  /** The author's replies on the threads of earlier comments about these questions (design §9.4); untrusted data. */
+  replies?: readonly QuestionReplies[];
   baseDir?: string;
   reviewDir?: string;
 }
@@ -376,6 +379,7 @@ export function planAnswerChecker(a: CheckerAssignment): Fitted {
           `The answers are too long to list in full here: each one's whole text, every citation (tree, path and lines) and every search, as the answerer gave them, are in ${file}, in the order below. Read it, and re-check against it. Each question with a short form of its answer:`,
           ...fitLines(compact, 24_000 * scale, (n) => `… and ${n} more questions with their answers, listed in ${file}`),
         ]),
+    ...repliesBlock(a.replies, new Set(a.questions.map((q) => q.id))),
     "",
     pullText(a.snapshot),
     ...(a.retry ? ["", "Your previous result left questions without a verdict, left out the searches of your own that a none-found or test answer needs, or did not follow the contract. Judge every question."] : []),
@@ -498,6 +502,8 @@ export interface NecessityCheckerAssignment {
   retry: boolean;
   /** The project's design principles, when the profile names a file (design §7.5.1). */
   principles?: PrinciplesContext;
+  /** The author's replies on the thread of an earlier comment about N1 (design §9.4); untrusted data. */
+  replies?: readonly QuestionReplies[];
   baseDir?: string;
   reviewDir?: string;
 }
@@ -540,6 +546,7 @@ export function planNecessityChecker(a: NecessityCheckerAssignment): Fitted {
           `  The answer is too long to list in full here: all of it, with every numbered trace step, design statement, changed line and alternative, is in ${file}. Read it, and check against it. The first lines:`,
           ...fitLines(lines, 10_000 * scale, (n) => `… and ${n} more lines of the answer, in ${file}`).map((l) => `  ${l}`),
         ]),
+    ...repliesBlock(a.replies, new Set([a.question.id])),
     "",
     pullText(a.snapshot),
     ...(a.retry ? ["", "Your previous result left the question without a verdict, left out the searches of your own that this answer needs, or did not follow the contract. Judge it."] : []),

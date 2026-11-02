@@ -92,6 +92,9 @@ import { chooseScope, FRESH_START_REASON, scopeRecordJson, SCOPE_RECORD_ID, SCOP
 import { planReviewer, planVerifier, round1Verdicts } from "./reviewprompts.js";
 import { draftWrites, readingOrder, recordedAspect, recordedRound1, recordedRules, recordedScope, round1Computed, ruleCommands } from "./reviewdraft.js";
 import { round1Json, ROUND1_DIR, ROUND1_RECORD_ID } from "./round1.js";
+import { registryFromEvidence } from "./prior.js";
+import { authorReplies } from "./replies.js";
+import { aspectPrior } from "./priorreview.js";
 import { COMMENTS_READ, createInput, ledgerPublishedCommand, publishFlow, publishPlan, REVIEWS_READ } from "./publish.js";
 import { scopeLine, DRAFT_SCHEMA } from "./draft.js";
 import { prepareTask } from "./prepare.js";
@@ -104,7 +107,7 @@ import { appendixWriteCommands, htmlWriteCommands, partCommands, recordCommands,
 import { ANSWER_CHECK_REFERENCES, ANSWER_CHECK_SCHEMA, ANSWER_CHECK_SCHEMA_NAME, ANSWERS_REFERENCES, ANSWERS_REVISION_SCHEMA_NAME, ANSWERS_SCHEMA, ANSWERS_SCHEMA_NAME, answersFlow } from "./answers.js";
 import { baseDirIn } from "./basetree.js";
 import { sourceDirs } from "./inventory.js";
-import { ledgerRead, priorShowCommand, writtenLedger } from "./ledger.js";
+import { ledgerRead, oldValue, priorState, writtenLedger } from "./ledger.js";
 import { QUESTIONS_REFERENCES, QUESTIONS_SCHEMA, QUESTIONS_SCHEMA_NAME, requiredQuestions, type Question } from "./questions.js";
 import { CLAIM_CHECK_REFERENCES } from "./claims.js";
 import { necessityQuestion, NECESSITY_ID, NECESSITY_REFERENCES, NECESSITY_REVISION_SCHEMA_NAME, NECESSITY_SCHEMA, NECESSITY_SCHEMA_NAME, parseNecessityRecord, type NecessityRecord } from "./necessity.js";
@@ -214,7 +217,7 @@ export function definitionFor(profile: Profile): GraphDefinition {
     },
     {
       id: REQUIREMENT_PUBLISHED,
-      statement: `The review was posted to the pull request as exactly one GitHub review of event COMMENT (never APPROVE or REQUEST_CHANGES), pinned to head <sha>, by the graphloom.github/create-pull-review executor, whose credential the plugin never sees, or a review of this head carrying the graph's head marker was already there and was found by reading the pull request's reviews before any post (an attempt whose outcome is unknown is reconciled the same way, and never repeated blind). Its body's first line is the verdict: "Review passed" when round 1 has no open issue and round 2 no open postable finding, else "Changes requested: <n> open". It carries round 1's issues when round 1 found any, else round 2's postable findings (the draft's comments that are findings); an item with a diff anchor is an inline comment (at most 50), the rest are in the body; each item ends with its marker (<!-- graphloom-finding: F3 --> or Q3, N1) and the body carries <!-- graphloom-review: <head> -->. The review's comments were read back and the ledger records the review id (reviewId on the head) and, for each item, the review and comment ids (github), by a compare-and-swap from the ledger value it read. The review's items and verdict recompute from the recorded round 1 and draft.`,
+      statement: `The review was posted to the pull request as exactly one GitHub review of event COMMENT (never APPROVE or REQUEST_CHANGES), pinned to head <sha>, by the graphloom.github/create-pull-review executor, whose credential the plugin never sees, or a review of this head carrying the graph's head marker was already there and was found by reading the pull request's reviews before any post (an attempt whose outcome is unknown is reconciled the same way, and never repeated blind). Its body's first line is the verdict: "Review passed" when round 1 has no open issue and round 2 no open postable finding, else "Changes requested: <n> open". It carries round 1's issues when round 1 found any, else round 2's postable findings (the draft's comments that are findings); an item with a diff anchor is an inline comment (at most 50), the rest are in the body; each item ends with its marker (<!-- graphloom-finding: F3 --> or Q3, N1) and the body carries <!-- graphloom-review: <head> -->. The review's comments were read back and the ledger records the review id (reviewId on the head) and, for each item, the review and comment ids (github), by a compare-and-swap from the ledger value it read. On a later head the body also lists what became of the items an earlier review posted (fixed in a commit, or still open with a link to the earlier comment), a still-open item is not posted again unless its old thread is outdated, and the verdict counts the earlier items still open. The review's items and verdict recompute from the recorded round 1, the aspects' records, the draft and the ledger's earlier items.`,
       evidenceSchema: "publish-v1",
     },
   ];
@@ -421,6 +424,16 @@ function fetch(ctx: Context, view: RunView): GraphDecision {
   }
   if (ledger.run === undefined || ledger.retry) {
     return withPrivate(dispatch(commandJob(FETCH_STAGE, "Read the pull request's ledger ref", { commands: [ledgerReadCommand(pr.owner, pr.repo, pr.number)], env: { ...GIT_ENV } }), "read the ledger ref, or record it absent"));
+  }
+  // A ledger an earlier run left is read whole here (its heads, question keys and posted items), so this run continues its ids and re-checks its items (design §9).
+  const ledgerValue = ledgerRead(view.evidence);
+  if (ledgerValue !== undefined && ledgerValue.ledger.present) {
+    const prior = priorState(view.evidence, oldValue(ledgerValue.ledger));
+    if (prior.state === "missing" || (prior.state === "unreadable" && retryOf(view)(prior.run))) {
+      const commands = prior.state === "missing" ? prior.next : [{ id: prior.run.command.id, argv: prior.run.command.argv }];
+      return withPrivate(dispatch(commandJob(FETCH_STAGE, "Read the prior ledger's ledger.json", { commands, continueOnFailure: true, env: { ...GIT_ENV } }), "read the prior ledger.json, so this run continues its ids and re-checks the items it posted"));
+    }
+    if (prior.state === "unreadable") return supervise({ reason: `the prior ledger's ledger.json cannot be read (${prior.reason}); the ledger is not overwritten`, evidenceRefs: [prior.run.record.ref] }, "escalate a prior ledger that cannot be read");
   }
   // The project's design principles file, read from the profile's ref or the pinned base, never the head (design §7.5.1).
   const configured = profile.questions.principles;
@@ -867,7 +880,7 @@ function questions(ctx: Context, view: RunView): GraphDecision {
     case "checker": {
       const answer = nf.answers.get(NECESSITY_ID)!;
       const baseDir = baseTreeDir(view, c.ctx.groundwork);
-      const planned = planNecessityChecker({ pr, snapshot: c.ctx.analysis.snapshot, question: necessityQuestion(), answer, designDocs: c.ctx.designDocs, context: c.ctx.context, retry: nf.retry, ...(c.ctx.principles !== undefined ? { principles: c.ctx.principles } : {}), ...(baseDir !== undefined ? { baseDir } : {}), ...(reviewDirOf(view) !== undefined ? { reviewDir: reviewDirOf(view)! } : {}) });
+      const planned = planNecessityChecker({ pr, snapshot: c.ctx.analysis.snapshot, question: necessityQuestion(), answer, replies: authorReplies(c.ctx.prior.items, c.ctx.analysis.snapshot.threads), designDocs: c.ctx.designDocs, context: c.ctx.context, retry: nf.retry, ...(c.ctx.principles !== undefined ? { principles: c.ctx.principles } : {}), ...(baseDir !== undefined ? { baseDir } : {}), ...(reviewDirOf(view) !== undefined ? { reviewDir: reviewDirOf(view)! } : {}) });
       const assignment = planned.text;
       const written = writeSpills(view, QUESTIONS_STAGE, planned.spills);
       if (written !== undefined) return written;
@@ -984,7 +997,7 @@ function answerStep(ctx: Context, view: RunView, c: QaContext, rest: readonly Qu
     case "checker": {
       const mounted = sourceDirs(c.groundwork.inventory);
       const baseDir = baseTreeDir(view, c.groundwork);
-      const planned = planAnswerChecker({ pr, snapshot: c.analysis.snapshot, groundwork: c.groundwork, questions: rest, answers: flow.answers, retry: flow.retry, mountedDirs: mounted, ...(baseDir !== undefined ? { baseDir } : {}), ...(reviewDirOf(view) !== undefined ? { reviewDir: reviewDirOf(view)! } : {}) });
+      const planned = planAnswerChecker({ pr, snapshot: c.analysis.snapshot, groundwork: c.groundwork, replies: authorReplies(c.prior.items, c.analysis.snapshot.threads), questions: rest, answers: flow.answers, retry: flow.retry, mountedDirs: mounted, ...(baseDir !== undefined ? { baseDir } : {}), ...(reviewDirOf(view) !== undefined ? { reviewDir: reviewDirOf(view)! } : {}) });
       const assignment = planned.text;
       const written = writeSpills(view, ANSWERS_STAGE, planned.spills);
       if (written !== undefined) return written;
@@ -1034,7 +1047,7 @@ function recordLedger(ctx: Context, view: RunView, c: QaContext, w: ReturnType<t
   const lr = commandState(view, COMMAND.ledger);
   if (lr.failed && lr.run !== undefined) return supervise({ reason: `the ledger read failed: ${describeCommand(lr.run.command)}`, evidenceRefs: [lr.run.record.ref] }, "escalate a failed ledger read");
   if (w.prior?.state === "missing" || (w.prior?.state === "unreadable" && retryOf(view)(w.prior.run))) {
-    return withPrivate(dispatch(commandJob(ANSWERS_STAGE, "Read the prior ledger's ledger.json", { commands: [priorShowCommand(w.old, process.execPath)], continueOnFailure: true, env: { ...GIT_ENV } }), "read the prior ledger.json, so the new one keeps its heads"));
+    return withPrivate(dispatch(commandJob(ANSWERS_STAGE, "Read the prior ledger's ledger.json", { commands: w.prior?.state === "missing" ? w.prior.next : [{ id: w.prior!.run.command.id, argv: w.prior!.run.command.argv }], continueOnFailure: true, env: { ...GIT_ENV } }), "read the prior ledger.json, so the new one keeps its heads"));
   }
   if (w.prior?.state === "unreadable") {
     return supervise({ reason: w.problem ?? "the prior ledger cannot be read", evidenceRefs: [w.prior.run.record.ref] }, "escalate a prior ledger that cannot be read: it is never overwritten");
@@ -1078,6 +1091,8 @@ function review(ctx: Context, view: RunView): GraphDecision {
   const necessityRecord = recordedNecessityJson(view.evidence);
   const round1 = round1Verdicts(necessityRecord.state === "read" ? parseNecessityRecord(necessityRecord.value) : undefined);
   const records: AspectRecord[] = [];
+  // What earlier heads left open (design §9.3): each aspect's sweep re-judges its own earlier findings and drops a new comment over one.
+  const registry = registryFromEvidence(view.evidence);
   let from = view.evidence.findIndex((e) => e.ref === scope.refs.at(-1));
   const mounted: string[] = [];
   for (const aspect of ASPECTS) {
@@ -1091,7 +1106,8 @@ function review(ctx: Context, view: RunView): GraphDecision {
       continue;
     }
     const earlier = findingsOf(records);
-    const f = aspectFlow(view.evidence.slice(from + 1), { aspect, scope: files, principles: principleIds, earlier, base, retryable: (r) => isStaleFailure(r.record, view) });
+    const ap = aspectPrior(registry, aspect, analysis.snapshot.files, files);
+    const f = aspectFlow(view.evidence.slice(from + 1), { aspect, scope: files, principles: principleIds, earlier, firstId: registry.nextF, prior: ap.given, suppress: ap.suppress, base, retryable: (r) => isStaleFailure(r.record, view) });
     const reviewDir = reviewDirOf(view);
     const baseDir = baseTreeDir(view, { baseTree: true });
     switch (f.state) {
@@ -1110,6 +1126,7 @@ function review(ctx: Context, view: RunView): GraphDecision {
           scopeLine: scopeLine(s),
           groups: rules.groups,
           known: f.known,
+          prior: f.prior,
           feedback: f.feedback,
           ...(reviewPrinciples !== undefined ? { principles: reviewPrinciples, round1 } : {}),
           ...(baseDir !== undefined ? { baseDir } : {}),
@@ -1118,7 +1135,7 @@ function review(ctx: Context, view: RunView): GraphDecision {
         const written = writeSpills(view, REVIEW_STAGE, planned.spills);
         if (written !== undefined) return written;
         const known = ["", ...f.known.map((k) => k.id)];
-        const job = agentJob(ctx, view, { jobId: role, stageId: REVIEW_STAGE, purpose: "review", instruction: `Review the ${aspect} aspect (pass ${f.n})`, schema: REVIEW_SCHEMA_NAME, harness: profile.roles[role], role, assignment: planned.text, readOnlyBinds: mounted, references: idRefs({ [REVIEW_REFERENCES[0]!]: idSet(known), [REVIEW_REFERENCES[1]!]: idSet(["", ...principleIds], (id) => oneLineText(reviewPrinciples?.applicable.find((p) => p.id === id)?.statement ?? "").slice(0, 300)) }) }, analysis.snapshot.files);
+        const job = agentJob(ctx, view, { jobId: role, stageId: REVIEW_STAGE, purpose: "review", instruction: `Review the ${aspect} aspect (pass ${f.n})`, schema: REVIEW_SCHEMA_NAME, harness: profile.roles[role], role, assignment: planned.text, readOnlyBinds: mounted, references: idRefs({ [REVIEW_REFERENCES[0]!]: idSet(known), [REVIEW_REFERENCES[2]!]: idSet(f.prior.map((x) => x.id)), [REVIEW_REFERENCES[1]!]: idSet(["", ...principleIds], (id) => oneLineText(reviewPrinciples?.applicable.find((p) => p.id === id)?.statement ?? "").slice(0, 300)) }) }, analysis.snapshot.files);
         if ("problem" in job) return refused(job);
         return dispatchAgent(view, job, `review the ${aspect} aspect (pass ${f.n}) in a fresh read-only ${harnessName(profile.roles[role])} session (${s.context.reason})`);
       }
@@ -1142,6 +1159,7 @@ function review(ctx: Context, view: RunView): GraphDecision {
           passes: f.passes,
           findings: f.findings,
           unsaturated: f.unsaturated,
+          ...(ap.given.length + ap.settled.length > 0 ? { prior: [...f.prior, ...ap.settled].sort((a, b) => Number(a.id.slice(1)) - Number(b.id.slice(1))) } : {}),
         };
         const id = aspectRecordId(aspect);
         return recordStep(view, REVIEW_STAGE, id, recordCommands(id, "review", aspectRecordJson(record)), `the ${aspect} review`);

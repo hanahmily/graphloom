@@ -26,6 +26,8 @@ import { writeChunks } from "./write.js";
 export const LEDGER_SCHEMA = "graphloom-pr-ledger-v1";
 const MAX_COMMAND_BYTES = 200_000;
 const ANSWER_CHARS = 400;
+/** Characters of the prior ledger's registry one command prints (a command report holds 65,536 bytes). */
+const PRIOR_CHUNK = 30_000;
 
 export interface LedgerHead {
   sha: string;
@@ -40,6 +42,8 @@ export interface LedgerHead {
 export interface LedgerQa {
   id: string;
   type: string;
+  /** The question's stable key (design §9.4): its type and subject, which maps the same question on a later head to this id. */
+  key: string;
   symbol: string | null;
   item: string;
   status: string;
@@ -63,17 +67,24 @@ export interface LedgerInput {
 export function ledgerJson(i: LedgerInput, prior: unknown): string {
   const priorHeads = isObject(prior) && Array.isArray(prior.heads) ? (prior.heads as LedgerHead[]).filter((h) => isObject(h) && typeof h.sha === "string" && h.sha !== i.pr.head) : [];
   const answers = new Map(i.answers.map((a) => [a.question, a] as const));
+  const current = new Set(i.questions.map((q) => q.id));
+  // Questions an earlier head asked and this one did not stay in the ledger (id and key), so their ids are never reused; the posted items stay too.
+  const carried = isObject(prior) && Array.isArray(prior.qa) ? (prior.qa as unknown[]).filter((q) => isObject(q) && typeof q.id === "string" && !current.has(q.id)) : [];
+  const findings = isObject(prior) && Array.isArray(prior.findings) ? prior.findings : [];
   const head: LedgerHead = { sha: i.pr.head, base: i.base, files: i.files, commits: i.commits, facts: i.facts, reported: true, reviewed: false };
   return JSON.stringify({
     schema: LEDGER_SCHEMA,
     pull: { owner: i.pr.owner, repo: i.pr.repo, number: i.pr.number },
     heads: [...priorHeads, head],
     purposes: i.purposes,
-    qa: i.questions.map((q): LedgerQa => {
-      const a = answers.get(q.id);
-      return { id: q.id, type: q.type, symbol: q.symbol ?? q.fn ?? null, item: q.item, status: a?.status ?? "unanswered", answer: (a?.answer ?? "").slice(0, ANSWER_CHARS), state: "open", history: a?.history ?? [] };
-    }),
-    findings: [],
+    qa: [
+      ...i.questions.map((q): LedgerQa => {
+        const a = answers.get(q.id);
+        return { id: q.id, type: q.type, key: q.stable ?? "", symbol: q.symbol ?? q.fn ?? null, item: q.item, status: a?.status ?? "unanswered", answer: (a?.answer ?? "").slice(0, ANSWER_CHARS), state: "open", history: a?.history ?? [] };
+      }),
+      ...carried,
+    ],
+    findings,
   });
 }
 
@@ -172,17 +183,35 @@ export function writtenLedger(argv: readonly string[]): { ref: string; old: stri
 }
 
 /**
- * The part of the prior `ledger.json` a new ledger keeps: its schema and its heads. A large run's ledger is mostly its
+ * The part of the prior `ledger.json` a new ledger keeps: its schema, its heads, its questions' ids and keys (not their answers)
+ * and its posted items, which a later run continues from (design §9) and this ledger carries on. A large run's ledger is mostly its
  * Q&A (a #1445-sized one passed 89 KB), past what a command report holds whole, so the command prints only these
  * (`node` reads the JSON; git's own status fails the command, since a pipe would hide it).
  */
-const PRIOR_EXTRACT = 'let s="";process.stdin.on("data",(d)=>{s+=d}).on("end",()=>{const v=JSON.parse(s);process.stdout.write(JSON.stringify({schema:v.schema,heads:v.heads}))})';
+const PRIOR_EXTRACT = String.raw`let s="";process.stdin.setEncoding("utf8");process.stdin.on("data",(d)=>{s+=d}).on("end",()=>{const v=JSON.parse(s);const c=(t)=>typeof t==="string"&&t.length>4000?t.slice(0,4000):t;
+const qa=(Array.isArray(v.qa)?v.qa:[]).map((q)=>({id:q.id,type:q.type,key:q.key,symbol:q.symbol,item:q.item,status:q.status,state:q.state}));
+const findings=(Array.isArray(v.findings)?v.findings:[]).map((f)=>({...f,body:c(f.body),text:c(f.text)}));
+const r=JSON.stringify({schema:v.schema,heads:v.heads,qa,findings}).replace(/[\u007f-\uffff]/g,(m)=>"\\u"+m.charCodeAt(0).toString(16).padStart(4,"0"));
+const n=Math.max(1,Math.ceil(r.length/${PRIOR_CHUNK}));const k=Number(process.argv[1]);
+const h=require("crypto").createHash("sha256").update(r).digest("hex");
+process.stdout.write("graphloom-prior "+k+" "+n+" "+h+"\n"+r.slice(k*${PRIOR_CHUNK},(k+1)*${PRIOR_CHUNK}))})`;
 
-/** Reads the prior ledger's schema and heads, so the new one keeps its heads. `node` is the Node binary to run (the plugin's own). */
-export const priorShowCommand = (old: string, node = "node"): EnvironmentCommand => ({
-  id: COMMAND.ledgerPrior,
-  argv: ["sh", "-c", 'set -eu; j=$(git -c core.hooksPath=/dev/null show "$1:ledger.json"); printf \'%s\' "$j" | "$2" -e "$3" > "$GRAPHLOOM_REPORT_FILE"', COMMAND.ledgerPrior, old, node, PRIOR_EXTRACT],
+/**
+ * Reads the prior ledger's registry (its schema, heads, question keys and posted items), part `k` of it. A ledger past what one
+ * command report holds is read in parts: each command prints a header (`graphloom-prior <k> <parts> <sha256 of the whole>`) and
+ * its slice of the registry's ASCII-only JSON, recomputed from the same commit each time, and `priorState` joins them and checks the
+ * digest. `node` is the Node binary to run (the plugin's own).
+ */
+export const priorShowCommand = (old: string, node = "node", k = 0): EnvironmentCommand => ({
+  id: k === 0 ? COMMAND.ledgerPrior : `${COMMAND.ledgerPrior}-${k}`,
+  argv: ["sh", "-c", 'set -eu; j=$(git -c core.hooksPath=/dev/null show "$1:ledger.json"); printf \'%s\' "$j" | "$2" -e "$3" "$4" > "$GRAPHLOOM_REPORT_FILE"', COMMAND.ledgerPrior, old, node, PRIOR_EXTRACT, String(k)],
 });
+
+/** What part `k` of a registry's JSON (ASCII only) prints, as `priorShowCommand` does: for the stand-ins of a rehearsal and for tests. */
+export function priorChunkText(registryJson: string, k: number): string {
+  const n = Math.max(1, Math.ceil(registryJson.length / PRIOR_CHUNK));
+  return `graphloom-prior ${k} ${n} ${sha256(registryJson)}\n${registryJson.slice(k * PRIOR_CHUNK, (k + 1) * PRIOR_CHUNK)}`;
+}
 
 export interface LedgerReading {
   ledger: Ledger;
@@ -200,24 +229,62 @@ export function ledgerRead(evidence: readonly EvidenceRecord[]): LedgerReading |
 
 export const oldValue = (l: Ledger): string => (l.present ? l.sha : "absent");
 
-export type PriorLedger = { state: "absent" } | { state: "missing" } | { state: "read"; value: unknown } | { state: "unreadable"; reason: string; run: CommandRun };
+export type PriorLedger =
+  | { state: "absent" }
+  /** Not read whole yet: the commands that read what is missing (the first part, then every later one). */
+  | { state: "missing"; next: EnvironmentCommand[] }
+  | { state: "read"; value: unknown }
+  | { state: "unreadable"; reason: string; run: CommandRun };
+
+/** The most parts one job reads. */
+const PRIOR_PARTS_PER_JOB = 16;
 
 /**
- * The prior ledger's `ledger.json` as the latest `ledger-prior` read it from the commit the write swaps from.
- * A ledger that is there and cannot be read whole is never replaced by one that forgets its heads.
+ * The prior ledger's registry as the `ledger-prior` commands read it from the commit the write swaps from: the first part says how
+ * many there are and the digest of the whole, the others follow, and the joined text must match the digest. A ledger that is there and
+ * cannot be read whole is never replaced by one that forgets its heads.
  */
-export function priorState(evidence: readonly EvidenceRecord[], old: string): PriorLedger {
+export function priorState(evidence: readonly EvidenceRecord[], old: string, node = process.execPath): PriorLedger {
   if (old === "absent") return { state: "absent" };
-  const run = commandRuns(evidence, COMMAND.ledgerPrior).filter((r) => r.command.argv[4] === old).at(-1);
-  if (run === undefined) return { state: "missing" };
-  if (!succeeded(run.command)) return { state: "unreadable", reason: `reading ${old.slice(0, 12)}:ledger.json exited ${run.command.exitCode ?? "on a signal"}`, run };
-  const report = reportText(run);
-  if (report.truncated) return { state: "unreadable", reason: "ledger.json did not fit the command report whole", run };
+  const runs = commandRuns(evidence).filter((r) => r.command.argv[3] === COMMAND.ledgerPrior && r.command.argv[4] === old);
+  const part = (k: number): CommandRun | undefined => runs.filter((r) => r.command.argv[7] === String(k)).at(-1);
+  const first = part(0);
+  if (first === undefined) return { state: "missing", next: [priorShowCommand(old, node, 0)] };
+  const text = (run: CommandRun): { text: string } | { problem: string } => {
+    if (!succeeded(run.command)) return { problem: `reading ${old.slice(0, 12)}:ledger.json exited ${run.command.exitCode ?? "on a signal"}` };
+    const report = reportText(run);
+    return report.truncated ? { problem: "a part of ledger.json did not fit the command report" } : { text: report.text };
+  };
+  const split = (t: string): { k: number; n: number; digest: string; body: string } | undefined => {
+    const m = /^graphloom-prior (\d+) (\d+) ([0-9a-f]{64})\n/.exec(t);
+    return m === null ? undefined : { k: Number(m[1]), n: Number(m[2]), digest: m[3]!, body: t.slice(m[0].length) };
+  };
+  const head = text(first);
+  if ("problem" in head) return { state: "unreadable", reason: head.problem, run: first };
+  const h = split(head.text);
+  if (h === undefined || h.k !== 0 || h.n < 1) return { state: "unreadable", reason: "the first part of ledger.json carries no header", run: first };
+  const bodies = [h.body];
+  const missing: EnvironmentCommand[] = [];
+  for (let k = 1; k < h.n; k += 1) {
+    const run = part(k);
+    if (run === undefined) {
+      missing.push(priorShowCommand(old, node, k));
+      continue;
+    }
+    const t = text(run);
+    if ("problem" in t) return { state: "unreadable", reason: t.problem, run };
+    const p = split(t.text);
+    if (p === undefined || p.k !== k || p.n !== h.n || p.digest !== h.digest) return { state: "unreadable", reason: `part ${k} of ledger.json is not of the same read`, run };
+    bodies[k] = p.body;
+  }
+  if (missing.length > 0) return { state: "missing", next: missing.slice(0, PRIOR_PARTS_PER_JOB) };
+  const whole = bodies.join("");
+  if (sha256(whole) !== h.digest) return { state: "unreadable", reason: "the parts of ledger.json do not match their digest", run: first };
   try {
-    const value: unknown = JSON.parse(report.text);
-    if (!isObject(value) || value.schema !== LEDGER_SCHEMA) return { state: "unreadable", reason: `it is not a ${LEDGER_SCHEMA} document`, run };
+    const value: unknown = JSON.parse(whole);
+    if (!isObject(value) || value.schema !== LEDGER_SCHEMA) return { state: "unreadable", reason: `it is not a ${LEDGER_SCHEMA} document`, run: first };
     return { state: "read", value };
   } catch {
-    return { state: "unreadable", reason: "it is not JSON", run };
+    return { state: "unreadable", reason: "it is not JSON", run: first };
   }
 }

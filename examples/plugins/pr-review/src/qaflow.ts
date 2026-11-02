@@ -16,6 +16,7 @@ import { COMMAND, QUESTION_BATCH_SIZE, REVIEW_DIR } from "./constants.js";
 import { commandRuns, succeeded, type CommandRun } from "./evidence.js";
 import { necessityDecision, necessityJson, necessityQuestion, parseNecessityRecord, type NecessityRecord } from "./necessity.js";
 import { principlesContext, principlesReading, principlesRecord, type PrinciplesContext } from "./principles.js";
+import { continueIds, questionKeys, registryFromEvidence, type PriorRegistry } from "./prior.js";
 import { ledgerJson, ledgerMarkdown, ledgerRead, ledgerWriteCommands, oldValue, priorState, type PriorLedger } from "./ledger.js";
 import { htmlPagesFrom } from "./html.js";
 import { appendixWriteCommands, htmlWriteCommands, necessityWriteCommands, qaWriteCommands, readParts, recordedNecessityJson, recordedReport } from "./parts.js";
@@ -45,6 +46,8 @@ export interface QaContext {
   context: Profile["context"];
   /** The project's design principles as N1 judges the change against them, when the profile names a file (design §7.5.1). */
   principles?: PrinciplesContext;
+  /** What earlier runs left in the ledger (design §9): the ids to continue from and the posted items; empty for a first run. */
+  prior: PriorRegistry;
 }
 
 export type QaContextState =
@@ -74,7 +77,7 @@ export function qaContext(evidence: readonly EvidenceRecord[], profile: Profile,
   const symbols = g.groundwork.symbols.map((s) => ({ ...s, ...(itemOfSymbol(s, view.items) !== undefined ? { item: itemOfSymbol(s, view.items)! } : {}) }));
   const groundwork: Groundwork = { ...g.groundwork, symbols };
   const mode = questionsMode(a.analysis.snapshot.mode, groundwork.symbols.filter((s) => s.change === "new").length, profile.limits);
-  return { state: "ready", ctx: { analysis: a.analysis, mode, pr, base, view, groundwork, pinned: pinnedTexts(a.analysis.snapshot.pull, a.analysis.snapshot.commits), packs: effectivePacks(profile), refs: g.refs, designDocs: profile.questions.designDocs, context: profile.context, ...(principles !== undefined ? { principles } : {}) } };
+  return { state: "ready", ctx: { analysis: a.analysis, mode, pr, base, view, groundwork, pinned: pinnedTexts(a.analysis.snapshot.pull, a.analysis.snapshot.commits), packs: effectivePacks(profile), refs: g.refs, prior: registryFromEvidence(evidence), designDocs: profile.questions.designDocs, context: profile.context, ...(principles !== undefined ? { principles } : {}) } };
 }
 
 /** The questioner's flow: its result checked by the deterministic rules. */
@@ -98,11 +101,30 @@ export interface QuestionSet {
  * N1, the necessity question, is always first; when it is skipped past, it is the only one.
  */
 export function questionSet(ctx: QaContext, output: QuestionerOutput | undefined, skipped = false): QuestionSet {
-  if (skipped) return { questions: [necessityQuestion()], purposes: [], rejected: [], skipped: true };
+  if (skipped) return { questions: [{ ...necessityQuestion(), stable: "necessity|N1" }], purposes: [], rejected: [], skipped: true };
   const { stated, rejected } = statedPurposes(output, ctx.view, ctx.pinned, isLarge(ctx.mode));
   const required = requiredQuestions({ view: ctx.view, groundwork: ctx.groundwork, large: isLarge(ctx.mode) }, stated);
   const purposes: PurposeRecord[] = changeItems(ctx.view, isLarge(ctx.mode)).map((i) => stated.get(i.id) ?? { item: i.id, status: "asked" });
-  return { questions: [necessityQuestion(), ...finalQuestions(required, output, ctx.groundwork, isLarge(ctx.mode))], purposes, rejected, skipped: false };
+  return { questions: continued(ctx, [necessityQuestion(), ...finalQuestions(required, output, ctx.groundwork, isLarge(ctx.mode))]), purposes, rejected, skipped: false };
+}
+
+/** The first head cite's path of each report item and high-level change: the subject a question about it keeps from head to head. */
+function itemPaths(view: ReportView): (item: string) => string | undefined {
+  const all = [...view.items, ...(view.changes ?? [])];
+  return (item) => {
+    const cites = all.find((i) => i.id === item)?.cites ?? [];
+    return (cites.find((c) => c.side === "head") ?? cites[0])?.path;
+  };
+}
+
+/**
+ * The questions with their stable keys, and the ids the ledger gives them (design §9.4): a question whose key an earlier head's ledger
+ * holds keeps that id, a new one numbers on from the ledger's last, and a first run's ids are Q1, Q2, ... as they always were.
+ */
+function continued(ctx: QaContext, questions: Question[]): Question[] {
+  const keys = questionKeys(questions, ctx.groundwork.symbols, itemPaths(ctx.view));
+  const ids = continueIds(questions, keys, ctx.prior);
+  return questions.map((q) => ({ ...q, id: ids.get(q.id) ?? q.id, stable: keys.get(q.id) ?? "" }));
 }
 
 export const answerContext = (ctx: QaContext, questions: readonly Question[]): AnswerContext => ({ questions, groundwork: ctx.groundwork, view: ctx.view, packs: ctx.packs, pinned: ctx.pinned });

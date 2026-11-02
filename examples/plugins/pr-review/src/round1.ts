@@ -13,6 +13,7 @@ import { isTestPath } from "./answers.js";
 import { anchored, scrub, type ItemCites } from "./draft.js";
 import type { FullPack } from "./packs.js";
 import { effectiveConclusion, brokenNote, parseNecessityRecord, NECESSITY_ID } from "./necessity.js";
+import type { PriorItem } from "./prior.js";
 import type { PullFile } from "./snapshot.js";
 
 export const ROUND1_SCHEMA = "pr-review-round1-v1";
@@ -33,6 +34,8 @@ export const ROUND1_LABEL: Record<Round1Kind, string> = {
 export interface Round1Issue {
   /** `N1` or the question's id (`Q3`): the id the posted comment's marker carries. */
   id: string;
+  /** The stable key of its question (design §9.4), which ties the same issue on a later head to this id. */
+  key: string;
   kinds: Round1Kind[];
   /** The Q&A status of the answer behind it (N1's follows its conclusion). */
   status: string;
@@ -44,12 +47,24 @@ export interface Round1Issue {
   anchored: boolean;
 }
 
+/** What this head's round 1 says of an issue an earlier head's round 1 left open (design §9.4, item 4). */
+export interface Round1Prior {
+  id: string;
+  key: string;
+  /** `fixed`: it is no longer an issue on this head; `open`: it still is, or could not be re-checked. */
+  status: "fixed" | "open";
+  reason: string;
+}
+
 export interface Round1Record {
   schema: typeof ROUND1_SCHEMA;
   head: string;
   /** N1's conclusion as the Q&A shows it. */
   necessity: string;
+  /** Every issue open on this head: the earlier ones that still stand and the new ones. */
   issues: Round1Issue[];
+  /** The issues earlier heads left open, each judged on this head; absent for a run with none. */
+  prior?: Round1Prior[];
 }
 
 const oneLine = (s: string): string => s.replace(/\s+/g, " ").trim();
@@ -61,6 +76,7 @@ interface QaQuestion {
   id: string;
   type: string;
   item: string;
+  stable: string;
   symbol?: string;
   functionPath?: string;
   text: string;
@@ -81,6 +97,7 @@ function qaOf(json: string): { questions: QaQuestion[]; symbols: Array<{ id: str
       id: str(q.id),
       type: str(q.type),
       item: str(q.item),
+      stable: str(q.stable),
       ...(typeof q.symbol === "string" ? { symbol: q.symbol } : {}),
       ...(typeof q.functionPath === "string" ? { functionPath: q.functionPath } : {}),
       text: str(q.text),
@@ -104,6 +121,8 @@ export interface Round1Input {
   itemCites: ItemCites;
   /** The effective language packs: a cited path is a test by their `testFiles` convention, as answer validation judges it. */
   packs: readonly FullPack[];
+  /** The round-1 issues earlier heads left open, as the ledger holds them (empty for a first run). */
+  prior?: readonly PriorItem[];
 }
 
 /**
@@ -123,6 +142,7 @@ export function round1Record(i: Round1Input): Round1Record | undefined {
     const note = record !== undefined ? brokenNote(record.final) : "";
     issues.push({
       id: NECESSITY_ID,
+      key: "necessity|N1",
       kinds: ["necessity"],
       status: record?.final.status ?? "needs author",
       body: scrub([`**Necessity: ${conclusion}.** ${clip(oneLine(n?.rationale ?? "N1 has no recorded answer."), 700)}`, ...(note !== "" ? [note] : []), `Please say why this change is needed, or what in the system's design it follows.`].join("\n\n")),
@@ -144,13 +164,22 @@ export function round1Record(i: Round1Input): Round1Record | undefined {
     const cited = a.citations.filter((c) => c.path !== "").slice(0, 3).map((c) => `\`${c.path}${c.start > 0 ? `:${c.start}` : ""}\``);
     issues.push({
       id: q.id,
+      key: q.stable,
       kinds,
       status: a.status,
       body: scrub(`**${kinds.map((k) => ROUND1_LABEL[k]).join("; ")}** (${q.id}). ${oneLine(q.text)}\n\n${a.status === "needs author" ? "What was checked" : `Answer (${a.status})`}: ${clip(oneLine(a.answer), 600)}${cited.length > 0 && (kinds.includes("existing") || kinds.includes("missing-test")) ? `\n\nSee ${cited.join(", ")}.` : ""}`),
       ...(at !== undefined ? place(at.path, at.line) : { anchored: false }),
     });
   }
-  return { schema: ROUND1_SCHEMA, head: i.head, necessity: conclusion, issues };
+  const open = (i.prior ?? []).filter((p) => p.origin === "round1" && p.status === "open");
+  const askedOnlyN1 = qa.questions.every((q) => q.type === "necessity");
+  const prior = open.map((p): Round1Prior => {
+    if (issues.some((x) => x.id === p.id)) return { id: p.id, key: p.key, status: "open", reason: "it is still an issue on this head" };
+    if (p.id !== NECESSITY_ID && askedOnlyN1) return { id: p.id, key: p.key, status: "open", reason: "not re-checked: N1 was judged unnecessary, so the other questions were skipped" };
+    const q = qa.questions.find((x) => x.id === p.id);
+    return { id: p.id, key: p.key, status: "fixed", reason: p.id === NECESSITY_ID ? `N1 now concludes ${conclusion}` : q !== undefined ? `its question is now ${q.answer?.status ?? "answered"}, with no blocking category` : "its subject is no longer in the change" };
+  });
+  return { schema: ROUND1_SCHEMA, head: i.head, necessity: conclusion, issues, ...(open.length > 0 ? { prior } : {}) };
 }
 
 export const round1Json = (r: Round1Record): string => JSON.stringify(r);

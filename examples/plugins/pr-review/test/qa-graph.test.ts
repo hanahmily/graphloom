@@ -4,6 +4,7 @@
 import { checkAssignmentFidelity, type EvidenceRecord, type JobSpec } from "@graphloom/sdk";
 import { describe, expect, it } from "vitest";
 import { ledgerReadCommand } from "../src/commands.js";
+import { priorChunkText } from "../src/ledger.js";
 import { GIT_ENV } from "../src/commands.js";
 import { advancePullRequest } from "../src/graph.js";
 import { REHEARSAL_MERGE_BASE, rehearsal } from "../src/rehearsal.js";
@@ -422,7 +423,7 @@ describe("the ledger (design 9.1)", () => {
     const prior = "d".repeat(40);
     const withPrior = scenarioWith("answer-finds-existing-helper", (s) => {
       s.commands!["ledger-read"] = { exitCode: 0, stdout: `present ${prior}\n` };
-      s.commands!["ledger-prior"] = { exitCode: 0, stdout: JSON.stringify({ schema: "graphloom-pr-ledger-v1", heads: [{ sha: "e".repeat(40), reported: true, reviewed: false }] }) };
+      s.commands!["ledger-prior"] = { exitCode: 0, stdout: priorChunkText(JSON.stringify({ schema: "graphloom-pr-ledger-v1", heads: [{ sha: "e".repeat(40), reported: true, reviewed: false }] }), 0) };
     });
     const s2 = simulate({ scenario: withPrior });
     expect(stopOf(s2)).toMatchObject({ reason: "answers accepted" });
@@ -445,8 +446,8 @@ describe("the ledger (design 9.1)", () => {
       });
     const cases: Array<[{ exitCode: number; stdout?: string; stderr?: string }, RegExp]> = [
       [{ exitCode: 128, stderr: "fatal: path is not in the commit" }, /exited 128/],
-      [{ exitCode: 0, stdout: "not json" }, /it is not JSON/],
-      [{ exitCode: 0, stdout: JSON.stringify({ heads: [] }) }, /not a graphloom-pr-ledger-v1 document/],
+      [{ exitCode: 0, stdout: priorChunkText("not json", 0) }, /it is not JSON/],
+      [{ exitCode: 0, stdout: priorChunkText(JSON.stringify({ heads: [] }), 0) }, /not a graphloom-pr-ledger-v1 document/],
     ];
     for (const [stub, reason] of cases) {
       const sim = withPrior(stub);
@@ -482,7 +483,7 @@ describe("the ledger (design 9.1)", () => {
     const evidence = [...s2.evidence, { ...read, ref: "reread", generation: 2, payload: { ...(read.payload as object), command: { ...(read.payload as { command: object }).command, stdoutTail: `present ${winner}\n` } } } as EvidenceRecord];
     const next = advancePullRequest(viewOf({ ...s2, evidence }, resume));
     expect(next.action).toMatchObject({ type: "dispatch", job: { instruction: "Read the prior ledger's ledger.json" } });
-    const priors = [...evidence, { ...read, ref: "prior", generation: 2, payload: { ...(read.payload as object), command: { id: "ledger-prior", argv: ["sh", "-c", "x", "ledger-prior", winner], exitCode: 0, stdoutTail: JSON.stringify({ schema: "graphloom-pr-ledger-v1", heads: [] }), stderrTail: "" } } } as EvidenceRecord];
+    const priors = [...evidence, { ...read, ref: "prior", generation: 2, payload: { ...(read.payload as object), command: { id: "ledger-prior", argv: ["sh", "-c", "x", "ledger-prior", winner, "node", "extract", "0"], exitCode: 0, stdoutTail: priorChunkText(JSON.stringify({ schema: "graphloom-pr-ledger-v1", heads: [] }), 0), stderrTail: "" } } } as EvidenceRecord];
     const write2 = advancePullRequest(viewOf({ ...s2, evidence: priors }, resume));
     expect(write2.action).toMatchObject({ type: "dispatch", job: { instruction: expect.stringMatching(/^Advance the pull/) } });
     const argv = ((write2.action as { job: JobSpec }).job.input as { commands: Array<{ argv: string[] }> }).commands[0]!.argv;

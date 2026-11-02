@@ -8,17 +8,22 @@
  * runs (at most `MAX_SWEEP_PASSES`); the sweep ends at the first pass whose findings were all dismissed. The ledger is a
  * pure function of the recorded passes and verdicts, so a resume or a supervisor decision cannot lose it.
  *
- * Contract `pr-code-review-v1` is `code-review-v2` plus `side`, `suggestion`, `aspect` and `kind`; it has no `repro` yet
+ * Contract `pr-code-review-v1` is `code-review-v2` plus `side`, `suggestion`, `aspect`, `kind` and `prior`; it has no `repro` yet
  * (the reproducing tests are a later part, and `proof.ts` is where they plug in).
+ *
+ * On a later head (design §9.3) the first pass is also given the findings an earlier head left open, already re-anchored to this
+ * head, and judges each `still_present` or `fixed`; the verifier confirms the ones still present like a new finding (confirmed
+ * keeps it open, refuted makes it fixed). A new comment that overlaps a closed or an earlier finding is suppressed before it is verified.
  */
 import type { EnvironmentCommand, EvidenceRecord } from "@graphloom/sdk";
 import { isAspect, type Aspect } from "./aspects.js";
 import { agentRuns, commandRuns, succeeded, reportText, type AgentRun, type CommandRun } from "./evidence.js";
+import { overlaps as priorOverlaps } from "./prior.js";
 import { treeQuotePlan, readTreeQuotes, type TreeQuotePlan } from "./treequotes.js";
 
 export const REVIEW_SCHEMA_NAME = "pr-code-review-v1";
 export const VERIFY_SCHEMA_NAME = "pr-finding-verification-v1";
-export const REVIEW_REFERENCES = ["comments[].finding", "comments[].principle"];
+export const REVIEW_REFERENCES = ["comments[].finding", "comments[].principle", "prior[].finding"];
 export const VERIFY_REFERENCES = ["verdicts[].finding"];
 /** Passes one aspect may run on the head (issue-fix's `MAX_SWEEP_PASSES`); hitting it is noted unsaturated and does not fail the stage. */
 export const MAX_SWEEP_PASSES = 4;
@@ -40,13 +45,26 @@ export const REVIEW_VERDICTS = ["confirmed", "refuted", "uncertain"] as const;
 export type ReviewVerdict = (typeof REVIEW_VERDICTS)[number];
 export type FindingState = "pending" | "confirmed" | "disputed" | "dismissed";
 
+export const PRIOR_STATUSES = ["still_present", "fixed"] as const;
+export type PriorStatus = (typeof PRIOR_STATUSES)[number];
+
 const ASPECT_ENUM = ["correctness", "maintainability", "security"];
 
 export const REVIEW_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["comments", "summary"],
+  required: ["comments", "summary", "prior"],
   properties: {
+    // The judgment of each earlier finding the assignment lists (empty when it lists none).
+    prior: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["finding", "status", "reason"],
+        properties: { finding: { type: "string" }, status: { type: "string", enum: [...PRIOR_STATUSES] }, reason: { type: "string" } },
+      },
+    },
     comments: {
       type: "array",
       items: {
@@ -169,6 +187,8 @@ export interface Finding {
   distinct: boolean;
   /** The design principle the finding says the change breaks; absent for none (and in records written before it existed). */
   principle?: string;
+  /** An earlier head's finding that this sweep re-judges (design §9.3), not one it raised; never in an aspect record's `findings`. */
+  prior?: boolean;
   state: FindingState;
   /** The passes that raised it again by name. */
   reaffirmed: number[];
@@ -190,11 +210,44 @@ export interface PassContext {
   known: ReadonlySet<string>;
   /** The ids of the design principles given to this reviewer (design §8.1); none means a comment names no principle. */
   principles?: ReadonlySet<string>;
+  /** The ids of the earlier findings this pass must judge: each exactly once in `prior`. */
+  prior?: ReadonlySet<string>;
 }
 
 export interface ParsedPass {
   comments: ReviewComment[];
   summary: PassSummary;
+  /** The pass's judgment of each earlier finding it was given. */
+  prior: Array<{ finding: string; status: PriorStatus; reason: string }>;
+}
+
+/** An earlier head's open finding as the first pass is given it: re-anchored to this head, or outdated (no longer anchored to its diff). */
+export interface PriorFinding {
+  id: string;
+  path: string;
+  side: CommentSide;
+  startLine: number;
+  endLine: number;
+  /** The anchor could not be found again on this head: the reviewer looks for the code in the file. */
+  outdated: boolean;
+  severity: Severity;
+  kind: FindingKind;
+  /** The finding's text as it was posted. */
+  text: string;
+}
+
+/** What a sweep concluded of one earlier finding. */
+export interface PriorOutcome {
+  id: string;
+  status: "open" | "fixed";
+  /** Who decided: the reviewer, the verifier's refutation, the file leaving the change, or `carried` (not re-checked on this head). */
+  how: "reviewer" | "verifier" | "gone" | "carried";
+  reason: string;
+  path: string;
+  side: CommentSide;
+  line: number;
+  endLine: number;
+  outdated: boolean;
 }
 
 /** A pass's result, read against the deterministic rules: the comments and the summary, or every problem at once. */
@@ -227,6 +280,23 @@ export function parsePass(output: unknown, ctx: PassContext): ParsedPass | { pro
     }
     if (problems.length === 0 || problems.every((p) => !p.startsWith(at))) comments.push(c as unknown as ReviewComment);
   });
+  const priorIds = ctx.prior ?? new Set<string>();
+  const prior: ParsedPass["prior"] = [];
+  if (priorIds.size > 0) {
+    const raw = Array.isArray(output.prior) ? output.prior : [];
+    const seen = new Set<string>();
+    raw.forEach((p, i) => {
+      if (!isObj(p) || typeof p.finding !== "string" || !priorIds.has(p.finding) || !PRIOR_STATUSES.includes(p.status as PriorStatus) || typeof p.reason !== "string") {
+        problems.push(`prior[${i}] must name one of the earlier findings listed to you, with status still_present or fixed and a reason`);
+      } else if (seen.has(p.finding)) problems.push(`prior[${i}]: ${p.finding} is judged twice`);
+      else {
+        seen.add(p.finding);
+        prior.push({ finding: p.finding, status: p.status as PriorStatus, reason: oneLine(p.reason) });
+      }
+    });
+    const left = [...priorIds].filter((id) => !seen.has(id));
+    if (left.length > 0) problems.push(`prior must judge every earlier finding listed to you; missing ${left.join(", ")}`);
+  }
   const s = output.summary as Record<string, unknown>;
   const skipped = Array.isArray(s.skipped) ? (s.skipped as Array<{ path?: unknown; reason?: unknown }>) : [];
   if (!Number.isSafeInteger(s.total_files) || !Number.isSafeInteger(s.reviewed_files)) problems.push("summary.total_files and summary.reviewed_files must be integers");
@@ -234,7 +304,7 @@ export function parsePass(output: unknown, ctx: PassContext): ParsedPass | { pro
     problems.push(`the pass must review every one of the ${ctx.scope.size} file(s) in scope and skip none (it reported ${String(s.reviewed_files)} of ${String(s.total_files)} reviewed, ${skipped.length} skipped)`);
   }
   if (problems.length > 0) return { problems };
-  return { comments, summary: { total_files: s.total_files as number, reviewed_files: s.reviewed_files as number, skipped: [] } };
+  return { comments, summary: { total_files: s.total_files as number, reviewed_files: s.reviewed_files as number, skipped: [] }, prior };
 }
 
 /** A verifier's result against the pending findings: one verdict each, or every problem at once (a finding left out is judged later, as disputed). */
@@ -316,6 +386,8 @@ export interface PassRecord {
   nits: number;
   /** Comments folded into another of the same pass on overlapping lines. */
   merged: number;
+  /** New comments left out because they overlap a closed or an earlier finding (design §9.3). */
+  suppressed?: number;
 }
 
 /** What an aspect's sweep recorded: everything the draft and the validators need, without the agent evidence. */
@@ -332,6 +404,8 @@ export interface AspectRecord {
   findings: Finding[];
   /** The sweep hit `MAX_SWEEP_PASSES` with the last pass still raising findings that survived verification. */
   unsaturated: boolean;
+  /** What this head's sweep concluded of each earlier finding it re-judged; absent for a run with none. */
+  prior?: PriorOutcome[];
 }
 
 export const ASPECT_RECORD_SCHEMA = "pr-review-aspect-v1";
@@ -353,11 +427,11 @@ export function parseAspectRecord(json: string, aspect: Aspect): AspectRecord | 
 export const quotePrefix = (aspect: Aspect, pass: number): string => `rvq-${aspect}-${pass}`;
 
 export type AspectFlow =
-  | { state: "pass"; n: number; feedback: string[]; known: Finding[] }
+  | { state: "pass"; n: number; feedback: string[]; known: Finding[]; /** The earlier findings the first pass judges. */ prior: PriorFinding[] }
   | { state: "verify"; n: number; findings: Finding[]; feedback: string[] }
   | { state: "quotes"; commands: EnvironmentCommand[] }
   | { state: "supervise"; reason: string; refs: string[] }
-  | { state: "done"; findings: Finding[]; passes: PassRecord[]; unsaturated: boolean; refs: string[] };
+  | { state: "done"; findings: Finding[]; passes: PassRecord[]; unsaturated: boolean; refs: string[]; prior: PriorOutcome[] };
 
 export interface AspectSpec {
   aspect: Aspect;
@@ -366,6 +440,12 @@ export interface AspectSpec {
   principles?: ReadonlySet<string>;
   /** The findings the earlier aspects recorded: their ids are known, and numbering goes on after them. */
   earlier: readonly Finding[];
+  /** The number the first new finding of the review takes: after the ledger's last `F<n>` (1 for a first run). */
+  firstId?: number;
+  /** The earlier heads' open findings of this aspect that this head's first pass judges. */
+  prior?: readonly PriorFinding[];
+  /** Places where a new comment is not raised again: closed earlier findings and the ones judged here, re-anchored to this head. */
+  suppress?: ReadonlyArray<{ path: string; side: CommentSide; start: number; end: number }>;
   base: string | undefined;
   retryable?: (r: CommandRun) => boolean;
 }
@@ -373,9 +453,7 @@ export interface AspectSpec {
 const sameArgv = (a: readonly string[], b: readonly string[]): boolean => a.length === b.length && a.every((x, i) => x === b[i]);
 
 /** Two comments of one pass on the same file and side whose lines overlap are one problem, unless the reviewer marked them `distinct`. */
-function overlaps(a: { path: string; side: string; start: number; end: number }, b: { path: string; side: string; start: number; end: number }): boolean {
-  return a.path === b.path && a.side === b.side && a.start <= b.end && b.start <= a.end;
-}
+const overlaps = priorOverlaps;
 
 /**
  * Where an aspect's sweep stands, from the evidence after the aspect's own start (`evidence` is that slice): the reviewer
@@ -390,8 +468,12 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
   ].sort((a, b) => at(a.run) - at(b.run));
   const findings: Finding[] = [];
   const passes: PassRecord[] = [];
-  const known = (): Set<string> => new Set([...spec.earlier, ...findings].map((f) => f.id));
-  let next = spec.earlier.length + 1;
+  const given = spec.prior ?? [];
+  // The earlier findings are judged beside the new ones, but are never among them: they keep their ids and leave the sweep's numbering and saturation alone.
+  const priors: Finding[] = given.map((p) => ({ id: p.id, aspect: spec.aspect, raisedBy: spec.aspect, pass: 1, path: p.path, side: p.side, startLine: p.startLine, endLine: p.endLine, severity: p.severity, kind: p.kind, content: p.text, suggestion: "", evidence: "", distinct: true, prior: true, state: "pending", reaffirmed: [], notes: [] }));
+  const said = new Map<string, { status: PriorStatus; reason: string }>();
+  const known = (): Set<string> => new Set([...spec.earlier, ...findings, ...priors].map((f) => f.id));
+  let next = (spec.firstId ?? 1) + spec.earlier.length;
   let phase: "start" | "verify" | "need-pass" | "saturated" | "unsaturated" = "start";
   let retries = 0;
   let feedback: string[] = [];
@@ -405,7 +487,7 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
   type Resolved = { kind: "ok"; blocking: boolean } | { kind: "quotes"; commands: EnvironmentCommand[] } | { kind: "supervise"; reason: string; refs: string[] };
   /** Applies the verifier's verdicts to the findings the latest pass raised: a confirmation needs its own witness, a refutation quotes the tree shows, anything else is disputed. */
   const resolve = (): Resolved => {
-    const pending = findings.filter((f) => awaiting.includes(f.id));
+    const pending = [...findings, ...priors].filter((f) => awaiting.includes(f.id));
     const n = passes.length;
     for (const f of pending) {
       const v = verdicts!.get(f.id);
@@ -462,7 +544,7 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
         } else f.state = "dismissed";
       }
     }
-    return { kind: "ok", blocking: pending.some((f) => f.state === "confirmed" || f.state === "disputed") };
+    return { kind: "ok", blocking: pending.some((f) => f.prior !== true && (f.state === "confirmed" || f.state === "disputed")) };
   };
 
   for (const ev of events) {
@@ -480,7 +562,7 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
         retries += 1;
         continue;
       }
-      const parsed = ev.run.contract?.status === "invalid" ? { problems: ev.run.contract.problems.slice(0, 20) } : parsePass(ev.run.output, { aspect: spec.aspect, scope: spec.scope, known: known(), ...(spec.principles !== undefined ? { principles: spec.principles } : {}) });
+      const parsed = ev.run.contract?.status === "invalid" ? { problems: ev.run.contract.problems.slice(0, 20) } : parsePass(ev.run.output, { aspect: spec.aspect, scope: spec.scope, known: known(), ...(spec.principles !== undefined ? { principles: spec.principles } : {}), ...(passes.length === 0 && given.length > 0 ? { prior: new Set(given.map((p) => p.id)) } : {}) });
       if ("problems" in parsed) {
         retries += 1;
         feedback = parsed.problems;
@@ -493,7 +575,13 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
       const reaffirmed: string[] = [];
       let nits = 0;
       let merged = 0;
+      let suppressed = 0;
+      for (const j of parsed.prior) said.set(j.finding, { status: j.status, reason: j.reason });
       for (const c of parsed.comments) {
+        if (c.finding === "" && (spec.suppress ?? []).some((x) => overlaps({ path: c.path, side: c.side, start: c.start_line, end: c.end_line }, { path: x.path, side: x.side, start: x.start, end: x.end }))) {
+          suppressed += 1;
+          continue;
+        }
         if (c.finding !== "") {
           const mine = findings.find((f) => f.id === c.finding);
           if (mine !== undefined) mine.reaffirmed.push(n);
@@ -537,12 +625,13 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
         raised.push(f);
         findings.push(f);
       }
-      passes.push({ n, reviewed: parsed.summary.reviewed_files, raised: raised.map((f) => f.id), reaffirmed, nits, merged });
-      awaiting = raised.map((f) => f.id);
+      passes.push({ n, reviewed: parsed.summary.reviewed_files, raised: raised.map((f) => f.id), reaffirmed, nits, merged, ...(suppressed > 0 ? { suppressed } : {}) });
+      // The earlier findings are judged in the first pass only: a later pass verifies what it raised, and what was settled stays settled.
+      awaiting = [...raised.map((f) => f.id), ...(n === 1 ? priors.filter((f) => said.get(f.id)?.status === "still_present").map((f) => f.id) : [])];
       verdicts = undefined;
       verifyRetries = 0;
       verifyFeedback = [];
-      phase = raised.length > 0 ? "verify" : "saturated";
+      phase = awaiting.length > 0 ? "verify" : "saturated";
       continue;
     }
     // A verifier's result for the findings the latest pass raised.
@@ -560,20 +649,29 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
     verdicts = read.verdicts;
   }
   const tail = refs.slice(-10);
+  /** What the sweep concluded of each earlier finding: fixed when the reviewer said so or the verifier refuted it, else it stays open. */
+  const outcomes = (): PriorOutcome[] =>
+    priors.map((f, i): PriorOutcome => {
+      const at = { id: f.id, path: f.path, side: f.side, line: f.startLine, endLine: f.endLine, outdated: given[i]!.outdated };
+      const s = said.get(f.id);
+      if (s?.status === "fixed") return { ...at, status: "fixed", how: "reviewer", reason: s.reason };
+      if (f.state === "dismissed") return { ...at, status: "fixed", how: "verifier", reason: f.verdict?.reason ?? s?.reason ?? "refuted" };
+      return { ...at, status: "open", how: "verifier", reason: f.state === "confirmed" ? (f.verdict?.reason ?? s?.reason ?? "still present") : (f.notes[0] ?? s?.reason ?? "the verifier could not settle it, so it stays open") };
+    });
   if (phase === "verify") {
     if (verdicts === undefined) {
       if (verifyRetries > MAX_REVIEW_RETRIES) return { state: "supervise", reason: `the ${spec.aspect} verifier's result still fails the contract after ${MAX_REVIEW_RETRIES} retries: ${verifyFeedback.slice(0, 3).join("; ")}`, refs: tail };
-      return { state: "verify", n: passes.length, findings: findings.filter((f) => awaiting.includes(f.id)), feedback: verifyFeedback };
+      return { state: "verify", n: passes.length, findings: [...priors, ...findings].filter((f) => awaiting.includes(f.id)), feedback: verifyFeedback };
     }
     const r = resolve();
     if (r.kind === "quotes") return { state: "quotes", commands: r.commands };
     if (r.kind === "supervise") return { state: "supervise", reason: r.reason, refs: r.refs };
-    if (r.blocking && passes.length < MAX_SWEEP_PASSES) return { state: "pass", n: passes.length + 1, feedback: [], known: [...spec.earlier, ...findings] };
-    return { state: "done", findings, passes, unsaturated: r.blocking, refs: tail };
+    if (r.blocking && passes.length < MAX_SWEEP_PASSES) return { state: "pass", n: passes.length + 1, feedback: [], known: [...spec.earlier, ...findings], prior: [] };
+    return { state: "done", findings, passes, unsaturated: r.blocking, refs: tail, prior: outcomes() };
   }
-  if (phase === "saturated" || phase === "unsaturated") return { state: "done", findings, passes, unsaturated: phase === "unsaturated", refs: tail };
+  if (phase === "saturated" || phase === "unsaturated") return { state: "done", findings, passes, unsaturated: phase === "unsaturated", refs: tail, prior: outcomes() };
   if (retries > MAX_REVIEW_RETRIES) return { state: "supervise", reason: `the ${spec.aspect} reviewer's result still fails the contract or the deterministic rules after ${MAX_REVIEW_RETRIES} retries: ${feedback.slice(0, 3).join("; ")}`, refs: tail };
-  return { state: "pass", n: passes.length + 1, feedback, known: [...spec.earlier, ...findings] };
+  return { state: "pass", n: passes.length + 1, feedback, known: [...spec.earlier, ...findings], prior: passes.length === 0 ? [...given] : [] };
 }
 
 /** The review's findings in id order across the aspects' records. */

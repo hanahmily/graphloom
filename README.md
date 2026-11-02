@@ -224,8 +224,10 @@ crashes; filesystem and execution scopes require host enforcement.
   its issues are posted to the PR and end the run. Without any, round 2, three
   aspect reviewers with verified findings, runs in the same run, and the run posts
   one `COMMENT` review whose first line is the verdict (`Review passed` or `Changes
-  requested: <n> open`). Later pushes continue from a per-PR ledger ref (re-checking
-  what an earlier review posted is the second part of 0.21).
+  requested: <n> open`). Later pushes continue from a per-PR ledger ref: ids
+  continue, each earlier item is re-checked (fixed, or still open with a link to its
+  comment), round 2 waits until round 1's earlier issues are fixed, and the verdict
+  counts the items still open (0.22).
 - [Code quality metrics](docs/design-code-quality-metrics.md) (proposed):
   one definition of cyclomatic complexity (< 10), nesting depth (≤ 3), CRAP
   (threshold 30) and mutation survival for changed functions only, with

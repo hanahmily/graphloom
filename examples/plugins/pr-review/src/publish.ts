@@ -11,15 +11,24 @@
  * posted for this head (by an earlier attempt, or an earlier run) is found and never posted twice: before it posts, the stage
  * reads the pull request's reviews, and after an attempt that may or may not have reached GitHub it reads them again.
  * The posted review's id and its comments' ids are recorded in the ledger (`reviewId`, `github` on each item).
+ *
+ * On a later head (design §9.3, §9.4) the review also says what became of the items an earlier head posted: each one fixed (in
+ * which commit) or still open (with a link to its earlier comment). A still-open item is not posted again, unless its old thread is
+ * outdated; it counts toward the verdict, so `Review passed` means no round-1 issue and no round-2 finding is open, earlier ones included.
  */
 import type { EnvironmentCommand, EvidenceRecord } from "@graphloom/sdk";
 import { COMMAND, CREATE_PULL_REVIEW, GET_VIEWER, PART_BASE, PUBLISH_PATCH_FILE, PUBLISH_STAGE, ledgerRef } from "./constants.js";
 import { partCommands, readParts } from "./parts.js";
-import { severityLabel, type Draft, type DraftEntry } from "./draft.js";
+import { anchored, severityLabel, type Draft, type DraftEntry } from "./draft.js";
 import { commandRuns, isObject, producer, succeeded, type CommandRun } from "./evidence.js";
 import type { Analysis } from "./analysis.js";
 import { GIT_IDENTITY } from "./ledger.js";
 import { draftWrites, recordedRound1 } from "./reviewdraft.js";
+import { anchorInfo, findingKey, registryFromEvidence, type PriorItem, type PriorRegistry } from "./prior.js";
+import { ASPECTS } from "./aspects.js";
+import { findingsOf, type AspectRecord } from "./review.js";
+import { recordedAspect } from "./reviewdraft.js";
+import type { PullFile } from "./snapshot.js";
 import type { Round1Record } from "./round1.js";
 import type { PullRequest } from "./request.js";
 import { READS, readResult, type ReadSpec } from "./snapshot.js";
@@ -60,6 +69,55 @@ export interface PublishItem {
   inline: boolean;
   /** The item's whole text (without its marker) when `body` was compacted to a one-line text to fit the review body; the ledger records it. */
   full?: string;
+  /** What the ledger keeps of the item so a later head can find it again (design §9.1). */
+  meta?: ItemMeta;
+  /** An earlier head's item posted again, because its old thread is outdated. */
+  repost?: boolean;
+}
+
+/** What the ledger records of a posted item beyond its id: the stable key, the place and the text. */
+export interface ItemMeta {
+  key: string;
+  aspect?: string;
+  severity?: string;
+  kind?: string;
+  side?: "RIGHT" | "LEFT";
+  endLine?: number;
+  anchorText?: string;
+  patchId?: string;
+  hunk?: [number, number, number];
+}
+
+/** What became of an item an earlier head posted, as this head's review says it. */
+export interface PriorLine {
+  id: string;
+  origin: "round1" | "round2";
+  status: "fixed" | "open";
+  reason: string;
+  /** Still open without being re-checked on this head (round 2 did not run, or its file was outside the scope). */
+  carried: boolean;
+  /** The earlier comment, or the review that holds it. */
+  link?: string;
+  /** The item's old thread is outdated: it is posted again as a new comment, where `place` says. */
+  repost: boolean;
+  /** Where a reposted round-2 item goes on this head, and whether that place lies in the diff. */
+  place?: { path: string; line: number; endLine: number; side: "RIGHT" | "LEFT"; anchored: boolean };
+  /** A still-open round-2 item whose anchor was not found again on this head: it is listed in the body, and the ledger marks it outdated. */
+  outdated?: boolean;
+  /** A still-open round-2 item whose place on this head was found again (or which is posted again): where it is now, and its anchor recomputed against this head's patch, which the ledger persists in place of the earlier head's. */
+  moved?: { path: string; line: number; endLine: number; meta: ItemMeta };
+  item: PriorItem;
+}
+
+/** A finding a verifier dismissed (never posted): it is recorded closed, so a later head does not raise it again. */
+export interface ClosedFinding {
+  id: string;
+  path: string;
+  line: number;
+  endLine: number;
+  side: "RIGHT" | "LEFT";
+  meta: ItemMeta;
+  text: string;
 }
 
 export interface ReviewPlan {
@@ -73,6 +131,10 @@ export interface ReviewPlan {
   items: PublishItem[];
   /** The verdict's first line of the body. */
   firstLine: string;
+  /** What became of the earlier heads' items, which the body lists and the ledger records. */
+  priors: PriorLine[];
+  /** Findings dismissed on this head, recorded closed in the ledger. */
+  closed: ClosedFinding[];
   /** Why the review cannot be posted so that every item is readable (they fit neither inline nor as one-line texts); the stage escalates instead of posting ids only. */
   problem?: string;
 }
@@ -99,18 +161,46 @@ function findingBody(e: DraftEntry): { text: string; full?: string } {
  * that are findings). The verdict is `Review passed` only when round 1 has no open issue and round 2 no open postable finding.
  * Inline comments are the items with a diff anchor, up to what one review carries; the rest are in the body.
  */
-export function planReview(i: { pull: Pick<PullRequest, "owner" | "repo" | "number">; head: string; nonce: string; round1: Round1Record; draft?: Draft | undefined }): ReviewPlan {
+export function planReview(i: {
+  pull: Pick<PullRequest, "owner" | "repo" | "number">;
+  head: string;
+  nonce: string;
+  round1: Round1Record;
+  draft?: Draft | undefined;
+  /** What became of the earlier heads' items (none for a first run). */
+  prior?: readonly PriorLine[] | undefined;
+  /** What the ledger keeps of each new round-2 finding, by id. */
+  meta?: ReadonlyMap<string, ItemMeta> | undefined;
+  closed?: readonly ClosedFinding[] | undefined;
+}): ReviewPlan {
   const issues = i.round1.issues;
+  const priors = [...(i.prior ?? [])];
   const round: 1 | 2 = issues.length > 0 || i.draft === undefined ? 1 : 2;
+  // A still-open issue is not posted again while its old thread is live; it is listed in the body with a link.
+  const listed = new Set(priors.filter((l) => l.origin === "round1" && l.status === "open" && !l.repost).map((l) => l.id));
+  const reposts: PublishItem[] = priors
+    .filter((l) => l.origin === "round2" && l.status === "open" && l.repost && l.place !== undefined && round === 2)
+    .map((l) => {
+      const text = neutralize(`**Still open** (first raised on ${l.item.head.slice(0, 7)}).\n\n${l.item.text ?? ""}`.trim());
+      const posted = clip(text, MAX_ITEM_TEXT);
+      const place = l.place!;
+      return { id: l.id, origin: "round2" as const, body: `${posted}\n\n${findingMarker(l.id)}`, ...(posted !== text ? { full: text } : {}), path: place.path, line: place.endLine, ...(place.endLine > place.line ? { startLine: place.line } : {}), side: place.side, inline: false, repost: true, meta: l.moved?.meta ?? metaOf(l.item) };
+    });
   const items: PublishItem[] =
     round === 1
-      ? issues.map((x) => {
+      ? issues.filter((x) => !listed.has(x.id)).map((x) => {
           const text = neutralize(x.body);
           const posted = clip(text, MAX_ITEM_TEXT);
-          return { id: x.id, origin: "round1" as const, body: `${posted}\n\n${findingMarker(x.id)}`, ...(posted !== text ? { full: text } : {}), ...(x.path !== undefined && x.line !== undefined ? { path: x.path, line: x.line } : {}), side: "RIGHT" as const, inline: false };
+          return { id: x.id, origin: "round1" as const, body: `${posted}\n\n${findingMarker(x.id)}`, ...(posted !== text ? { full: text } : {}), ...(x.path !== undefined && x.line !== undefined ? { path: x.path, line: x.line } : {}), side: "RIGHT" as const, inline: false, meta: { key: x.key ?? "", ...(x.path !== undefined ? { side: "RIGHT" as const } : {}) } };
         })
-      : (i.draft?.comments ?? []).filter((c) => c.kind === "finding").map((e) => { const b = findingBody(e); return ({ id: e.id, origin: "round2" as const, body: `${b.text}\n\n${findingMarker(e.id)}`, ...(b.full !== undefined ? { full: b.full } : {}), path: e.path, line: e.line, ...(e.startLine !== undefined ? { startLine: e.startLine } : {}), side: e.side, inline: false }); });
-  const anchoredIds = new Set<string>(round === 1 ? issues.filter((x) => x.anchored).map((x) => x.id) : (i.draft?.comments ?? []).filter((c) => c.kind === "finding" && c.anchored).map((c) => c.id));
+      : [
+          ...(i.draft?.comments ?? []).filter((c) => c.kind === "finding").map((e) => { const b = findingBody(e); return ({ id: e.id, origin: "round2" as const, body: `${b.text}\n\n${findingMarker(e.id)}`, ...(b.full !== undefined ? { full: b.full } : {}), path: e.path, line: e.line, ...(e.startLine !== undefined ? { startLine: e.startLine } : {}), side: e.side, inline: false, ...(i.meta?.has(e.id) ? { meta: i.meta.get(e.id)! } : {}) }); }),
+          ...reposts,
+        ];
+  const anchoredIds = new Set<string>([
+    ...(round === 1 ? issues.filter((x) => x.anchored).map((x) => x.id) : (i.draft?.comments ?? []).filter((c) => c.kind === "finding" && c.anchored).map((c) => c.id)),
+    ...reposts.filter((x) => priors.find((l) => l.id === x.id)?.place?.anchored === true).map((x) => x.id),
+  ]);
   let inline = 0;
   for (const it of items) {
     if (anchoredIds.has(it.id) && it.path !== undefined && it.line !== undefined && inline < MAX_INLINE_COMMENTS) {
@@ -118,7 +208,11 @@ export function planReview(i: { pull: Pick<PullRequest, "owner" | "repo" | "numb
       inline += 1;
     }
   }
-  const open = items.length;
+  // What is open: the items posted now (new ones and reposts of one still open) and the earlier ones still open and listed. An earlier item that is open is one item, posted again or not.
+  const stillOpen = priors.filter((l) => l.status === "open");
+  const stillIds = new Set(stillOpen.map((l) => l.id));
+  for (const x of items) if (stillIds.has(x.id)) x.repost = true;
+  const open = items.filter((x) => !stillIds.has(x.id)).length + stillOpen.length;
   const verdict = open === 0 ? "passed" : "changes-requested";
   const firstLine = verdictLine(open);
   const rest = items.filter((x) => !x.inline);
@@ -127,6 +221,7 @@ export function planReview(i: { pull: Pick<PullRequest, "owner" | "repo" | "numb
   const sections = [
     `${firstLine}\n${reviewMarker(i.head, i.nonce)}`,
     [round1Line, ...(round2Line !== undefined ? [round2Line] : [])].join("\n\n"),
+    ...(priors.length > 0 ? [priorSection(priors, i.pull, i.head)] : []),
     ...(inline > 0 ? [`${inline} item${inline === 1 ? " is" : "s are"} commented on the diff.`] : []),
   ];
   // The items that are not inline follow, whole, while they all fit. When they do not, an item with an anchor moves inline (room allowing),
@@ -163,7 +258,36 @@ export function planReview(i: { pull: Pick<PullRequest, "owner" | "repo" | "numb
   }
   const body = [...sections, ...pending.map((x) => x.body)].join("\n\n");
   const comments = items.filter((x) => x.inline).map((x) => ({ path: x.path!, line: x.line!, side: x.side, ...(x.startLine !== undefined && x.startLine < x.line! ? { startLine: x.startLine } : {}), body: x.body }));
-  return { round, verdict, open, body, comments, items, firstLine, ...(problem !== undefined ? { problem } : {}) };
+  return { round, verdict, open, body, comments, items, firstLine, priors, closed: [...(i.closed ?? [])], ...(problem !== undefined ? { problem } : {}) };
+}
+
+/** What the ledger keeps of an item an earlier head posted, which a repost carries on unchanged. */
+function metaOf(x: PriorItem): ItemMeta {
+  return { key: x.key, ...(x.aspect !== undefined ? { aspect: x.aspect } : {}), ...(x.severity !== undefined ? { severity: x.severity } : {}), ...(x.kind !== undefined ? { kind: x.kind } : {}), ...(x.side !== undefined ? { side: x.side } : {}), ...(x.endLine !== undefined ? { endLine: x.endLine } : {}), ...(x.anchorText !== undefined ? { anchorText: x.anchorText } : {}), ...(x.patchId !== undefined ? { patchId: x.patchId } : {}), ...(x.hunk !== undefined ? { hunk: x.hunk } : {}) };
+}
+
+/** The review body's account of the earlier heads' items: fixed in which commit, or still open with a link to the earlier comment. */
+function priorSection(priors: readonly PriorLine[], pull: Pick<PullRequest, "owner" | "repo" | "number">, head: string): string {
+  const lines = priors.map((l) => {
+    const why = l.reason !== "" ? ` (${clip(oneLine(neutralize(l.reason)), 160)})` : "";
+    if (l.status === "fixed") return `- ${l.id}: fixed in ${head.slice(0, 7)}${why}`;
+    return `- ${l.id}: still open${l.repost ? "; its old thread is outdated, so it is commented again" : l.link !== undefined ? ` ([earlier comment](${l.link}))` : ""}${why}`;
+  });
+  const fixed = priors.filter((l) => l.status === "fixed").length;
+  return [`Earlier items (${fixed} fixed, ${priors.length - fixed} still open):`, ...lines].join("\n");
+}
+
+/** The link to an earlier comment on the pull request, or to the review that holds it. */
+export function commentLink(pull: Pick<PullRequest, "owner" | "repo" | "number">, item: Pick<PriorItem, "commentId" | "reviewId" | "inline">): string | undefined {
+  const base = `https://github.com/${pull.owner}/${pull.repo}/pull/${pull.number}`;
+  if (item.commentId !== undefined && item.commentId !== null) return `${base}#discussion_r${item.commentId}`;
+  return item.reviewId !== undefined ? `${base}#pullrequestreview-${item.reviewId}` : undefined;
+}
+
+/** The meta of a new round-2 finding the draft posts: the aspect that raised it, its place and what the file's patch shows there. */
+export function findingMeta(f: { id: string; raisedBy: string; severity: string; kind: string; path: string; side: "RIGHT" | "LEFT"; startLine: number; endLine: number }, files: readonly PullFile[]): ItemMeta {
+  const a = anchorInfo(files.find((x) => x.path === f.path), f.side, f.startLine);
+  return { key: findingKey(f.raisedBy, f.path, f.startLine, a.anchorText), aspect: f.raisedBy, severity: f.severity, kind: f.kind, side: f.side, endLine: f.endLine, ...a };
 }
 
 /** The input of the create-pull-review call: one `COMMENT` review at the pinned head. */
@@ -215,7 +339,11 @@ export interface LedgerPatch {
   open: number;
   reviewId: number;
   url: string | null;
-  items: Array<{ id: string; origin: PublishItem["origin"]; path: string | null; line: number | null; inline: boolean; commentId: number | null; /** The whole text of an item whose posted text was compacted. */ body?: string }>;
+  items: Array<{ id: string; origin: PublishItem["origin"]; path: string | null; line: number | null; endLine?: number; inline: boolean; commentId: number | null; /** The whole text of an item whose posted text was compacted. */ body?: string; /** The item's text as posted (whole), without its marker. */ text: string; repost?: boolean; meta?: ItemMeta }>;
+  /** What became of the earlier heads' items on this head. */
+  priors: Array<{ id: string; origin: PriorLine["origin"]; status: PriorLine["status"]; carried: boolean; reason: string; outdated?: boolean; /** Where a still-open item is on this head, with its anchor recomputed against this head's patch. */ moved?: PriorLine["moved"] }>;
+  /** Findings dismissed on this head, recorded closed. */
+  closed: Array<{ id: string; path: string; line: number; endLine: number; side: "RIGHT" | "LEFT"; text: string; meta: ItemMeta }>;
 }
 
 export function ledgerPatch(pr: Pick<PullRequest, "head">, plan: ReviewPlan, posted: Posted, ids: ReadonlyMap<string, number>): LedgerPatch {
@@ -227,7 +355,9 @@ export function ledgerPatch(pr: Pick<PullRequest, "head">, plan: ReviewPlan, pos
     open: plan.open,
     reviewId: posted.reviewId,
     url: posted.url,
-    items: plan.items.map((x) => ({ id: x.id, origin: x.origin, path: x.path ?? null, line: x.line ?? null, inline: x.inline, commentId: x.inline ? ids.get(x.id) ?? null : null, ...(x.full !== undefined ? { body: x.full } : {}) })),
+    items: plan.items.map((x) => ({ id: x.id, origin: x.origin, path: x.path ?? null, /** The item's first line (a range's last is `endLine`; GitHub's own convention is the end, kept for the posted comment only). */ line: x.startLine ?? x.line ?? null, ...(x.line !== undefined ? { endLine: x.line } : {}), inline: x.inline, commentId: x.inline ? ids.get(x.id) ?? null : null, ...(x.full !== undefined ? { body: x.full } : {}), text: x.full ?? x.body.slice(0, x.body.length - findingMarker(x.id).length).trim(), ...(x.repost === true ? { repost: true } : {}), ...(x.meta !== undefined ? { meta: x.meta } : {}) })),
+    priors: plan.priors.map((l) => ({ id: l.id, origin: l.origin, status: l.status, carried: l.carried, reason: l.reason, ...(l.outdated !== undefined ? { outdated: l.outdated } : {}), ...(l.moved !== undefined ? { moved: l.moved } : {}) })),
+    closed: plan.closed.map((c) => ({ id: c.id, path: c.path, line: c.line, endLine: c.endLine, side: c.side, text: c.text, meta: c.meta })),
   };
 }
 
@@ -323,16 +453,30 @@ export function publishFlow(evidence: readonly EvidenceRecord[], plan: ReviewPla
 // ---- the ledger ----
 
 /** The code `ledger-published` runs over the ledger's `ledger.json` and the patch: `SAME` when the ledger already holds this review. */
-const MERGE =
-  'let s="";process.stdin.on("data",(d)=>{s+=d}).on("end",()=>{const v=JSON.parse(s);const p=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));' +
-  'const heads=Array.isArray(v.heads)?v.heads:[];const h=heads.find((x)=>x.sha===p.head);' +
-  'if(h&&h.reviewId===p.reviewId){process.stdout.write("SAME");return}' +
-  'if(h){h.reviewId=p.reviewId;h.reviewed=p.round===2;h.round1=p.round===1?"issues":"clean";h.verdict=p.verdict;h.open=p.open;if(p.url)h.reviewUrl=p.url}' +
-  'const github=(it)=>({head:p.head,reviewId:p.reviewId,commentId:it.commentId,inline:it.inline});' +
-  'const kept=(Array.isArray(v.findings)?v.findings:[]).filter((f)=>!(f.head===p.head&&p.items.some((it)=>it.id===f.id)));' +
-  'for(const it of p.items){kept.push({head:p.head,id:it.id,origin:it.origin,path:it.path,line:it.line,body:it.body,state:"open",github:github(it)});' +
-  'const q=(Array.isArray(v.qa)?v.qa:[]).find((x)=>x.id===it.id);if(q){q.state="open";q.github=github(it)}}' +
-  'v.heads=heads;v.findings=kept;process.stdout.write(JSON.stringify(v))})';
+const MERGE = String.raw`let s="";process.stdin.setEncoding("utf8");process.stdin.on("data",(d)=>{s+=d}).on("end",()=>{
+const v=JSON.parse(s);const p=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
+const heads=Array.isArray(v.heads)?v.heads:[];const h=heads.find((x)=>x.sha===p.head);
+if(h&&h.reviewId===p.reviewId){process.stdout.write("SAME");return}
+if(h){h.reviewId=p.reviewId;h.reviewed=p.round===2;h.round1=p.round===1?"issues":"clean";h.verdict=p.verdict;h.open=p.open;if(p.url)h.reviewUrl=p.url}
+const gh=(it)=>({head:p.head,reviewId:p.reviewId,commentId:it.commentId,inline:it.inline});
+const findings=Array.isArray(v.findings)?v.findings:[];
+const qa=Array.isArray(v.qa)?v.qa:[];
+const note=(f,status,extra)=>{const keep=(Array.isArray(f.history)?f.history:[]).filter((x)=>x.head!==p.head);f.history=keep.concat([Object.assign({head:p.head,status:status},extra||{})])};
+for(const it of p.items){
+const fields=Object.assign({origin:it.origin,path:it.path,line:it.line,text:it.text},it.endLine?{endLine:it.endLine}:{},it.body?{body:it.body}:{},it.meta||{});
+let f=findings.find((x)=>x.id===it.id);
+if(f){if(it.meta){delete f.anchorText;delete f.patchId;delete f.hunk;delete f.outdated}Object.assign(f,fields)}else{f=Object.assign({head:p.head,id:it.id},fields);findings.push(f)}
+f.state="open";f.github=gh(it);note(f,"open",it.repost?{reposted:true}:{});
+const q=qa.find((x)=>x.id===it.id);if(q){q.state="open";q.github=gh(it)}
+}
+for(const pr of p.priors||[]){
+const f=findings.find((x)=>x.id===pr.id);if(!f)continue;
+if(pr.status==="fixed"){f.state="fixed";f.fixedIn=p.head;note(f,"fixed",{reason:pr.reason})}
+else if(!p.items.some((it)=>it.id===pr.id)){note(f,"open",{reason:pr.reason,carried:pr.carried});if(pr.moved){delete f.anchorText;delete f.patchId;delete f.hunk;Object.assign(f,{path:pr.moved.path,line:pr.moved.line,endLine:pr.moved.endLine},pr.moved.meta)}if(pr.outdated===true)f.outdated=true;else if(pr.outdated===false)delete f.outdated}
+const q=qa.find((x)=>x.id===pr.id);if(q&&pr.status==="fixed")q.state="fixed";
+}
+for(const c of p.closed||[]){if(findings.some((x)=>x.id===c.id))continue;findings.push(Object.assign({head:p.head,id:c.id,origin:"round2",path:c.path,line:c.line,endLine:c.endLine,side:c.side,text:c.text,state:"withdrawn",history:[{head:p.head,status:"withdrawn"}]},c.meta||{}))}
+v.heads=heads;v.findings=findings;v.qa=qa;process.stdout.write(JSON.stringify(v))})`;
 
 const PUBLISHED_WRITE =
   String.raw`set -eu; ref="$1"; msg="$2"; patch="$3"; node="$4"; merge="$5"
@@ -362,15 +506,81 @@ export function ledgerPublishedCommand(pr: Pick<PullRequest, "owner" | "repo" | 
 
 export type PublishPlan = { state: "ready"; plan: ReviewPlan; round1: Round1Record } | { state: "pending"; reason: string } | { state: "failed"; reason: string; refs: string[] };
 
+/** Whether the thread that holds comment `commentId` is outdated on GitHub (the lines it was left on changed). */
+function threadOutdated(threads: readonly unknown[], commentId: number | null | undefined): boolean {
+  if (commentId === undefined || commentId === null) return false;
+  return threads.some((t) => isObject(t) && t.isOutdated === true && Array.isArray(t.comments) && t.comments.some((c) => isObject(c) && c.id === commentId));
+}
+
+/**
+ * What became of each item an earlier head posted: round 1's from the recorded round 1 (fixed, or still an issue), round 2's from the
+ * aspects' records (judged by the sweep, settled, or carried when round 2 did not run on this head). An item still open is posted again
+ * only when its old thread is outdated on GitHub or its anchor was not found again on this head.
+ */
+export function priorLines(registry: PriorRegistry, pull: Pick<PullRequest, "owner" | "repo" | "number">, round1: Round1Record, records: readonly AspectRecord[] | undefined, files: readonly PullFile[], threads: readonly unknown[]): PriorLine[] {
+  const out: PriorLine[] = [];
+  const idKey = (id: string): number => Number(id.slice(1)) || 0;
+  for (const r of round1.prior ?? []) {
+    const item = registry.items.find((x) => x.id === r.id);
+    if (item === undefined) continue;
+    const link = commentLink(pull, item);
+    out.push({ id: r.id, origin: "round1", status: r.status, reason: r.reason, carried: r.status === "open" && r.reason.startsWith("not re-checked"), ...(link !== undefined ? { link } : {}), repost: r.status === "open" && !r.reason.startsWith("not re-checked") && threadOutdated(threads, item.commentId), item });
+  }
+  const outcomes = new Map((records ?? []).flatMap((r) => r.prior ?? []).map((o) => [o.id, o] as const));
+  for (const item of registry.items.filter((x) => x.origin === "round2" && x.status === "open")) {
+    const o = outcomes.get(item.id);
+    const link = commentLink(pull, item);
+    const base = { id: item.id, origin: "round2" as const, ...(link !== undefined ? { link } : {}), item };
+    if (o === undefined) {
+      out.push({ ...base, status: "open", reason: "not re-checked on this head: round 1 has open issues, so round 2 did not run", carried: true, repost: false });
+      continue;
+    }
+    // Posted again only at a place found again on this head: one whose anchor was not found is listed in the body, with its stored anchor left as it was.
+    const repost = o.status === "open" && o.how !== "carried" && !o.outdated && threadOutdated(threads, item.commentId);
+    const file = files.find((f) => f.path === o.path);
+    const place = { path: o.path, line: o.line, endLine: o.endLine, side: o.side, anchored: anchored(file, o.side, o.line, o.endLine) };
+    // Its anchor is recomputed against this head's patch and its own range, so the next head re-anchors from where it is now and not from where it was
+    // (an item whose anchor was not found again, and is not posted again, keeps the earlier head's coordinates, which agree with each other).
+    const info = o.status === "open" && o.how !== "carried" && !o.outdated ? anchorInfo(file, o.side, o.line) : {};
+    const { anchorText: _a, patchId: _p, hunk: _h, ...rest } = metaOf(item);
+    const moved = info.patchId !== undefined ? { path: o.path, line: o.line, endLine: o.endLine, meta: { ...rest, ...info, side: o.side, endLine: o.endLine } } : undefined;
+    out.push({ ...base, status: o.status, reason: o.reason, carried: o.how === "carried", repost, ...(o.status === "open" && o.how !== "carried" ? { outdated: o.outdated } : {}), ...(repost ? { place } : {}), ...(moved !== undefined ? { moved } : {}) });
+  }
+  return out.sort((a, b) => (a.origin === b.origin ? idKey(a.id) - idKey(b.id) : a.origin === "round1" ? -1 : 1));
+}
+
 /** The review the run posts, recomputed from the recorded round 1 and (when round 1 found no issue) the draft the Draft stage composed. */
 export function publishPlan(evidence: readonly EvidenceRecord[], analysis: Analysis, pr: PullRequest, base: string | undefined): PublishPlan {
   const round1 = recordedRound1(evidence);
   if (round1.state === "none") return { state: "pending", reason: "round 1 was not recorded" };
   if (round1.state === "failed") return round1;
   const nonce = viewerOf(evidence)?.nonce ?? "pending";
-  if (round1.value.issues.length > 0) return { state: "ready", round1: round1.value, plan: planReview({ pull: pr, head: pr.head, nonce, round1: round1.value }) };
+  const registry = registryFromEvidence(evidence);
+  const files = analysis.snapshot.files;
+  if (round1.value.issues.length > 0) {
+    const prior = priorLines(registry, pr, round1.value, undefined, files, analysis.snapshot.threads);
+    return { state: "ready", round1: round1.value, plan: planReview({ pull: pr, head: pr.head, nonce, round1: round1.value, prior }) };
+  }
   const w = draftWrites(evidence, analysis, pr, base);
   if (w.state === "pending") return { state: "pending", reason: `the draft cannot be composed: ${w.reason}` };
   if (w.state === "failed") return w;
-  return { state: "ready", round1: round1.value, plan: planReview({ pull: pr, head: pr.head, nonce, round1: round1.value, draft: w.writes.draft }) };
+  const records: AspectRecord[] = [];
+  for (const a of ASPECTS) {
+    const r = recordedAspect(evidence, a);
+    if (r.state === "read") records.push(r.value);
+  }
+  const all = findingsOf(records);
+  // A posted finding's place is its draft entry's range (which can cover several findings): the anchor is read at its first line and the range is recorded whole.
+  const entries = new Map(w.writes.draft.comments.filter((c) => c.kind === "finding").map((c) => [c.id, c] as const));
+  const meta = new Map(
+    all
+      .filter((f) => f.state === "confirmed" || f.state === "disputed")
+      .map((f) => {
+        const e = entries.get(f.id);
+        return [f.id, findingMeta(e === undefined ? f : { ...f, path: e.path, side: e.side, startLine: e.startLine ?? e.line, endLine: e.line }, files)] as const;
+      }),
+  );
+  const closed = all.filter((f) => f.state === "dismissed").map((f): ClosedFinding => ({ id: f.id, path: f.path, line: f.startLine, endLine: f.endLine, side: f.side, text: clip(neutralize(f.content), MAX_ITEM_TEXT), meta: findingMeta(f, files) }));
+  const prior = priorLines(registry, pr, round1.value, records, files, analysis.snapshot.threads);
+  return { state: "ready", round1: round1.value, plan: planReview({ pull: pr, head: pr.head, nonce, round1: round1.value, draft: w.writes.draft, prior, meta, closed }) };
 }

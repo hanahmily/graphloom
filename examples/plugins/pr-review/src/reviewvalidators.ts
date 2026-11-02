@@ -19,6 +19,7 @@ import { FRESH_START_REASON } from "./reviewscope.js";
 import { draftWrites, recordedAspect, recordedRound1, recordedRules, recordedScope, round1Computed, writtenDraftFiles } from "./reviewdraft.js";
 import { round1Json } from "./round1.js";
 import { publishFlow, publishPlan } from "./publish.js";
+import { aspectOfItem, registryFromEvidence } from "./prior.js";
 import { secretFindings } from "./secrets.js";
 
 const passed = (reason: string): ValidationResult => ({ status: "passed", reason });
@@ -84,7 +85,8 @@ export const codeReview: Validator = profiled((input, profile) => {
   if (s.mode === "large" && s.areas.length === 0) return failed("a large pull request's review names no area");
   if (s.context.kind !== "seeded" || s.context.reason !== FRESH_START_REASON) return failed("the reviewers' session start was not recorded as a fresh session seeded with review.md only");
   const problems: string[] = [];
-  let firstId = 1;
+  const registry = registryFromEvidence(input.evidence);
+  let firstId = registry.nextF;
   const records: AspectRecord[] = [];
   for (const a of ASPECTS) {
     const rules = recordedRules(input.evidence, a, s.files);
@@ -95,6 +97,10 @@ export const codeReview: Validator = profiled((input, profile) => {
     if (r.state === "none") return inconclusive(`the ${a} review is not finished`);
     if (r.state === "failed") return failed(r.reason);
     problems.push(...aspectProblems(r.value, a, s.files.length, s.context.reason, profile, firstId));
+    // Every earlier finding of the aspect that was open is judged on this head, once.
+    const owed = registry.items.filter((x) => x.origin === "round2" && x.status === "open" && aspectOfItem(x) === a).map((x) => x.id).sort();
+    const judged = (r.value.prior ?? []).map((x) => x.id).sort();
+    if (JSON.stringify(owed) !== JSON.stringify(judged)) problems.push(`${a}: the earlier findings ${owed.join(", ") || "(none)"} are open, and the record judges ${judged.join(", ") || "none"}`);
     firstId += r.value.findings.length;
     records.push(r.value);
   }
