@@ -13,7 +13,7 @@ import { COMMAND } from "../src/constants.js";
 import { AGENT_CONFIG_NAMES, baseExportCommand, parseBaseExport } from "../src/basetree.js";
 import { baseDefsCommand } from "../src/groundwork.js";
 import { buildInventory, declaredDependencies, manifestsCommand, parseManifests, parseSites, parseSources, parseTree, siteCommands, sourceCommands, treeCommand } from "../src/inventory.js";
-import { ledgerWriteCommand, priorShowCommand } from "../src/ledger.js";
+import { ledgerWriteCommand, ledgerWriteCommands, priorShowCommand } from "../src/ledger.js";
 import { GO_PACK } from "../src/packs.js";
 import { bodyFromSnippet, candidateCommand, parseSearch, planFor, searchCommand } from "../src/queries.js";
 import { LEDGER_MOVED, ledgerRef } from "../src/constants.js";
@@ -314,7 +314,22 @@ describe("the ledger compare-and-swap (design 9.1)", () => {
     const second = git(dir, ["rev-parse", ref]);
     expect(git(dir, ["rev-parse", `${second}^`])).toBe(first);
     expect(git(dir, ["log", "--format=%an", "-1", ref])).toBe("graphloom");
-    expect(run(dir, priorShowCommand(first)).report).toContain('"tag":"one"');
+    // The prior read keeps the schema and the heads only.
+    expect(JSON.parse(run(dir, priorShowCommand(first, process.execPath)).report)).toEqual({ schema: "graphloom-pr-ledger-v1" });
+  });
+
+  it("reads the heads of a prior ledger far larger than a command report holds, and fails when git cannot read it", () => {
+    const dir = setup();
+    const heads = [{ sha: "a".repeat(40), base: "b".repeat(40), files: 207, commits: 5, facts: 300, reported: true, reviewed: false }];
+    const big = JSON.stringify({ schema: "graphloom-pr-ledger-v1", pull: { owner: "o", repo: "r", number: 1 }, heads, purposes: [], qa: Array.from({ length: 400 }, (_, i) => ({ id: `Q${i}`, answer: "x".repeat(600) })), findings: [] });
+    expect(big.length).toBeGreaterThan(200_000);
+    const writes = ledgerWriteCommands(pr, "absent", big, "# big\n");
+    for (const c of [...writes.parts, writes.write]) expect(run(dir, c).code).toBe(0);
+    const sha = git(dir, ["rev-parse", ref]);
+    const read = run(dir, priorShowCommand(sha, process.execPath));
+    expect(read.code, read.stderr).toBe(0);
+    expect(JSON.parse(read.report)).toEqual({ schema: "graphloom-pr-ledger-v1", heads });
+    expect(run(dir, priorShowCommand("f".repeat(40), process.execPath)).code).not.toBe(0);
   });
 
   it("loses the race: a write from a stale value exits with LEDGER_MOVED and leaves the ref where the winner put it", () => {

@@ -1063,7 +1063,7 @@ function recordLedger(ctx: Context, view: RunView, c: QaContext, w: ReturnType<t
   const lr = commandState(view, COMMAND.ledger);
   if (lr.failed && lr.run !== undefined) return supervise({ reason: `the ledger read failed: ${describeCommand(lr.run.command)}`, evidenceRefs: [lr.run.record.ref] }, "escalate a failed ledger read");
   if (w.prior?.state === "missing" || (w.prior?.state === "unreadable" && retryOf(view)(w.prior.run))) {
-    return withPrivate(dispatch(commandJob(ANSWERS_STAGE, "Read the prior ledger's ledger.json", { commands: [priorShowCommand(w.old)], continueOnFailure: true, env: { ...GIT_ENV } }), "read the prior ledger.json, so the new one keeps its heads"));
+    return withPrivate(dispatch(commandJob(ANSWERS_STAGE, "Read the prior ledger's ledger.json", { commands: [priorShowCommand(w.old, process.execPath)], continueOnFailure: true, env: { ...GIT_ENV } }), "read the prior ledger.json, so the new one keeps its heads"));
   }
   if (w.prior?.state === "unreadable") {
     return supervise({ reason: w.problem ?? "the prior ledger cannot be read", evidenceRefs: [w.prior.run.record.ref] }, "escalate a prior ledger that cannot be read: it is never overwritten");
