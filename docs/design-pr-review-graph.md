@@ -235,7 +235,7 @@ meaning and parser (review-kit, [§14](#14-sharing-code-with-issue-fix)).
 | `checks` | Optional commands, run only in the Docker sandbox (`checks.sandbox`, same shape as `metrics.sandbox`) ([§8.3](#83-checks)). Absent means there is no Checks stage |
 | `comments` | `minSeverity` (default `P2`), `nits` (false), `questions` (pre-select `needs author` items as draft comments, true), `maxComments` (30), `suggestions.maxLines` (10), optional `footer` |
 | `privateRepos` | Never named in posted text (issue-fix's `withoutPrivateReferences`, `src/prompts.ts:325`) |
-| `harnesses` | each role takes a harness id or `{ harness, model?, effort? }` ([§13.1](#131-roles)): `reporter`, `diagrammer` (optional: the diagram job only; absent, it takes the reporter's harness, model and effort), `questioner`, `answerer` (`claude-code` or `codex` only), `report-checker`, `answer-checker`, and `verifier-<aspect>` for `correctness`, `maintainability` and `security`. There is no `reviewer-<aspect>` key: the reviewers run on the answerer's harness, and a profile that names one is refused ([§13.1](#131-roles)) |
+| `harnesses` | each role takes a harness id or `{ harness, model?, effort? }` ([§13.1](#131-roles)): `reporter`, `diagrammer` (optional: the diagram job only; absent, it takes the reporter's harness, model and effort), `questioner`, `answerer` (`claude-code` or `codex` only), `batch-answerer` (optional: the answer batches of large mode only, `claude-code` or `codex`; absent, it takes the answerer's harness, model and effort; N1 keeps the answerer), `report-checker`, `answer-checker`, and `verifier-<aspect>` for `correctness`, `maintainability` and `security`. There is no `reviewer-<aspect>` key: the reviewers run on the answerer's harness, and a profile that names one is refused ([§13.1](#131-roles)) |
 | `supervisor`, `budgets` | As in issue-fix ([§13](#13-agent-roles-supervisor-budgets)) |
 | `limits` | `maxFiles` (150), `maxPatchBytes` (1 MiB), `maxNewSymbols` (200): past one, the pull request is reviewed in large mode ([§6.9](#69-large-pull-requests), [§7.6](#76-questions-in-large-mode)). `hardMaxFiles` (1000), `hardMaxPatchBytes` (8 MiB), `hardMaxNewSymbols` (2000): past one, the run stops "incompatible task" and names the size. `areaMaxBytes` (256 KiB) and `areaMinBytes` (16 KiB) shape the areas. Each is a positive integer; a `max*` may not exceed its hard cap, nor `areaMinBytes` the `areaMaxBytes` |
 
@@ -283,7 +283,7 @@ generation's evidence holds a `--decline review-layer`.
 | Report | `change-report` | Every template section is present, with cited items or an explicit "None". Every citation is inside the PR's diff. Every changed file and every detector fact is cited. No item carries a severity, finding or verdict (the contract has no such field). Every report opens with a briefing the reporter writes (what is new, the data flow of each new feature, what to check, [§6.1](#61-template), [§6.10](#610-features-and-their-data-flow)), and `review.html` (the briefing) and `review-appendix.html` are written beside `review.md` ([§6.11](#611-the-html-report)); an artifact too large for one command is written in parts ([§6.6](#66-output)) | `change-report-v1`, `report-write` | `change-report` |
 | Report | `measurements` | For every function the PR adds or modifies, complexity and nesting were measured by the pinned tools over the head tree, and coverage (on by default) and then mutation (on by default, at covered sites only) were measured in the Docker sandbox over a checkout of the head, or carry a not-run reason (switched off by the profile, Docker unavailable, image missing, a dependency not cached, no vitest coverage provider, no coverage). Every value recomputes from its evidence ([metrics §5](design-code-quality-metrics.md#5-records-and-recomputation)) | `graphloom-metrics-v1` command reports | `measurements` |
 | Report | `claims-checked` | An independent `<report-checker>` judged every report item against the diff, and every item left is `supported` with matching quotes | `claim-check-v1` | `claims-checked` |
-| Questions | `questions-complete` | N1, the necessity question, was asked first ([§7.5](#75-the-necessity-question-n1)): its three parts have their evidence, an independent checker verified every cited design statement, trace step and the conclusion, and N1's checked answer and decision are recorded in `necessity.json`. When N1 concluded `unnecessary`, the checker supports it and the operator did not ask for every question, N1 is the only question required and the skip is recorded. Otherwise every required question was asked ([§7.1](#71-questions)): purpose for each change item whose purpose the PR text does not state (a stated purpose recorded with a matching quote instead); `existing-equivalent`, `reuse-library` and `common-logic` for each new symbol; `missing-test` for each new or modified symbol with no mapped test; and one question per value over a metric limit and per surviving mutant. Every changed function has a measurement record or a not-run reason | `necessity-v1`, `answer-check-v1`, `necessity-write`, `questions-v1`, search and test-map reports | `questions-complete` (`independence: separate-reviewer`: N1's check is its latest review) |
+| Questions | `questions-complete` | N1, the necessity question, was asked first ([§7.5](#75-the-necessity-question-n1)): its three parts have their evidence, an independent checker verified every cited design statement, trace step and the conclusion, and N1's checked answer and decision are recorded in `necessity.json`. When N1 concluded `unnecessary`, the checker supports it and the operator did not ask for every question, N1 is the only question required and the skip is recorded. Otherwise every required question was asked ([§7.1](#71-questions)): purpose for each change item whose purpose the PR text does not state (a stated purpose recorded with a matching quote instead); `existing-equivalent`, `reuse-library` and `common-logic` for each new symbol (in large mode, one combined `existing-reuse-common` question per change item that adds a symbol, answered in three labelled parts, [§7.6](#76-questions-in-large-mode)); `missing-test` for each new or modified symbol with no mapped test; and one question per value over a metric limit and per surviving mutant. Every changed function has a measurement record or a not-run reason | `necessity-v1`, `answer-check-v1`, `necessity-write`, `questions-v1`, search and test-map reports | `questions-complete` (`independence: separate-reviewer`: N1's check is its latest review) |
 | Answers | `answers-complete` | N1 has its recorded answer first (alone, with the skip recorded in the Q&A, when it was skipped past). Every other question has an answer from the `<answerer>`, with evidence (citations, the searches run, each re-run by the plugin with the count it measured, quotes) and a status of `answered`, `partially answered` or `needs author`. Every "none found" answer lists its whole-repository searches and the dependency inventory. Every cited metric equals its record. Every proposal cites line ranges inside its function. `review.md`, `report.json` and `qa.json` are written | `answers-v1`, `qa-write` | `answers-complete` |
 | Answers | `answers-grounded` | An independent `<answer-checker>` verified N1's cited design statements, trace steps and conclusion, and re-checked every cited equivalent, library, duplicate and covering test, and every "none found" claim, against the trees. Every answer left is `supported` or `partial`. An answer still unsupported after one correction is `needs author`, with both statements recorded | `claim-check-v1` | `answers-grounded` |
 | Review | `code-review` | Unless report-only: for each aspect (correctness, maintainability, security), the latest read-only `<reviewer-aspect>` pass reviewed every file in scope with that aspect's rule file, every rule group `ocr delegate rule` returned for it has source `custom` and that file's rule text, and the pass gave a status for every open prior finding of the aspect. Every pass started, on the answerer's harness, as a fork of the review's base session or seeded with its recorded reason. Each aspect's sweep saturated or ran four passes. Every finding has a verdict from its `<verifier-aspect>`, in a fresh session on a harness different from its reviewer's | `pr-code-review-v1`, `ocr-rule-groups` command reports, `pr-finding-verification-v1` | `open-code-review` |
@@ -945,7 +945,7 @@ maintainer who wants this uses `claude-code` or `codex` for the `reporter`.
 **Budgets.** Before the reporter job, the graph computes the jobs and agent
 invocations large mode needs (the reporter and its check with the commands that
 verify its quotes, the diagram job, plus the Questions and Answers estimate of
-§7.6: two items an area, five questions an item, in batches of 15) and stops
+§7.6: two items an area, three questions an item, in batches of 15) and stops
 with the numbers if the run's remaining budget cannot cover them, so the
 maintainer can raise the profile's `budgets` instead of losing a run halfway.
 It is a floor: corrections and retries come on top.
@@ -1236,6 +1236,7 @@ question.
 | `existing-equivalent` | Every new symbol: does the codebase already have the same or an equivalent? |
 | `reuse-library` | Every new symbol: could an existing internal package or an already-declared third-party library do this? |
 | `common-logic` | Every new symbol: does it duplicate logic elsewhere, in the base or in the PR, that could become shared code? |
+| `existing-reuse-common` | **Large mode only** ([§7.6](#76-questions-in-large-mode)): the three questions above, always asked, as one question per change item that adds a symbol. In large mode it replaces the three separate types |
 | `missing-test` | Every new or modified symbol or feature that the test map finds no covering test for: which test covers it? |
 | `split-function` | Every changed function with complexity ≥ 10 or nesting > 3: could it be split into smaller functions with one intent each? The question says, per metric over its limit, whether the excess is **inherited** from the base, **made worse** by the change or **introduced** by it ([§6.8](#68-measurements)) |
 | `complexity-coverage` | Every changed function with **measured** coverage and CRAP ≥ 30, or with **unknown** coverage and complexity ≥ 10: which tests cover its branches? The question gives a modified function's base complexity and where the value comes from. An upper-bound CRAP alone ([metrics §2.4](design-code-quality-metrics.md#24-crap)) is shown in Measurements but asks nothing |
@@ -1344,6 +1345,38 @@ whole base tree (`tree` `base`, no `paths`) counts toward the required number
 paths, over the head or over a dependency is supplementary evidence, since it
 covers less than the repository. A dependency marked
 `source unavailable` makes the answer `partially answered`.
+
+#### The combined question's answer
+
+The one question of large mode that asks three things
+(`existing-reuse-common`, [§7.6](#76-questions-in-large-mode)) is answered in
+three **labelled parts**, `existing-equivalent`, `reuse-library` and
+`common-logic`, in the `parts` of the answer (empty for every other question; the
+contract requires the field). Each part has its own answer text, status,
+`none_found`, citations, searches and inventory entries, and is held to the rules
+of the separate question of that name: a part that finds nothing lists its own
+whole-repository searches (three, or one for the library), a library part that
+finds nothing is `partially answered` while a declared dependency has no source
+here, and a part that names a candidate cites it. Evidence shared by two parts is
+listed in both. The answer's own text is a one-line summary; its own citations,
+searches and inventory stay empty (evidence beside the parts is refused, since it
+would be neither shown nor checked as a part), and its **status is the weakest of
+the three parts'** (`answered`, then `partially answered`, then `needs author`),
+computed by the plugin. All three parts are required, once each.
+
+The checker's verdict for the question carries a judgment for each part, with the
+searches of its own that a part saying none found needs (the question's own
+`searches` stay empty), and the question's verdict is the weakest of the parts'.
+A part still unsupported after the one revision is `needs author` with both
+statements kept, and the question is `needs author` with it. Each part of a
+revised answer records the answerer's first and corrected statement of that part
+(`history`), shown beside the part's verdict in `qa.json`, `review.md`,
+`review-appendix.html` and, for a downgraded part, the open question of
+`review.html`; the question's own `history` keeps the one-line summaries. The citations of
+every part are verified and its searches re-run like any answer's, and a part's
+absence rests on its own measured searches. `qa.json` records the parts with
+their verdicts; `review.md`, the open questions of `review.html` and
+`review-appendix.html` show the three parts, each with its status.
 
 #### Ids
 
@@ -1840,19 +1873,38 @@ are the questions. N1 is unchanged. Then, **per change item**:
 | Type | Required for, in large mode |
 |---|---|
 | `purpose` | Unchanged: every change item whose purpose the PR text does not state |
-| `existing-equivalent`, `reuse-library`, `common-logic` | Once per **change item** that adds a symbol, about the mechanism the item adds. The question may name the item's new **exported** symbols (Go: an identifier starting with an upper-case letter; TypeScript: exported); the unexported ones are only counted in it |
+| `existing-reuse-common` | Once per **change item** that adds a symbol, about the mechanism the item adds: one question that asks all three of "do we already have the same or an equivalent?", "can an existing internal package or declared library do it?" and "is there common logic that could be shared?". The question may name the item's new **exported** symbols (Go: an identifier starting with an upper-case letter; TypeScript: exported); the unexported ones are only counted in it |
 | `missing-test` | Once per change item: "which tests cover it", listing every new or modified function of the item the test map finds no covering test for |
 
+**One question, three parts.** The three questions are always asked, as the
+requirement is that a new mechanism is checked for an existing equivalent, a
+reusable library and common logic. In large mode they are asked **together**:
+before this, each change item raised three separate questions, and on
+apache/skywalking-banyandb#1445 that was 102 of 128 questions, each answered,
+checked and re-run separately. The combined question's text asks all three, and
+its answer has three labelled parts (existing equivalent, reusable library, common
+logic), each with its own evidence and status, and each judged by the answer
+checker; the question's status is the weakest of the three
+([§7.3](#73-answers), "The combined question's answer"). Nothing is dropped:
+every part is as grounded as the separate answer would be. Standard mode is
+unchanged: the three separate questions for each new symbol. Question ids, the
+`Q<n>` numbering, the enums and the batches of at most 15 are as they were.
+
 **Not asked in large mode:** `split-function`, `complexity-coverage`, `weak-test`,
-the trio for each exported symbol, and `missing-test` for each function. The
+the three separate questions (also not for each exported symbol: the combined
+question names the item's exported symbols instead), and `missing-test` for each
+function. The
 **measurements still run and show every function**, the over-limit ones visible
 in the table ([§6.8](#68-measurements)), so the maintainer sees them without being
 asked about each. A maintainer who wants a function looked at asks for it in the
 reporter's session ([§6.9](#69-large-pull-requests)).
 
-**Answers in batches.** The answerer answers the questions of a few change
-items per job (at most 15 questions), continuing its own session from one batch
-to the next, so it keeps what it has read. The answer checker checks each batch
+**Answers in batches.** The `batch-answerer` role ([§13.1](#131-roles); the
+`answerer`'s harness, model and effort when the profile names none) answers the
+questions of a few change items per job (at most 15 questions), continuing its
+own session from one batch to the next, so it keeps what it has read. N1 keeps
+the `answerer` in every mode. Its session is the one `graphloom session open
+--stage answers` forks in large mode ([§17](#17-discussing-a-run-graphloom-session-open)). The answer checker checks each batch
 in a fresh session. `qa.json` and `review.md` are written once, after the last
 batch; a batch's correction and its "needs author" outcome follow §7.3.
 
@@ -2737,8 +2789,9 @@ the review base session ([§8.1](#81-review)).
 | `diagrammer` | the `reporter`'s | read | Optional. The diagram job only ([§6.10](#610-features-and-their-data-flow)): it draws the checked data flows of the features and the lifecycle entries with the vendored diagram-design skill, fresh session, one correction in the same session. Absent, it takes the reporter's harness, model and effort. No `distinctFrom`: its drawings are checked by code (the skill's checks, inertness, the label rule), and it receives only data the claim check already judged |
 | `report-checker` | `codex` | read | `distinctFrom: ["reporter"]` |
 | `questioner` | `codex` | read | `distinctFrom: ["reporter"]`. Asks only |
-| `answerer` | `claude-code` | read | `distinctFrom: ["questioner"]`. Claude Code or Codex only. Answers N1 first, in the Questions stage (`necessity-v1`), then the other questions from the whole codebase |
-| `answer-checker` | `codex` | read | `distinctFrom: ["answerer"]`. Verifies N1's cited design statements, trace steps and conclusion, then the other answers |
+| `answerer` | `claude-code` | read | `distinctFrom: ["questioner"]`. Claude Code or Codex only. Answers N1 first, in the Questions stage (`necessity-v1`), in every mode, then the other questions from the whole codebase (in large mode the batches below take those) |
+| `batch-answerer` | the `answerer`'s | read | Optional. Used **only** by large mode's answer batches ([§7.6](#76-questions-in-large-mode)); N1 keeps the `answerer` in every mode, and standard mode never uses it. Absent, it takes the answerer's harness, model and effort, which is today's behavior. Claude Code or Codex only, for the reason below. Its batches' session is the one `graphloom session open --stage answers` forks ([§17](#17-discussing-a-run-graphloom-session-open)) in large mode. The profile can give it a cheaper model than the answerer, since a batch is many small questions and N1 is one deep one |
+| `answer-checker` | `codex` | read | `distinctFrom: ["answerer", "batch-answerer"]`. Verifies N1's cited design statements, trace steps and conclusion, then the other answers |
 | `reviewer-correctness` | the answerer's | read | `sameAs: "answerer"`. Correctness passes; writes reproducing tests |
 | `reviewer-maintainability` | the answerer's | read | `sameAs: "answerer"`. Maintainability passes |
 | `reviewer-security` | the answerer's | read | `sameAs: "answerer"`. Security passes; writes reproducing tests |
@@ -2758,7 +2811,7 @@ another aspect ([§8.1](#81-review)) is still verified by the verifier of the
 pass that raised it.
 
 **The answerer is Claude Code or Codex.** `parseProfile` refuses
-`harnesses.answerer: "pi"`. A Pi session has no interactive restore, so the
+`harnesses.answerer: "pi"` and `harnesses.batch-answerer: "pi"`. A Pi session has no interactive restore, so the
 maintainer could not open it, and a Pi answerer would leave the reviewers
 on Pi with no conversation to carry. The alternative, reviewers that fork a
 Pi answerer only when no conversation exists, would make the review's
@@ -2777,6 +2830,7 @@ from its preference list that differs from its `distinctFrom` partner's:
 | `questioner` | codex, pi, claude-code, skipping the answerer's |
 | `reporter` | claude-code, codex, pi, skipping the questioner's |
 | `diagrammer` | the reporter's, unless the profile sets it |
+| `batch-answerer` | the answerer's, unless the profile sets it (then the answer-checker must differ from it as from the answerer) |
 | `report-checker`, `answer-checker` | codex, pi, claude-code, skipping its author's |
 | `reviewer-<aspect>` | the answerer's |
 | `verifier-correctness`, `verifier-maintainability` | claude-code, codex, pi, skipping the reviewers' |
@@ -2967,7 +3021,7 @@ recorded, so they do not decide CI verdicts.
 | `needs-author-purpose` | A new config flag; nothing in the PR text, commits, issue or code comments says why | A `purpose` question answered `needs author`, listing what was read; marked in `review.md`; offered as a draft comment in the review layer |
 | `purpose-stated` | The PR body states why the flag is added | A purpose record `stated` with the matching quote; no `purpose` question |
 | `missing-test` | A new exported function that no test references; the questioner omits the question | The plugin adds the required `missing-test` question; the answerer's whole-repository search finds no test → `needs author`, naming the package's `_test.go` |
-| `large-pull-request` | Run with `limits: { maxFiles: 2, areaMaxBytes: 500, areaMinBytes: 1 }` (`LARGE_LIMITS`): two packages (`alpha`: six exported functions; `beta`: an exported function and an unexported helper), a guide, a generated `*.pb.go` file and a binary file GitHub gave no patch for. Under the profile's own limits the same pull request is an ordinary small one | Stops `report ready`: three areas (`A1` docs, `A2` `pkg/alpha`, `A3` `pkg/beta`) and the generated area; **one** reporter job (given the digest: the areas with the names of their exported symbols, the file list, the facts and the guide's patch, the only interface file) and **one** claim check whose quotes are verified in the trees (`arch-quote-1`), then the diagrams; no area job, no synthesis; the generated file and `assets/logo.png` listed in `other` ("generated code, not summarised", "patch not provided by GitHub"); `report.json` says `mode: "large"` with the limit passed and the areas, `review.md` says so in its header and its Areas section lists the areas with the reporter's labels and the "Dive into an area" command; the questions follow [§7.6](#76-questions-in-large-mode) (the trio once for the `alpha` item and once for the `beta` item, a `purpose` question for the item the PR text does not explain, one `missing-test` question for each item, none per symbol and none per function): N1 and 8 more, answered in one batch, checked in a fresh session and recorded; `qa.json` and `review.md` written once; every receipt valid |
+| `large-pull-request` | Run with `limits: { maxFiles: 2, areaMaxBytes: 500, areaMinBytes: 1 }` (`LARGE_LIMITS`): two packages (`alpha`: six exported functions; `beta`: an exported function and an unexported helper), a guide, a generated `*.pb.go` file and a binary file GitHub gave no patch for. Under the profile's own limits the same pull request is an ordinary small one | Stops `report ready`: three areas (`A1` docs, `A2` `pkg/alpha`, `A3` `pkg/beta`) and the generated area; **one** reporter job (given the digest: the areas with the names of their exported symbols, the file list, the facts and the guide's patch, the only interface file) and **one** claim check whose quotes are verified in the trees (`arch-quote-1`), then the diagrams; no area job, no synthesis; the generated file and `assets/logo.png` listed in `other` ("generated code, not summarised", "patch not provided by GitHub"); `report.json` says `mode: "large"` with the limit passed and the areas, `review.md` says so in its header and its Areas section lists the areas with the reporter's labels and the "Dive into an area" command; the questions follow [§7.6](#76-questions-in-large-mode) (one combined `existing-reuse-common` question for the `alpha` item and one for the `beta` item, each answered in three labelled parts, a `purpose` question for the item the PR text does not explain, one `missing-test` question for each item, none per symbol and none per function): N1 and 5 more, answered in one batch by the `batch-answerer`, checked in a fresh session and recorded; `qa.json` and `review.md` written once; every receipt valid |
 | `feature-data-flow` | The `report` pull request with one feature, the nightly retention sweep: four stages (the `retention_days` flag as a source, the group's `retention_days` as a store, the sweep as a process, the cron library as an external) and three flows, each cited in the diff; the claim check does not support one flow (`F1.f2`) twice | The checker is asked for `W1`…, `F1`, `F1.s1`…`F1.s4` and `F1.f1`…`F1.f3`; the flow is dropped from `report.json` and listed under "Removed by the claim check" in `review.md` and `review-appendix.html`; the skill's Data flow (passing its real `self_check.py` and `verify-geometry.py` and the label rule) holds the two other flows in `review.html`; the same `diagram-corrected` and `diagram-fallback` variants draw it by a corrected document and by the plugin |
 | `large-artifacts` | A pull request of 1,000 data files (large mode), whose `report.json` and `review-appendix.html` pass one write command | Both are written as part sets (`report-json-p1`…, `review-appendix-html-p1`…), each part its own job, while the briefing `review.html` stays small; the validators reconstruct them from the recorded parts and pass; `succeeded` at `report ready` |
 | `complex-function` | A new function with 12 decision points and nesting 4; `metrics.coverage: false` | A Measurements row (12, 4, CRAP with coverage unknown as the upper bound, mutation not run with its reason); `split-function` answered with a proposal (line ranges, names new to the package, one responsibility each) and `complexity-coverage` entries; the `measurements` validator rejects a canned record whose `complexity` disagrees with its `decisions` |
@@ -3010,6 +3064,15 @@ Codex on the fork in the maintainer's terminal
 ([core §15](design-typescript-core.md#15-opening-a-recorded-agent-session)).
 The agent is told, in one line, that it is a fork of the answers session,
 what the answer checker's job reported since, and the run's status.
+
+**Whose session that is.** The Answers stage's answering session is the
+`answerer`'s in standard mode. In large mode the questions are answered in
+batches by the `batch-answerer` ([§13.1](#131-roles)), so the session
+`--stage answers` forks, and the one the review layer's reviewers fork from,
+is the batch-answerer's (the answerer's own, when the profile names no
+batch-answerer). N1's answerer session stays in the `questions` stage and is the
+`answerer`'s in every mode; when N1 skips the other questions it is the only
+answer, and `--stage questions` opens it.
 
 - **The conversation is recorded.** When the agent exits, GraphLoom
   captures the fork's transcript into the run with `operator-conversation`
@@ -3169,6 +3232,37 @@ What 0.11 does, where this document leaves it open:
   as before, so their size is bounded by what one command carries; a report or
   Q&A that does not fit still stops the run "incompatible task" and says so.
   (0.12 lifts this: [§6.6](#66-output), multi-part writes.)
+
+### Version 0.17: one combined question per item in large mode, and a batch-answerer role
+
+The maintainer's feedback on the live run of apache/skywalking-banyandb#1445: 102 of its
+128 questions were the existence, reuse and common-logic questions, each answered and
+checked separately. The rule that all three are always asked stays; what changes is how
+many questions carry them. What 0.17 does:
+
+- Large mode asks one `existing-reuse-common` question per change item that adds a symbol,
+  in place of the three separate questions ([§7.6](#76-questions-in-large-mode)); standard
+  mode is unchanged. The question types gain `existing-reuse-common`, which the
+  questioner may not add. `answers-v1` gains `parts` (required, empty for every other
+  question) and `answer-check-v1` gains `parts` (required, likewise): the three labelled
+  parts of an answer and their verdicts ([§7.3](#73-answers)). The question's status and
+  verdict are the weakest of the three; `qa.json`, `review.md`, the open questions of
+  `review.html` and `review-appendix.html` show the parts. `largeNeeds` assumes three
+  questions an item (purpose, the combined question, missing-test), not five.
+- A profile may name a `batch-answerer` role (`harnesses.batch-answerer`, the same string or
+  `{ harness, model?, effort? }` form) for large mode's answer batches
+  ([§13.1](#131-roles)); absent, it is the answerer's. N1 keeps the answerer, the
+  answer-checker must differ in harness from it as from the answerer, and its session is
+  the one `session open --stage answers` forks in large mode
+  ([§17](#17-discussing-a-run-graphloom-session-open)). `profiles/banyandb.json` sets it to
+  Claude Code, Sonnet, high effort.
+- Results of 0.16 are not read by 0.17: the two contracts changed shape, and a run is
+  pinned to one plugin version.
+- Ambiguities resolved: a part's evidence shared with another part is listed in both; the
+  answer's own citations, searches and inventory must be empty, and the plugin computes its
+  status from the parts; a part unsupported after the one revision is `needs author` and
+  the question follows it; the batch-answerer is held to no pair with the questioner (only
+  with the answer-checker, as the answerer is held with the questioner and the checker).
 
 ### Version 0.16: a one-page briefing report
 

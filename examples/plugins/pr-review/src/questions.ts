@@ -24,10 +24,19 @@ export const MAX_ADDED_QUESTIONS = 30;
 export const MAX_QUESTION_CORRECTIONS = 2;
 const MIN_QUOTE_CHARS = 12;
 
-export const QUESTION_TYPES = ["necessity", "purpose", "existing-equivalent", "reuse-library", "common-logic", "missing-test", "split-function", "complexity-coverage", "weak-test", "other"] as const;
+export const QUESTION_TYPES = ["necessity", "purpose", "existing-equivalent", "reuse-library", "common-logic", "existing-reuse-common", "missing-test", "split-function", "complexity-coverage", "weak-test", "other"] as const;
 export type QuestionType = (typeof QUESTION_TYPES)[number];
-/** The types the questioner may add: a weak-test question exists only for a surviving mutant, which the graph, not the questioner, finds; the necessity question N1 is the plugin's own and comes first. */
-const ADDABLE: readonly string[] = QUESTION_TYPES.filter((t) => t !== "weak-test" && t !== "necessity");
+/**
+ * The three questions every new mechanism is asked (design §7.1): is there an equivalent, can a library do it, is there
+ * common logic. Standard mode asks them separately per symbol; large mode asks them as one `existing-reuse-common`
+ * question per change item (design §7.6), whose answer has one labelled part for each.
+ */
+export const COMBINED_PARTS = ["existing-equivalent", "reuse-library", "common-logic"] as const;
+export type CombinedPart = (typeof COMBINED_PARTS)[number];
+export const COMBINED_TYPE = "existing-reuse-common";
+
+/** The types the questioner may add: a weak-test question exists only for a surviving mutant, which the graph, not the questioner, finds; the necessity question N1 is the plugin's own and comes first, and the combined question is the plugin's own too. */
+const ADDABLE: readonly string[] = QUESTION_TYPES.filter((t) => t !== "weak-test" && t !== "necessity" && t !== COMBINED_TYPE);
 
 /** The id fields of the questioner's contract: each is constrained, per job, to the report's item ids and the groundwork's symbol ids. */
 export const QUESTIONS_REFERENCES = ["purposes[].item", "questions[].item", "questions[].symbol"] as const;
@@ -113,7 +122,7 @@ export interface Question {
 export interface QuestionInputs {
   view: ReportView;
   groundwork: Groundwork;
-  /** Large mode (design §7.6): a high-level review. Per change item, the trio (about the mechanism) and a missing-test question; nothing per symbol or per function. */
+  /** Large mode (design §7.6): a high-level review. Per change item, the combined existence/reuse/common-logic question (about the mechanism) and a missing-test question; nothing per symbol or per function. */
   large?: boolean;
 }
 
@@ -150,9 +159,10 @@ export function survivors(r: MetricsRecord): Array<{ line: number; from: string;
 const MAX_NAMED = 40;
 
 /**
- * The questions large mode asks per change item (design §7.6): the trio once about the mechanism the item adds, naming
- * its new exported symbols (the unexported ones are counted), and one missing-test question listing every new or
- * modified function of the item that no test in the pull request covers. An item that adds no symbol gets no trio.
+ * The questions large mode asks per change item (design §7.6): one combined existence, reuse and common-logic
+ * question about the mechanism the item adds, naming its new exported symbols (the unexported ones are counted), and
+ * one missing-test question listing every new or modified function of the item that no test in the pull request
+ * covers. An item that adds no symbol gets no combined question.
  */
 function itemQuestions(items: readonly ViewItem[], byItem: ReadonlyMap<string, readonly SymbolDef[]>, groundwork: Groundwork): RequiredQuestion[] {
   const out: RequiredQuestion[] = [];
@@ -164,9 +174,12 @@ function itemQuestions(items: readonly ViewItem[], byItem: ReadonlyMap<string, r
     if (added.length > 0) {
       const exported = added.filter((s) => s.exported);
       const adds = `It adds: ${exported.length > 0 ? named(exported) : "no exported symbol"}${added.length > exported.length ? `${exported.length > 0 ? ", and " : "; "}${added.length - exported.length} unexported symbol(s)` : ""}.`;
-      out.push({ key: `existing-equivalent:item:${item.id}`, type: "existing-equivalent", item: item.id, text: `Does the codebase already have the same or an equivalent of the mechanism this change adds (${what})? ${adds}` });
-      out.push({ key: `reuse-library:item:${item.id}`, type: "reuse-library", item: item.id, text: `Could an existing internal package or an already-declared third-party library do what the mechanism this change adds (${what}) does? ${adds}` });
-      out.push({ key: `common-logic:item:${item.id}`, type: "common-logic", item: item.id, text: `Does the mechanism this change adds (${what}) duplicate logic elsewhere, in the base or in the pull request, that could become shared code? ${adds}` });
+      out.push({
+        key: `${COMBINED_TYPE}:item:${item.id}`,
+        type: COMBINED_TYPE,
+        item: item.id,
+        text: `For the mechanism this change adds (${what}): (1) does the codebase already have the same or an equivalent of it; (2) could an existing internal package or an already-declared third-party library do what it does; (3) does it duplicate logic elsewhere, in the base or in the pull request, that could become shared code? Answer all three, each with its own evidence. ${adds}`,
+      });
     }
     const uncovered = syms.filter((s) => (groundwork.testMap.get(s.id) ?? []).length === 0 && s.kind !== "type" && s.kind !== "interface");
     if (uncovered.length > 0) {

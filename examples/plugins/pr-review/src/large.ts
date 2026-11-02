@@ -77,8 +77,8 @@ export interface LargeNeeds {
 
 /** A high-level report has about one item per area or subsystem. */
 export const ASSUMED_ITEMS_PER_AREA = 2;
-/** Per item in large mode: purpose, existing-equivalent, reuse-library, common-logic and missing-test (design §7.6). */
-export const ASSUMED_QUESTIONS_PER_ITEM = 5;
+/** Per item in large mode: purpose, the one combined existing-reuse-common question and missing-test (design §7.6). */
+export const ASSUMED_QUESTIONS_PER_ITEM = 3;
 /**
  * Jobs the stages around the agents need in any run (measurements, coverage, the groundwork's reads, the quote check of the
  * claims, the writes with review.html and its appendix, the ledger, and the writes of the files the agents read instead of an

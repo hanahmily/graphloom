@@ -24,7 +24,7 @@ describe("the BanyanDB profile", () => {
     expect(p.project).toBe("apache/skywalking-banyandb");
     expect([p.owner, p.repo]).toEqual(["apache", "skywalking-banyandb"]);
     expect(p.limits).toEqual({ maxFiles: 150, maxPatchBytes: 1024 * 1024, maxNewSymbols: 200, hardMaxFiles: 1000, hardMaxPatchBytes: 8 * 1024 * 1024, hardMaxNewSymbols: 2000, areaMaxBytes: 256 * 1024, areaMinBytes: 16 * 1024 });
-    expect(p.roles).toEqual({ reporter: "claude-code", diagrammer: "claude-code", "report-checker": "codex", questioner: "codex", answerer: "claude-code", "answer-checker": "codex" });
+    expect(p.roles).toEqual({ reporter: "claude-code", diagrammer: "claude-code", "report-checker": "codex", questioner: "codex", answerer: "claude-code", "batch-answerer": "claude-code", "answer-checker": "codex" });
     expect(p.metrics.coverage).toBe(true);
     expect(p.metrics.mutation.enabled).toBe(true);
     expect(p.supervisorPreference.harnesses).toEqual(["pi", "claude-code", "codex"]);
@@ -58,7 +58,8 @@ describe("the BanyanDB profile", () => {
       { role: "report-checker", harness: "codex", access: "read", distinctFrom: ["reporter"], setting: "harnesses.report-checker" },
       { role: "questioner", harness: "codex", access: "read", distinctFrom: ["reporter"], setting: "harnesses.questioner" },
       { role: "answerer", harness: "claude-code", access: "read", distinctFrom: ["questioner"], setting: "harnesses.answerer" },
-      { role: "answer-checker", harness: "codex", access: "read", distinctFrom: ["answerer"], setting: "harnesses.answer-checker" },
+      { role: "batch-answerer", harness: "claude-code", access: "read", setting: "harnesses.batch-answerer (optional; the answer batches of large mode; falls back to harnesses.answerer)" },
+      { role: "answer-checker", harness: "codex", access: "read", distinctFrom: ["answerer", "batch-answerer"], setting: "harnesses.answer-checker" },
     ]);
     expect(d.supervisor).toEqual({ harnesses: ["pi", "claude-code", "codex"] });
     expect(d.defaultBudgets).toMatchObject({ agentInvocations: 1200, jobs: 220, decisions: 240, corrections: 12 });
@@ -125,9 +126,9 @@ describe("profile refusals", () => {
     const ids = { reporter: "claude-code", "report-checker": "codex", questioner: "codex", answerer: "claude-code", "answer-checker": "codex" };
     expect(profileOf({ harnesses: ids }).roleSettings).toEqual({});
     // The BanyanDB profile pins Opus at high effort for the authors and medium effort for the Codex checkers.
-    expect(profileOf().roleSettings).toEqual({ reporter: { model: "opus", effort: "high" }, diagrammer: { model: "opus", effort: "high" }, answerer: { model: "opus", effort: "high" }, "report-checker": { effort: "medium" }, questioner: { effort: "medium" }, "answer-checker": { effort: "medium" } });
-    const p = profileOf({ harnesses: { reporter: { harness: "claude-code", model: "opus", effort: "max" }, "report-checker": { harness: "codex", effort: "minimal" }, questioner: { harness: "codex" }, answerer: "claude-code" } });
-    expect(p.roles).toEqual({ reporter: "claude-code", diagrammer: "claude-code", "report-checker": "codex", questioner: "codex", answerer: "claude-code", "answer-checker": "codex" });
+    expect(profileOf().roleSettings).toEqual({ reporter: { model: "opus", effort: "high" }, diagrammer: { model: "opus", effort: "high" }, answerer: { model: "opus", effort: "high" }, "batch-answerer": { model: "sonnet", effort: "high" }, "report-checker": { effort: "medium" }, questioner: { effort: "medium" }, "answer-checker": { effort: "medium" } });
+    const p =profileOf({ harnesses: { reporter: { harness: "claude-code", model: "opus", effort: "max" }, "report-checker": { harness: "codex", effort: "minimal" }, questioner: { harness: "codex" }, answerer: "claude-code" } });
+    expect(p.roles).toEqual({ reporter: "claude-code", diagrammer: "claude-code", "report-checker": "codex", questioner: "codex", answerer: "claude-code", "batch-answerer": "claude-code", "answer-checker": "codex" });
     // With no diagrammer named it takes the reporter's settings.
     expect(p.roleSettings).toEqual({ reporter: { model: "opus", effort: "max" }, diagrammer: { model: "opus", effort: "max" }, "report-checker": { effort: "minimal" } });
   });
@@ -167,6 +168,25 @@ describe("profile refusals", () => {
     expect(refused(pack({ grep: 3 }))).toMatch(/grep must be a POSIX extended regular expression/);
     expect(refused({ symbols: { packs: [{ language: "go", globs: ["../x"] }] } })).toMatch(/without "\.\."/);
     expect(profileOf(pack({ definitions: ["^fn\\s+(?<name>\\w+)"], testFiles: ["**/*_spec.go"] })).symbols[0]).toMatchObject({ language: "go", testFiles: ["**/*_spec.go"] });
+  });
+
+  it("takes an optional batch-answerer for large mode's answer batches: absent it is the answerer (harness, model and effort), and it is held to the same distinct pair with the answer-checker", () => {
+    // Absent: the answerer's harness, model and effort.
+    const fallback = profileOf({ harnesses: { reporter: "claude-code", "report-checker": "codex", questioner: "codex", answerer: { harness: "claude-code", model: "opus", effort: "high" }, "answer-checker": "codex" } });
+    expect(fallback.roles["batch-answerer"]).toBe("claude-code");
+    expect(fallback.roleSettings["batch-answerer"]).toEqual({ model: "opus", effort: "high" });
+    // Named: its own harness, model and effort, in the string or the object form.
+    const named = profileOf({ harnesses: { reporter: "claude-code", "report-checker": "codex", questioner: "codex", answerer: { harness: "claude-code", model: "opus", effort: "high" }, "batch-answerer": { harness: "claude-code", model: "sonnet", effort: "medium" }, "answer-checker": "codex" } });
+    expect(named.roleSettings["batch-answerer"]).toEqual({ model: "sonnet", effort: "medium" });
+    expect(named.roleSettings.answerer).toEqual({ model: "opus", effort: "high" });
+    expect(profileOf({ harnesses: { reporter: "claude-code", "report-checker": "codex", questioner: "codex", answerer: "claude-code", "batch-answerer": "claude-code", "answer-checker": "codex" } }).roles["batch-answerer"]).toBe("claude-code");
+    // The answer-checker differs in harness from the batch-answerer as it must from the answerer.
+    expect(refused({ harnesses: { answerer: "claude-code", "batch-answerer": "codex", "answer-checker": "codex" } })).toMatch(/answer-checker must differ from harnesses.batch-answerer \(both are codex\)/);
+    expect(refused({ harnesses: { "batch-answerer": { harness: "codex", model: "x" } } })).toMatch(/answer-checker must differ from harnesses.batch-answerer/);
+    // Its session is the one the maintainer opens in large mode, so it is not a Pi session; its settings are checked like any role's.
+    expect(refused({ harnesses: { "batch-answerer": "pi" } })).toMatch(/batch-answerer must be claude-code or codex/);
+    expect(refused({ harnesses: { "batch-answerer": { harness: "claude-code", effort: "minimal" } } })).toMatch(/batch-answerer.effort must be one of/);
+    expect(refused({ harnesses: { "batch-answerer": { harness: "claude-code", colour: "red" } } })).toMatch(/batch-answerer/);
   });
 
   it("accepts roles that satisfy every pair", () => {
