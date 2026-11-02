@@ -1231,6 +1231,7 @@ function publishStage(ctx: Context, view: RunView): GraphDecision {
   const p = publishPlan(view.evidence, a.analysis, pr, pinnedBase(view.evidence));
   if (p.state === "pending") return supervise({ reason: `the review cannot be composed: ${p.reason}` }, "escalate a missing record");
   if (p.state === "failed") return supervise({ reason: p.reason, evidenceRefs: p.refs }, "escalate an unreadable record");
+  if (p.plan.problem !== undefined) return supervise({ reason: p.plan.problem }, "escalate a review whose items cannot all be made readable");
   const secrets = secretFindings(JSON.stringify(createInput(pr, p.plan)));
   if (secrets.length > 0) return stop({ reason: "report refused", blocker: `the review would hold what looks like a credential (${[...new Set(secrets)].slice(0, 3).join("; ")}); it was not posted`, retryable: false }, "refuse to post a review that holds a secret");
   const flow = publishFlow(view.evidence, p.plan, pr);

@@ -71,6 +71,8 @@ interface Options {
   through?: "answers" | "end";
   /** How many pages the Publish stage's read of the reviews takes (the pages after the first start at the cursor the previous one gave). */
   reviewPages?: number;
+  /** How many whole reads of a review's comments show none of them (a read that lags the post); every later read shows them. */
+  hideComments?: number;
   /** Reviews of the pull request that are already on GitHub when the run starts. */
   reviews?: FakeReview[];
   /** What the Publish stage's `create-pull-review` does: `post` (the default); `lost` fails without posting; `posted-then-failed` posts and then reports an ambiguous failure. A list gives one outcome per attempt. */
@@ -145,6 +147,7 @@ function* simulationSteps(options: Options = {}): Generator<undefined, Simulatio
   };
   const github: FakeGithub = { creates: [], reviews: [...(options.reviews ?? [])] };
   let nextReviewId = 7000;
+  let commentReads = 0;
   let nextCommentId = 9000;
   let written: Simulation["written"];
   let qa: Simulation["qa"];
@@ -230,7 +233,8 @@ function* simulationSteps(options: Options = {}): Generator<undefined, Simulatio
         const mine = github.reviews.filter((_, i) => i % pages === at - 1);
         out = { items: mine.map((r) => ({ id: r.id, user: r.user ?? FAKE_LOGIN, state: r.state, body: r.body.slice(0, 4000), bodyTruncated: false, commitId: r.commitId, submittedAt: null, url: r.url })), page: last ? { complete: true, nextCursor: null, startCursor: String(at) } : { complete: false, nextCursor: String(at + 1), startCursor: String(at) } };
       } else if (job.executor.id === LIST_PULL_REVIEW_COMMENTS.id) {
-        out = { items: github.reviews.flatMap((r) => r.comments.map((c) => ({ id: c.id, reviewId: r.id, path: c.path, line: c.line, side: "RIGHT", body: c.body.slice(0, 4000), bodyTruncated: false }))), page };
+        commentReads += 1;
+        out = { items: commentReads <= (options.hideComments ?? 0) ? [] : github.reviews.flatMap((r) => r.comments.map((c) => ({ id: c.id, reviewId: r.id, path: c.path, line: c.line, side: "RIGHT", body: c.body.slice(0, 4000), bodyTruncated: false }))), page };
       } else if (job.executor.id === CREATE_PULL_REVIEW.id) {
         const input = job.input as Record<string, unknown>;
         github.creates.push(input);

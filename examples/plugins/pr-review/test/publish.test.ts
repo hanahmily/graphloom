@@ -85,8 +85,26 @@ describe("the review the Publish stage posts", () => {
     expect(many.body.length).toBeLessThanOrEqual(MAX_REVIEW_BODY);
     const huge = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1(Array.from({ length: 60 }, (_, i) => issue(`Q${i + 1}`, { body: "z".repeat(3_000) }))) });
     expect(huge.body.length).toBeLessThanOrEqual(MAX_REVIEW_BODY);
-    expect(huge.body).toMatch(/more items? did not fit this body: /);
     expect(huge.firstLine).toBe("Changes requested: 60 open");
+    // Nothing is reduced to an id: every item keeps a clipped one-line text and its marker, and its whole text goes to the ledger.
+    expect(huge.problem).toBeUndefined();
+    for (const x of huge.items) {
+      expect(x.body).toMatch(new RegExp(`^\\S.*z+.* <!-- graphloom-finding: ${x.id} -->$`));
+      expect(x.body).not.toContain("\n");
+      expect(huge.body).toContain(x.body);
+      expect(x.full).toContain("z".repeat(3_000));
+    }
+    expect(huge.body).not.toMatch(/did not fit this body/);
+    const patch = ledgerPatch({ head: HEAD }, huge, { reviewId: 1, url: null, how: "created" }, new Map());
+    expect(patch.items.every((i) => (i.body ?? "").includes("z".repeat(3_000)))).toBe(true);
+  });
+
+  it("moves an anchored item inline before it shrinks the others, and escalates rather than post ids only", () => {
+    const mixed = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([...Array.from({ length: 25 }, (_, i) => issue(`Q${i + 1}`, { body: "y".repeat(3_000), path: "pkg/a.go", line: i + 1, anchored: true })), ...Array.from({ length: 25 }, (_, i) => issue(`Q${i + 30}`, { body: "w".repeat(3_000) }))]) });
+    expect(mixed.problem).toBeUndefined();
+    expect(mixed.items.filter((x) => x.inline)).toHaveLength(25);
+    const impossible = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1(Array.from({ length: 700 }, (_, i) => issue(`Q${i + 1}`, { body: "v".repeat(300) }))) });
+    expect(impossible.problem).toMatch(/^700 items fit neither inline nor as one-line texts/);
   });
 
   it("finds a review of this head only when this credential's login authored it, as COMMENTED, with this run's marker", () => {
@@ -177,7 +195,7 @@ describe("the gate after Answers: issues publish round 1 and end the run, none c
 });
 
 describe("publishing is idempotent across retries and runs: the reviews are read before anything is posted", () => {
-  const marked = (nonce: string, over: Partial<FakeReview> = {}): FakeReview => ({ id: 99, body: `Changes requested: 1 open\n${reviewMarker(HEAD, nonce)}\n\nearlier`, commitId: HEAD, state: "COMMENTED", url: "https://github.com/apache/skywalking-banyandb/pull/7#pullrequestreview-99", comments: [{ id: 990, path: "pkg/schema/ttl.go", line: 1, body: `earlier ${findingMarker("Q1")}` }], ...over });
+  const marked = (nonce: string, over: Partial<FakeReview> = {}): FakeReview => ({ id: 99, body: `Changes requested: 1 open\n${reviewMarker(HEAD, nonce)}\n\nearlier`, commitId: HEAD, state: "COMMENTED", url: "https://github.com/apache/skywalking-banyandb/pull/7#pullrequestreview-99", comments: issues().github.reviews[0]!.comments.map((c, k) => ({ ...c, id: 990 + k })), ...over });
 
   it("posts nothing when a review of this head already carries the marker, and records that review", () => {
     const sim = issues({ reviews: [marked(nonceOf(issues()))] });
@@ -236,6 +254,42 @@ describe("publishing is idempotent across retries and runs: the reviews are read
     expect(publishFlow(without, plan.plan, pull).state).toBe("ledger");
     expect(reviewPublished.evaluate({ requirementId: "review-published", statement: "", evidence: without, candidateDigest: "d1", config: BANYANDB })).toMatchObject({ status: "inconclusive" });
     expect(reviewPublished.evaluate({ requirementId: "review-published", statement: "", evidence, candidateDigest: "d1", config: BANYANDB })).toMatchObject({ status: "passed", reason: expect.stringMatching(/one COMMENT review \(\d+, created\) at head 0123456789ab: Changes requested: \d+ open; round 1/) });
+  });
+});
+
+describe("the read-back of the posted comments must recover every inline item's id", () => {
+  it("reads again when a read lags the post, and records the ids once they show", () => {
+    const sim = issues({ hideComments: 1 });
+    expect(publishJobs(sim).filter((j) => j === "graphloom.github/list-pull-review-comments")).toHaveLength(2);
+    expect(ledgerPatchOf(sim).items.filter((i) => i.inline).every((i) => i.commentId !== null)).toBe(true);
+    expect(stopOf(sim)).toMatchObject({ reason: "complete" });
+  });
+
+  it("goes to the supervisor, naming the items, after three reads that lack one, and never records a null id", () => {
+    const sim = issues({ hideComments: 9 });
+    expect(publishJobs(sim).filter((j) => j === "graphloom.github/list-pull-review-comments")).toHaveLength(3);
+    expect(sim.final.action.type).toBe("supervise");
+    expect(JSON.stringify(sim.final)).toMatch(/3 reads of the review's comments did not show the inline comments? of /);
+    expect(publishJobs(sim)).not.toContain("ledger-published");
+  });
+
+  it("is rejected by the validator when the ledger would hold a null id for an inline item", () => {
+    const sim = issues();
+    const evidence = candidateEvidence(sim.evidence, "d1");
+    const pull = evidencePull(evidence, profileOf())!;
+    const a = analyze(evidence, profileOf(), pull);
+    if (a.state !== "ready") throw new Error("not ready");
+    const plan = publishPlan(evidence, a.analysis, pull, pinnedBase(evidence));
+    if (plan.state !== "ready") throw new Error(plan.state);
+    // The comments the read showed, with the first inline comment taken away: the stage is not done.
+    const inline = plan.plan.items.find((x) => x.inline)!;
+    const cut = evidence.map((e): EvidenceRecord => {
+      const g = (e.payload as { github?: { items?: Array<{ body?: string }> } } | undefined)?.github;
+      if (g?.items === undefined || !g.items.some((c) => c.body?.includes(`graphloom-finding: ${inline.id} `))) return e;
+      return { ...e, payload: { ...(e.payload as object), github: { ...g, items: g.items.filter((c) => !c.body?.includes(`graphloom-finding: ${inline.id} `)) } } };
+    });
+    expect(publishFlow(cut, plan.plan, pull).state).not.toBe("done");
+    expect(reviewPublished.evaluate({ requirementId: "review-published", statement: "", evidence: cut, candidateDigest: "d1", config: BANYANDB }).status).not.toBe("passed");
   });
 });
 

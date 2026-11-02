@@ -167,8 +167,11 @@ export const reviewPublished: Validator = profiled((input, profile) => {
   const plan = p.plan;
   if (!plan.body.startsWith(`${plan.firstLine}\n`)) return failed("the review body does not open with its verdict");
   if (plan.verdict === "passed" && (p.round1.issues.length > 0 || plan.open > 0)) return failed("a review with an open item is not a pass");
+  if (plan.problem !== undefined) return failed(plan.problem);
   const flow = publishFlow(input.evidence, plan, pr);
   if (flow.state !== "done") return inconclusive(flow.state === "supervise" ? flow.reason : "the review is not posted and recorded in the ledger yet");
+  const noId = flow.patch.items.filter((x) => x.inline && x.commentId === null).map((x) => x.id);
+  if (noId.length > 0) return failed(`the ledger holds no comment id for the inline item${noId.length === 1 ? "" : "s"} ${noId.join(", ")}`);
   const secrets = secretFindings(plan.body);
   if (secrets.length > 0) return failed(`the posted review holds what looks like a credential (${[...new Set(secrets)].slice(0, 3).join("; ")})`);
   return passed(`one COMMENT review (${flow.posted.reviewId}, ${flow.posted.how}) at head ${pr.head.slice(0, 12)}: ${plan.firstLine}; round ${plan.round}, ${plan.items.length} item(s), ${plan.comments.length} inline; its comments were read back and the ledger records the review id and each item's ids`);

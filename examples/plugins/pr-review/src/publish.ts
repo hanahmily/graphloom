@@ -33,6 +33,8 @@ export const MAX_REVIEW_BODY = 40_000;
 export const MAX_INLINE_COMMENTS = 50;
 const MAX_ITEM_TEXT = 1_800;
 const MAX_ITEM_BODY = 3_800;
+/** The least text a compacted item keeps: a one-liner shorter than this says too little to act on. */
+const MIN_ONE_LINER = 80;
 
 export const findingMarker = (id: string): string => `<!-- graphloom-finding: ${id} -->`;
 /** The marker of this run's review of `head`: the head and a nonce of the run (its viewer read's operation), which a stranger cannot know. */
@@ -52,6 +54,8 @@ export interface PublishItem {
   side: "RIGHT" | "LEFT";
   /** An inline comment on the diff; the others are listed in the review body. */
   inline: boolean;
+  /** The item's whole text (without its marker) when `body` was compacted to a one-line text to fit the review body; the ledger records it. */
+  full?: string;
 }
 
 export interface ReviewPlan {
@@ -65,6 +69,8 @@ export interface ReviewPlan {
   items: PublishItem[];
   /** The verdict's first line of the body. */
   firstLine: string;
+  /** Why the review cannot be posted so that every item is readable (they fit neither inline nor as one-line texts); the stage escalates instead of posting ids only. */
+  problem?: string;
 }
 
 const oneLine = (s: string): string => s.replace(/\s+/g, " ").trim();
@@ -113,19 +119,41 @@ export function planReview(i: { pull: Pick<PullRequest, "owner" | "repo" | "numb
     [round1Line, ...(round2Line !== undefined ? [round2Line] : [])].join("\n\n"),
     ...(inline > 0 ? [`${inline} item${inline === 1 ? " is" : "s are"} commented on the diff.`] : []),
   ];
-  // The items that are not inline follow, whole, while they fit; the ones past the bound are named, and are in the ledger.
-  let used = sections.join("\n\n").length;
-  const listed: string[] = [];
-  const omitted: string[] = [];
-  for (const x of rest) {
-    if (used + x.body.length + 2 <= MAX_REVIEW_BODY - 200) {
-      listed.push(x.body);
-      used += x.body.length + 2;
-    } else omitted.push(x.id);
+  // The items that are not inline follow, whole, while they all fit. When they do not, an item with an anchor moves inline (room allowing),
+  // and the rest shrink evenly to one-line texts (every item keeps its text and its marker, none is reduced to an id); when even that
+  // cannot fit, the plan says so and the stage escalates.
+  const budget = MAX_REVIEW_BODY - 200 - sections.join("\n\n").length;
+  const size = (xs: readonly PublishItem[]): number => xs.reduce((n, x) => n + x.body.length + 2, 0);
+  let problem: string | undefined;
+  let pending = items.filter((x) => !x.inline);
+  if (size(pending) > budget) {
+    for (const x of pending) {
+      if (inline < MAX_INLINE_COMMENTS && x.path !== undefined && x.line !== undefined && anchoredIds.has(x.id) && !x.inline) {
+        x.inline = true;
+        inline += 1;
+      }
+    }
+    pending = items.filter((x) => !x.inline);
   }
-  const body = [...sections, ...listed, ...(omitted.length > 0 ? [`${omitted.length} more item${omitted.length === 1 ? "" : "s"} did not fit this body: ${omitted.join(", ")}.`] : [])].join("\n\n");
+  if (size(pending) > budget) {
+    const textOf = (x: PublishItem): string => x.body.slice(0, x.body.length - findingMarker(x.id).length).trim();
+    let limit = MAX_ITEM_BODY;
+    const compacted = (l: number): string[] => pending.map((x) => `${clip(oneLine(textOf(x)), l)} ${findingMarker(x.id)}`);
+    while (limit >= MIN_ONE_LINER && compacted(limit).reduce((n, b) => n + b.length + 2, 0) > budget) limit -= 50;
+    if (limit < MIN_ONE_LINER) problem = `${pending.length} items fit neither inline nor as one-line texts in the review body (${pending.map((x) => x.id).join(", ")}): posting their ids only would hide what is requested`;
+    else {
+      const lines = compacted(limit);
+      pending.forEach((x, k) => {
+        if (lines[k] !== x.body) {
+          x.full = textOf(x);
+          x.body = lines[k]!;
+        }
+      });
+    }
+  }
+  const body = [...sections, ...pending.map((x) => x.body)].join("\n\n");
   const comments = items.filter((x) => x.inline).map((x) => ({ path: x.path!, line: x.line!, side: x.side, ...(x.startLine !== undefined && x.startLine < x.line! ? { startLine: x.startLine } : {}), body: x.body }));
-  return { round, verdict, open, body, comments, items, firstLine };
+  return { round, verdict, open, body, comments, items, firstLine, ...(problem !== undefined ? { problem } : {}) };
 }
 
 /** The input of the create-pull-review call: one `COMMENT` review at the pinned head. */
@@ -177,7 +205,7 @@ export interface LedgerPatch {
   open: number;
   reviewId: number;
   url: string | null;
-  items: Array<{ id: string; origin: PublishItem["origin"]; path: string | null; line: number | null; inline: boolean; commentId: number | null }>;
+  items: Array<{ id: string; origin: PublishItem["origin"]; path: string | null; line: number | null; inline: boolean; commentId: number | null; /** The whole text of an item whose posted text was compacted. */ body?: string }>;
 }
 
 export function ledgerPatch(pr: Pick<PullRequest, "head">, plan: ReviewPlan, posted: Posted, ids: ReadonlyMap<string, number>): LedgerPatch {
@@ -189,11 +217,13 @@ export function ledgerPatch(pr: Pick<PullRequest, "head">, plan: ReviewPlan, pos
     open: plan.open,
     reviewId: posted.reviewId,
     url: posted.url,
-    items: plan.items.map((x) => ({ id: x.id, origin: x.origin, path: x.path ?? null, line: x.line ?? null, inline: x.inline, commentId: x.inline ? ids.get(x.id) ?? null : null })),
+    items: plan.items.map((x) => ({ id: x.id, origin: x.origin, path: x.path ?? null, line: x.line ?? null, inline: x.inline, commentId: x.inline ? ids.get(x.id) ?? null : null, ...(x.full !== undefined ? { body: x.full } : {}) })),
   };
 }
 
 export const MAX_CREATE_ATTEMPTS = 3;
+/** Whole reads of a posted review's comments before a missing inline id goes to the supervisor. */
+export const MAX_COMMENT_READS = 3;
 
 /** Who the credential is and this run's nonce, from the viewer read the stage made first (`get-viewer`; its operation id is the nonce). */
 export function viewerOf(evidence: readonly EvidenceRecord[]): { login: string; nonce: string } | undefined {
@@ -260,7 +290,16 @@ export function publishFlow(evidence: readonly EvidenceRecord[], plan: ReviewPla
   if (comments === undefined || (comments.complete === false && comments.nextCursor !== null)) {
     return { state: "comments", reviewId: posted.reviewId, ...(comments?.nextCursor != null ? { cursor: comments.nextCursor } : {}), why: comments === undefined ? "read the review's comments back, to record their ids" : "read the next page of the review's comments" };
   }
-  const patch = ledgerPatch(pr, plan, posted, commentIds(comments.items, posted.reviewId));
+  if (!comments.complete) return { state: "supervise", reason: "the review's comments could not be read whole, so their ids cannot be recorded", refs: comments.refs };
+  const ids = commentIds(comments.items, posted.reviewId);
+  const missing = plan.items.filter((x) => x.inline && !ids.has(x.id)).map((x) => x.id);
+  if (missing.length > 0) {
+    // A read can lag the post: read again (a whole read each time), and escalate when the ids are still missing, never accept a null id.
+    const reads = later.filter((e) => producer(e)?.executorId === COMMENTS_READ.pin.id && isObject(e.payload) && isObject(e.payload.github) && (!isObject(e.payload.github.page) || [undefined, "1", "start"].includes(e.payload.github.page.startCursor as string | undefined))).length;
+    if (reads >= MAX_COMMENT_READS) return { state: "supervise", reason: `${reads} reads of the review's comments did not show the inline comment${missing.length === 1 ? "" : "s"} of ${missing.join(", ")}, so their ids cannot be recorded`, refs: comments.refs };
+    return { state: "comments", reviewId: posted.reviewId, why: `the read of the review's comments lacks ${missing.join(", ")}: read them again` };
+  }
+  const patch = ledgerPatch(pr, plan, posted, ids);
   const run = commandRuns(evidence, COMMAND.ledgerPublished).at(-1);
   const argvPatch = run?.command.argv[6];
   if (run !== undefined && succeeded(run.command) && at(evidence, run.record.ref) > Math.max(...comments.refs.map((r) => at(evidence, r))) && argvPatch === JSON.stringify(patch)) return { state: "done", posted, patch };
@@ -277,7 +316,7 @@ const MERGE =
   'if(h){h.reviewId=p.reviewId;h.reviewed=p.round===2;h.round1=p.round===1?"issues":"clean";h.verdict=p.verdict;h.open=p.open;if(p.url)h.reviewUrl=p.url}' +
   'const github=(it)=>({head:p.head,reviewId:p.reviewId,commentId:it.commentId,inline:it.inline});' +
   'const kept=(Array.isArray(v.findings)?v.findings:[]).filter((f)=>!(f.head===p.head&&p.items.some((it)=>it.id===f.id)));' +
-  'for(const it of p.items){kept.push({head:p.head,id:it.id,origin:it.origin,path:it.path,line:it.line,state:"open",github:github(it)});' +
+  'for(const it of p.items){kept.push({head:p.head,id:it.id,origin:it.origin,path:it.path,line:it.line,body:it.body,state:"open",github:github(it)});' +
   'const q=(Array.isArray(v.qa)?v.qa:[]).find((x)=>x.id===it.id);if(q){q.state="open";q.github=github(it)}}' +
   'v.heads=heads;v.findings=kept;process.stdout.write(JSON.stringify(v))})';
 

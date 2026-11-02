@@ -2372,8 +2372,13 @@ head and the event is always `COMMENT`.
    anything else; a read that shows nothing allows the next attempt, at most
    three, then the supervisor.
 3. **Read back.** The stage reads the review's comments
-   (`list-pull-review-comments`) and takes each inline item's comment id from
-   its marker.
+   (`list-pull-review-comments`, every page) and takes each inline item's comment id
+   from its marker. A missing id is never recorded as null: the comments are read again
+   (at most three whole reads), then the supervisor gets the missing item ids.
+   Items not inline are never reduced to ids: when they do not all fit the body, an
+   anchored one moves inline, the rest shrink evenly to one-line texts with their markers,
+   and the ledger keeps each compacted item's whole text; if even that cannot fit, the
+   stage escalates instead of posting.
 4. **Record.** The review id and the ids are evidence (the executor's and the
    reads' results) and are written to the ledger by `ledger-published`: one
    more commit that sets `reviewId` (and `reviewed`, `round1`, `verdict`,
