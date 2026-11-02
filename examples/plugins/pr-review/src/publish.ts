@@ -13,7 +13,8 @@
  * The posted review's id and its comments' ids are recorded in the ledger (`reviewId`, `github` on each item).
  */
 import type { EnvironmentCommand, EvidenceRecord } from "@graphloom/sdk";
-import { COMMAND, CREATE_PULL_REVIEW, GET_VIEWER, PUBLISH_STAGE, ledgerRef } from "./constants.js";
+import { COMMAND, CREATE_PULL_REVIEW, GET_VIEWER, PART_BASE, PUBLISH_PATCH_FILE, PUBLISH_STAGE, ledgerRef } from "./constants.js";
+import { partCommands, readParts } from "./parts.js";
 import { severityLabel, type Draft, type DraftEntry } from "./draft.js";
 import { commandRuns, isObject, producer, succeeded, type CommandRun } from "./evidence.js";
 import type { Analysis } from "./analysis.js";
@@ -39,7 +40,10 @@ const MIN_ONE_LINER = 80;
 export const findingMarker = (id: string): string => `<!-- graphloom-finding: ${id} -->`;
 /** The marker of this run's review of `head`: the head and a nonce of the run (its viewer read's operation), which a stranger cannot know. */
 export const reviewMarker = (head: string, nonce: string): string => `<!-- graphloom-review: ${head} ${nonce} -->`;
-const MARKER = /<!-- graphloom-finding: ([A-Z][0-9]+) -->/;
+/** The marker publication appends: the last thing in a body. Marker-looking text in an item's content is neutralized and never matches. */
+const MARKER = /<!-- graphloom-finding: ([A-Z][0-9]+) -->$/;
+/** Content that looks like one of this graph's markers (or any HTML comment) is made inert, so it cannot be taken for a marker or hide text. */
+export const neutralize = (text: string): string => text.replace(/<!--/g, "&lt;!--");
 
 export interface PublishItem {
   /** `N1`, `Q3` or `F3`: the id its marker carries. */
@@ -79,13 +83,15 @@ const clip = (s: string, n: number): string => (s.length <= n ? s : `${s.slice(0
 /** The first line of the review: the verdict, and what is open. */
 export const verdictLine = (open: number): string => (open === 0 ? "Review passed" : `Changes requested: ${open} open`);
 
-function findingBody(e: DraftEntry): string {
+function findingBody(e: DraftEntry): { text: string; full?: string } {
   const aspects = e.aspects.length > 0 ? ` · ${e.aspects.join(", ")}` : "";
   const tags = [e.proof?.state === "non-behavioral" ? "non-behavioral" : undefined, e.principle !== undefined ? `breaks principle ${e.principle}` : undefined].filter((t): t is string => t !== undefined);
   const label = `**${e.severity !== undefined ? severityLabel(e.severity) : "[finding]"}**${aspects}${tags.length > 0 ? ` · ${tags.join(" · ")}` : ""}`;
-  const text = `${label}\n\n${clip(e.body, MAX_ITEM_TEXT)}`;
+  const text = `${label}\n\n${clip(neutralize(e.body), MAX_ITEM_TEXT)}`;
   const suggestion = e.suggestion !== undefined && e.anchored && e.side === "RIGHT" ? `\n\n\`\`\`suggestion\n${e.suggestion}\n\`\`\`` : "";
-  return text.length + suggestion.length <= MAX_ITEM_BODY - 60 ? `${text}${suggestion}` : text;
+  const posted = text.length + suggestion.length <= MAX_ITEM_BODY - 60 ? `${text}${suggestion}` : text;
+  // What was cut (the text, or a suggestion that did not fit) is kept whole for the ledger.
+  return posted === `${label}\n\n${neutralize(e.body)}${suggestion}` ? { text: posted } : { text: posted, full: `${label}\n\n${neutralize(e.body)}${suggestion}` };
 }
 
 /**
@@ -98,8 +104,12 @@ export function planReview(i: { pull: Pick<PullRequest, "owner" | "repo" | "numb
   const round: 1 | 2 = issues.length > 0 || i.draft === undefined ? 1 : 2;
   const items: PublishItem[] =
     round === 1
-      ? issues.map((x) => ({ id: x.id, origin: "round1", body: `${x.body}\n\n${findingMarker(x.id)}`, ...(x.path !== undefined && x.line !== undefined ? { path: x.path, line: x.line } : {}), side: "RIGHT", inline: false }))
-      : (i.draft?.comments ?? []).filter((c) => c.kind === "finding").map((e) => ({ id: e.id, origin: "round2", body: `${findingBody(e)}\n\n${findingMarker(e.id)}`, path: e.path, line: e.line, ...(e.startLine !== undefined ? { startLine: e.startLine } : {}), side: e.side, inline: false }));
+      ? issues.map((x) => {
+          const text = neutralize(x.body);
+          const posted = clip(text, MAX_ITEM_TEXT);
+          return { id: x.id, origin: "round1" as const, body: `${posted}\n\n${findingMarker(x.id)}`, ...(posted !== text ? { full: text } : {}), ...(x.path !== undefined && x.line !== undefined ? { path: x.path, line: x.line } : {}), side: "RIGHT" as const, inline: false };
+        })
+      : (i.draft?.comments ?? []).filter((c) => c.kind === "finding").map((e) => { const b = findingBody(e); return ({ id: e.id, origin: "round2" as const, body: `${b.text}\n\n${findingMarker(e.id)}`, ...(b.full !== undefined ? { full: b.full } : {}), path: e.path, line: e.line, ...(e.startLine !== undefined ? { startLine: e.startLine } : {}), side: e.side, inline: false }); });
   const anchoredIds = new Set<string>(round === 1 ? issues.filter((x) => x.anchored).map((x) => x.id) : (i.draft?.comments ?? []).filter((c) => c.kind === "finding" && c.anchored).map((c) => c.id));
   let inline = 0;
   for (const it of items) {
@@ -145,7 +155,7 @@ export function planReview(i: { pull: Pick<PullRequest, "owner" | "repo" | "numb
       const lines = compacted(limit);
       pending.forEach((x, k) => {
         if (lines[k] !== x.body) {
-          x.full = textOf(x);
+          x.full ??= textOf(x);
           x.body = lines[k]!;
         }
       });
@@ -183,7 +193,7 @@ export function commentIds(items: readonly unknown[], reviewId: number): Map<str
   const out = new Map<string, number>();
   for (const c of items) {
     if (!isObject(c) || c.reviewId !== reviewId || typeof c.id !== "number" || typeof c.body !== "string") continue;
-    const m = MARKER.exec(c.body);
+    const m = MARKER.exec(c.body.trimEnd());
     if (m !== null && !out.has(m[1]!)) out.set(m[1]!, c.id);
   }
   return out;
@@ -243,7 +253,7 @@ export type PublishFlow =
   | { state: "reviews"; cursor?: string; why: string }
   | { state: "create"; why: string }
   | { state: "comments"; reviewId: number; cursor?: string; why: string }
-  | { state: "ledger"; posted: Posted; patch: LedgerPatch; run?: CommandRun }
+  | { state: "ledger"; posted: Posted; patch: LedgerPatch; /** The commands that write the patch file, a part set, before the ledger command reads it. */ parts: EnvironmentCommand[]; run?: CommandRun }
   | { state: "done"; posted: Posted; patch: LedgerPatch }
   | { state: "supervise"; reason: string; refs: string[] };
 
@@ -301,16 +311,20 @@ export function publishFlow(evidence: readonly EvidenceRecord[], plan: ReviewPla
   }
   const patch = ledgerPatch(pr, plan, posted, ids);
   const run = commandRuns(evidence, COMMAND.ledgerPublished).at(-1);
-  const argvPatch = run?.command.argv[6];
-  if (run !== undefined && succeeded(run.command) && at(evidence, run.record.ref) > Math.max(...comments.refs.map((r) => at(evidence, r))) && argvPatch === JSON.stringify(patch)) return { state: "done", posted, patch };
-  return { state: "ledger", posted, patch, ...(run !== undefined ? { run } : {}) };
+  const json = JSON.stringify(patch);
+  const written = readParts(evidence, PART_BASE.publishPatch, PUBLISH_PATCH_FILE);
+  const wroteAt = written.state === "read" ? written.at : -1;
+  const readsAt = Math.max(...comments.refs.map((r) => at(evidence, r)));
+  const current = written.state === "read" && written.value === json && wroteAt > readsAt;
+  if (current && run !== undefined && succeeded(run.command) && at(evidence, run.record.ref) > wroteAt && run.command.argv[6] === PUBLISH_PATCH_FILE) return { state: "done", posted, patch };
+  return { state: "ledger", posted, patch, parts: partCommands(PART_BASE.publishPatch, PUBLISH_PATCH_FILE, json), ...(run !== undefined && current && at(evidence, run.record.ref) > wroteAt ? { run } : {}) };
 }
 
 // ---- the ledger ----
 
 /** The code `ledger-published` runs over the ledger's `ledger.json` and the patch: `SAME` when the ledger already holds this review. */
 const MERGE =
-  'let s="";process.stdin.on("data",(d)=>{s+=d}).on("end",()=>{const v=JSON.parse(s);const p=JSON.parse(process.argv[1]);' +
+  'let s="";process.stdin.on("data",(d)=>{s+=d}).on("end",()=>{const v=JSON.parse(s);const p=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));' +
   'const heads=Array.isArray(v.heads)?v.heads:[];const h=heads.find((x)=>x.sha===p.head);' +
   'if(h&&h.reviewId===p.reviewId){process.stdout.write("SAME");return}' +
   'if(h){h.reviewId=p.reviewId;h.reviewed=p.round===2;h.round1=p.round===1?"issues":"clean";h.verdict=p.verdict;h.open=p.open;if(p.url)h.reviewUrl=p.url}' +
@@ -341,7 +355,7 @@ if git -c core.hooksPath=/dev/null update-ref "$ref" "$new" "$old"; then echo "a
  * another run advanced since is built upon, and a review the ledger already holds is a no-op. `node` is the Node binary to run.
  */
 export function ledgerPublishedCommand(pr: Pick<PullRequest, "owner" | "repo" | "number" | "head">, patch: LedgerPatch, node = "node"): EnvironmentCommand {
-  return { id: COMMAND.ledgerPublished, argv: ["sh", "-c", PUBLISHED_WRITE, COMMAND.ledgerPublished, ledgerRef(pr.owner, pr.repo, pr.number), `pr-review ${pr.owner}/${pr.repo}#${pr.number} at ${pr.head.slice(0, 12)}: published review ${patch.reviewId}`, JSON.stringify(patch), node, MERGE] };
+  return { id: COMMAND.ledgerPublished, argv: ["sh", "-c", PUBLISHED_WRITE, COMMAND.ledgerPublished, ledgerRef(pr.owner, pr.repo, pr.number), `pr-review ${pr.owner}/${pr.repo}#${pr.number} at ${pr.head.slice(0, 12)}: published review ${patch.reviewId}`, PUBLISH_PATCH_FILE, node, MERGE] };
 }
 
 // ---- what the stage posts, from the records ----

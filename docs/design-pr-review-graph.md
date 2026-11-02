@@ -2354,9 +2354,12 @@ head and the event is always `COMMENT`.
    - each item ends with its marker, `<!-- graphloom-finding: N1 -->`,
      `Q3` or `F3`, and the body's second line is
      `<!-- graphloom-review: <head sha> <nonce> -->`, which marks the head and this run
-     (the nonce is the operation id of the stage's viewer read, so a stranger cannot know it). Bodies are cut so
-     that each marker is read back whole (a read cuts a body at 4,000
-     characters) and the input fits an executor's 256,000 bytes.
+     (the nonce is the operation id of the stage's viewer read, so a stranger cannot know it). Every posted
+     body, round 1's and round 2's, inline or not, is clipped before its marker is
+     appended (a read cuts a body at 4,000 characters), the whole text is kept for the
+     ledger, and the input fits an executor's 256,000 bytes. Marker-looking text in an
+     item's content is neutralized (`<!--` becomes `&lt;!--`), and an id is read back
+     only from the marker that ends a comment's body.
 2. **Reconcile before posting** (core design: reconcile ambiguous effects before
    retrying). The stage first reads who the credential is (`graphloom.github/get-viewer`,
    `GET /user`), then the pull request's reviews (`list-pull-reviews`, paged by
@@ -2383,8 +2386,10 @@ head and the event is always `COMMENT`.
    reads' results) and are written to the ledger by `ledger-published`: one
    more commit that sets `reviewId` (and `reviewed`, `round1`, `verdict`,
    `open`) on the head and a `github` entry (`reviewId`, `commentId`, `inline`)
-   on each item, by compare-and-swap from the ref's value it reads in the same
-   command, so a ledger another run advanced since is built upon and a review
+   on each item (a compacted item's whole text as `body`), by compare-and-swap from the
+   ref's value it reads in the same command. The patch can be far past one argument, so
+   it is written first as a bounded part set with a digest (`publish-patch-p<k>`, as
+   `report.json` is) and the command reads the file, so a ledger another run advanced since is built upon and a review
    the ledger already holds is a no-op.
 
 A write refused for lack of a binding (`github.writeTokenEnv` unset) fails the

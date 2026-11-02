@@ -122,6 +122,8 @@ export const PART_BASE = {
   necessityJson: "necessity-json",
   ledgerJson: "ledger-json",
   ledgerMd: "ledger-md",
+  /** The patch the Publish stage records in the ledger, as a part set (design §6.6): it can be far past one argument. */
+  publishPatch: "publish-patch",
   /** The rule file of an aspect: `review-rules-<aspect>` (design §8.1). */
   reviewRules: "review-rules",
   /** The draft (design §10.1) and the report files rewritten with the Review section. */
@@ -163,6 +165,7 @@ export const QA_JSON = `${REVIEW_DIR}/qa.json`;
 export const NECESSITY_JSON = `${REVIEW_DIR}/necessity.json`;
 /** The ledger blobs of a multi-part ledger write, which the `ledger-write` command reads (ignored like the rest of `.graphloom/review/`). */
 export const LEDGER_JSON_FILE = `${REVIEW_DIR}/ledger/ledger.json`;
+export const PUBLISH_PATCH_FILE = `${REVIEW_DIR}/ledger/publish-patch.json`;
 export const LEDGER_MD_FILE = `${REVIEW_DIR}/ledger/ledger.md`;
 
 /** `refs/graphloom/pr-review/<owner>/<repo>/<N>/ledger`: the per-PR ledger (design §9.1). */

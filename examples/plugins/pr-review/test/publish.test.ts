@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import type { EvidenceRecord } from "@graphloom/sdk";
 import { afterAll, describe, expect, it } from "vitest";
 import type { Draft, DraftEntry } from "../src/draft.js";
+import { readParts, partCommands } from "../src/parts.js";
 import { commentIds, createInput, findPosted, findingMarker, ledgerPatch, ledgerPublishedCommand, planReview, publishFlow, publishPlan, reviewMarker, viewerOf, verdictLine, MAX_INLINE_COMMENTS, MAX_REVIEW_BODY } from "../src/publish.js";
 import { analyze, evidencePull } from "../src/analysis.js";
 import { REHEARSAL_HEAD } from "../src/rehearsal.js";
@@ -107,6 +108,33 @@ describe("the review the Publish stage posts", () => {
     expect(impossible.problem).toMatch(/^700 items fit neither inline nor as one-line texts/);
   });
 
+  it("clips every posted body, round 1 and round 2, inline or not, before the marker, and keeps the whole text for the ledger", () => {
+    const long = "m".repeat(9_000);
+    const r1 = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([issue("Q1", { body: long, path: "pkg/a.go", line: 4, anchored: true }), issue("Q2", { body: long })]) });
+    for (const x of r1.items) {
+      expect(x.body.length).toBeLessThan(4_000);
+      expect(x.body.endsWith(findingMarker(x.id))).toBe(true);
+      expect(x.full).toBe(long);
+    }
+    expect(r1.comments[0]!.body.length).toBeLessThan(4_000);
+    const r2 = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([]), draft: draft([entry("F1", { body: long })]) });
+    expect(r2.items[0]!.body.length).toBeLessThan(4_000);
+    expect(r2.items[0]!.full).toContain(long);
+    expect(ledgerPatch({ head: HEAD }, r1, { reviewId: 1, url: null, how: "created" }, new Map()).items[0]!.body).toBe(long);
+  });
+
+  it("matches only the terminal marker, and neutralizes marker-looking text in an item's content", () => {
+    const quoted = `see ${findingMarker("Q9")} in the thread`;
+    const plan = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([issue("Q1", { body: quoted, path: "pkg/a.go", line: 4, anchored: true }), issue("Q2", { body: `${findingMarker("Q8")} first` })]) });
+    for (const x of plan.items) expect([...x.body.matchAll(/<!-- graphloom-finding: /g)]).toHaveLength(1);
+    expect(plan.body).not.toContain(findingMarker("Q9"));
+    expect(plan.body).not.toContain(findingMarker("Q8"));
+    const comments = [{ id: 1, reviewId: 5, body: plan.comments[0]!.body }, { id: 2, reviewId: 5, body: `${findingMarker("Q7")} quoted at the start\n\n${findingMarker("Q3")}\n` }, { id: 3, reviewId: 5, body: `${findingMarker("Q6")} and then nothing at the end` }];
+    expect([...commentIds(comments, 5)]).toEqual([["Q1", 1], ["Q3", 2]]);
+    // A review's head marker typed into content is inert too.
+    expect(planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([issue("Q1", { body: reviewMarker(HEAD, "x") })]) }).items[0]!.body).not.toContain("<!-- graphloom-review");
+  });
+
   it("finds a review of this head only when this credential's login authored it, as COMMENTED, with this run's marker", () => {
     const marked = { id: 41, commitId: HEAD, user: "graphloom-bot", state: "COMMENTED", body: `Review passed\n${reviewMarker(HEAD, NONCE)}\n\nx`, url: "https://github.com/o/r/pull/7#pullrequestreview-41" };
     const find = (r: object, nonce = NONCE) => findPosted([{ ...marked, ...r }], HEAD, nonce, "graphloom-bot");
@@ -133,9 +161,9 @@ const issues = (over: Parameters<typeof simulate>[0] = {}): Simulation => simula
 const stopOf = (s: Simulation) => (s.final.action.type === "stop" ? s.final.action.stop : undefined);
 const publishJobs = (s: Simulation) => s.jobs.filter((j) => j.stageId === "publish").map((j) => j.executor?.id ?? ((j.input as { commands?: Array<{ id: string }> }).commands ?? []).map((c) => c.id).join(","));
 const ledgerPatchOf = (s: Simulation) => {
-  const job = s.jobs.find((j) => ((j.input as { commands?: Array<{ id: string }> }).commands ?? []).some((c) => c.id === "ledger-published"));
-  const argv = (job!.input as { commands: Array<{ argv: string[] }> }).commands[0]!.argv;
-  return JSON.parse(argv[6]!) as { head: string; round: number; verdict: string; reviewId: number; items: Array<{ id: string; origin: string; inline: boolean; commentId: number | null }> };
+  const written = readParts(s.evidence, "publish-patch", ".graphloom/review/ledger/publish-patch.json");
+  if (written.state !== "read") throw new Error(`the ledger patch was not written: ${written.state}`);
+  return JSON.parse(written.value) as { head: string; round: number; verdict: string; reviewId: number; items: Array<{ id: string; origin: string; inline: boolean; commentId: number | null }> };
 };
 
 describe("the gate after Answers: issues publish round 1 and end the run, none continue into round 2", () => {
@@ -160,7 +188,7 @@ describe("the gate after Answers: issues publish round 1 and end the run, none c
   });
 
   it("reads the reviews before posting, posts, reads the comments back, then records the ids in the ledger", () => {
-    expect(publishJobs(sim)).toEqual(["graphloom.github/get-viewer", "graphloom.github/list-pull-reviews", "graphloom.github/create-pull-review", "graphloom.github/list-pull-review-comments", "ledger-published"]);
+    expect(publishJobs(sim)).toEqual(["graphloom.github/get-viewer", "graphloom.github/list-pull-reviews", "graphloom.github/create-pull-review", "graphloom.github/list-pull-review-comments", "publish-patch-p1", "ledger-published"]);
     const reads = sim.jobs.filter((j) => j.stageId === "publish" && j.executor !== undefined && j.executor.id !== "graphloom.github/create-pull-review");
     for (const j of reads) expect(j.readOnly).toBe(true);
     const write = sim.jobs.find((j) => j.executor?.id === "graphloom.github/create-pull-review")!;
@@ -203,7 +231,7 @@ describe("publishing is idempotent across retries and runs: the reviews are read
     expect(sim.github.reviews).toHaveLength(1);
     expect(stopOf(sim)).toMatchObject({ reason: "complete" });
     expect(ledgerPatchOf(sim).reviewId).toBe(99);
-    expect(publishJobs(sim)).toEqual(["graphloom.github/get-viewer", "graphloom.github/list-pull-reviews", "graphloom.github/list-pull-review-comments", "ledger-published"]);
+    expect(publishJobs(sim)).toEqual(["graphloom.github/get-viewer", "graphloom.github/list-pull-reviews", "graphloom.github/list-pull-review-comments", "publish-patch-p1", "ledger-published"]);
   });
 
   it("posts when the review there is of another head, or carries no marker of this graph", () => {
@@ -340,7 +368,9 @@ describe("the ledger advance that records the published review, against a real r
     return { dir, first };
   }
   const patchOf = (over: Partial<ReturnType<typeof ledgerPatch>> = {}) => ({ ...ledgerPatch({ head: HEAD }, planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([issue("Q1", { path: "pkg/a.go", line: 4, anchored: true }), issue("N1")]) }), { reviewId: 4242, url: "https://github.com/o/r/pull/7#pullrequestreview-4242", how: "created" }, new Map([["Q1", 777]])), ...over });
+  /** As the stage does: the patch is written as a part set with a digest, then the ledger command reads the file. */
   const run = async (dir: string, patch: ReturnType<typeof ledgerPatch>) => {
+    for (const part of partCommands("publish-patch", ".graphloom/review/ledger/publish-patch.json", JSON.stringify(patch))) await sh(part.argv[0]!, part.argv.slice(1), { cwd: dir, env });
     const c = ledgerPublishedCommand(PULL, patch, process.execPath);
     return sh(c.argv[0]!, c.argv.slice(1), { cwd: dir, env });
   };
@@ -362,6 +392,24 @@ describe("the ledger advance that records the published review, against a real r
     expect(await git(dir, "show", `${now}:report.json`)).toBe("{\"r\":1}");
     expect(await git(dir, "show", `${now}:ledger.md`)).toContain("apache/skywalking-banyandb#7");
     expect(await git(dir, "log", "-1", "--format=%s", REF)).toBe(`pr-review apache/skywalking-banyandb#7 at ${HEAD.slice(0, 12)}: published review 4242`);
+  });
+
+  it("records a patch of about 200 KiB, written as a part set that fits the executor input and read from its file, not an argument", async () => {
+    const { dir } = await ledgerRepo();
+    const big = patchOf({ items: Array.from({ length: 140 }, (_, i) => ({ id: `Q${i + 1}`, origin: "round1" as const, path: null, line: null, inline: false, commentId: null, body: `${i}:${"b".repeat(2_000)}` })) });
+    const json = JSON.stringify(big);
+    expect(json.length).toBeGreaterThan(200_000);
+    const parts = partCommands("publish-patch", ".graphloom/review/ledger/publish-patch.json", json);
+    expect(parts.length).toBeGreaterThan(1);
+    for (const part of parts) expect(Buffer.byteLength(JSON.stringify({ commands: [part] }), "utf8")).toBeLessThan(256_000);
+    const command = ledgerPublishedCommand(PULL, big, process.execPath);
+    expect(JSON.stringify(command.argv).length).toBeLessThan(10_000);
+    expect(command.argv[6]).toBe(".graphloom/review/ledger/publish-patch.json");
+    const out = await run(dir, big);
+    expect(out.stdout).toMatch(/^advanced /);
+    const ledger = JSON.parse(await git(dir, "show", `${REF}:ledger.json`)) as { findings: Array<{ id: string; body: string }> };
+    expect(ledger.findings).toHaveLength(140);
+    expect(ledger.findings[139]!.body).toBe(`139:${"b".repeat(2_000)}`);
   });
 
   it("is a no-op when the ledger already holds that review, so a retry or a resume changes nothing", async () => {

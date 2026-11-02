@@ -1259,6 +1259,12 @@ function publishStage(ctx: Context, view: RunView): GraphDecision {
         return supervise({ reason: `recording the published review in the ledger failed: ${describeCommand(lw.run.command)}: ${outputTail(lw.run.command)}`, evidenceRefs: [lw.run.record.ref] }, "escalate a failed ledger write");
       }
       if (commandRuns(view.evidence, COMMAND.ledgerPublished).length >= 4) return supervise({ reason: "the ledger write of the published review keeps differing from the one the evidence recomputes" }, "escalate a ledger write that does not settle");
+      // The patch is written first, as a part set with a digest (it can be far past one argument), and the ledger command reads the file.
+      const parts = nextWrite(view, flow.parts, { failed: "writing the published review's ledger patch failed", settle: "the written ledger patch keeps differing from the one the evidence recomputes" });
+      if (parts !== undefined) {
+        if ("decision" in parts) return parts.decision;
+        return withPrivate(dispatch(commandJob(PUBLISH_STAGE, writeInstruction(parts.command, "Write the published review's ledger patch"), { commands: [parts.command] }), "write the patch that records the published review in the ledger, in parts with a digest"));
+      }
       return withPrivate(dispatch(commandJob(PUBLISH_STAGE, "Record the published review in the pull request's ledger by compare-and-swap (no repository code runs)", { commands: [ledgerPublishedCommand(pr, flow.patch, process.execPath)], env: { ...GIT_ENV } }), `record review ${flow.posted.reviewId} and its comments' ids in the ledger`));
     }
     case "done":
