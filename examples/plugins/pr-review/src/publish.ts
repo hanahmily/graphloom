@@ -102,6 +102,8 @@ export interface PriorLine {
   repost: boolean;
   /** Where a reposted round-2 item goes on this head, and whether that place lies in the diff. */
   place?: { path: string; line: number; endLine: number; side: "RIGHT" | "LEFT"; anchored: boolean };
+  /** A still-open round-2 item whose place on this head was found again (or which is posted again): where it is now, and its anchor recomputed against this head's patch, which the ledger persists in place of the earlier head's. */
+  moved?: { path: string; line: number; endLine: number; meta: ItemMeta };
   item: PriorItem;
 }
 
@@ -180,7 +182,7 @@ export function planReview(i: {
       const text = neutralize(`**Still open** (first raised on ${l.item.head.slice(0, 7)}).\n\n${l.item.text ?? ""}`.trim());
       const posted = clip(text, MAX_ITEM_TEXT);
       const place = l.place!;
-      return { id: l.id, origin: "round2" as const, body: `${posted}\n\n${findingMarker(l.id)}`, ...(posted !== text ? { full: text } : {}), path: place.path, line: place.line, ...(place.endLine > place.line ? { startLine: place.line } : {}), side: place.side, inline: false, repost: true, meta: metaOf(l.item) };
+      return { id: l.id, origin: "round2" as const, body: `${posted}\n\n${findingMarker(l.id)}`, ...(posted !== text ? { full: text } : {}), path: place.path, line: place.endLine, ...(place.endLine > place.line ? { startLine: place.line } : {}), side: place.side, inline: false, repost: true, meta: l.moved?.meta ?? metaOf(l.item) };
     });
   const items: PublishItem[] =
     round === 1
@@ -335,9 +337,9 @@ export interface LedgerPatch {
   open: number;
   reviewId: number;
   url: string | null;
-  items: Array<{ id: string; origin: PublishItem["origin"]; path: string | null; line: number | null; inline: boolean; commentId: number | null; /** The whole text of an item whose posted text was compacted. */ body?: string; /** The item's text as posted (whole), without its marker. */ text: string; repost?: boolean; meta?: ItemMeta }>;
+  items: Array<{ id: string; origin: PublishItem["origin"]; path: string | null; line: number | null; endLine?: number; inline: boolean; commentId: number | null; /** The whole text of an item whose posted text was compacted. */ body?: string; /** The item's text as posted (whole), without its marker. */ text: string; repost?: boolean; meta?: ItemMeta }>;
   /** What became of the earlier heads' items on this head. */
-  priors: Array<{ id: string; origin: PriorLine["origin"]; status: PriorLine["status"]; carried: boolean; reason: string }>;
+  priors: Array<{ id: string; origin: PriorLine["origin"]; status: PriorLine["status"]; carried: boolean; reason: string; /** Where a still-open item is on this head, with its anchor recomputed against this head's patch. */ moved?: PriorLine["moved"] }>;
   /** Findings dismissed on this head, recorded closed. */
   closed: Array<{ id: string; path: string; line: number; endLine: number; side: "RIGHT" | "LEFT"; text: string; meta: ItemMeta }>;
 }
@@ -351,8 +353,8 @@ export function ledgerPatch(pr: Pick<PullRequest, "head">, plan: ReviewPlan, pos
     open: plan.open,
     reviewId: posted.reviewId,
     url: posted.url,
-    items: plan.items.map((x) => ({ id: x.id, origin: x.origin, path: x.path ?? null, line: x.line ?? null, inline: x.inline, commentId: x.inline ? ids.get(x.id) ?? null : null, ...(x.full !== undefined ? { body: x.full } : {}), text: x.full ?? x.body.slice(0, x.body.length - findingMarker(x.id).length).trim(), ...(x.repost === true ? { repost: true } : {}), ...(x.meta !== undefined ? { meta: x.meta } : {}) })),
-    priors: plan.priors.map((l) => ({ id: l.id, origin: l.origin, status: l.status, carried: l.carried, reason: l.reason })),
+    items: plan.items.map((x) => ({ id: x.id, origin: x.origin, path: x.path ?? null, /** The item's first line (a range's last is `endLine`; GitHub's own convention is the end, kept for the posted comment only). */ line: x.startLine ?? x.line ?? null, ...(x.line !== undefined ? { endLine: x.line } : {}), inline: x.inline, commentId: x.inline ? ids.get(x.id) ?? null : null, ...(x.full !== undefined ? { body: x.full } : {}), text: x.full ?? x.body.slice(0, x.body.length - findingMarker(x.id).length).trim(), ...(x.repost === true ? { repost: true } : {}), ...(x.meta !== undefined ? { meta: x.meta } : {}) })),
+    priors: plan.priors.map((l) => ({ id: l.id, origin: l.origin, status: l.status, carried: l.carried, reason: l.reason, ...(l.moved !== undefined ? { moved: l.moved } : {}) })),
     closed: plan.closed.map((c) => ({ id: c.id, path: c.path, line: c.line, endLine: c.endLine, side: c.side, text: c.text, meta: c.meta })),
   };
 }
@@ -459,16 +461,16 @@ const findings=Array.isArray(v.findings)?v.findings:[];
 const qa=Array.isArray(v.qa)?v.qa:[];
 const note=(f,status,extra)=>{const keep=(Array.isArray(f.history)?f.history:[]).filter((x)=>x.head!==p.head);f.history=keep.concat([Object.assign({head:p.head,status:status},extra||{})])};
 for(const it of p.items){
-const fields=Object.assign({origin:it.origin,path:it.path,line:it.line,text:it.text},it.body?{body:it.body}:{},it.meta||{});
+const fields=Object.assign({origin:it.origin,path:it.path,line:it.line,text:it.text},it.endLine?{endLine:it.endLine}:{},it.body?{body:it.body}:{},it.meta||{});
 let f=findings.find((x)=>x.id===it.id);
-if(f){Object.assign(f,fields)}else{f=Object.assign({head:p.head,id:it.id},fields);findings.push(f)}
+if(f){if(it.meta){delete f.anchorText;delete f.patchId;delete f.hunk}Object.assign(f,fields)}else{f=Object.assign({head:p.head,id:it.id},fields);findings.push(f)}
 f.state="open";f.github=gh(it);note(f,"open",it.repost?{reposted:true}:{});
 const q=qa.find((x)=>x.id===it.id);if(q){q.state="open";q.github=gh(it)}
 }
 for(const pr of p.priors||[]){
 const f=findings.find((x)=>x.id===pr.id);if(!f)continue;
 if(pr.status==="fixed"){f.state="fixed";f.fixedIn=p.head;note(f,"fixed",{reason:pr.reason})}
-else if(!p.items.some((it)=>it.id===pr.id)){note(f,"open",{reason:pr.reason,carried:pr.carried})}
+else if(!p.items.some((it)=>it.id===pr.id)){note(f,"open",{reason:pr.reason,carried:pr.carried});if(pr.moved){delete f.anchorText;delete f.patchId;delete f.hunk;Object.assign(f,{path:pr.moved.path,line:pr.moved.line,endLine:pr.moved.endLine},pr.moved.meta)}}
 const q=qa.find((x)=>x.id===pr.id);if(q&&pr.status==="fixed")q.state="fixed";
 }
 for(const c of p.closed||[]){if(findings.some((x)=>x.id===c.id))continue;findings.push(Object.assign({head:p.head,id:c.id,origin:"round2",path:c.path,line:c.line,endLine:c.endLine,side:c.side,text:c.text,state:"withdrawn",history:[{head:p.head,status:"withdrawn"}]},c.meta||{}))}
@@ -532,8 +534,14 @@ export function priorLines(registry: PriorRegistry, pull: Pick<PullRequest, "own
       continue;
     }
     const repost = o.status === "open" && o.how !== "carried" && (o.outdated || threadOutdated(threads, item.commentId));
-    const place = { path: o.path, line: o.line, endLine: o.endLine, side: o.side, anchored: anchored(files.find((f) => f.path === o.path), o.side, o.line, o.endLine) };
-    out.push({ ...base, status: o.status, reason: o.reason, carried: o.how === "carried", repost, ...(repost ? { place } : {}) });
+    const file = files.find((f) => f.path === o.path);
+    const place = { path: o.path, line: o.line, endLine: o.endLine, side: o.side, anchored: anchored(file, o.side, o.line, o.endLine) };
+    // Its anchor is recomputed against this head's patch and its own range, so the next head re-anchors from where it is now and not from where it was
+    // (an item whose anchor was not found again, and is not posted again, keeps the earlier head's coordinates, which agree with each other).
+    const info = o.status === "open" && o.how !== "carried" && (!o.outdated || repost) ? anchorInfo(file, o.side, o.line) : {};
+    const { anchorText: _a, patchId: _p, hunk: _h, ...rest } = metaOf(item);
+    const moved = info.patchId !== undefined ? { path: o.path, line: o.line, endLine: o.endLine, meta: { ...rest, ...info, side: o.side, endLine: o.endLine } } : undefined;
+    out.push({ ...base, status: o.status, reason: o.reason, carried: o.how === "carried", repost, ...(repost ? { place } : {}), ...(moved !== undefined ? { moved } : {}) });
   }
   return out.sort((a, b) => (a.origin === b.origin ? idKey(a.id) - idKey(b.id) : a.origin === "round1" ? -1 : 1));
 }
@@ -559,7 +567,16 @@ export function publishPlan(evidence: readonly EvidenceRecord[], analysis: Analy
     if (r.state === "read") records.push(r.value);
   }
   const all = findingsOf(records);
-  const meta = new Map(all.filter((f) => f.state === "confirmed" || f.state === "disputed").map((f) => [f.id, findingMeta(f, files)] as const));
+  // A posted finding's place is its draft entry's range (which can cover several findings): the anchor is read at its first line and the range is recorded whole.
+  const entries = new Map(w.writes.draft.comments.filter((c) => c.kind === "finding").map((c) => [c.id, c] as const));
+  const meta = new Map(
+    all
+      .filter((f) => f.state === "confirmed" || f.state === "disputed")
+      .map((f) => {
+        const e = entries.get(f.id);
+        return [f.id, findingMeta(e === undefined ? f : { ...f, path: e.path, side: e.side, startLine: e.startLine ?? e.line, endLine: e.line }, files)] as const;
+      }),
+  );
   const closed = all.filter((f) => f.state === "dismissed").map((f): ClosedFinding => ({ id: f.id, path: f.path, line: f.startLine, endLine: f.endLine, side: f.side, text: clip(neutralize(f.content), MAX_ITEM_TEXT), meta: findingMeta(f, files) }));
   const prior = priorLines(registry, pr, round1.value, records, files, analysis.snapshot.threads);
   return { state: "ready", round1: round1.value, plan: planReview({ pull: pr, head: pr.head, nonce, round1: round1.value, draft: w.writes.draft, prior, meta, closed }) };

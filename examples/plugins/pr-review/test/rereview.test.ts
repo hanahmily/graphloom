@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterAll, describe, expect, it } from "vitest";
-import { ledgerPublishedCommand, ledgerPatch, planReview, priorLines, type PriorLine } from "../src/publish.js";
+import { findingMeta, ledgerPublishedCommand, ledgerPatch, planReview, priorLines, type PriorLine } from "../src/publish.js";
 import { partCommands, readParts } from "../src/parts.js";
 import { priorShowCommand, writtenLedger } from "../src/ledger.js";
 import { continueIds, patchId, questionKeys, reanchor, registryOf, REANCHOR_WINDOW, type PriorItem, type PriorRegistry } from "../src/prior.js";
@@ -215,6 +215,72 @@ describe("the review body and the verdict with earlier items", () => {
     const records = [{ schema: "pr-review-aspect-v1", aspect: "maintainability", prior: [outcome("F3", "fixed", false)] }, { schema: "pr-review-aspect-v1", aspect: "security", prior: [outcome("F4", "open", true)] }] as never;
     const judged = priorLines(registry, PULL, round1, records, [], threads);
     expect(judged.map((l) => [l.id, l.status, l.repost])).toEqual([["Q1", "fixed", false], ["F3", "fixed", false], ["F4", "open", true]]);
+  });
+});
+
+describe("a finding's place in the ledger across three heads", () => {
+  const dirs: string[] = [];
+  afterAll(async () => {
+    for (const d of dirs) await rm(d, { recursive: true, force: true });
+  });
+  /** The same three-line change at three places: only the hunk's numbers differ, so each head's patch has the same id. */
+  const patch = (at: number): PullFile => {
+    const text = `@@ -${at},3 +${at},5 @@\n ctx\n+first line\n+second line\n+third line\n ctx`;
+    return { path: "pkg/a.go", status: "modified", previousPath: null, additions: 3, deletions: 0, patch: text, patchOmitted: false, parsed: parsePatch(text) };
+  };
+  const pull = { ...PULL, head: hexOf("c") };
+  const emptyRound1: Round1Record = { schema: ROUND1_SCHEMA, head: hexOf("c"), necessity: "necessary", issues: [] };
+  const draftOf = (line: number, startLine: number) => ({ comments: [{ id: "F1", kind: "finding", aspects: ["maintainability"], severity: "P2", proof: { state: "non-behavioral" }, path: "pkg/a.go", side: "RIGHT", startLine, line, anchored: true, body: "Say what this is for." }], summary: "" }) as never;
+
+  it("records the first line and the last, anchored at the first; a finding re-posted at a shifted place is recorded there, and the next head shifts from there", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "pr-review-place-"));
+    dirs.push(dir);
+    await sh("git", ["init", "-q", "-b", "main", dir], { env });
+    await writeFile(path.join(dir, "ledger.json"), JSON.stringify({ schema: "graphloom-pr-ledger-v1", heads: [{ sha: hexOf("a") }, { sha: hexOf("b") }, { sha: hexOf("c") }], qa: [], findings: [] }));
+    for (const name of ["ledger.md", "qa.json", "report.json"]) await writeFile(path.join(dir, name), "{}\n");
+    await sh("git", ["add", "-A"], { cwd: dir, env });
+    await sh("git", ["commit", "-q", "-m", "answers"], { cwd: dir, env });
+    await sh("git", ["update-ref", REF, (await sh("git", ["rev-parse", "HEAD"], { cwd: dir, env })).stdout.trim()], { cwd: dir, env });
+    const publish = async (head: string, p: ReturnType<typeof ledgerPatch>) => {
+      const text = JSON.stringify({ ...p, head });
+      for (const part of partCommands("publish-patch", ".graphloom/review/ledger/publish-patch.json", text)) await sh(part.argv[0]!, part.argv.slice(1), { cwd: dir, env });
+      const c = ledgerPublishedCommand({ ...PULL, head }, JSON.parse(text), process.execPath);
+      await sh(c.argv[0]!, c.argv.slice(1), { cwd: dir, env });
+      const ledger = JSON.parse((await sh("git", ["show", `${REF}:ledger.json`], { cwd: dir, env })).stdout) as unknown;
+      return registryOf(ledger).items.find((i) => i.id === "F1")!;
+    };
+
+    // Head 1: the finding covers lines 11 to 13 (the draft's `line` is the range's end). The ledger keeps 11 and 13, and the anchor is line 11's text.
+    const meta1 = findingMeta({ id: "F1", raisedBy: "maintainability", severity: "P2", kind: "non-behavioral", path: "pkg/a.go", side: "RIGHT", startLine: 11, endLine: 13 }, [patch(10)]);
+    const plan1 = planReview({ pull, head: hexOf("a"), nonce: "n", round1: emptyRound1, draft: draftOf(13, 11), meta: new Map([["F1", meta1]]) });
+    expect(plan1.comments).toMatchObject([{ path: "pkg/a.go", startLine: 11, line: 13 }]);
+    const one = await publish(hexOf("a"), ledgerPatch(pull, plan1, { reviewId: 1, url: null, how: "created" }, new Map([["F1", 501]])));
+    expect(one).toMatchObject({ line: 11, endLine: 13, anchorText: "first line", hunk: [0, 10, 10] });
+
+    // Head 2: the same change, 9 lines lower, and the old thread is outdated: the finding is posted again at 20 to 22 and recorded there with its anchor recomputed.
+    const moved = reanchor(one, [patch(19)]);
+    expect(moved).toEqual({ state: "found", line: 20, endLine: 22, how: "shifted" });
+    const outcome = { id: "F1", status: "open" as const, how: "verifier" as const, reason: "still there", path: "pkg/a.go", side: "RIGHT" as const, line: 20, endLine: 22, outdated: false };
+    const registry1: PriorRegistry = { items: [one], qa: [], nextQ: 1, nextF: 2, heads: [hexOf("a")] };
+    const lines2 = priorLines(registry1, pull, emptyRound1, [{ aspect: "maintainability", prior: [outcome] }] as never, [patch(19)], [{ isOutdated: true, comments: [{ id: 501 }] }]);
+    expect(lines2[0]).toMatchObject({ repost: true, place: { line: 20, endLine: 22, anchored: true } });
+    const plan2 = planReview({ pull, head: hexOf("b"), nonce: "n", round1: emptyRound1, draft: { comments: [], summary: "" } as never, prior: lines2 });
+    expect(plan2.comments).toMatchObject([{ path: "pkg/a.go", startLine: 20, line: 22 }]);
+    const two = await publish(hexOf("b"), ledgerPatch(pull, plan2, { reviewId: 2, url: null, how: "created" }, new Map([["F1", 777]])));
+    expect(two).toMatchObject({ line: 20, endLine: 22, anchorText: "first line", hunk: [0, 19, 19], commentId: 777 });
+
+    // Head 3: 10 lines lower again. From the recorded place it is 30 to 32, not shifted twice (40 to 42) and not an inverted range.
+    expect(reanchor(two, [patch(29)])).toEqual({ state: "found", line: 30, endLine: 32, how: "shifted" });
+
+    // A still-open item found again but not posted again is recorded at its new place as well.
+    const registry2: PriorRegistry = { items: [two], qa: [], nextQ: 1, nextF: 2, heads: [hexOf("a"), hexOf("b")] };
+    const outcome3 = { ...outcome, line: 30, endLine: 32 };
+    const lines3 = priorLines(registry2, pull, emptyRound1, [{ aspect: "maintainability", prior: [outcome3] }] as never, [patch(29)], []);
+    expect(lines3[0]).toMatchObject({ repost: false, moved: { line: 30, endLine: 32, meta: { hunk: [0, 29, 29], anchorText: "first line" } } });
+    const plan3 = planReview({ pull: PULL, head: hexOf("c"), nonce: "n", round1: emptyRound1, draft: { comments: [], summary: "" } as never, prior: lines3 });
+    const three = await publish(hexOf("c"), ledgerPatch(pull, plan3, { reviewId: 3, url: null, how: "created" }, new Map()));
+    expect(three).toMatchObject({ line: 30, endLine: 32, hunk: [0, 29, 29], commentId: 777 });
+    expect(reanchor(three, [patch(39)])).toEqual({ state: "found", line: 40, endLine: 42, how: "shifted" });
   });
 });
 
