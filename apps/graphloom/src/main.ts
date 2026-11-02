@@ -6,12 +6,12 @@
  * GraphLoom CLI: run | inspect | stats | wait | stop | resume | switch-model | delete | version | doctor | setup | skills
  */
 import { existsSync } from "node:fs";
-import os from "node:os";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createController, loadRunState, resolveStateDir } from "@graphloom/controller";
 import type { GraphRehearsal } from "@graphloom/sdk";
-import type { ApprovalRequest, RunReport } from "@graphloom/controller";
+import type { RunReport } from "@graphloom/controller";
+import { approvalFlags } from "./approval-flags.js";
 import { createCliRunner } from "./cli-runner.js";
 import { harnessRepairDeps, resolveBundlePath, resolveBundlePathForResume } from "./repair-config.js";
 import { switchModelTarget } from "./switch-model.js";
@@ -278,7 +278,7 @@ async function main(): Promise<void> {
   }
 
   if (cmd === "resume") {
-    const runRef = requireRunRef(args[1], "resume <stateDir|runId> [--state-root <dir>] [--supervisor <harness> [--reason <text>]] [--upgrade] [--update-plugin] [--update-executors] [--reconciled] [--approve <id> | --decline <id> [--reason <text>]] [--rehearsal] [--on-stop <command>]");
+    const runRef = requireRunRef(args[1], "resume <stateDir|runId> [--state-root <dir>] [--supervisor <harness> [--reason <text>]] [--upgrade] [--update-plugin] [--update-executors] [--reconciled] [--approve <id> [--input <name>=<value> ...] | --decline <id> [--reason <text>]] [--rehearsal] [--on-stop <command>]");
     const stateRoot = flagValue(args, "--state-root");
     const approval = approvalFlags(args);
     // `--upgrade` moves the run to this GraphLoom first (§5.2), and moves its ownership record with it.
@@ -631,30 +631,6 @@ function requireCommandsMode(args: string[]): "stub" | "run" | undefined {
   return value;
 }
 
-/** `--approve <id>`, or `--decline <id> [--reason <text>]` (docs/design-pr-review-graph.md section 11): who decides is the login running this. */
-function approvalFlags(args: string[]): ApprovalRequest | undefined {
-  const approve = flagValue(args, "--approve");
-  const decline = flagValue(args, "--decline");
-  for (const flag of ["--approve", "--decline"]) {
-    const value = flagValue(args, flag);
-    if (args.includes(flag) && (value === undefined || value.startsWith("--") || value === "")) throw new Error(`${flag} needs an approval id`);
-  }
-  if (approve === undefined && decline === undefined) {
-    if (args.includes("--reason") && !args.includes("--supervisor")) throw new Error("--reason answers --supervisor or --decline");
-    return undefined;
-  }
-  if (approve !== undefined && decline !== undefined) throw new Error("--approve and --decline decide one approval each; resume once for each");
-  const reason = flagValue(args, "--reason");
-  if (args.includes("--reason") && (reason === undefined || reason.startsWith("--"))) throw new Error("--reason needs a text");
-  if (approve !== undefined && reason !== undefined) throw new Error("--reason goes with --decline");
-  return {
-    approvalId: (approve ?? decline)!,
-    decision: approve !== undefined ? "approve" : "decline",
-    ...(reason !== undefined ? { reason } : {}),
-    operator: os.userInfo().username,
-  };
-}
-
 function flagValue(args: string[], name: string): string | undefined {
   const i = args.indexOf(name);
   if (i < 0) return undefined;
@@ -677,7 +653,7 @@ Usage:
   graphloom stats <stateDir|runId> [--state-root <dir>] [--json]
   graphloom wait <stateDir|runId> [--state-root <dir>] [--until stop|progress] [--since <cursor>] [--timeout <dur>] [--json]
   graphloom stop <stateDir|runId> [--state-root <dir>]
-  graphloom resume <stateDir|runId> [--state-root <dir>] [--supervisor <harness> [--reason <text>]] [--upgrade] [--update-plugin] [--update-executors] [--reconciled] [--approve <id> | --decline <id> [--reason <text>]] [--rehearsal] [--on-stop <command>]
+  graphloom resume <stateDir|runId> [--state-root <dir>] [--supervisor <harness> [--reason <text>]] [--upgrade] [--update-plugin] [--update-executors] [--reconciled] [--approve <id> [--input <name>=<value> ...] | --decline <id> [--reason <text>]] [--rehearsal] [--on-stop <command>]
   graphloom switch-model <stateDir|runId> <model> --reason <text> [--state-root <dir>]
   graphloom delete <stateDir|runId> [--state-root <dir>] [--force]
   graphloom version [--json | --root]
@@ -692,6 +668,11 @@ Usage:
 session list shows a run's recorded agent sessions; session open forks one in your own terminal (Claude Code or
 Codex, under the job's confinement with the checkout read-only) and records the conversation when the agent
 exits, as an operator conversation a later open continues (--from-original starts again from the job's session).
+
+resume --approve <id> records the operator's decision on an approval the graph declared; an approval that declares inputs takes
+one --input <name>=<value> for each value it asks for (pr-review: --approve review-layer --input areas=A3,A17), which the
+controller checks against the declared name and pattern and records with the approval for the graph to read. --decline <id>
+[--reason <text>] takes no input.
 
 task new asks the graph's own prepareTask hook what its arguments mean (for pr-review, a pull
 request: pr-review owner/repo#N --repo <clone> --profile <name>), validates the plan it returns, fetches

@@ -4,7 +4,7 @@
 import { createHash } from "node:crypto";
 import { lstat, open, realpath } from "node:fs/promises";
 import path from "node:path";
-import { MAX_APPROVAL_FILE_BYTES } from "@graphloom/sdk";
+import { MAX_APPROVAL_FILE_BYTES, MAX_APPROVAL_INPUT_CHARS } from "@graphloom/sdk";
 import { newEvidenceRef } from "./admit.js";
 import type { DurableRunState } from "./state.js";
 
@@ -15,6 +15,8 @@ export interface ApprovalRequest {
   reason?: string;
   /** Who decided: the operator's login name, recorded as given. */
   operator?: string;
+  /** `--input <name>=<value>` values of an approve, checked against the approval's declared inputs. */
+  inputs?: Record<string, string>;
 }
 
 /** The `operator-approval` evidence payload (docs/design-pr-review-graph.md section 11, decision half). */
@@ -24,6 +26,8 @@ export interface OperatorApprovalPayload {
   decision: "approve" | "decline";
   reason?: string;
   files: Array<{ path: string; sha256: string; bytes: number }>;
+  /** The operator's input values by declared name (absent when none were given); the controller does not read their meaning. */
+  inputs?: Record<string, string>;
   operator: string;
   at: string;
   generation: number;
@@ -50,10 +54,29 @@ export function approvalRefusal(state: DurableRunState, request: ApprovalRequest
       : `graph ${state.definition.graphId} declares no approval ${JSON.stringify(request.approvalId)}; it declares ${declared.map((a) => a.id).join(", ")}`;
   }
   if (request.decision === "approve" && entry.unavailable !== undefined) return entry.unavailable;
+  const inputProblem = inputRefusal(entry, request);
+  if (inputProblem !== undefined) return inputProblem;
   if (request.reason !== undefined && request.reason.length > MAX_APPROVAL_REASON) {
     return `--reason is ${request.reason.length} characters, more than ${MAX_APPROVAL_REASON}`;
   }
   if (state.status !== "stopped") return `run ${state.runId} is ${state.status}; ${request.decision} an approval when it has stopped`;
+  return undefined;
+}
+
+/** Why the `--input` values do not fit what the approval declared, or undefined. */
+function inputRefusal(entry: { id: string; inputs?: Array<{ name: string; pattern?: string }> }, request: ApprovalRequest): string | undefined {
+  const given = Object.entries(request.inputs ?? {});
+  if (given.length === 0) return undefined;
+  if (request.decision === "decline") return "--input goes with --approve: a decline takes no input";
+  const declared = entry.inputs ?? [];
+  if (declared.length === 0) return `approval ${JSON.stringify(entry.id)} declares no inputs`;
+  for (const [name, value] of given) {
+    const input = declared.find((d) => d.name === name);
+    if (input === undefined) return `approval ${JSON.stringify(entry.id)} declares no input ${JSON.stringify(name)}; it declares ${declared.map((d) => d.name).join(", ")}`;
+    if (value.length > MAX_APPROVAL_INPUT_CHARS) return `input ${name} is ${value.length} characters, more than ${MAX_APPROVAL_INPUT_CHARS}`;
+    if (/[\u0000-\u001f]/.test(value)) return `input ${name} holds a control character`;
+    if (input.pattern !== undefined && !new RegExp(`^(?:${input.pattern})$`).test(value)) return `input ${name} is ${JSON.stringify(value.length > 80 ? `${value.slice(0, 79)}…` : value)}, which does not match the declared pattern ${input.pattern}`;
+  }
   return undefined;
 }
 
@@ -94,6 +117,7 @@ export async function applyApproval(state: DurableRunState, request: ApprovalReq
     decision: request.decision,
     ...(request.reason !== undefined && request.reason !== "" ? { reason: request.reason } : {}),
     files,
+    ...(request.decision === "approve" && request.inputs !== undefined && Object.keys(request.inputs).length > 0 ? { inputs: { ...request.inputs } } : {}),
     operator: request.operator ?? "operator",
     at: new Date().toISOString(),
     generation: state.generation,

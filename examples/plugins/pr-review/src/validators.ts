@@ -20,6 +20,7 @@ import { requiredQuestions, statedPurposes } from "./questions.js";
 import { principlesRecord } from "./principles.js";
 import { htmlPagesFrom, htmlProblems } from "./html.js";
 import { writtenLedger } from "./ledger.js";
+import { codeReview, draftComposed } from "./reviewvalidators.js";
 import { readParts, recordedAppendix, recordedHtml, recordedNecessityJson, recordedQa, recordedReport, sha256 } from "./parts.js";
 
 const passed = (reason: string): ValidationResult => ({ status: "passed", reason });
@@ -377,6 +378,8 @@ const VALIDATORS: Record<string, Validator> = {
   "questions-complete": questionsComplete,
   "answers-complete": answersComplete,
   "answers-grounded": answersGrounded,
+  "code-review": codeReview,
+  "draft-composed": draftComposed,
 };
 
 /** A shipped validator; it reads the run's profile from `ValidationInput.config`. */

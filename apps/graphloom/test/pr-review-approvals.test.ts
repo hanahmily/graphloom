@@ -63,9 +63,9 @@ const approvalsOf = async (stateDir: string) =>
   (await loadRunState(stateDir)).evidence.map((e) => e.payload as OperatorApprovalPayload | undefined).filter((p) => p?.type === "operator-approval") as OperatorApprovalPayload[];
 
 describe.skipIf(GO === undefined)("pr-review approvals: the decision half", () => {
-  it("stops final at report ready after Answers; --approve review-layer is refused with the version named; --decline finishes the run as succeeded, report only, with operator-approval evidence", async () => {
+  it("stops final at report ready after Answers; --decline review-layer finishes the run as succeeded, report only, with operator-approval evidence", async () => {
     const env = await ready();
-    const opts = { scenario: "happy", offline: true, commands: "stub" as const };
+    const opts = { scenario: "review-layer", offline: true, commands: "stub" as const };
     const stopped = await rehearseStopAt(env.taskPath, "answers", opts);
     expect(stopped.ok, JSON.stringify(stopped)).toBe(true);
     const stateDir = stopped.stateDir;
@@ -75,18 +75,24 @@ describe.skipIf(GO === undefined)("pr-review approvals: the decision half", () =
     expect(ready1.status).toBe("stopped");
     expect(ready1.stopReason).toBe("report ready");
     expect(ready1.blocker).toContain("--decline review-layer");
+    expect(ready1.blocker).toContain("--approve review-layer");
     // A plain resume holds a final stop: nothing it depends on changed.
     expect((await resumeRehearsal(stateDir)).stopReason).toBe("report ready");
     expect(await approvalsOf(stateDir)).toEqual([]);
 
-    // The declared approval is data in the pinned definition.
+    // The declared approval is data in the pinned definition, with its operator input.
     const state = await loadRunState(stateDir);
-    expect(state.definition.approvals).toEqual([expect.objectContaining({ id: "review-layer", stageId: "review", unavailable: expect.stringContaining("no Review stage") })]);
+    expect(state.definition.approvals).toEqual([
+      expect.objectContaining({ id: "review-layer", stageId: "review", inputs: [expect.objectContaining({ name: "areas", pattern: "A[0-9]+(,A[0-9]+)*" })] }),
+    ]);
+    expect(state.definition.approvals![0]).not.toHaveProperty("unavailable");
 
-    // Refusals record nothing and change nothing.
+    // Refusals record nothing and change nothing: an undeclared approval, an undeclared input, a value off the declared pattern, an input on a decline.
     const before = await readFile(path.join(stateDir, "state.json"), "utf8");
-    await expect(resumeRehearsal(stateDir, { approval: { approvalId: "review-layer", decision: "approve", operator: "tester" } })).rejects.toThrow(/pr-review 0\.17\.0 has no Review stage.*--decline review-layer finishes the run as succeeded/);
     await expect(resumeRehearsal(stateDir, { approval: { approvalId: "publish-review", decision: "decline", operator: "tester" } })).rejects.toThrow(/declares no approval "publish-review"; it declares review-layer/);
+    await expect(resumeRehearsal(stateDir, { approval: { approvalId: "review-layer", decision: "approve", operator: "tester", inputs: { colour: "red" } } })).rejects.toThrow(/declares no input "colour"; it declares areas/);
+    await expect(resumeRehearsal(stateDir, { approval: { approvalId: "review-layer", decision: "approve", operator: "tester", inputs: { areas: "3,17" } } })).rejects.toThrow(/input areas is "3,17", which does not match the declared pattern/);
+    await expect(resumeRehearsal(stateDir, { approval: { approvalId: "review-layer", decision: "decline", operator: "tester", inputs: { areas: "A1" } } })).rejects.toThrow(/a decline takes no input/);
     expect(await readFile(path.join(stateDir, "state.json"), "utf8")).toBe(before);
     expect(await approvalsOf(stateDir)).toEqual([]);
 
@@ -99,8 +105,35 @@ describe.skipIf(GO === undefined)("pr-review approvals: the decision half", () =
     expect(records).toHaveLength(1);
     expect(records[0]).toMatchObject({ type: "operator-approval", approvalId: "review-layer", decision: "decline", reason: "report is enough", operator: "tester", files: [] });
     expect(records[0]!.generation).toBe((await loadRunState(stateDir)).generation);
+    const final = await loadRunState(stateDir);
+    expect(final.receipts.filter((r) => r.valid && (r.stageId === "review" || r.stageId === "draft")).map((r) => r.requirementId)).toEqual(["code-review", "draft-composed"]);
 
     // A finished run has nothing left to decide.
     await expect(resumeRehearsal(stateDir, { approval: { approvalId: "review-layer", decision: "decline", operator: "tester" } })).rejects.toThrow(/has succeeded; there is nothing left to decline/);
+  }, 240_000);
+
+  it("records an approval's input with it, shows it to the graph, and runs the review layer after --approve review-layer to a draft", async () => {
+    const env = await ready();
+    const opts = { scenario: "review-layer", offline: true, commands: "stub" as const };
+    const stopped = await rehearseStopAt(env.taskPath, "answers", opts);
+    expect(stopped.ok, JSON.stringify(stopped)).toBe(true);
+    const stateDir = stopped.stateDir;
+
+    // The pull request is not large, so the graph refuses the areas it was given, naming why; the input is in the evidence it read.
+    const refused = await resumeRehearsal(stateDir, { approval: { approvalId: "review-layer", decision: "approve", operator: "tester", inputs: { areas: "A1" } } });
+    expect(refused.status).toBe("stopped");
+    expect(refused.stopReason).toBe("review scope refused");
+    expect(refused.blocker).toMatch(/not large and is reviewed whole; approve again without it/);
+    expect(await approvalsOf(stateDir)).toEqual([expect.objectContaining({ decision: "approve", inputs: { areas: "A1" }, operator: "tester" })]);
+
+    // The operator approves again without the input: the review runs, and the run stops with the draft ready.
+    const reviewed = await resumeRehearsal(stateDir, { approval: { approvalId: "review-layer", decision: "approve", operator: "tester" } });
+    expect(reviewed.status, JSON.stringify(reviewed).slice(0, 800)).toBe("stopped");
+    expect(reviewed.stopReason).toBe("draft ready");
+    expect(reviewed.blocker).toContain("draft.md");
+    const records = await approvalsOf(stateDir);
+    expect(records.map((r) => [r.decision, r.inputs])).toEqual([["approve", { areas: "A1" }], ["approve", undefined]]);
+    const final = await loadRunState(stateDir);
+    expect(final.receipts.filter((r) => r.valid && (r.stageId === "review" || r.stageId === "draft")).map((r) => r.requirementId)).toEqual(["code-review", "draft-composed"]);
   }, 240_000);
 });

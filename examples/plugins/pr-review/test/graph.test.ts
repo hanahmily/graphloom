@@ -366,7 +366,6 @@ describe("what makes the run stop before any agent", () => {
     const sim = simulate({ request: "Fix apache/skywalking-banyandb#7." });
     expect(stopOf(sim)).toMatchObject({ reason: "incompatible task", retryable: false });
     expect(sim.jobs).toEqual([]);
-    expect(stopOf(simulate({ request: `Review on apache/skywalking-banyandb#7 at ${REHEARSAL_HEAD}.` }))!.blocker).toMatch(/Review mode/);
   });
 
   it("refuses a task whose profile does not parse", () => {

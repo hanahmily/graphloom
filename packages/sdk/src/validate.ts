@@ -250,7 +250,12 @@ export function assertGraphDefinition(value: unknown): GraphDefinition {
   return obj as unknown as GraphDefinition;
 }
 
-const APPROVAL_KEYS: ReadonlySet<string> = new Set(["id", "stageId", "description", "files", "unavailable"]);
+const APPROVAL_KEYS: ReadonlySet<string> = new Set(["id", "stageId", "description", "files", "unavailable", "inputs"]);
+const APPROVAL_INPUT_KEYS: ReadonlySet<string> = new Set(["name", "description", "pattern"]);
+/** Most characters one approval input value may have, and most inputs one approval may declare. */
+export const MAX_APPROVAL_INPUT_CHARS = 2_000;
+export const MAX_APPROVAL_INPUTS = 8;
+export const APPROVAL_INPUT_NAME = /^[a-z][a-z0-9-]{0,31}$/;
 /** Most bytes the files an approval pins may total (docs/design-pr-review-graph.md section 11). */
 export const MAX_APPROVAL_FILE_BYTES = 256 * 1024;
 
@@ -278,6 +283,34 @@ function assertApprovals(value: unknown): void {
           throw new WireValidationError("malformed", `${label}.files[${j}] must be a relative path without .. segments`);
         }
       });
+    }
+    if (a["inputs"] !== undefined) assertApprovalInputs(requireArray(a, "inputs"), `${label}.inputs`);
+  });
+}
+
+function assertApprovalInputs(inputs: unknown[], label: string): void {
+  if (inputs.length > MAX_APPROVAL_INPUTS) throw new WireValidationError("malformed", `${label} declares ${inputs.length} inputs, more than ${MAX_APPROVAL_INPUTS}`);
+  const names = new Set<string>();
+  inputs.forEach((raw, j) => {
+    const at = `${label}[${j}]`;
+    const input = asObject(raw, at);
+    for (const key of Object.keys(input)) {
+      if (!APPROVAL_INPUT_KEYS.has(key)) throw new WireValidationError("malformed", `${at}.${key} is not an approval input field`);
+    }
+    const name = requireString(input, "name");
+    if (!APPROVAL_INPUT_NAME.test(name) || names.has(name)) throw new WireValidationError("malformed", `${at}.name must be a unique [a-z][a-z0-9-]{0,31}`);
+    names.add(name);
+    if (input["description"] !== undefined && (typeof input["description"] !== "string" || (input["description"] as string).trim() === "")) {
+      throw new WireValidationError("malformed", `${at}.description must be a non-empty string`);
+    }
+    if (input["pattern"] !== undefined) {
+      const pattern = input["pattern"];
+      if (typeof pattern !== "string" || pattern === "" || pattern.length > 500) throw new WireValidationError("malformed", `${at}.pattern must be a regular expression of 1 to 500 characters`);
+      try {
+        new RegExp(`^(?:${pattern})$`);
+      } catch {
+        throw new WireValidationError("malformed", `${at}.pattern is not a valid regular expression`);
+      }
     }
   });
 }

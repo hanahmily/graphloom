@@ -22,6 +22,9 @@ import { DIVE_COLUMNS, DIVE_COMMAND, DIVE_HEADING, DIVE_LINE, DIVE_TEXT, diveRow
 import { hotspots, hotspotText, needAuthor, openQuestions, SCOPE_KINDS, SCOPE_TITLES, scopeText, type Scope } from "./scope.js";
 import { describeReasons, type ModeReason } from "./mode.js";
 import { exceeds, LIMITS, originOf, type Metric } from "./metrics/crap.js";
+import { baseLine, draftMarkdown, parseDraft, scopeLine, type Draft } from "./draft.js";
+import { proofOf } from "./proof.js";
+import { SEVERITIES, type Finding } from "./review.js";
 import type { MetricsRecord } from "./metrics/record.js";
 import { isTestPath } from "./metrics/record.js";
 import { searchWhere, type MeasuredSearch } from "./searches.js";
@@ -92,6 +95,8 @@ export interface HtmlInput {
   qa?: QaDoc;
   /** Absent while N1 is pending. */
   necessity?: NecessityRecord;
+  /** The draft review with the ledger it was composed from: present once the review layer has run. */
+  review?: Draft;
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
@@ -166,6 +171,61 @@ function details(summary: string, body: string, open = false, cls = "", id = "")
 }
 
 const para = (text: string): string => `<p>${esc(text)}</p>`;
+
+// ---- the review layer (design §8, §10) ----
+
+const STATE_CLASS: Record<string, string> = { confirmed: "bad", disputed: "warn", dismissed: "grey", pending: "grey" };
+
+/** A finding that could block a merge: P0 or P1 that stands (confirmed, or still disputed). These are open by default. */
+const isBlocking = (f: Finding): boolean => (f.state === "confirmed" || f.state === "disputed") && (f.severity === "P0" || f.severity === "P1");
+
+function findingHtml(f: Finding, d: Draft, g: Github, full: boolean): string {
+  const proof = proofOf(f);
+  const verifier = d.review.aspects.find((a) => a.aspect === f.raisedBy)?.verifier ?? "?";
+  const cite = citeLink(g, { path: f.path, side: f.side === "RIGHT" ? "head" : "base", start: f.startLine, end: f.endLine });
+  const summary = `<span class="rid">${esc(f.id)}</span> ${badge("grey", f.aspect)} ${badge(STATE_CLASS[f.state] ?? "grey", f.state)} ${badge(proof.state === "unproven" ? "warn" : "ok", proof.state === "unproven" ? "unproven" : proof.state)} ${esc(clip(f.content.replace(/\s+/g, " "), 140))} <span class="muted">${cite}</span>`;
+  const body = [
+    `<p>${esc(f.content)}</p>`,
+    f.evidence !== "" ? `<p class="muted">The reviewer read: ${esc(f.evidence)}</p>` : "",
+    f.verdict !== undefined
+      ? `<p>Checker (${esc(verifier)}): <strong>${esc(f.verdict.verdict)}</strong>${f.verdict.witness !== "" ? ` at <code>${esc(f.verdict.witness)}</code>` : ""}: ${esc(f.verdict.reason)}${f.verdict.quotes.length > 0 ? ` Quotes: ${f.verdict.quotes.map((q) => `<code>${esc(`${q.path}:${q.line}`)}</code> <q>${esc(clip(q.text.replace(/\s+/g, " "), 100))}</q>`).join("; ")}.` : ""}</p>`
+      : "",
+    proof.state === "unproven" ? `<p class="muted">Unproven: ${esc(proof.reason)}; it is listed for your judgment and never drafted as P0 or P1.</p>` : "",
+    f.notes.length > 0 ? `<p class="muted">${esc(f.notes.join("; "))}.</p>` : "",
+    full && f.suggestion.trim() !== "" ? `<p>Suggestion:</p><pre><code>${esc(f.suggestion)}</code></pre>` : "",
+  ].join("");
+  return details(summary, body, isBlocking(f), "qa");
+}
+
+/** The Review part of the briefing: the findings by severity with counts, each collapsed except the blocking ones. */
+function reviewHtml(d: Draft | undefined, g: Github): string {
+  if (d === undefined) return "";
+  const live = d.review.findings.filter((f) => f.state !== "dismissed");
+  const counts = `${d.review.findings.filter((f) => f.state === "confirmed").length} confirmed · ${d.review.findings.filter((f) => f.state === "disputed").length} disputed · ${d.review.findings.filter((f) => f.state === "dismissed").length} dismissed`;
+  const groups = SEVERITIES.flatMap((sev) => {
+    const at = live.filter((f) => f.severity === sev);
+    return at.length === 0 ? [] : [`<h3>${esc(sev)} <span class="muted">(${at.length})</span></h3>${at.map((f) => findingHtml(f, d, g, false)).join("")}`];
+  });
+  const body = [
+    `<p>Recommended verdict: <strong>${esc(d.recommended)}</strong>${d.recommended === "approve" ? " (drafted as comment)" : ""}. Scope: ${esc(scopeLine({ source: d.review.scope.source as never, areas: d.review.scope.areas, files: { length: d.review.scope.files } }))}. The draft is draft.md in .graphloom/review/; the maintainer posts it.</p>`,
+    `<p class="muted">${esc(counts)} · ${d.comments.filter((c) => c.kind === "question").length} question(s) for the author. Every reviewer was seeded (${esc(d.review.context.reason)}); the base session was ${esc(baseLine(d.review.base))}.</p>`,
+    ...(groups.length === 0 ? [para("No finding survived verification.")] : groups),
+    ...(d.judgment.length > 0 ? [para(`${d.judgment.length} finding(s) need your judgment: confirmed but not proven by a test, or disputed. The appendix lists them with the draft.`)] : []),
+  ].join("");
+  return details(`<h2>Review</h2> ${badge(d.recommended === "request-changes" ? "bad" : d.recommended === "comment" ? "warn" : "ok", d.recommended)}`, body, true, "sec");
+}
+
+/** The appendix's Review part: every finding in full, with its verdict, and the draft. */
+function reviewAppendixHtml(d: Draft | undefined, g: Github): string {
+  if (d === undefined) return "";
+  const aspects = d.review.aspects.map((a) => `<tr><td>${esc(a.aspect)}</td><td>${esc(a.reviewer)}</td><td>${esc(a.verifier)}</td><td>${a.passes}${a.unsaturated ? " (not saturated)" : ""}</td><td>${a.confirmed}</td><td>${a.disputed}</td><td>${a.dismissed}</td><td>${a.nits}</td></tr>`).join("");
+  const body = [
+    `<h3>Aspects</h3><div class="scroll"><table><thead><tr><th>Aspect</th><th>Reviewer</th><th>Verifier</th><th>Passes</th><th>Confirmed</th><th>Disputed</th><th>Dismissed</th><th>Nits not verified</th></tr></thead><tbody>${aspects}</tbody></table></div>`,
+    `<h3>Findings</h3>${d.review.findings.length === 0 ? para("None raised.") : d.review.findings.map((f) => findingHtml(f, d, g, true)).join("")}`,
+    `<h3>Draft</h3><pre><code>${esc(draftMarkdown(d))}</code></pre>`,
+  ].join("");
+  return details("<h2>Review: findings and draft</h2>", body, false, "sec");
+}
 
 // ---- header ----
 
@@ -640,6 +700,7 @@ export function renderReviewHtml(i: HtmlInput): string {
     briefingHtml(i, g),
     featuresHtml(r, g),
     checkHtml(r.briefing, g),
+    reviewHtml(i.review, g),
     hotspotsHtml(r, g),
     areasHtml(r),
     openQuestionsHtml(i),
@@ -660,20 +721,21 @@ export function renderAppendixHtml(i: HtmlInput): string {
     itemsHtml(r, c),
     measurementsHtml(r),
     qaHtml(r, i.qa, g),
+    reviewAppendixHtml(i.review, g),
     removedHtml(r),
     `<p class="foot"><a href="${REVIEW_HREF}">Back to the briefing</a></p>`,
   ]);
 }
 
 /** `review.html` rendered from the text of `report.json`, and of `qa.json` and `necessity.json` once they exist; undefined when `report.json` is not a report. */
-export function reviewHtmlFrom(reportJson: string, qaJson?: string, necessityJson?: string): string | undefined {
-  const input = htmlInputFrom(reportJson, qaJson, necessityJson);
+export function reviewHtmlFrom(reportJson: string, qaJson?: string, necessityJson?: string, draftJson?: string): string | undefined {
+  const input = htmlInputFrom(reportJson, qaJson, necessityJson, draftJson);
   return input === undefined ? undefined : renderReviewHtml(input);
 }
 
 /** `review-appendix.html` rendered from the same documents. */
-export function appendixHtmlFrom(reportJson: string, qaJson?: string, necessityJson?: string): string | undefined {
-  const input = htmlInputFrom(reportJson, qaJson, necessityJson);
+export function appendixHtmlFrom(reportJson: string, qaJson?: string, necessityJson?: string, draftJson?: string): string | undefined {
+  const input = htmlInputFrom(reportJson, qaJson, necessityJson, draftJson);
   return input === undefined ? undefined : renderAppendixHtml(input);
 }
 
@@ -681,22 +743,23 @@ export function appendixHtmlFrom(reportJson: string, qaJson?: string, necessityJ
 const rendered = new Map<string, { review: string; appendix: string } | undefined>();
 
 /** Both files rendered from the same documents, which are parsed once. */
-export function htmlPagesFrom(reportJson: string, qaJson?: string, necessityJson?: string): { review: string; appendix: string } | undefined {
-  const key = `${reportJson}\u0000${qaJson ?? ""}\u0000${necessityJson ?? ""}`;
+export function htmlPagesFrom(reportJson: string, qaJson?: string, necessityJson?: string, draftJson?: string): { review: string; appendix: string } | undefined {
+  const key = `${reportJson}\u0000${qaJson ?? ""}\u0000${necessityJson ?? ""}\u0000${draftJson ?? ""}`;
   if (rendered.has(key)) return rendered.get(key);
-  const input = htmlInputFrom(reportJson, qaJson, necessityJson);
+  const input = htmlInputFrom(reportJson, qaJson, necessityJson, draftJson);
   const pages = input === undefined ? undefined : { review: renderReviewHtml(input), appendix: renderAppendixHtml(input) };
   if (rendered.size >= 4) rendered.delete(rendered.keys().next().value!);
   rendered.set(key, pages);
   return pages;
 }
 
-function htmlInputFrom(reportJson: string, qaJson?: string, necessityJson?: string): HtmlInput | undefined {
+function htmlInputFrom(reportJson: string, qaJson?: string, necessityJson?: string, draftJson?: string): HtmlInput | undefined {
   const report = parseReportDoc(reportJson);
   if (report === undefined) return undefined;
   const qa = qaJson === undefined ? undefined : parseQaDoc(qaJson);
   const necessity = necessityJson === undefined ? undefined : parseNecessityRecord(necessityJson);
-  return { report, ...(qa !== undefined ? { qa } : {}), ...(necessity !== undefined ? { necessity } : {}) };
+  const review = draftJson === undefined ? undefined : parseDraft(draftJson);
+  return { report, ...(qa !== undefined ? { qa } : {}), ...(necessity !== undefined ? { necessity } : {}), ...(review !== undefined ? { review } : {}) };
 }
 
 // ---- the inertness check ----

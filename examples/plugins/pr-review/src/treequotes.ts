@@ -59,8 +59,8 @@ while [ "$#" -ge 4 ]; do
   echo "$i $v"
 done; rm -f "$GRAPHLOOM_REPORT_FILE.q"; echo "checked $i"; } > "$GRAPHLOOM_REPORT_FILE"`;
 
-/** The commands that verify the supported claims' quotes against their trees (at most 14 quotes each). */
-export function treeQuotePlan(claims: ReadonlyArray<{ id: string; tree: "head" | "base" | "either"; quotes: ReadonlyArray<{ path: string; line: number; text: string }> }>, base: string | undefined): TreeQuotePlan {
+/** The commands that verify the supported claims' quotes against their trees (at most 14 quotes each); their ids are `<idPrefix>-<n>`, `tree-quote-<n>` for the claim check. */
+export function treeQuotePlan(claims: ReadonlyArray<{ id: string; tree: "head" | "base" | "either"; quotes: ReadonlyArray<{ path: string; line: number; text: string }> }>, base: string | undefined, idPrefix: string = COMMAND.treeQuote): TreeQuotePlan {
   const entries: TreeQuoteEntry[] = claims.flatMap((c) => c.quotes.map((q) => ({ id: c.id, tree: c.tree, path: normal(q.path), line: q.line, text: q.text })));
   if (entries.length === 0) return { commands: [], entries: [], sizes: [] };
   if (base === undefined) return { unavailable: "the checkout recorded no pinned base, so the claims' quotes cannot be verified in their trees", commands: [], entries, sizes: [] };
@@ -68,7 +68,7 @@ export function treeQuotePlan(claims: ReadonlyArray<{ id: string; tree: "head" |
   const sizes: number[] = [];
   for (let i = 0; i < entries.length; i += ENTRIES_PER_COMMAND) {
     const chunk = entries.slice(i, i + ENTRIES_PER_COMMAND);
-    const id = `${COMMAND.treeQuote}-${commands.length + 1}`;
+    const id = `${idPrefix}-${commands.length + 1}`;
     commands.push({ id, argv: ["sh", "-c", QUOTE_SCRIPT, id, base, ...chunk.flatMap((e) => [e.tree, e.path, String(e.line), e.text])] });
     sizes.push(chunk.length);
   }

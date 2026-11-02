@@ -110,6 +110,22 @@ describe("approvals and the prepare_task wire message", () => {
     }
   });
 
+  it("checks the operator inputs an approval declares: unique names, a valid pattern, at most eight", () => {
+    const ok = [{ id: "review-layer", inputs: [{ name: "areas", description: "area ids", pattern: "A[0-9]+(,A[0-9]+)*" }] }];
+    expect(() => assertGraphDefinition({ ...base, approvals: ok })).not.toThrow();
+    const bad: unknown[] = [
+      [{ id: "a", inputs: [{ name: "Areas" }] }],
+      [{ id: "a", inputs: [{ name: "x" }, { name: "x" }] }],
+      [{ id: "a", inputs: [{ name: "x", extra: 1 }] }],
+      [{ id: "a", inputs: [{ name: "x", pattern: "(" }] }],
+      [{ id: "a", inputs: [{ name: "x", pattern: "" }] }],
+      [{ id: "a", inputs: [{ name: "x", description: " " }] }],
+      [{ id: "a", inputs: Array.from({ length: 9 }, (_, i) => ({ name: `n${i}` })) }],
+      [{ id: "a", inputs: "x" }],
+    ];
+    for (const approvals of bad) expect(() => assertGraphDefinition({ ...base, approvals }), JSON.stringify(approvals)).toThrow(WireValidationError);
+  });
+
   it("accepts a prepare_task request and refuses one without arguments", () => {
     const envelope = { protocolVersion: PROTOCOL_VERSION, runId: "r", operationId: "o", generation: 1, expectedStateRevision: 0, activeVersion: "g@1" };
     expect(() => assertWireRequest({ ...envelope, kind: "prepare_task", input: { args: ["x"], repo: { remotes: [], head: "a" }, options: { dryRun: false } } })).not.toThrow();

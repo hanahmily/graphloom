@@ -16,7 +16,12 @@ import type { Groundwork } from "../src/groundwork.js";
 
 import { hugeRehearsal } from "../src/rehearsal.js";
 import { HUGE_AREAS, HUGE_LIMITS, hugeSymbolNames } from "../src/rehearsal-huge.js";
-import { BANYANDB, assignmentOf, profileOf, simulate, type Simulation } from "./support.js";
+import { BANYANDB, assignmentOf, profileOf, simulate, simulateYielding, type Simulation } from "./support.js";
+import { hugePath, HUGE_FILES_PER_AREA } from "../src/rehearsal-huge.js";
+import { passReply, verifyReply } from "../src/rehearsal-review.js";
+import { REVIEW_SCHEMA_NAME, VERIFY_SCHEMA_NAME } from "../src/review.js";
+import { recordedScope } from "../src/reviewdraft.js";
+import { REHEARSAL_REQUEST } from "../src/rehearsal.js";
 
 const CONFIG = { limits: HUGE_LIMITS };
 
@@ -266,4 +271,54 @@ describe("a repair keeps every problem and every statement it is given", () => {
       }
     }
   });
+});
+
+describe("a review pass on a few areas of a pull request at the scale of #1445 fits the executor's bound", () => {
+  // The reviewers review the areas A3, A17 and A18 (nine files each) the operator picked; their assignments carry the seed,
+  // the rule groups and the file list, none of which may push an assignment past the bound.
+  const { scenario, headFiles } = hugeRehearsal({ ...BANYANDB, ...CONFIG });
+  const total = 3 * HUGE_FILES_PER_AREA;
+  const path = hugePath(3, 1);
+  const finding = { path, start_line: 2, end_line: 3, severity: "P1", content: "The function returns y times the module number, which is zero for a module that was never numbered." };
+  const picked = {
+    ...scenario,
+    results: {
+      ...scenario.results,
+      [REVIEW_SCHEMA_NAME]: [passReply(total, [finding]), passReply(total, []), passReply(total, []), passReply(total, []), passReply(total, [])] as never,
+      [VERIFY_SCHEMA_NAME]: [verifyReply([{ finding: "F1", verdict: "confirmed", witness: `${path}:3` }])] as never,
+    },
+  };
+  const seed = [{ ref: "ev-approval", kind: "other" as const, generation: 1, payload: { type: "operator-approval", approvalId: "review-layer", decision: "approve", files: [], inputs: { areas: "A3,A17,A18" }, operator: "t", at: "2026-10-30T10:00:00.000Z", generation: 1 } }];
+  // A conversation of the longest the summary allows seeds every reviewer.
+  const conversation = {
+    ref: "ev-conv",
+    kind: "other" as const,
+    generation: 1,
+    payload: { type: "operator-conversation", stageId: "answers", baseSession: "claude-a", rootSession: "claude-a", forkSession: "claude-c", harness: "claude-code", startedAt: "2026-10-30T09:00:00.000Z", endedAt: "2026-10-30T10:00:00.000Z", transcript: { sha256: "x", bytes: 1 }, contextTokens: 90_000, turns: Array.from({ length: 80 }, (_, i) => ({ operator: `Maintainer message ${i}: ${"the ttl rule applies to every group. ".repeat(12)}`, answer: "ok ".repeat(600) })) },
+  };
+
+  it("runs the review of the three areas through the Draft stage and records the scope", async () => {
+    const sim = await simulateYielding({ scenario: picked, config: CONFIG, files: headFiles, request: REHEARSAL_REQUEST.replace("Report on", "Review on"), seed: [...seed, conversation], maxSteps: 2_800, budgets: { agentInvocations: 400, jobs: 2_000, decisions: 4_000, corrections: 40 } }, 10);
+    expect(sim.final.action.type === "stop" ? sim.final.action.stop : sim.final.action, JSON.stringify(sim.final).slice(0, 500)).toMatchObject({ reason: "draft ready" });
+    const scope = recordedScope(sim.evidence);
+    expect(scope.state === "read" && [scope.value.source, scope.value.areas.map((a) => a.id), scope.value.files.length]).toEqual(["operator", ["A3", "A17", "A18"], total]);
+    const reviewJobs = sim.jobs.filter((j) => j.stageId === "review" && j.kind === "agent");
+    expect(reviewJobs.length).toBeGreaterThanOrEqual(5);
+    const sizes = reviewJobs.map((j) => assignmentOf(j).length);
+    expect(Math.max(...sizes)).toBeLessThanOrEqual(ASSIGNMENT_BUDGET_CHARS);
+    // The seed is in every reviewer's assignment: inline or as a file the plugin wrote first.
+    for (const j of reviewJobs.filter((x) => x.resultSchema === REVIEW_SCHEMA_NAME)) expect(assignmentOf(j)).toMatch(/Maintainer message 79|review-conversation-[0-9a-f]{8}\.md/);
+    // Every file an assignment names was written by a command before the job.
+    const written = new Set<string>();
+    for (const j of sim.jobs) {
+      const commands = (j.input as { commands?: EnvironmentCommand[] }).commands;
+      if (j.kind === "command" && Array.isArray(commands)) for (const c of commands) {
+        const w = writtenBy(c);
+        if (w !== undefined) written.add(w);
+        if (c.id === "report-write") for (const n of ["report.json", "review.md"]) written.add(`${WORKTREE}/.graphloom/review/${n}`);
+        if (c.id === "qa-write") for (const n of ["qa.json", "review.md"]) written.add(`${WORKTREE}/.graphloom/review/${n}`);
+      }
+      if (j.kind === "agent" && j.stageId === "review") for (const f of pathsOf(assignmentOf(j))) expect(written.has(f), `${f} is named by a review job before any command wrote it`).toBe(true);
+    }
+  }, 900_000);
 });

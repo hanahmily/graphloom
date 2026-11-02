@@ -129,6 +129,8 @@ export function agentSessionViews(state: DurableRunState): AgentSessionView[] | 
     dispatchKey: r.dispatchKey,
     executorId: r.executorId,
     status: r.status,
+    sessionRef: r.sessionRef,
+    settledAt: r.settledAt,
     ...(r.continuedFrom !== undefined ? { continuedFrom: r.continuedFrom } : {}),
     ...(r.harness !== undefined ? { harness: r.harness } : {}),
     ...(r.origin !== undefined ? { origin: r.origin } : {}),

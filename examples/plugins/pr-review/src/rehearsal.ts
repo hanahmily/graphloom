@@ -51,6 +51,8 @@ export const REHEARSAL_MERGE_BASE = "fedcba9876543210fedcba9876543210fedcba98";
 const TREE = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 export const REHEARSAL_REQUEST = `Report on ${REHEARSAL_PULL.owner}/${REHEARSAL_PULL.repo}#${REHEARSAL_PULL.number} at ${REHEARSAL_HEAD}.`;
 
+import { reviewScenarioParts, type ReviewScript } from "./rehearsal-review.js";
+
 export { FLAGS_GO, LARGE_LIMITS };
 
 export const TTL_GO = `// Licensed under the Apache License, Version 2.0.
@@ -1091,6 +1093,15 @@ export function hugeRehearsal(config: unknown): { scenario: RehearsalScenario; h
 }
 
 /** The scenarios, for the profile the run is described with (design §16). */
+/**
+ * A scenario with the review layer's replies added (design §16, `review-layer`): it still ends at `report ready`, and the
+ * replies are used once the operator approves the review layer (or the request is in Review mode).
+ */
+function withReview(scenario: RehearsalScenario, script: ReviewScript): RehearsalScenario {
+  const parts = reviewScenarioParts(script);
+  return { ...scenario, results: { ...scenario.results, ...parts.results }, commands: { ...scenario.commands, ...parts.commands } };
+}
+
 export function rehearsal(config: unknown): GraphRehearsal {
   let profile: Profile;
   try {
@@ -1176,6 +1187,8 @@ export function rehearsal(config: unknown): GraphRehearsal {
       "diagram-fallback": build(profile, REPORT_PULL, { toolId: "static-go-1", features: retentionFeatures, unsupported: ["F1.f2"], diagrams: "fallback" }).scenario,
       // A pull request of 1000 data files: report.json and review.html are past one write command, so each is written in parts (design §6.6).
       "large-artifacts": build(profile, ARTIFACTS_PULL, {}).scenario,
+      // The review layer (design §8): three aspect reviewers over one Go file; a confirmed P1, a refuted P2 (the checker's dismissal), a confirmed non-behavioral P2, and the draft.
+      "review-layer": withReview(build(profile, COMPLEX_PULL, { toolId: "static-go-1" }).scenario, { total: 1, path: "pkg/schema/ttl.go" }),
     },
   };
 }

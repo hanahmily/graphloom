@@ -32,6 +32,12 @@ import {
   ANSWERER_JOB,
   ANSWERS_STAGE,
   CODING_AGENT,
+  DRAFT_JSON,
+  DRAFT_MD,
+  DRAFT_STAGE,
+  REQUIREMENT_CODE_REVIEW,
+  REQUIREMENT_DRAFT,
+  REVIEW_STAGE,
   COMMAND,
   ENV_PLUGIN_ROOT,
   ENV_WORKTREE,
@@ -75,7 +81,13 @@ import { coverageCommand, coverageConfinement, missingProbe, sandboxEnvironmentC
 import { planChecker, planReporter } from "./prompts.js";
 import { assignmentProblem, type FileSpill } from "./fit.js";
 import { isLarge } from "./mode.js";
-import { harnessName, parseProfile, ProfileError, ROLES, DISTINCT_PAIRS, type Profile, type Role } from "./profile.js";
+import { harnessName, parseProfile, ProfileError, reviewerRole, verifierRole, ROLES, DISTINCT_PAIRS, type Profile, type Role } from "./profile.js";
+import { ASPECTS, ruleGroups, ruleFileText, type Aspect } from "./aspects.js";
+import { aspectFlow, aspectRecordId, aspectRecordJson, ASPECT_RECORD_SCHEMA, findingsOf, REVIEW_REFERENCES, REVIEW_SCHEMA, REVIEW_SCHEMA_NAME, VERIFY_REFERENCES, VERIFY_SCHEMA, VERIFY_SCHEMA_NAME, type AspectRecord } from "./review.js";
+import { chooseScope, approvalOf, scopeRecordJson, selectBase, seedReason, sha256 as scopeSha, SCOPE_RECORD_ID, SCOPE_SCHEMA, summaryFor, type ScopeRecord } from "./reviewscope.js";
+import { planReviewer, planVerifier } from "./reviewprompts.js";
+import { draftWrites, readingOrder, recordedAspect, recordedRules, recordedScope, ruleCommands } from "./reviewdraft.js";
+import { scopeLine, DRAFT_SCHEMA } from "./draft.js";
 import { prepareTask } from "./prepare.js";
 import { requestedPull, type PullRequest } from "./request.js";
 import { secretFindings } from "./secrets.js";
@@ -178,6 +190,16 @@ export function definitionFor(profile: Profile): GraphDefinition {
       statement: `An independent ${harnessName(profile.roles["answer-checker"])} answer checker, on a harness other than the answerer's (and the batch-answerer's), re-checked every cited equivalent, library, duplicate and covering test, and every "none found" claim (each part of a combined answer separately) with searches of its own, against the trees, and had verified N1's cited design statements, trace steps${profile.questions.principles !== undefined ? ", principle verdicts" : ""} and conclusion. Every answer left is supported or partial; an answer still unsupported after one correction is needs author, with both statements recorded (for N1, its conclusion becomes questionable and every question is asked). In large mode each batch of answers is checked by its own answer checker job in a fresh session, with the same correction and downgrade rules.`,
       evidenceSchema: ANSWER_CHECK_SCHEMA_NAME,
     },
+    {
+      id: REQUIREMENT_CODE_REVIEW,
+      statement: `Unless the operator declined the review layer (the run is then report only, and this requirement passes on that decline): for each of the aspects correctness, maintainability and security, a read-only ${harnessName(profile.roles[reviewerRole("correctness")])} reviewer swept the review's scope with the aspect's rule file, and every finding it raised has a verdict from the aspect's verifier (${ASPECTS.map((a) => `${a}: ${harnessName(profile.roles[verifierRole(a)])}`).join(", ")}), a fresh read-only session on a harness other than the reviewer's. The Review stage is entered in Review mode or after the operator's --approve review-layer. The scope is the whole pull request; in large mode it is the files of the areas the operator picked (--approve review-layer --input areas=A3,A17), or without a list the areas that the briefing's risks, behavior and compatibility entries cite (a default that cites none, or a list that names no readable area, stops the run and asks for areas), and it is recorded once, in a review-scope record, with the review base session (the latest operator conversation of the Answers stage by endedAt, else the answerer's own session) and the reason every reviewer was seeded and not forked (forking is not available in this version, or the base's context is over review.fork.maxParentTokens (default ${profile.review.fork.maxParentTokens}), or its transcript was omitted). Each reviewer starts a fresh session seeded with review.md and the deterministic conversation summary (the maintainer's messages verbatim and each agent answer cut to 1 KiB, at most 32 KiB, the oldest agent answers cut first, every cut marked), which recomputes from the recorded conversations. Each aspect's effective rule file (the shipped rules with the profile's review.aspects.<aspect>.rules entries) is written to .graphloom/review/rules/<aspect>.json, every file of the scope falls under one of its entries, and the reviewer is told which. Each pass reviews every file of the scope and skips none, its comments are checked (a file of the scope, a side, a range, an aspect, a kind: a correctness finding is behavioral; a severity), and P3 nits are counted and not verified. The sweep follows issue-fix's review convergence on one candidate: every finding of a pass is verified in one pr-finding-verification-v1 job, a confirmation needs its own path:line witness, a refutation needs one to three quotes that the head's files show (otherwise the finding is disputed, as is one the verifier left uncertain or gave no verdict), another pass runs while a finding of the last pass is confirmed or disputed, at most 4 passes, and a sweep that ends at the cap is recorded unsaturated and does not fail the stage. A finding the verifier calls behavioral is unproven in this version (reproducing tests arrive with a later part of the review layer), so it is never drafted as P0 or P1. Each aspect's sweep is recorded in a review-aspect-<aspect> record, from which the validator recomputes the findings, their states and the harnesses.`,
+      evidenceSchema: VERIFY_SCHEMA_NAME,
+    },
+    {
+      id: REQUIREMENT_DRAFT,
+      statement: `Unless the operator declined the review layer: the draft review is composed by plugin code from the aspects' records and the Q&A (no model writes it) and written whole to ${DRAFT_JSON} (pr-review-draft-v1, canonical) and ${DRAFT_MD} (its editable rendering), each as one command or a bounded multi-part write. Confirmed findings that claim no wrong behavior are the comments, grouped by aspect (correctness, security, maintainability), at most P2; confirmed findings of different aspects on overlapping lines of one file are one entry that lists every aspect; confirmed behavioral findings, which are unproven in this version, and disputed findings are listed under "Needs your judgment" and never drafted as P0 or P1; the Q&A items that need the author are pre-selected and the rest listed under "Not selected"; a suggestion is kept only when the verifier says it fixes the finding, it is at most 20 lines and replaces exactly the commented RIGHT range; a comment outside a hunk of the file's patch is marked as going in the review body; the recommended verdict is request-changes only for a proven P0 or P1 finding (none in this version), approve only when nothing is open, and approve is drafted as comment; the summary is at most 1,200 characters. The draft holds no path inside .graphloom/ and no secret. ${REVIEW_MD}, ${REVIEW_HTML} and ${REVIEW_APPENDIX_HTML} are written again with a Review section: findings by severity with counts, each with its one-line claim, aspect badge, cite and checker verdict, collapsed except the P0 and P1 findings that stand, in the briefing; every finding in full and the draft in the appendix. They recompute from report.json, qa.json, necessity.json and the draft, with the same inert check. Nothing is posted to GitHub.`,
+      evidenceSchema: DRAFT_SCHEMA,
+    },
   ];
   const bindings: ValidatorBinding[] = [
     { requirementId: REQUIREMENT_SNAPSHOT, validatorId: "pr-snapshot", version: "1" },
@@ -190,6 +212,9 @@ export function definitionFor(profile: Profile): GraphDefinition {
     { requirementId: REQUIREMENT_QUESTIONS, validatorId: "questions-complete", version: "1", independence: "separate-reviewer" },
     { requirementId: REQUIREMENT_ANSWERS, validatorId: "answers-complete", version: "1" },
     { requirementId: REQUIREMENT_GROUNDED, validatorId: "answers-grounded", version: "1", independence: "separate-reviewer" },
+    // The reviews' verifiers are independent reviewers: the controller admits it from review evidence of a read-only review job.
+    { requirementId: REQUIREMENT_CODE_REVIEW, validatorId: "code-review", version: "1", independence: "separate-reviewer" },
+    { requirementId: REQUIREMENT_DRAFT, validatorId: "draft-composed", version: "1" },
   ];
   return {
     graphId: GRAPH_ID,
@@ -210,12 +235,17 @@ export function definitionFor(profile: Profile): GraphDefinition {
       { name: NECESSITY_REVISION_SCHEMA_NAME, schema: asSchema(NECESSITY_SCHEMA), evidenceKind: "other", references: [...NECESSITY_REFERENCES] },
       // Kind "review": answers-grounded is judged by an independent reviewer (a read-only review job on another harness).
       { name: ANSWER_CHECK_SCHEMA_NAME, schema: asSchema(ANSWER_CHECK_SCHEMA), evidenceKind: "review", references: [...ANSWER_CHECK_REFERENCES] },
+      // The review layer (design §8.1): an aspect reviewer's pass, and the verifier's verdicts on its findings. Both are read-only review jobs.
+      { name: REVIEW_SCHEMA_NAME, schema: asSchema(REVIEW_SCHEMA), evidenceKind: "review", references: [...REVIEW_REFERENCES] },
+      { name: VERIFY_SCHEMA_NAME, schema: asSchema(VERIFY_SCHEMA), evidenceKind: "review", references: [...VERIFY_REFERENCES] },
     ],
     stages: [
       { id: FETCH_STAGE, name: "Fetch", requirementIds: [REQUIREMENT_SNAPSHOT, REQUIREMENT_CHECKED_OUT, REQUIREMENT_LEDGER] },
       { id: REPORT_STAGE, name: "Report", requirementIds: [REQUIREMENT_REPORT, REQUIREMENT_MEASUREMENTS, REQUIREMENT_CLAIMS] },
       { id: QUESTIONS_STAGE, name: "Questions", requirementIds: [REQUIREMENT_QUESTIONS] },
       { id: ANSWERS_STAGE, name: "Answers", requirementIds: [REQUIREMENT_ANSWERS, REQUIREMENT_GROUNDED] },
+      { id: REVIEW_STAGE, name: "Review", requirementIds: [REQUIREMENT_CODE_REVIEW] },
+      { id: DRAFT_STAGE, name: "Draft", requirementIds: [REQUIREMENT_DRAFT] },
     ],
     requirements,
     defaultValidators: bindings,
@@ -228,16 +258,23 @@ export function definitionFor(profile: Profile): GraphDefinition {
 }
 
 /**
- * The operator decisions this version declares (design §11). `review-layer` opens the Review stage, which 0.1 does
- * not have, so an approval is refused with that reason and a decline finishes the run report-only.
+ * The operator decisions this version declares (design §11). `review-layer` opens the Review stage: reviewers for three
+ * aspects, their findings and a draft. It takes one optional input, `areas`, which names the areas of a large pull
+ * request to review (`--approve review-layer --input areas=A3,A17`); a decline finishes the run report-only.
  */
 export function approvalDeclarations(): ApprovalDeclaration[] {
   return [
     {
       id: REVIEW_LAYER_APPROVAL,
-      stageId: "review",
+      stageId: REVIEW_STAGE,
       description: "continue into the review layer (aspect reviewers, findings, a draft); declining finishes the run report-only",
-      unavailable: `pr-review ${GRAPH_VERSION} has no Review stage (its first layer is the report, the questions and the answers), so --approve ${REVIEW_LAYER_APPROVAL} is refused; --decline ${REVIEW_LAYER_APPROVAL} finishes the run as succeeded, report only`,
+      inputs: [
+        {
+          name: "areas",
+          description: "large pull requests only: the areas to review, as comma-separated ids such as A3,A17 (the Areas table of review.html lists them); without it, the areas cited by the briefing's risks, behavior and compatibility entries",
+          pattern: "A[0-9]+(,A[0-9]+)*",
+        },
+      ],
     },
   ];
 }
@@ -259,7 +296,16 @@ export function agentRoles(profile: Profile): AgentRoleDeclaration[] {
   return ROLES.map((role) => {
     const distinctFrom = DISTINCT_PAIRS.filter(([checked]) => checked === role).map(([, author]) => author);
     // diagrammer (the diagram job) is optional, falling back to the reporter's harness, model and effort.
-    const setting = role === "diagrammer" ? `harnesses.${role} (optional; falls back to harnesses.reporter)` : role === "batch-answerer" ? `harnesses.${role} (optional; the answer batches of large mode; falls back to harnesses.answerer)` : `harnesses.${role}`;
+    const setting =
+      role === "diagrammer"
+        ? `harnesses.${role} (optional; falls back to harnesses.reporter)`
+        : role === "batch-answerer"
+          ? `harnesses.${role} (optional; the answer batches of large mode; falls back to harnesses.answerer)`
+          : role.startsWith("reviewer-")
+            ? `harnesses.${role} (optional; the ${role.slice("reviewer-".length)} aspect's reviewer; falls back to harnesses.answerer, and must be on its harness: a reviewer starts from the answerer's session)`
+            : role.startsWith("verifier-")
+              ? `harnesses.${role} (optional; the ${role.slice("verifier-".length)} aspect's finding verifier; the first harness of the design's preference that is not its reviewer's)`
+              : `harnesses.${role}`;
     return { role, harness: profile.roles[role], access: "read" as const, ...(distinctFrom.length > 0 ? { distinctFrom } : {}), setting };
   });
 }
@@ -289,7 +335,8 @@ export function advancePullRequest(view: RunView): GraphDecision {
   const stage = definition.stages.find((s) => !s.requirementIds.every((id) => view.receipts.some((r) => r.stageId === s.id && r.requirementId === id && r.valid)) || view.openAttempt?.[s.id] === true);
   const ctx: Context = { profile, definition, pr };
   if (stage === undefined) {
-    if (approvalDecision(view.evidence, REVIEW_LAYER_APPROVAL) === "decline") {
+    const approval = approvalOf(view.evidence, REVIEW_LAYER_APPROVAL);
+    if (approval?.decision === "decline") {
       return withPrivate(
         stop(
           { reason: "complete", blocker: `report only: the operator declined the review layer; the briefing is ${REVIEW_HTML} in the worktree, with the appendix (every change item, the measurements, the whole Q&A) in ${REVIEW_APPENDIX_HTML} (${REVIEW_MD} beside them is the plain-text copy of both)`, retryable: false },
@@ -297,19 +344,37 @@ export function advancePullRequest(view: RunView): GraphDecision {
         ),
       );
     }
-    // N1's answerer sits in the Questions stage; when it was the only answer, that is the session to discuss.
-    const rec = recordedNecessity(view.evidence);
-    const chat = rec.state === "read" && rec.record.decision.action === "skip" ? QUESTIONS_STAGE : ANSWERS_STAGE;
     return withPrivate(
       stop(
         {
-          reason: "report ready",
-          blocker: `the report is the briefing ${REVIEW_HTML}, with the appendix ${REVIEW_APPENDIX_HTML}; review.md beside them is the plain-text copy of both for agents and graphloom session open (report.json and qa.json too, in the worktree). Together they hold the report, the questions and their answers. graphloom session open <run> --stage ${chat} discusses them; graphloom resume <run> --decline review-layer finishes the run report-only (this version has no Review stage, so --approve review-layer is refused)`,
+          reason: "draft ready",
+          blocker: `the draft review is ${DRAFT_MD} in the worktree (${DRAFT_JSON} is its canonical form): edit either, then post it yourself; this version posts nothing. The findings are in the Review section of the briefing ${REVIEW_HTML} (collapsed except the blocking ones), with every finding in full and the draft in the appendix ${REVIEW_APPENDIX_HTML}; ${REVIEW_MD} is the plain-text copy.`,
           retryable: false,
         },
-        "the report and the Q&A are ready; the review layer is not built in this version",
+        "the review layer finished: the draft review is ready for the maintainer",
       ),
     );
+  }
+  // The review layer runs in Review mode, or after the operator's approval; the operator's decline passes its requirements.
+  if (stage.id === REVIEW_STAGE || stage.id === DRAFT_STAGE) {
+    const approval = approvalOf(view.evidence, REVIEW_LAYER_APPROVAL);
+    if (approval?.decision === "decline") return withPrivate(validate({ stageId: stage.id }, `the operator declined the review layer: ${stage.name} passes report only`));
+    if (pr.mode === "report" && approval?.decision !== "approve") {
+      // N1's answerer sits in the Questions stage; when it was the only answer, that is the session to discuss.
+      const rec = recordedNecessity(view.evidence);
+      const chat = rec.state === "read" && rec.record.decision.action === "skip" ? QUESTIONS_STAGE : ANSWERS_STAGE;
+      return withPrivate(
+        stop(
+          {
+            reason: "report ready",
+            blocker: `the report is the briefing ${REVIEW_HTML}, with the appendix ${REVIEW_APPENDIX_HTML}; review.md beside them is the plain-text copy of both for agents and graphloom session open (report.json and qa.json too, in the worktree). Together they hold the report, the questions and their answers. graphloom session open <run> --stage ${chat} discusses them (what you say there reaches the review layer); graphloom resume <run> --approve review-layer continues into the review (a large pull request: add --input areas=A3,A17 to name the areas to review; without it, the areas the briefing's risks, behavior and compatibility entries cite), and graphloom resume <run> --decline review-layer finishes the run report-only`,
+            retryable: false,
+          },
+          "the report and the Q&A are ready; the review layer needs the operator's approval",
+        ),
+      );
+    }
+    return stage.id === REVIEW_STAGE ? review(ctx, view) : draftStage(ctx, view);
   }
   switch (stage.id) {
     case FETCH_STAGE:
@@ -1012,4 +1077,154 @@ function recordLedger(ctx: Context, view: RunView, c: QaContext, w: ReturnType<t
     return withPrivate(dispatch(commandJob(ANSWERS_STAGE, writeInstruction(parts.command, "Write the ledger files"), { commands: [parts.command] }), "write the ledger's ledger.json and ledger.md as parts: they do not fit the ledger write's one command"));
   }
   return withPrivate(dispatch(commandJob(ANSWERS_STAGE, "Advance the pull request's ledger ref by compare-and-swap (no repository code runs)", { commands: [w.ledger], env: { ...GIT_ENV } }), "record this head's report and Q&A in the ledger, from the value Fetch read"));
+}
+
+// ---- the review layer (design §8) ----
+
+const REVIEW_COMMAND_WORDS = { failed: "recording the review failed", settle: "the review's record keeps differing from the one the evidence recomputes" };
+
+/** The review: the scope, base and rule files first, then each aspect's sweep (passes, verification, the check of refutations' quotes), each recorded when it ends. */
+function review(ctx: Context, view: RunView): GraphDecision {
+  const { profile, pr } = ctx;
+  const a = analyze(view.evidence, profile, pr);
+  if (a.state !== "ready") return supervise({ reason: a.state === "pending" ? `the review stage lost the pull request snapshot: ${a.reason}` : a.problem }, "escalate a missing snapshot");
+  const { analysis } = a;
+  const flow = reportFlowOf(view.evidence, analysis, retryOf(view));
+  if (flow.state !== "done") return supervise({ reason: "the review stage lost the finished report" }, "escalate a missing report");
+  const scope = recordedScope(view.evidence);
+  if (scope.state === "failed") return supervise({ reason: `the review's scope record does not read back: ${scope.reason}`, evidenceRefs: scope.refs }, "escalate an unreadable scope record");
+  if (scope.state === "none") return startReview(ctx, view, analysis, flow.final.briefing.check);
+  const s = scope.value;
+  const base = pinnedBase(view.evidence);
+  const files = new Set(s.files);
+  const records: AspectRecord[] = [];
+  let from = view.evidence.findIndex((e) => e.ref === scope.refs.at(-1));
+  const mounted: string[] = [];
+  for (const aspect of ASPECTS) {
+    const rules = recordedRules(view.evidence, aspect, s.files);
+    if (rules.state !== "read") return supervise({ reason: rules.state === "failed" ? rules.reason : `the ${aspect} rule file was not written` }, "escalate a rule file that does not cover the scope: no review runs with a generic rule");
+    const rec = recordedAspect(view.evidence, aspect);
+    if (rec.state === "failed") return supervise({ reason: rec.reason, evidenceRefs: rec.refs }, "escalate an unreadable aspect record");
+    if (rec.state === "read") {
+      records.push(rec.value);
+      from = Math.max(from, view.evidence.findIndex((e) => e.ref === rec.refs.at(-1)));
+      continue;
+    }
+    const earlier = findingsOf(records);
+    const f = aspectFlow(view.evidence.slice(from + 1), { aspect, scope: files, earlier, base, retryable: (r) => isStaleFailure(r.record, view) });
+    const reviewDir = reviewDirOf(view);
+    const baseDir = baseTreeDir(view, { baseTree: true });
+    switch (f.state) {
+      case "supervise":
+        return supervise({ reason: f.reason, evidenceRefs: f.refs }, "hand the unresolved review to the supervisor");
+      case "quotes":
+        return withPrivate(dispatch(commandJob(REVIEW_STAGE, "Check the refutations' quotes against the head", { commands: f.commands.slice(0, 16), env: { ...GIT_ENV } }), "check each refutation's quotes against the head's files"));
+      case "pass": {
+        const role = reviewerRole(aspect);
+        const planned = planReviewer({
+          pr,
+          snapshot: analysis.snapshot,
+          aspect,
+          pass: f.n,
+          files: readingOrder(view.evidence, s.files),
+          scopeLine: scopeLine(s),
+          groups: rules.groups,
+          summary: summaryFor(view.evidence, s.base).text,
+          context: s.context,
+          known: f.known,
+          feedback: f.feedback,
+          ...(baseDir !== undefined ? { baseDir } : {}),
+          ...(reviewDir !== undefined ? { reviewDir } : {}),
+        });
+        const written = writeSpills(view, REVIEW_STAGE, planned.spills);
+        if (written !== undefined) return written;
+        const known = ["", ...f.known.map((k) => k.id)];
+        const job = agentJob(ctx, view, { jobId: role, stageId: REVIEW_STAGE, purpose: "review", instruction: `Review the ${aspect} aspect (pass ${f.n})`, schema: REVIEW_SCHEMA_NAME, harness: profile.roles[role], role, assignment: planned.text, readOnlyBinds: mounted, references: idRefs({ [REVIEW_REFERENCES[0]!]: idSet(known) }) }, analysis.snapshot.files);
+        if ("problem" in job) return refused(job);
+        return dispatchAgent(view, job, `review the ${aspect} aspect (pass ${f.n}) in a fresh read-only ${harnessName(profile.roles[role])} session, seeded with review.md and the conversation summary (${s.context.reason})`);
+      }
+      case "verify": {
+        const role = verifierRole(aspect);
+        const planned = planVerifier({ pr, snapshot: analysis.snapshot, aspect, pass: f.n, findings: f.findings, feedback: f.feedback, ...(baseDir !== undefined ? { baseDir } : {}), ...(reviewDir !== undefined ? { reviewDir } : {}) });
+        const written = writeSpills(view, REVIEW_STAGE, planned.spills);
+        if (written !== undefined) return written;
+        const job = agentJob(ctx, view, { jobId: role, stageId: REVIEW_STAGE, purpose: "review", instruction: `Verify the ${aspect} pass ${f.n} findings`, schema: VERIFY_SCHEMA_NAME, harness: profile.roles[role], role, assignment: planned.text, readOnlyBinds: mounted, references: idRefs({ [VERIFY_REFERENCES[0]!]: idSet(f.findings.map((x) => x.id)) }) }, analysis.snapshot.files);
+        if ("problem" in job) return refused(job);
+        return dispatchAgent(view, job, `verify the ${aspect} findings with a fresh read-only ${harnessName(profile.roles[role])} session on another harness than the reviewer's`);
+      }
+      case "done": {
+        const record: AspectRecord = {
+          schema: ASPECT_RECORD_SCHEMA,
+          aspect,
+          reviewer: profile.roles[reviewerRole(aspect)],
+          verifier: profile.roles[verifierRole(aspect)],
+          context: s.context,
+          scopeFiles: s.files.length,
+          passes: f.passes,
+          findings: f.findings,
+          unsaturated: f.unsaturated,
+        };
+        const id = aspectRecordId(aspect);
+        return recordStep(view, REVIEW_STAGE, id, recordCommands(id, "review", aspectRecordJson(record)), `the ${aspect} review`);
+      }
+    }
+  }
+  return validateStage(ctx, view, REVIEW_STAGE);
+}
+
+/** Decides the scope and the base session and writes the rule files and the scope record, in that order (the record last: it marks the start complete). */
+function startReview(ctx: Context, view: RunView, analysis: Analysis, check: Parameters<typeof chooseScope>[0]["check"]): GraphDecision {
+  const { profile } = ctx;
+  const approval = approvalOf(view.evidence, REVIEW_LAYER_APPROVAL);
+  const areasInput = approval?.decision === "approve" ? approval.inputs.areas : undefined;
+  const choice = chooseScope({ mode: analysis.snapshot.mode, files: analysis.snapshot.files, partition: analysis.snapshot.partition, check, areasInput });
+  if ("problem" in choice) {
+    return withPrivate(stop({ reason: "review scope refused", blocker: `${choice.problem}; approve again (graphloom resume <run> --approve review-layer --input areas=<ids>) once it is settled`, retryable: true }, "stop: the review's scope cannot be decided"));
+  }
+  if (choice.files.length === 0) return withPrivate(stop({ reason: "review scope refused", blocker: "the chosen scope holds no file to review", retryable: true }, "stop: the review's scope is empty"));
+  for (const aspect of ASPECTS) {
+    const g = ruleGroups(ruleFileText(aspect, profile.review.rules[aspect]), choice.files);
+    if (g.state === "failed") return supervise({ reason: `the ${aspect} rule file does not cover the scope: ${g.problems.join("; ")}` }, "escalate a rule file that does not cover the scope");
+  }
+  const rec = recordedNecessity(view.evidence);
+  const chat = rec.state === "read" && rec.record.decision.action === "skip" ? QUESTIONS_STAGE : ANSWERS_STAGE;
+  const baseSession = selectBase(view, chat, ANSWERER_JOB);
+  const summary = summaryFor(view.evidence, baseSession);
+  const record: ScopeRecord = {
+    schema: SCOPE_SCHEMA,
+    mode: choice.mode,
+    source: choice.source,
+    ...(areasInput !== undefined ? { areasInput } : {}),
+    ...(approval?.decision === "approve" ? { approvalRef: approval.ref } : {}),
+    areas: choice.areas,
+    files: choice.files,
+    base: baseSession,
+    context: { kind: "seeded", reason: seedReason(baseSession, profile.review.fork.maxParentTokens) },
+    summary: { sha256: scopeSha(summary.text), bytes: summary.bytes, cuts: summary.cuts, turns: summary.turns },
+    harnesses: Object.fromEntries(ASPECTS.map((a) => [a, { reviewer: profile.roles[reviewerRole(a)], verifier: profile.roles[verifierRole(a)] }])),
+  };
+  const commands = [...ASPECTS.flatMap((a) => ruleCommands(a, profile.review.rules[a])), ...recordCommands(SCOPE_RECORD_ID, "review", scopeRecordJson(record))];
+  const next = nextWrite(view, commands, REVIEW_COMMAND_WORDS);
+  if (next === undefined) return supervise({ reason: "the review's scope record was written as recomputed but does not read back" }, "escalate a scope record that does not read back");
+  if ("decision" in next) return next.decision;
+  return withPrivate(dispatch(commandJob(REVIEW_STAGE, writeInstruction(next.command, "Record the review's scope and base session as evidence"), { commands: [next.command] }), "write the aspects' rule files and record the review's scope and base session"));
+}
+
+/** The Draft stage: the draft and the report files with the Review section, written whole, then validated. */
+function draftStage(ctx: Context, view: RunView): GraphDecision {
+  const { profile, pr } = ctx;
+  const a = analyze(view.evidence, profile, pr);
+  if (a.state !== "ready") return supervise({ reason: a.state === "pending" ? `the draft stage lost the pull request snapshot: ${a.reason}` : a.problem }, "escalate a missing snapshot");
+  const w = draftWrites(view.evidence, a.analysis, pr, pinnedBase(view.evidence));
+  if (w.state === "pending") return supervise({ reason: `the draft cannot be composed: ${w.reason}` }, "escalate a missing review record");
+  if (w.state === "failed") return supervise({ reason: w.reason, evidenceRefs: w.refs }, "escalate an unreadable review record");
+  const t = w.writes.texts;
+  const secrets = Object.values(t).flatMap((x) => secretFindings(x));
+  if (secrets.length > 0) return stop({ reason: "report refused", blocker: `the draft would hold what looks like a credential (${[...new Set(secrets)].slice(0, 3).join("; ")}); it was not written`, retryable: false }, "refuse to write a draft that holds a secret");
+  const inert = [...writtenHtmlProblems(t.html, pr, pinnedBase(view.evidence)), ...writtenHtmlProblems(t.appendix, pr, pinnedBase(view.evidence))];
+  if (inert.length > 0) return supervise({ reason: `review.html or review-appendix.html would not be self-contained and inert: ${inert.slice(0, 3).join("; ")}` }, "escalate a report file that fails its own inertness check");
+  const next = nextWrite(view, w.writes.commands, { failed: "writing the draft failed", settle: "the written draft keeps differing from the one the evidence recomputes" });
+  if (next === undefined) return validateStage(ctx, view, DRAFT_STAGE);
+  if ("decision" in next) return next.decision;
+  return withPrivate(dispatch(commandJob(DRAFT_STAGE, writeInstruction(next.command, "Write the draft review"), { commands: [next.command] }), "write draft.json, draft.md and the report files with the Review section"));
 }

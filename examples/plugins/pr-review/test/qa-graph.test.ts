@@ -529,10 +529,10 @@ describe("the Questions and Answers validators", () => {
     expect(evaluate("questions-complete", failed)).toMatchObject({ status: "failed", reason: expect.stringMatching(/groundwork could not be read/) });
   });
 
-  it("are bound as the design says: answers-grounded needs a separate reviewer, the others none", async () => {
+  it("are bound as the design says: answers-grounded and code-review need a separate reviewer, the others none", async () => {
     const { createGraph } = await import("../src/graph.js");
     const d = createGraph().describe(BANYANDB);
-    expect(d.defaultValidators.filter((b) => b.independence !== undefined).map((b) => [b.requirementId, b.independence])).toEqual([["claims-checked", "separate-reviewer"], ["questions-complete", "separate-reviewer"], ["answers-grounded", "separate-reviewer"]]);
+    expect(d.defaultValidators.filter((b) => b.independence !== undefined).map((b) => [b.requirementId, b.independence])).toEqual([["claims-checked", "separate-reviewer"], ["questions-complete", "separate-reviewer"], ["answers-grounded", "separate-reviewer"], ["code-review", "separate-reviewer"]]);
     expect(d.resultContracts!.find((c) => c.name === "answer-check-v1")!.evidenceKind).toBe("review");
   });
 });

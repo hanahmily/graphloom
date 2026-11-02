@@ -6,10 +6,10 @@ import type { ExecutorPin } from "@graphloom/sdk";
 export const GRAPH_ID = "pr-review";
 /**
  * The stage list is fixed per plugin version (design-pr-review-graph.md §5,
- * §18): 0.1 declares Fetch, Report, Questions and Answers. Review, Checks,
- * Draft and Publish arrive with later versions.
+ * §18): 0.1 declares Fetch, Report, Questions and Answers; 0.18 adds Review
+ * and Draft. Checks and Publish arrive with later versions.
  */
-export const GRAPH_VERSION = "0.17.0";
+export const GRAPH_VERSION = "0.18.0";
 
 /** The operator decision that would continue into the review layer (design §11). */
 export const REVIEW_LAYER_APPROVAL = "review-layer";
@@ -18,6 +18,8 @@ export const FETCH_STAGE = "fetch";
 export const REPORT_STAGE = "report";
 export const QUESTIONS_STAGE = "questions";
 export const ANSWERS_STAGE = "answers";
+export const REVIEW_STAGE = "review";
+export const DRAFT_STAGE = "draft";
 
 export const REQUIREMENT_SNAPSHOT = "pr-snapshot";
 export const REQUIREMENT_CHECKED_OUT = "head-checked-out";
@@ -28,6 +30,8 @@ export const REQUIREMENT_CLAIMS = "claims-checked";
 export const REQUIREMENT_QUESTIONS = "questions-complete";
 export const REQUIREMENT_ANSWERS = "answers-complete";
 export const REQUIREMENT_GROUNDED = "answers-grounded";
+export const REQUIREMENT_CODE_REVIEW = "code-review";
+export const REQUIREMENT_DRAFT = "draft-composed";
 
 export const CODING_AGENT: ExecutorPin = { id: "graphloom.coding-agent/run", version: "1" };
 export const GET_PULL: ExecutorPin = { id: "graphloom.github/get-pull", version: "1" };
@@ -89,6 +93,8 @@ export const COMMAND = {
   coverTs: "cover-ts",
   /** The check of the claims' quotes against the trees their cites name (design §6.9): `tree-quote-<n>`. */
   treeQuote: "tree-quote",
+  /** The review layer's scope and base-session record (design §8.1), and the aspects' own (`review-aspect-<aspect>`). */
+  reviewScope: "review-scope",
 } as const;
 
 /**
@@ -107,10 +113,19 @@ export const PART_BASE = {
   necessityJson: "necessity-json",
   ledgerJson: "ledger-json",
   ledgerMd: "ledger-md",
+  /** The rule file of an aspect: `review-rules-<aspect>` (design §8.1). */
+  reviewRules: "review-rules",
+  /** The draft (design §10.1) and the report files rewritten with the Review section. */
+  draftJson: "draft-json",
+  draftMd: "draft-md",
+  finalMd: "review-md-final",
+  finalHtml: "review-html-final",
+  finalAppendix: "review-appendix-html-final",
 } as const;
 
 /** The questioner's and the answerer's session keys, so a correction continues the previous session. */
 export const QUESTIONER_JOB = "questioner";
+/** The review layer's job keys: `reviewer-<aspect>` and `verifier-<aspect>`. */
 export const ANSWERER_JOB = "answerer";
 
 /** The exit status of the ledger write when its compare-and-swap lost the race (design §9.1). */
@@ -127,6 +142,11 @@ export const REVIEW_DIR = ".graphloom/review";
 export const BASE_DIR = `${REVIEW_DIR}/base`;
 export const REPORT_JSON = `${REVIEW_DIR}/report.json`;
 export const REVIEW_MD = `${REVIEW_DIR}/review.md`;
+/** The review layer's files (design §8.1, §10.1): the aspects' rule files, the draft, and the records of the sweep. */
+export const REVIEW_RULES_DIR = `${REVIEW_DIR}/rules`;
+export const ruleFilePath = (aspect: string): string => `${REVIEW_RULES_DIR}/${aspect}.json`;
+export const DRAFT_JSON = `${REVIEW_DIR}/draft.json`;
+export const DRAFT_MD = `${REVIEW_DIR}/draft.md`;
 export const REVIEW_HTML = `${REVIEW_DIR}/review.html`;
 /** The appendix of the HTML report (design §6.11): every change item, the measurements, the whole Q&A. */
 export const REVIEW_APPENDIX_HTML = `${REVIEW_DIR}/review-appendix.html`;
