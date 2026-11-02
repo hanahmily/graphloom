@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
-import type { GraphDecision, GraphDefinition, GraphRehearsal, PrepareTaskInput, PrepareTaskReply, RunView, ValidationInput, ValidationResult } from "@graphloom/sdk";
+import type { EvidencePartReader, GraphDecision, GraphDefinition, GraphRehearsal, PrepareTaskInput, PrepareTaskReply, RunView, ValidationInput, ValidationResult } from "@graphloom/sdk";
 
 /** Non-durable observation returned instead of applying a plugin result. */
 export interface ChildObservation {
@@ -13,7 +13,9 @@ export interface ChildObservation {
     | "stale"
     | "oversized"
     | "unknown"
-    | "internal";
+    | "internal"
+    /** A recorded evidence blob the call needed is missing or corrupt; the plugin is not at fault. */
+    | "evidence_unavailable";
   message: string;
   exitCode?: number | null | undefined;
 }
@@ -38,6 +40,12 @@ export interface PluginHost {
   readonly generation: number;
   /** OS pid of the plugin child when hosted out-of-process. */
   readonly childPid?: number | undefined;
+  /**
+   * True when this host reads externalized evidence parts itself (a child worker installs lazy getters over the
+   * run's evidence store; an in-process host given a reader hydrates eagerly). A host without it is handed
+   * hydrated records by the controller.
+   */
+  readonly hydratesEvidence?: boolean;
   describe(ctx: CallContext): Promise<HostResult<GraphDefinition>>;
   advance(ctx: CallContext, view: RunView): Promise<HostResult<GraphDecision>>;
   evaluate?(
@@ -76,6 +84,8 @@ export interface ChildPluginHostOptions {
 
 export interface InProcessPluginHostOptions {
   activeVersion: string;
+  /** Reads externalized evidence parts; the host then hydrates each advance view's evidence eagerly. */
+  evidenceReader?: EvidencePartReader;
   generation?: number;
   /** The run's pinned task config, passed to describe and attached to every advance view. */
   config?: unknown;

@@ -75,6 +75,8 @@ export async function createChildPluginHost(
 }
 
 class ChildSession implements PluginHost {
+  /** The worker installs lazy getters over the run's evidence store (worker.ts). */
+  readonly hydratesEvidence = true;
   readonly activeVersion: string;
   readonly generation: number;
 
@@ -609,6 +611,7 @@ function mapWireErrorCode(
     case "oversized":
     case "unknown":
     case "internal":
+    case "evidence_unavailable":
       return code;
     default:
       return "unknown";

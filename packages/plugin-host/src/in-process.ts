@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import type { GraphDecision, GraphDefinition, GraphPlugin, PrepareTaskInput, PrepareTaskReply, RunView } from "@graphloom/sdk";
-import { createScriptedGraph, type ScriptedGraphOptions } from "@graphloom/sdk";
+import { createScriptedGraph, hydrateRecord, isEvidenceUnavailable, type ScriptedGraphOptions } from "@graphloom/sdk";
 import type {
   CallContext,
   HostResult,
@@ -19,6 +19,7 @@ export function createInProcessPluginHost(
   let closed = false;
 
   return {
+    ...(options.evidenceReader !== undefined ? { hydratesEvidence: true } : {}),
     activeVersion: options.activeVersion,
     generation,
     async describe(_ctx: CallContext): Promise<HostResult<GraphDefinition>> {
@@ -57,13 +58,13 @@ export function createInProcessPluginHost(
         };
       }
       try {
-        return { ok: true, value: plugin.advance(withConfig(view, options.config)) };
+        return { ok: true, value: plugin.advance(withConfig(hydrated(view, options.evidenceReader), options.config)) };
       } catch (err) {
         return {
           ok: false,
           observation: {
             kind: "child_observation",
-            code: "crash",
+            code: isEvidenceUnavailable(err) ? "evidence_unavailable" : "crash",
             message: err instanceof Error ? err.message : String(err),
           },
         };
@@ -80,6 +81,11 @@ export function createInProcessPluginHost(
       closed = true;
     },
   };
+}
+
+/** The view with every externalized evidence part read back in; unchanged without a reader. */
+function hydrated(view: RunView, reader: InProcessPluginHostOptions["evidenceReader"]): RunView {
+  return reader === undefined ? view : { ...view, evidence: view.evidence.map((record) => hydrateRecord(record, reader)) };
 }
 
 /** The view with the run's config attached; unchanged when the run has none. */
