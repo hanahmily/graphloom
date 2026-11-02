@@ -154,6 +154,7 @@
     "report-checker": { "harness": "codex", "effort": "medium" },
     "questioner": { "harness": "codex", "effort": "medium" },
     "answerer": { "harness": "claude-code", "model": "opus", "effort": "high" },
+    "batch-answerer": { "harness": "claude-code", "model": "sonnet", "effort": "high" },
     "answer-checker": { "harness": "codex", "effort": "medium" }
   },
   "supervisor": {

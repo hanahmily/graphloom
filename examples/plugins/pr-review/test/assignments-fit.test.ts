@@ -8,7 +8,8 @@ import { diagramSpecs, MAX_DIAGRAM_DATA_CHARS } from "../src/diagrams.js";
 import type { Fact } from "../src/detectors.js";
 import type { ClaimTarget } from "../src/claims.js";
 import { planChecker, planReporter, pullText } from "../src/prompts.js";
-import { planAnswerer, planNecessity, planNecessityChecker } from "../src/qaprompts.js";
+import { planAnswerChecker, planAnswerer, planNecessity, planNecessityChecker } from "../src/qaprompts.js";
+import { withParts } from "../src/answers.js";
 import { reporterSections } from "../src/template.js";
 import type { Question } from "../src/questions.js";
 import type { Groundwork } from "../src/groundwork.js";
@@ -156,6 +157,23 @@ describe("a job that would not fit points to a file the plugin writes first", ()
     expect(plan.text).toContain(`${DIR}/${spill.name}`);
     expect(spill.text).toContain("Q900 [existing-equivalent]");
     expect(plan.text).toContain("Questions (900):");
+  });
+
+  it("gives the answer checker a batch of 15 combined questions, each answered in three full parts, within the bound, the answers as a file", () => {
+    const questions: Question[] = Array.from({ length: 15 }, (_, i) => ({ id: `Q${i + 1}`, type: "existing-reuse-common", item: `R${i + 1}`, text: `For the mechanism this change adds (item ${i + 1}): (1) an equivalent; (2) a library; (3) common logic? ${"It adds: pkg.Name (pkg/name.go:10), ".repeat(12)}`, origin: "required", key: `k${i}` }));
+    const search = (n: number) => ({ pattern: `pattern-${n}-${"x".repeat(150)}`, tree: "base" as const, paths: [], ignoreCase: false as const, hits: 0 });
+    const part = (name: "existing-equivalent" | "reuse-library" | "common-logic") => ({ part: name, answer: "No equivalent was found; the searches show none. ".repeat(30), status: "answered" as const, none_found: true, citations: Array.from({ length: 12 }, (_, k) => ({ path: `pkg/file${k}.go`, tree: "base" as const, start: 1, end: 9, quote: "q".repeat(300) })), searches: Array.from({ length: 12 }, (_, k) => search(k)), inventory: [] });
+    const answers = new Map(questions.map((q) => [q.id, withParts({ question: q.id, answer: "summary ".repeat(40), status: "answered", none_found: false, citations: [], searches: [], inventory: [], metrics: [], proposal: { kind: "none", splits: [], testFile: "", testName: "", cases: [], assertion: "" }, parts: (["existing-equivalent", "reuse-library", "common-logic"] as const).map(part) })] as const));
+    const groundwork = { symbols: [], searches: new Map(), candidates: [], prSimilar: [], inventory: { dependencies: [], packages: [], truncated: [] }, testMap: new Map(), notes: [] } as unknown as Groundwork;
+    const plan = planAnswerChecker({ pr: PR, snapshot: pull, groundwork, questions, answers, retry: false, mountedDirs: [], reviewDir: DIR });
+    expect(plan.text.length).toBeLessThanOrEqual(ASSIGNMENT_BUDGET_CHARS);
+    const spill = plan.spills.find((x) => x.name.startsWith("answers-"))!;
+    expect(plan.text).toContain(`${DIR}/${spill.name}`);
+    expect(spill.text).toContain("PART reuse-library");
+    expect(spill.text).toContain("Q15 [existing-reuse-common]");
+    const asked = planAnswerer({ pr: PR, snapshot: pull, view: { items: [], records: [] }, groundwork, questions, kind: "first", feedback: [], mountedDirs: [], reviewDir: DIR });
+    expect(asked.text.length).toBeLessThanOrEqual(ASSIGNMENT_BUDGET_CHARS);
+    expect(asked.text).toContain("Q15 [existing-reuse-common]");
   });
 
   it("gives N1's checker the whole answer as a file when it is long", () => {

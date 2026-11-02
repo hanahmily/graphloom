@@ -50,9 +50,22 @@ export interface ReportDoc {
   measurements: { tools?: string; coverage?: string[]; mutation?: string; records?: MetricsRecord[]; none?: string };
 }
 
+interface QaPart {
+  part: string;
+  answer: string;
+  status: string;
+  none_found?: boolean;
+  citations?: Array<{ path: string; tree: string; start: number; end: number; quote: string }>;
+  searches?: MeasuredSearch[];
+  inventory?: Array<{ name: string; version: string }>;
+  check?: { verdict: string; note: string; searches?: MeasuredSearch[] };
+}
+
 interface QaAnswer {
   answer: string;
   status: string;
+  /** The three labelled parts of a combined existence/reuse/common-logic answer (design §7.6). */
+  parts?: QaPart[];
   none_found?: boolean;
   citations?: Array<{ path: string; tree: string; start: number; end: number; quote: string }>;
   searches?: MeasuredSearch[];
@@ -333,7 +346,7 @@ function openQuestionsHtml(i: HtmlInput): string {
   const sel = openQuestions(qa.questions, { id: NECESSITY_ID, conclusion: n1 });
   const rows = sel.open.map((q) => {
     const status = q.answer?.status ?? "not answered";
-    return `<li><a href="${APPENDIX_HREF}#q-${esc(q.id)}"><strong>${esc(q.id)}</strong></a> <span class="muted">[${esc(q.type)}]</span> ${badge(STATUS_CLASS[status] ?? "grey", status)} ${esc(clip(q.text, 200))}${q.answer !== undefined ? ` <div class="muted">${esc(clip(q.answer.answer, 240))}</div>` : ""}</li>`;
+    return `<li><a href="${APPENDIX_HREF}#q-${esc(q.id)}"><strong>${esc(q.id)}</strong></a> <span class="muted">[${esc(q.type)}]</span> ${badge(STATUS_CLASS[status] ?? "grey", status)} ${esc(clip(q.text, 200))}${q.answer !== undefined ? ` <div class="muted">${esc(clip(q.answer.answer, 240))}</div>${(q.answer.parts ?? []).length > 0 ? `<ul class="plain">${(q.answer.parts ?? []).map((p) => `<li>${esc(PART_TITLES[p.part] ?? p.part)} ${badge(STATUS_CLASS[p.status] ?? "grey", p.status)} <span class="muted">${esc(clip(p.answer, 200))}</span></li>`).join("")}</ul>` : ""}` : ""}</li>`;
   });
   const body = [
     sel.open.length === 0 ? para("No question needs a person.") : `<ul class="plain open">${rows.join("")}</ul>`,
@@ -474,6 +487,25 @@ function searchHtml(s: MeasuredSearch): string {
   return `<li><code>${esc(clip(s.pattern, 120))}</code> <span class="muted">(${esc(searchWhere(s))}) → ${esc(result)}</span></li>`;
 }
 
+const PART_TITLES: Record<string, string> = { "existing-equivalent": "Existing equivalent", "reuse-library": "Reusable library", "common-logic": "Common logic" };
+
+/** The evidence and checker line of an answer or of one part of it. */
+function evidenceHtml(a: Pick<QaPart, "citations" | "searches" | "inventory" | "check">, g: Github): string {
+  const check = a.check;
+  const verdict = check === undefined ? "" : check.verdict === "downgraded" ? `downgraded to needs author${check.note !== "" ? ` (${check.note})` : ""}` : `${check.verdict}${check.note !== "" ? `: ${check.note}` : ""}`;
+  return [
+    (a.citations ?? []).length > 0 ? `<p class="cites">Cites ${(a.citations ?? []).map((c) => `${citeLink(g, c)}${c.quote.trim() !== "" ? ` <q>${esc(clip(c.quote, 140))}</q>` : ""}`).join(" ")}</p>` : "",
+    (a.searches ?? []).length > 0 ? `<details class="steps"><summary>Searches (${(a.searches ?? []).length})</summary><ul class="plain">${(a.searches ?? []).map(searchHtml).join("")}</ul></details>` : "",
+    (a.inventory ?? []).length > 0 ? `<p class="muted">Inventory: ${(a.inventory ?? []).map((d) => esc(`${d.name}@${d.version}`)).join(", ")}</p>` : "",
+    check !== undefined ? `<p class="muted">Checker: ${esc(verdict)}.${(check.searches ?? []).length > 0 ? ` Its own searches: ${(check.searches ?? []).map((s) => esc(clip(s.pattern, 60))).join("; ")}.` : ""}</p>` : "",
+  ].join("");
+}
+
+/** A combined answer's three parts, each with its status, text and evidence (design §7.6). */
+function partsHtml(parts: readonly QaPart[], g: Github): string {
+  return `<div class="parts">${parts.map((p) => `<div class="part"><p><strong>${esc(PART_TITLES[p.part] ?? p.part)}</strong> ${badge(STATUS_CLASS[p.status] ?? "grey", p.status)}${p.none_found === true ? ' <span class="muted">none found</span>' : ""}</p><p>${esc(p.answer)}</p>${evidenceHtml(p, g)}</div>`).join("")}</div>`;
+}
+
 function answerHtml(a: QaAnswer, g: Github): string {
   const p = a.proposal;
   const proposal =
@@ -484,16 +516,12 @@ function answerHtml(a: QaAnswer, g: Github): string {
         : p.kind === "test"
           ? `<p>Proposal: <code>${esc(p.testName ?? "")}</code> in ${esc(p.testFile ?? "")}${(p.cases ?? []).length > 0 ? `, cases ${(p.cases ?? []).map((c) => `${esc(c.input)} (${esc(c.branches)})`).join("; ")}` : ""}</p>`
           : `<p>Proposal: ${esc(p.assertion ?? "")}</p>`;
-  const check = a.check;
-  const verdict = check === undefined ? "" : check.verdict === "downgraded" ? `downgraded to needs author${check.note !== "" ? ` (${check.note})` : ""}` : `${check.verdict}${check.note !== "" ? `: ${check.note}` : ""}`;
   return [
     `<p>${esc(a.answer)}</p>`,
-    (a.citations ?? []).length > 0 ? `<p class="cites">Cites ${(a.citations ?? []).map((c) => `${citeLink(g, c)}${c.quote.trim() !== "" ? ` <q>${esc(clip(c.quote, 140))}</q>` : ""}`).join(" ")}</p>` : "",
-    (a.searches ?? []).length > 0 ? `<details class="steps"><summary>Searches (${(a.searches ?? []).length})</summary><ul class="plain">${(a.searches ?? []).map(searchHtml).join("")}</ul></details>` : "",
-    (a.inventory ?? []).length > 0 ? `<p class="muted">Inventory: ${(a.inventory ?? []).map((d) => esc(`${d.name}@${d.version}`)).join(", ")}</p>` : "",
+    (a.parts ?? []).length > 0 ? partsHtml(a.parts ?? [], g) : evidenceHtml(a, g),
     (a.metrics ?? []).length > 0 ? `<p class="muted">Metrics: ${(a.metrics ?? []).map((m) => esc(`${m.function} ${m.name} ${m.value}`)).join(", ")}</p>` : "",
     proposal,
-    check !== undefined ? `<p class="muted">Checker: ${esc(verdict)}.${(check.searches ?? []).length > 0 ? ` Its own searches: ${(check.searches ?? []).map((s) => esc(clip(s.pattern, 60))).join("; ")}.` : ""}</p>` : "",
+    (a.parts ?? []).length > 0 && a.check !== undefined ? `<p class="muted">Checker: ${esc(a.check.verdict === "downgraded" ? "downgraded to needs author" : a.check.verdict)}${a.check.note !== "" ? ` (${esc(a.check.note)})` : ""}.</p>` : "",
     (a.notes ?? []).length > 0 ? `<p class="muted">Note: ${esc((a.notes ?? []).join("; "))}.</p>` : "",
     (a.history ?? []).length > 1 ? `<p class="muted">Statements before the correction: ${(a.history ?? []).map((h, n) => `${n === 0 ? "first" : "corrected"} (${esc(h.status)}): “${esc(clip(h.answer, 160))}”`).join("; ")}.</p>` : "",
   ].join("");

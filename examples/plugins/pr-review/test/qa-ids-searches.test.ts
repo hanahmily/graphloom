@@ -66,7 +66,7 @@ describe("the answer checker's and the answerer's ids are read tolerantly, and n
   const ctx = contextOf("missing-test");
   const questions = afterNecessity(questionSet(ctx, undefined));
   const answers = new Map(questions.map((x) => [x.id, { question: x.id, none_found: false } as Answer] as const));
-  const verdict = (question: string, over: object = {}) => ({ question, verdict: "supported", note: "", searches: [search("x", { hits: 0 })], principles: [], ...over });
+  const verdict = (question: string, over: object = {}) => ({ question, verdict: "supported", note: "", searches: [search("x", { hits: 0 })], principles: [], parts: [], ...over });
 
   it("matches verdicts keyed with the type or the whole text after the id, and records the normalization", () => {
     const verdicts = questions.map((x) => verdict(`${x.id} [${x.type}] ${x.text}`));
@@ -88,7 +88,7 @@ describe("the answer checker's and the answerer's ids are read tolerantly, and n
   });
 
   it("reads the answerer's answers keyed with the text after the id, and records it", () => {
-    const base = { answer: "a", status: "answered", none_found: false, citations: [], searches: [], inventory: [], metrics: [], proposal: { kind: "none", splits: [], testFile: "", testName: "", cases: [], assertion: "" } };
+    const base = { answer: "a", status: "answered", none_found: false, citations: [], searches: [], inventory: [], metrics: [], proposal: { kind: "none", splits: [], testFile: "", testName: "", cases: [], assertion: "" }, parts: [] };
     const out = { answers: questions.map((x) => ({ ...base, question: `${x.id} [${x.type}] ${x.text}` })) };
     const parsed = parseAnswers(out, new Set(questions.map((x) => x.id)));
     if ("problems" in parsed) throw new Error(parsed.problems.join(";"));

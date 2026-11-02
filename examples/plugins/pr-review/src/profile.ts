@@ -134,8 +134,8 @@ export const MAX_GINKGO_LABEL_FILTER_CHARS = 200;
 /** An argv element's longest text; the whole setup must also fit the coverage command's spec. */
 const MAX_SETUP_ARG_CHARS = 2_000;
 
-export type Role = "reporter" | "diagrammer" | "report-checker" | "questioner" | "answerer" | "answer-checker";
-export const ROLES: readonly Role[] = ["reporter", "diagrammer", "report-checker", "questioner", "answerer", "answer-checker"];
+export type Role = "reporter" | "diagrammer" | "report-checker" | "questioner" | "answerer" | "batch-answerer" | "answer-checker";
+export const ROLES: readonly Role[] = ["reporter", "diagrammer", "report-checker", "questioner", "answerer", "batch-answerer", "answer-checker"];
 
 /** The harness each role defaults to (design §13.1). */
 const DEFAULT_ROLES: Record<Role, string> = {
@@ -145,6 +145,8 @@ const DEFAULT_ROLES: Record<Role, string> = {
   "report-checker": "codex",
   questioner: "codex",
   answerer: "claude-code",
+  // Optional: absent, it takes the answerer's harness, model and effort too (checkRoles).
+  "batch-answerer": "claude-code",
   "answer-checker": "codex",
 };
 
@@ -154,6 +156,7 @@ export const DISTINCT_PAIRS: ReadonlyArray<readonly [Role, Role]> = [
   ["questioner", "reporter"],
   ["answerer", "questioner"],
   ["answer-checker", "answerer"],
+  ["answer-checker", "batch-answerer"],
 ];
 
 /** What a role asks of its harness beyond which one: either may be absent, which inherits the harness's own. */
@@ -605,8 +608,14 @@ function checkRoles(raw: unknown): { roles: Record<Role, string>; settings: Part
     roles.diagrammer = roles.reporter;
     if (settings.reporter !== undefined) settings.diagrammer = { ...settings.reporter };
   }
-  // The maintainer opens the answerer's session (design §13.1), and a Pi session has no interactive restore.
+  // The optional batch-answerer (the answer batches of large mode, design §7.6) falls back the same way, to the answerer's harness, model and effort.
+  if (h["batch-answerer"] === undefined) {
+    roles["batch-answerer"] = roles.answerer;
+    if (settings.answerer !== undefined) settings["batch-answerer"] = { ...settings.answerer };
+  }
+  // The maintainer opens the answerer's session (design §13.1; in large mode the batch-answerer's), and a Pi session has no interactive restore.
   need(roles.answerer !== "pi", 'harnesses.answerer must be claude-code or codex: a Pi session cannot be opened by the maintainer, so the review layer could not continue from it');
+  need(roles["batch-answerer"] !== "pi", 'harnesses.batch-answerer must be claude-code or codex: a Pi session cannot be opened by the maintainer, so the review layer could not continue from it');
   for (const [checked, author] of DISTINCT_PAIRS) {
     need(roles[checked] !== roles[author], `harnesses.${checked} must differ from harnesses.${author} (both are ${roles[checked]}): an artifact is checked on a harness other than its author's`);
   }

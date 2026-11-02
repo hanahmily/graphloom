@@ -176,23 +176,30 @@ describe("a large pull request, reported at a high level (design §6.9)", () => 
     expect(sim.receipts.filter((r) => r.stageId === "answers").every((r) => r.valid)).toBe(true);
   });
 
-  it("asks exactly the high-level questions, even though functions exceed the limits: N1, then per change item the trio, purpose and missing-test", () => {
+  it("asks exactly the high-level questions, even though functions exceed the limits: N1, then per change item the one combined question, purpose and missing-test", () => {
     const q = qa(sim);
-    const questions = q.questions as Array<{ id: string; type: string; item: string; symbol?: string; text: string }>;
+    const questions = q.questions as Array<{ id: string; type: string; item: string; symbol?: string; text: string; answer?: { status: string; parts?: Array<{ part: string; status: string }> } }>;
     const types = new Set(questions.filter((x) => x.id !== "N1").map((x) => x.type));
-    expect([...types].sort()).toEqual(["common-logic", "existing-equivalent", "missing-test", "purpose", "reuse-library"]);
+    // The three separate types are never asked in large mode: the combined question replaces them.
+    expect([...types].sort()).toEqual(["existing-reuse-common", "missing-test", "purpose"]);
     expect(questions[0]!.id).toBe("N1");
     // Not asked in large mode: split-function, complexity-coverage, anything per symbol or per function.
     expect(questions.filter((x) => x.type === "split-function" || x.type === "complexity-coverage" || x.type === "weak-test")).toEqual([]);
     expect(questions.filter((x) => x.symbol !== undefined)).toEqual([]);
     // Once per change item, about the mechanism, naming the item's new exported symbols.
-    const itemsWithSymbols = new Set(questions.filter((x) => x.type === "existing-equivalent").map((x) => x.item));
-    for (const type of ["existing-equivalent", "reuse-library", "common-logic"]) {
-      const of = questions.filter((x) => x.type === type);
-      expect(of.map((x) => x.item).sort()).toEqual([...itemsWithSymbols].sort());
+    const combined = questions.filter((x) => x.type === "existing-reuse-common");
+    expect(combined.length).toBeGreaterThan(0);
+    expect(new Set(combined.map((x) => x.item)).size).toBe(combined.length);
+    const itemQuestion = questions.find((x) => x.type === "existing-reuse-common" && x.text.includes("alpha.Alpha1"))!;
+    expect(itemQuestion.text).toContain("alpha.Alpha6");
+    // It asks all three: an equivalent, a library, common logic.
+    expect(itemQuestion.text).toMatch(/already have the same or an equivalent.*existing internal package or an already-declared third-party library.*duplicate logic/s);
+    // Each is answered in three labelled parts, and the question's status is the weakest of them.
+    for (const c of combined) {
+      expect(c.answer!.parts!.map((p) => p.part)).toEqual(["existing-equivalent", "reuse-library", "common-logic"]);
+      const order = ["answered", "partially answered", "needs author"];
+      expect(c.answer!.status).toBe(c.answer!.parts!.map((p) => p.status).sort((a, b) => order.indexOf(b) - order.indexOf(a))[0]);
     }
-    const itemTrio = questions.find((x) => x.type === "existing-equivalent" && x.text.includes("alpha.Alpha1"))!;
-    expect(itemTrio.text).toContain("alpha.Alpha6");
     const unexported = questions.find((x) => x.text.includes("beta.Beta"))!;
     expect(unexported.text).toMatch(/1 unexported symbol\(s\)/);
     expect(unexported.text).not.toContain("beta.twice");
@@ -384,8 +391,9 @@ describe("the budget pre-check before the reporter job (design §6.9)", () => {
   it("counts one reporter, one check and the quote commands, not an area's jobs, and is covered by the default budgets for a ten-area pull request", () => {
     const defaults = definitionFor(profileOf()).defaultBudgets!;
     const ten = largeNeeds(10);
-    // 2 (reporter, check) + 1 questioner + 2 N1 + 7 batches of 2 + 2 diagrams = 21 agent invocations; 4 + 1 + 4 + 35 + 34 + 4 + 4 jobs.
-    expect(ten).toMatchObject({ areas: 10, questions: 100, batches: 7, agentInvocations: 21, jobs: 81, decisions: 93 });
+    // Three questions per item (purpose, the combined existing-reuse-common, missing-test): 60 questions in 4 batches.
+    // 2 (reporter, check) + 1 questioner + 2 N1 + 4 batches of 2 + 2 diagrams = 15 agent invocations; 2 + 1 + 1 + 4 + 20 + 34 + 4 jobs.
+    expect(ten).toMatchObject({ areas: 10, questions: 60, batches: 4, agentInvocations: 15, jobs: 66, decisions: 78 });
     expect(largeNeeds(1).jobs).toBeLessThan(ten.jobs);
     expect(budgetShortfall(ten, { agentInvocations: defaults.agentInvocations!, jobs: defaults.jobs!, decisions: defaults.decisions! })).toBeUndefined();
     expect(budgetShortfall(largeNeeds(100), { agentInvocations: defaults.agentInvocations!, jobs: defaults.jobs!, decisions: defaults.decisions! })).toContain("budgets.jobs");
@@ -443,7 +451,8 @@ describe("the limits (design §6.9)", () => {
     const q = qa(sim);
     expect(q.mode).toBe("large");
     expect(q.modeReasons).toEqual([{ limit: "maxNewSymbols", value: 8, max: 3 }]);
-    expect(q.questions.filter((x: { type: string; symbol?: string }) => x.type === "existing-equivalent" && x.symbol === undefined)).toHaveLength(2);
+    expect(q.questions.filter((x: { type: string; symbol?: string }) => x.type === "existing-reuse-common" && x.symbol === undefined)).toHaveLength(2);
+    expect(q.questions.filter((x: { type: string }) => ["existing-equivalent", "reuse-library", "common-logic"].includes(x.type))).toEqual([]);
   });
 });
 
@@ -657,6 +666,45 @@ describe("the item limit and the roles of large mode", () => {
     expect(options(agents(sim, "change-report-v1")[0]!)).toEqual({ model: "opus", effort: "high" });
     for (const j of sim.jobs.filter((x) => x.resultSchema === "claim-check-v1")) expect(options(j)).toEqual({ effort: "medium" });
     expect(options(agents(std, "change-report-v1")[0]!)).toEqual({ model: "opus", effort: "high" });
+  });
+
+  it("runs the answer batches on the batch-answerer role (sonnet, high), N1 on the answerer (opus, high), and the checkers on the answer-checker, on another harness", () => {
+    const batches = agents(sim, "answers-v1");
+    expect(batches.length).toBeGreaterThan(0);
+    for (const j of batches) {
+      expect(j.stageId).toBe("answers");
+      expect(options(j)).toEqual({ model: "sonnet", effort: "high" });
+    }
+    for (const j of agents(sim, "necessity-v1")) expect(options(j)).toEqual({ model: "opus", effort: "high" });
+    const checkers = sim.jobs.filter((x) => x.resultSchema === "answer-check-v1");
+    expect(checkers.length).toBeGreaterThan(batches.length);
+    for (const j of checkers) expect(harnessOf(j)).not.toBe(harnessOf(batches[0]!));
+    // The batches continue one session: the batch-answerer's, which `session open --stage answers` forks.
+    expect(batches[0]!.continueFrom).toBeUndefined();
+    expect(new Set(batches.map((j) => j.jobId))).toEqual(new Set(["answerer"]));
+  });
+
+  it("uses the batch-answerer only in large mode: a standard run's answers stay on the answerer", () => {
+    for (const j of agents(std, "answers-v1")) expect(options(j)).toEqual({ model: "opus", effort: "high" });
+    expect(agents(std, "answers-v1").length).toBeGreaterThan(0);
+  });
+
+  it("falls back to the answerer's harness, model and effort when no batch-answerer is named", () => {
+    const harnesses = { reporter: { harness: "claude-code", model: "opus", effort: "high" }, "report-checker": "codex", questioner: "codex", answerer: { harness: "claude-code", model: "haiku", effort: "low" }, "answer-checker": "codex" };
+    const fallback = run(undefined, { ...LARGE, harnesses });
+    expect(stopOf(fallback)).toMatchObject({ reason: "report ready" });
+    const batches = agents(fallback, "answers-v1");
+    expect(batches.length).toBeGreaterThan(0);
+    for (const j of batches) {
+      expect(harnessOf(j)).toBe("claude-code");
+      expect(options(j)).toEqual({ model: "haiku", effort: "low" });
+    }
+    for (const j of agents(fallback, "necessity-v1")) expect(options(j)).toEqual({ model: "haiku", effort: "low" });
+  });
+
+  it("holds the batch-answerer to the distinct pair with the answer-checker", () => {
+    const harnesses = { reporter: "codex", "report-checker": "claude-code", questioner: "claude-code", answerer: "codex", "batch-answerer": "claude-code", "answer-checker": "claude-code" };
+    expect(() => profileOf({ harnesses })).toThrow(/answer-checker must differ from harnesses.batch-answerer/);
   });
 });
 
