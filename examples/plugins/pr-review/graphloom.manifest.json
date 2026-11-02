@@ -16,7 +16,7 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "71e16375a29e7e5db6633a8c9126578220734b35e530a920485fcaff7b119fe7",
+    "sourceTree": "20eb51b149d3df5accb25d35e90221530ff3976f10c2a943d0c83cddda015461",
     "packageLock": "161ed552815dbe9b2c78580f3bfebc6562a62c6eb06ea7d3ad1fcf70fd86447a",
     "files": {
       "package.json": "3f6bbf796f12a261375d265ea6836f28e0bcee5f53ecbc3d4cbabcabf5a315c8",
@@ -57,7 +57,7 @@
       "src/analysis.ts": "a53ccde6ccde567cdcdfba82b4a0775b67c30a8c3381a176dc3c2b37fb5a8ec5",
       "src/answers.ts": "cab7297c32b576e27dd776d640a0a2ac5fedc32b77b73e0f2285453647e1cafe",
       "src/areas.ts": "660a2790e2d233fd9a6583ea6e81eaf099b5e14ec1e1bb41362e1a73b896982a",
-      "src/aspects.ts": "b0859110e6a03b72e496d48c3ded3c6a6cd0f96c4672fb3c8d5836ccb172a26a",
+      "src/aspects.ts": "cdb076db1be548427a94b30ce18fe4330da2365f50e166cd3cbf5e9733c4b4ac",
       "src/basetree.ts": "09f12dd8efb9acd20a48a62ae029f8c05b676c4eaa77bdfdabe18f283b425450",
       "src/briefing.ts": "60bdc883d44d6d07d1b7d510e54ccaffb3aa4da0d903cb49bd922435b5ca60d5",
       "src/cites.ts": "aac861a7321fb094c1e6a199b1c53c34dddb98df29bc2e9812ca4d4ad6f28725",
@@ -127,7 +127,7 @@
       "src/request.ts": "a41061d3921d0a431f2eb3b858ed7683ddfb760d72ca2f89c5660200309ea5c4",
       "src/review.ts": "db3a79d552f790be0d21656d1d827fccfefb6d0a57986a17eec919b6c0901833",
       "src/reviewdraft.ts": "21212fbeaa2754244740e4f8cd4e704bfdad5ca83a28774b638c7c7f3e7e8682",
-      "src/reviewprompts.ts": "03c0a2e8d03d3e942d61865ec58cd508b9a1b8eaf80b4d4d0b7e6323e387750f",
+      "src/reviewprompts.ts": "02a98e852620d81f8125a6e1441eddc345444d9f8c69cd31db7e14f9014011e9",
       "src/reviewscope.ts": "606c7e41bcb0533019ef2f30d1887c4002dd3db3999a8cd4422bb7cf12e19b2a",
       "src/reviewvalidators.ts": "bcf3754499c029592af9a2d8428112080a86e6e8b999610a5b1c26482d980eb8",
       "src/scope.ts": "b10065f1409d9855e2d9706485930a7babb417b7afb99cf4be281a6bd7424c89",
@@ -176,7 +176,7 @@
       "test/rehearsal-docs.test.ts": "348ec40ab564e45a023985a48ed4f0139e34fb9f90dc37419a1c886c85cb7890",
       "test/report-analysis.test.ts": "5905c5a7928f11307146d002de7ff472cc17ceba31d17176459a149d040d3f59",
       "test/report.test.ts": "d2586ad91970641d18267741275d675907de1e2978203300f42f774cf76e600e",
-      "test/review-units.test.ts": "38be81378947430cd7279dbde9f5ed48c4568ff350b94d665fcade99da7fc1e2",
+      "test/review-units.test.ts": "5fd8526964c57d85d07240b866b9e6f17ee2496beab46e9e70ef5e2a45b2f52f",
       "test/review.test.ts": "4f171f70dfa43cdf42775168838c8c09b0df2eb6c97fd5291622ad70e56644bc",
       "test/scope.test.ts": "594904c01dde39cf2c3ef211707e9ad853ee79e9840bfbb0e78fe685cbb23611",
       "test/static-batches.test.ts": "d5f9f472c56aec8c3770cc584c1ea3f5cbcec3a67faf095f1e4bc2c4d59a7e7a",

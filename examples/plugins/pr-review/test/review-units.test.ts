@@ -148,10 +148,16 @@ describe("the aspects' rule files", () => {
     expect(doc.rules[0]!.rule).toMatch(/^Aspect: correctness\. Go code: review only this:.*Out of scope:.*A finding outside the correctness aspect is left out\.$/);
   });
 
-  it("take a profile's entries over the shipped ones: the same path replaces, a new one comes before **", () => {
+  it("take a profile's entries over the shipped ones: the same path replaces, a new one comes before every shipped one", () => {
     const rules = effectiveRules("security", [{ path: "**/*.go", rule: "Aspect: security. Go: only unsafe." }, { path: "**/*.proto", rule: "Aspect: security. Proto." }]);
-    expect(rules.map((r) => r.path)).toEqual(["**/*.go", "**/*.ts", "**/*.tsx", "**/*.proto", "**"]);
-    expect(rules[0]!.rule).toBe("Aspect: security. Go: only unsafe.");
+    expect(rules.map((r) => r.path)).toEqual(["**/*.proto", "**/*.go", "**/*.ts", "**/*.tsx", "**"]);
+    expect(rules[1]!.rule).toBe("Aspect: security. Go: only unsafe.");
+  });
+
+  it("let a path-specific profile rule win over the shipped language glob that also matches the file", () => {
+    const text = ruleFileText("security", [{ path: "src/auth/**", rule: "Aspect: security. Auth code: review sessions and tokens only." }]);
+    const g = ruleGroups(text, ["src/auth/login.ts", "src/util/x.ts"]);
+    expect(g.state === "ok" && g.groups.map((x) => [x.path, x.files])).toEqual([["src/auth/**", ["src/auth/login.ts"]], ["**/*.ts", ["src/util/x.ts"]]]);
   });
 
   it("resolve every file of the scope to one entry, and fail on a rule file that is not a custom one or leaves a file unmatched", () => {
@@ -285,5 +291,28 @@ describe("the draft", () => {
     expect(md.indexOf("### Security")).toBeLessThan(md.indexOf("### Maintainability"));
     expect(md).toContain("```suggestion\nsafe()\n```");
     expect(md).toContain("not in the diff (goes in the review body)");
+  });
+});
+
+describe("the findings a reviewer must not raise again", () => {
+  const known = Array.from({ length: 120 }, (_, i) => finding({ id: `F${i + 1}`, content: `finding number ${i + 1} ${"x".repeat(200)}`, path: `pkg/f${i}.go` }));
+  const base = { pr: { mode: "review" as const, owner: "o", repo: "r", number: 1, head: "a".repeat(40) }, snapshot: { pull: { title: "t", body: "b" }, commits: [] } as never, aspect: "correctness" as const, pass: 2, files: ["pkg/a.go"], scopeLine: "the whole pull request", groups: [], summary: "", context: { kind: "seeded" as const, reason: "x" }, feedback: [], reviewDir: "/work/tree/.graphloom/review" };
+
+  it("lists every known finding in a file when they do not fit inline, and tells the reviewer to read it", async () => {
+    const { planReviewer } = await import("../src/reviewprompts.js");
+    const planned = planReviewer({ ...base, known });
+    const spill = planned.spills.find((s) => s.name.startsWith("review-known-findings-"));
+    expect(spill).toBeDefined();
+    for (const f of known) expect(spill!.text).toContain(`${f.id} [`);
+    expect(planned.text).toContain(`/work/tree/.graphloom/review/${spill!.name}`);
+    expect(planned.text).toMatch(/Read that file first, and do not raise again any finding in it/);
+    expect(planned.text).not.toContain("F120 [");
+  });
+
+  it("keeps a short list inline with no file", async () => {
+    const { planReviewer } = await import("../src/reviewprompts.js");
+    const planned = planReviewer({ ...base, known: known.slice(0, 3) });
+    expect(planned.spills.filter((s) => s.name.startsWith("review-known-findings-"))).toEqual([]);
+    expect(planned.text).toContain("F3 [");
   });
 });

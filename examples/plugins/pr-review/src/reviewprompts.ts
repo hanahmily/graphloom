@@ -65,6 +65,10 @@ export function planReviewer(a: ReviewerAssignment): Fitted {
     const conversation = a.summary === "" ? undefined : spillOf("review-conversation", a.summary);
     if (conversation !== undefined && !summaryInline) spills.push(conversation);
     const knownLines = a.known.map(lineOf);
+    // Every known finding stays visible to a fresh session: past the inline budget the whole list is a file the reviewer reads.
+    const knownFull = spillOf("review-known-findings", a.known.map((f) => lineOf(f)).join("\n"));
+    const knownInline = knownLines.join("\n").length <= KNOWN_INLINE_CHARS * scale;
+    if (a.known.length > 0 && !knownInline) spills.push(knownFull);
     const fb = feedbackBlock(a.feedback, scale, a.reviewDir);
     spills.push(...fb.spills);
     const text = [
@@ -97,7 +101,12 @@ export function planReviewer(a: ReviewerAssignment): Fitted {
         ? [
             "",
             `Findings already raised in this review (do not raise them again):`,
-            ...fitLines(knownLines, KNOWN_INLINE_CHARS * scale, (n) => `… and ${n} more findings already raised`),
+            ...(knownInline
+              ? knownLines
+              : [
+                  `There are ${a.known.length} of them, too many to list in full here: every one, with its id, is in ${reviewFile(a.reviewDir, knownFull.name)}. Read that file first, and do not raise again any finding in it (name it in \`finding\` when you confirm it is still there). The first ones:`,
+                  ...fitLines(knownLines, KNOWN_INLINE_CHARS * scale * 0.5, (n) => `… and ${n} more findings, all listed in ${reviewFile(a.reviewDir, knownFull.name)}`),
+                ]),
           ]
         : []),
       "",

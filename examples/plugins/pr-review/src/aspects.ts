@@ -58,15 +58,20 @@ export function shippedRules(aspect: Aspect): RuleEntry[] {
   return [...RULE_GLOBS.map((g) => ({ path: g.path, rule: ruleText(aspect, g.language) })), { path: "**", rule: ruleText(aspect, undefined) }];
 }
 
-/** The effective entries: the profile's replace the shipped entry with the same `path`, or are added before the final `**`. */
+/**
+ * The effective entries: the profile's replace the shipped entry with the same `path` (in its place), and any other profile
+ * entry goes before every shipped one, in the profile's order, since the first matching entry wins and a path-specific
+ * profile rule (`src/auth/**`) must take precedence over the shipped language globs.
+ */
 export function effectiveRules(aspect: Aspect, overrides: readonly RuleEntry[] = []): RuleEntry[] {
   const out = shippedRules(aspect);
+  const added: RuleEntry[] = [];
   for (const o of overrides) {
     const at = out.findIndex((e) => e.path === o.path);
     if (at >= 0) out[at] = { path: o.path, rule: o.rule };
-    else out.splice(out.length - 1, 0, { path: o.path, rule: o.rule });
+    else added.push({ path: o.path, rule: o.rule });
   }
-  return out;
+  return [...added, ...out];
 }
 
 /** The text of `rules/<aspect>.json`: the format ocr 1.13.3 honors (`merge_system_rule: false` with `path`/`rule` entries). */
