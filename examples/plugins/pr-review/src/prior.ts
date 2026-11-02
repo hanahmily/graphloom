@@ -97,7 +97,8 @@ export function registryOf(ledger: unknown): PriorRegistry {
       ...(str(raw.kind) !== undefined ? { kind: str(raw.kind)! } : {}),
       ...(str(raw.patchId) !== undefined ? { patchId: str(raw.patchId)! } : {}),
       ...(hunk !== undefined ? { hunk } : {}),
-      ...(str(raw.text) !== undefined ? { text: str(raw.text)! } : {}),
+      // A 0.21 ledger recorded the whole text only in `body`, and only for an item whose posted text was compacted.
+      ...((str(raw.text) ?? str(raw.body)) !== undefined ? { text: (str(raw.text) ?? str(raw.body))! } : {}),
       ...(num(gh.reviewId) !== undefined ? { reviewId: num(gh.reviewId)! } : {}),
       ...(gh.commentId === null || num(gh.commentId) !== undefined ? { commentId: (gh.commentId as number | null) } : {}),
       ...(typeof gh.inline === "boolean" ? { inline: gh.inline } : {}),

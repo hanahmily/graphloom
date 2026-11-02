@@ -16,7 +16,7 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "0b3c794a3953440112773da1056829fa0d4e7b8d9335170203fd7871b89e8ec4",
+    "sourceTree": "88569ce30eb63565b3db72d7848cb8b8a814e77523a1e89bcac8a9b9e40becf0",
     "packageLock": "6ba71af10b9d0d39ffa547982c2d11c9bf2f20b5206cae3ee15e0af6a0b7068e",
     "files": {
       "package.json": "e0fde4edb6e3b710a67b68a941637cc4f7da87709e6b66e2af48f54b61601f71",
@@ -106,8 +106,8 @@
       "src/patch.ts": "e8dc3e4f18e01747494da71065bc048c24c331bea417ef7840fa5961084607d0",
       "src/prepare.ts": "7dc5e341b7c51697d42cff4b22c7f5aad3ce3ce0eb77df5330b569a2e041050d",
       "src/principles.ts": "0edbbcc0008172d378364587e5091190f2498a490ab525552aa20b5a10475969",
-      "src/prior.ts": "ba71e4d53856110a94902a811fbd7a1fb045f59a4dcccf82ebb29de389e3001d",
-      "src/priorreview.ts": "210e859e1822749b213e51425cbedce5f4daff2f825cc3b009952de45686489b",
+      "src/prior.ts": "3621d592f5ca3e2d2bc0347628389debdd7d8b78989d1cbf2a84e35cf29a1c9f",
+      "src/priorreview.ts": "5b51f52530ce611137e5ac805a49accdf3194e84d11bc692fe17a16c47847309",
       "src/profile.ts": "53716e77f733273a99d125976eda08506b36cb587e4f48a58d0eb547c3f7ef35",
       "src/prompts.ts": "b1b4b72c212b3636b60946cfb93067e13352278184334b2468a0d06a9254e422",
       "src/proof.ts": "f5a4fdd4626b694644b97368bea1a8dfba465ab510ef612fcaee12fd6d95b59d",
@@ -183,7 +183,7 @@
       "test/rehearsal-docs.test.ts": "348ec40ab564e45a023985a48ed4f0139e34fb9f90dc37419a1c886c85cb7890",
       "test/report-analysis.test.ts": "106ebb6ceef88a3ac3004319f18e4a1ef24fffe711c7190368f11cfdc5d9b25c",
       "test/report.test.ts": "d2586ad91970641d18267741275d675907de1e2978203300f42f774cf76e600e",
-      "test/rereview.test.ts": "747b9c03de75ea181941942c317747fb3727bdd2e656ee8c59ca7824e4d191b9",
+      "test/rereview.test.ts": "930aeb016a362b62d3af083a6a2b9966cdaa233bd97a2055002ecdbd62275a64",
       "test/reuse.test.ts": "2f153341f66ed857253b561c885f50da2b6255c6a791793fea9ae0386b56b75c",
       "test/review-principles.test.ts": "7f3abc02bc6fec3b48ed7efd4eabdb6a0a1b9bc33bbca4ca0ca32671147b998e",
       "test/review-units.test.ts": "0c41c47a9aef9cd9a35c0130e2ee49fb103a1c2aa26ed898e92169145b4d925c",

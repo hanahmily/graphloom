@@ -41,6 +41,11 @@ export function aspectPrior(registry: PriorRegistry, aspect: Aspect, files: read
       out.settled.push({ id: item.id, status: "fixed", how: "gone", reason: "its file is no longer changed by the pull request", ...base, outdated: false });
       continue;
     }
+    // A finding with no recorded claim (a 0.21 ledger kept the text only for a compacted item) cannot be judged by a reviewer, and its `fixed` could close it unchecked: it stays open.
+    if ((item.text ?? "").trim() === "") {
+      out.settled.push({ id: item.id, status: "open", how: "carried", reason: "not re-checked: no recorded claim", ...base, outdated: false });
+      continue;
+    }
     if (!scope.has(item.path)) {
       out.settled.push({ id: item.id, status: "open", how: "carried", reason: "its file is outside this review's scope, so it was not re-checked", ...base, outdated: false });
       continue;

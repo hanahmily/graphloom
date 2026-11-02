@@ -522,9 +522,9 @@ describe("a pull request reviewed on three heads", () => {
     expect(aspectOf(c, "maintainability").passes).toHaveLength(2);
   });
 
-  it("head 3 of a 0.21 ledger: a finding recorded without its aspect goes to the maintainability sweep and is judged there", () => {
+  it("head 3 of a 0.21 ledger: a finding recorded without its aspect goes to the maintainability sweep, with its legacy body as the claim, and is judged there", () => {
     // What a 0.21 run left: no aspect, no key, no anchor, a single line.
-    const old21 = { schema: "graphloom-pr-ledger-v1", heads: [{ sha: hexOf("a"), reviewed: true }], qa: [], findings: [{ head: hexOf("a"), id: "F3", origin: "round2", path: "pkg/schema/ttl.go", line: 16, state: "open", github: { head: hexOf("a"), reviewId: 9, commentId: 55, inline: true } }] };
+    const old21 = { schema: "graphloom-pr-ledger-v1", heads: [{ sha: hexOf("a"), reviewed: true }], qa: [], findings: [{ head: hexOf("a"), id: "F3", origin: "round2", path: "pkg/schema/ttl.go", line: 16, state: "open", body: "The loop that adds 0+1+2 to n has no purpose a reader can find.", github: { head: hexOf("a"), reviewId: 9, commentId: 55, inline: true } }] };
     const at = { sha: hexOf("d"), extract: { "ledger-prior": priorChunkText(JSON.stringify(old21), 0) } };
     const c = end(onLedger("review-layer", at, reviewers([[1, []], [1, [], [{ finding: "F3", status: "fixed", reason: "gone" }]], [1, []]])));
     expect(aspectOf(c, "maintainability").prior).toMatchObject([{ id: "F3", status: "fixed" }]);
@@ -536,6 +536,19 @@ describe("a pull request reviewed on three heads", () => {
     expect(aspectOf(open, "maintainability").prior).toMatchObject([{ id: "F3", status: "open", outdated: true }]);
     expect(body(open)).toContain("- F3: still open ([earlier comment](https://github.com/apache/skywalking-banyandb/pull/7#discussion_r55))");
     expect(open.github.creates[0]!.comments).toEqual([]);
+  });
+
+  it("head 3 of a 0.21 ledger: a finding with no recorded claim is not sent to a reviewer; it stays open, listed with its link and the reason", () => {
+    const old21 = { schema: "graphloom-pr-ledger-v1", heads: [{ sha: hexOf("a"), reviewed: true }], qa: [], findings: [{ head: hexOf("a"), id: "F3", origin: "round2", path: "pkg/schema/ttl.go", line: 16, state: "open", github: { head: hexOf("a"), reviewId: 9, commentId: 55, inline: true } }] };
+    const at = { sha: hexOf("d"), extract: { "ledger-prior": priorChunkText(JSON.stringify(old21), 0) } };
+    // The reviewer is given nothing to judge (its `prior` list is empty), so it cannot close the finding unchecked.
+    const c = end(onLedger("review-layer", at, reviewers([[1, []], [1, []], [1, []]])));
+    expect(aspectOf(c, "maintainability").prior).toMatchObject([{ id: "F3", status: "open", how: "carried", reason: "not re-checked: no recorded claim" }]);
+    const asked = c.jobs.filter((j) => j.instruction.startsWith("Review the maintainability")).map((j) => (j.input as { assignment: string }).assignment).join("\n");
+    expect(asked).not.toContain("an earlier review of this pull request raised");
+    expect(body(c).split("\n")[0]).toBe("Changes requested: 1 open");
+    expect(body(c)).toContain("- F3: still open ([earlier comment](https://github.com/apache/skywalking-banyandb/pull/7#discussion_r55)) (not re-checked: no recorded claim)");
+    expect(c.github.creates[0]!.comments).toEqual([]);
   });
 
   it("head 4: a finding that was closed, fixed or dismissed, is not raised again; a comment over its place is dropped before verification", () => {
