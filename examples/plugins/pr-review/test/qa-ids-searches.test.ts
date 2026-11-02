@@ -139,6 +139,15 @@ describe("a search is a structured, valid, re-runnable record", () => {
     expect(pathProblem("rel", "dependency", ["/mod/x"])).toMatch(/inventory/);
   });
 
+  it("accepts an exclusion pathspec, whose glob is checked like any path, and no other magic", () => {
+    for (const ok of [":!*_test.go", ":!*.pb.go", ":^vendor/**", ":(exclude)docs/**"]) expect(pathProblem(ok, "base", []), ok).toBeUndefined();
+    expect(pathProblem(":!", "base", [])).toMatch(/excludes a path that is empty/);
+    expect(pathProblem(":!../x", "head", [])).toMatch(/excludes a path that has a \.\. segment/);
+    expect(pathProblem(":!/etc", "base", [])).toMatch(/excludes a path that is absolute/);
+    expect(pathProblem(":(glob)*.go", "base", [])).toMatch(/only an exclusion/);
+    expect(pathProblem(":!*_test.go", "dependency", ["/mod/x"])).toMatch(/inventory/);
+  });
+
   it("names every problem of a search in the answer's deterministic check, and so sends it back", () => {
     const ctx = contextOf("complex-function");
     const set = questionSet(ctx, undefined);
@@ -161,6 +170,14 @@ describe("a search is a structured, valid, re-runnable record", () => {
     expect(text([search("ok", { tree: "dependency", paths: ["/etc"] })])).toMatch(/absolute directory inside one of the inventory/);
     expect(searchProblems(search("ok"), "Q1", [])).toEqual([]);
     expect(text([search("ok")])).not.toMatch(/regular expression|path/);
+    expect(text([search("ok", { paths: ["pkg/**", ":!*_test.go", ":!*.pb.go"] })])).not.toMatch(/path/);
+    // The existence/reuse/common-logic answer covers three concerns in one statement: it has twice the room.
+    const reuse = set.questions.find((x) => x.type === "existing-reuse-common");
+    expect(reuse).toBeDefined();
+    const sized = (id: string, n: number) => answerProblems([{ ...answer([search("ok")]), question: id, answer: "x".repeat(n) }], actx, new Set([id])).join("|");
+    expect(sized(reuse!.id, 3_000)).not.toMatch(/characters, more than/);
+    expect(sized(reuse!.id, 4_100)).toMatch(/4100 characters, more than 4000/);
+    expect(sized(q.id, 2_100)).toMatch(/2100 characters, more than 2000/);
   });
 });
 
