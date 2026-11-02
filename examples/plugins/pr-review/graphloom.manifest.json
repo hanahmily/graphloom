@@ -16,7 +16,7 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "fd7758a2f241567d7f7e4177d8937046c0c7383a7176e28786e94f8f711b119e",
+    "sourceTree": "610a0d5f26fdfae42b38688186a031bb66ac6d5b133d25bf00c6810fd5477cf9",
     "packageLock": "a05f07c95ad84f0a0ed9d02b8d78555c7b040bcf35283519a623d4b4c3ced43d",
     "files": {
       "package.json": "5d3e46773fdfc92de27717d63b434180c69938f53ccc77244a3c03d27b164ccd",
@@ -76,7 +76,7 @@
       "src/fit.ts": "71f7e1484bf1abc6b73441a230a7fad5d268a2164723c23ff09ea87437b07bba",
       "src/flow.ts": "a83792504b417f9554861a954948b7b2eaf7b1cd33dddb7166b2e7222cc3cbb9",
       "src/flowlayout.ts": "18175cd7867230794ee384eeae0719ce29b61cb32004f471d6b9c932013dcc94",
-      "src/graph.ts": "c3d2961eb7435528163f6c0a1ae890095c6d4ace4c0ee062665f35fa644b4eb7",
+      "src/graph.ts": "5b6ef3e80d24ba9e0a0d2dd75e2565bbbd1dd58b2b22a99ae1458aa733bd5a01",
       "src/groundwork.ts": "5a12d35f33eee1ef6a136449a48e4dccd1c0e6971a92a01e814d6c5dabfeabd7",
       "src/html.ts": "2812d52f1b563bb923ae7e1a8fe39534a3e66b457c27c21c6e929b9ccfd1e440",
       "src/htmlsvg.ts": "8516c3d13419eab655f9d1ddf4cfb8f386cdd49e6bfd0ffd497b64dfc96b6b70",

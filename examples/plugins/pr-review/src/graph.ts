@@ -1101,7 +1101,7 @@ function review(ctx: Context, view: RunView): GraphDecision {
   // The design principles that apply to the review's scope, and what round 1 concluded of them (design §8.1); none when the profile names no file or none applies.
   const configured = profile.questions.principles;
   const reading = configured !== undefined && base !== undefined ? principlesReading(view.evidence, configured, base) : undefined;
-  const scoped: PrinciplesContext | undefined = reading?.state === "read" ? principlesContext(reading.read, s.files.map((path) => ({ path }))) : undefined;
+  const scoped: PrinciplesContext | undefined = reading?.state === "read" ? principlesContext(reading.read, analysis.snapshot.files.filter((f) => files.has(f.path))) : undefined;
   const reviewPrinciples = scoped !== undefined && scoped.read.file === "present" && scoped.applicable.length > 0 ? scoped : undefined;
   const principleIds = new Set((reviewPrinciples?.applicable ?? []).map((p) => p.id));
   const necessityRecord = recordedNecessityJson(view.evidence);
