@@ -2,8 +2,8 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 /**
- * The validators of the Review and Draft stages. Both pass on the operator's decline of the review layer (the run is
- * report only, as their requirements' statements say); otherwise they judge the review's records, which plugin code wrote
+ * The validators of the round-1 gate, the Review, Draft and Publish stages. Review and Draft pass when round 1 found issues
+ * (the run publishes round 1 and ends, as their requirements' statements say); otherwise they judge the review's records, which plugin code wrote
  * from the agent evidence, against the rules a record must keep: the scope and base were recorded with a reason, every
  * rule file is the effective one and covers the scope, every aspect swept at least once with an independent verifier, and
  * every finding was judged. The draft is recomputed from those records and must be what was written.
@@ -11,13 +11,14 @@
 import type { ValidationInput, ValidationResult, Validator } from "@graphloom/sdk";
 import { ASPECTS, ruleFileText, type Aspect } from "./aspects.js";
 import { analyze, evidencePull } from "./analysis.js";
-import { REVIEW_LAYER_APPROVAL } from "./constants.js";
 import { htmlProblems } from "./html.js";
 import { pinnedBase } from "./commands.js";
 import { parseProfile, ProfileError, reviewerRole, verifierRole, type Profile } from "./profile.js";
 import { MAX_SWEEP_PASSES, type AspectRecord } from "./review.js";
-import { draftWrites, recordedAspect, recordedRules, recordedScope, writtenDraftFiles } from "./reviewdraft.js";
-import { approvalOf, sha256, summaryFor } from "./reviewscope.js";
+import { FRESH_START_REASON } from "./reviewscope.js";
+import { draftWrites, recordedAspect, recordedRound1, recordedRules, recordedScope, round1Computed, writtenDraftFiles } from "./reviewdraft.js";
+import { round1Json } from "./round1.js";
+import { publishFlow, publishPlan } from "./publish.js";
 import { secretFindings } from "./secrets.js";
 
 const passed = (reason: string): ValidationResult => ({ status: "passed", reason });
@@ -39,7 +40,11 @@ function profiled(evaluate: (input: ValidationInput, profile: Profile) => Valida
   };
 }
 
-const declined = (input: ValidationInput): boolean => approvalOf(input.evidence, REVIEW_LAYER_APPROVAL)?.decision === "decline";
+/** Round 1 found issues: the review layer does not run in this run (design §9.4). */
+const blocked = (input: ValidationInput): boolean => {
+  const r = recordedRound1(input.evidence);
+  return r.state === "read" && r.value.issues.length > 0;
+};
 
 /** The problems of one aspect's record against the scope and the profile, empty when it keeps every rule. */
 function aspectProblems(r: AspectRecord, aspect: Aspect, files: number, reason: string, profile: Profile, firstId: number): string[] {
@@ -70,16 +75,14 @@ function aspectProblems(r: AspectRecord, aspect: Aspect, files: number, reason: 
 }
 
 export const codeReview: Validator = profiled((input, profile) => {
-  if (declined(input)) return passed("report only: the operator declined the review layer, so no review was required");
+  if (blocked(input)) return passed("round 1 found issues: they are published and round 2 runs on a later head, so no review was required");
   const scope = recordedScope(input.evidence);
   if (scope.state === "none") return inconclusive("the review has not started: its scope was not recorded");
   if (scope.state === "failed") return failed(scope.reason);
   const s = scope.value;
   if (s.files.length === 0) return failed("the review's scope holds no file");
   if (s.mode === "large" && s.areas.length === 0) return failed("a large pull request's review names no area");
-  if (s.context.kind !== "seeded" || s.context.reason.trim() === "") return failed("the reviewers' session start was not recorded with its reason");
-  const summary = summaryFor(input.evidence, s.base);
-  if (summary.bytes !== s.summary.bytes || sha256(summary.text) !== s.summary.sha256) return failed("the conversation summary the reviewers were seeded with is not what the recorded conversations recompute");
+  if (s.context.kind !== "seeded" || s.context.reason !== FRESH_START_REASON) return failed("the reviewers' session start was not recorded as a fresh session seeded with review.md only");
   const problems: string[] = [];
   let firstId = 1;
   const records: AspectRecord[] = [];
@@ -99,12 +102,12 @@ export const codeReview: Validator = profiled((input, profile) => {
   const findings = records.flatMap((r) => r.findings);
   const count = (state: string): number => findings.filter((f) => f.state === state).length;
   return passed(
-    `${s.files.length} file(s) of ${s.source === "whole" ? "the whole pull request" : `${s.areas.map((a) => a.id).join(", ")} (${s.source === "operator" ? "chosen by the operator" : "cited by the briefing's risks, behavior and compatibility entries"})`} were reviewed for correctness, maintainability and security, every reviewer seeded (${s.context.reason}); ${records.map((r) => `${r.aspect}: ${r.passes.length} pass(es)${r.unsaturated ? " (unsaturated)" : ""}`).join(", ")}; ${findings.length} finding(s), each judged by a verifier on another harness than its reviewer's: ${count("confirmed")} confirmed, ${count("disputed")} disputed, ${count("dismissed")} dismissed`,
+    `${s.files.length} file(s) of ${s.source === "whole" ? "the whole pull request" : `${s.areas.map((a) => a.id).join(", ")} (${s.source === "all-areas" ? "every readable area: the briefing cites none" : "cited by the briefing's risks, behavior and compatibility entries"})`} were reviewed for correctness, maintainability and security (${s.context.reason}); ${records.map((r) => `${r.aspect}: ${r.passes.length} pass(es)${r.unsaturated ? " (unsaturated)" : ""}`).join(", ")}; ${findings.length} finding(s), each judged by a verifier on another harness than its reviewer's: ${count("confirmed")} confirmed, ${count("disputed")} disputed, ${count("dismissed")} dismissed`,
   );
 });
 
 export const draftComposed: Validator = profiled((input, profile) => {
-  if (declined(input)) return passed("report only: the operator declined the review layer, so no draft was required");
+  if (blocked(input)) return passed("round 1 found issues: they are published and round 2 runs on a later head, so no draft was required");
   const pr = evidencePull(input.evidence, profile);
   if (pr === undefined) return inconclusive("the pull request has not been read");
   const a = analyze(input.evidence, profile, pr);
@@ -130,6 +133,43 @@ export const draftComposed: Validator = profiled((input, profile) => {
   const d = w.writes.draft;
   const unanchored = [...d.comments, ...d.judgment].filter((e) => !e.anchored).length;
   return passed(
-    `the draft was composed from the review's records and the Q&A: ${d.comments.filter((c) => c.kind === "finding").length} finding comment(s), ${d.comments.filter((c) => c.kind === "question").length} question(s) for the author, ${d.judgment.length} entr${d.judgment.length === 1 ? "y" : "ies"} for the maintainer's judgment, ${d.notSelected.length} not selected; recommended verdict ${d.recommended}, drafted as ${d.verdict}${unanchored > 0 ? `; ${unanchored} entr${unanchored === 1 ? "y" : "ies"} outside the diff go in the review body` : ""}; draft.json, draft.md and the report files with the Review section recompute from the evidence; nothing was posted`,
+    `the draft was composed from the review's records and the Q&A: ${d.comments.filter((c) => c.kind === "finding").length} finding comment(s), ${d.comments.filter((c) => c.kind === "question").length} question(s) for the author, ${d.judgment.length} entr${d.judgment.length === 1 ? "y" : "ies"} for the maintainer's judgment, ${d.notSelected.length} not selected; recommended verdict ${d.recommended}, drafted as ${d.verdict}${unanchored > 0 ? `; ${unanchored} entr${unanchored === 1 ? "y" : "ies"} outside the diff go in the review body` : ""}; draft.json, draft.md and the report files with the Review section recompute from the evidence; the Publish stage posts the findings`,
   );
+});
+
+export const round1Gated: Validator = profiled((input, profile) => {
+  const pr = evidencePull(input.evidence, profile);
+  if (pr === undefined) return inconclusive("the pull request has not been read");
+  const a = analyze(input.evidence, profile, pr);
+  if (a.state === "pending") return inconclusive(a.reason);
+  if (a.state === "incompatible") return failed(a.problem);
+  const computed = round1Computed(input.evidence, a.analysis, pr);
+  if (computed.state === "pending") return inconclusive(computed.reason);
+  const rec = recordedRound1(input.evidence);
+  if (rec.state === "none") return inconclusive("round 1 has not been recorded");
+  if (rec.state === "failed") return failed(rec.reason);
+  if (round1Json(rec.value) !== round1Json(computed.record)) return failed("the recorded round-1 issues are not what necessity.json and qa.json recompute");
+  const n = computed.record.issues.length;
+  const secrets = secretFindings(round1Json(rec.value));
+  if (secrets.length > 0) return failed(`the round-1 record holds what looks like a credential (${[...new Set(secrets)].slice(0, 3).join("; ")})`);
+  return passed(n === 0 ? `round 1 found no issue (N1: ${computed.record.necessity}): the same run continues into the review layer` : `round 1 found ${n} issue${n === 1 ? "" : "s"} (${computed.record.issues.map((x) => `${x.id}: ${x.kinds.join(", ")}`).join("; ")}): they are published and round 2 runs on a later head`);
+});
+
+export const reviewPublished: Validator = profiled((input, profile) => {
+  const pr = evidencePull(input.evidence, profile);
+  if (pr === undefined) return inconclusive("the pull request has not been read");
+  const a = analyze(input.evidence, profile, pr);
+  if (a.state === "pending") return inconclusive(a.reason);
+  if (a.state === "incompatible") return failed(a.problem);
+  const p = publishPlan(input.evidence, a.analysis, pr, pinnedBase(input.evidence));
+  if (p.state === "pending") return inconclusive(p.reason);
+  if (p.state === "failed") return failed(p.reason);
+  const plan = p.plan;
+  if (!plan.body.startsWith(`${plan.firstLine}\n`)) return failed("the review body does not open with its verdict");
+  if (plan.verdict === "passed" && (p.round1.issues.length > 0 || plan.open > 0)) return failed("a review with an open item is not a pass");
+  const flow = publishFlow(input.evidence, plan, pr);
+  if (flow.state !== "done") return inconclusive(flow.state === "supervise" ? flow.reason : "the review is not posted and recorded in the ledger yet");
+  const secrets = secretFindings(plan.body);
+  if (secrets.length > 0) return failed(`the posted review holds what looks like a credential (${[...new Set(secrets)].slice(0, 3).join("; ")})`);
+  return passed(`one COMMENT review (${flow.posted.reviewId}, ${flow.posted.how}) at head ${pr.head.slice(0, 12)}: ${plan.firstLine}; round ${plan.round}, ${plan.items.length} item(s), ${plan.comments.length} inline; its comments were read back and the ledger records the review id and each item's ids`);
 });

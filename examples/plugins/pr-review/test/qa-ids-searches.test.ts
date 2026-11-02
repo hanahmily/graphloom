@@ -241,7 +241,7 @@ describe("the graph re-runs the searches and records what it measured", () => {
       reporting(sc, 3);
     });
     const sim = simulate({ scenario: s });
-    expect(stopOf(sim)).toMatchObject({ reason: "report ready" });
+    expect(stopOf(sim)).toMatchObject({ reason: "answers accepted" });
     const searches = finalOf(sim).filter((q) => q.id !== "N1").flatMap((q) => q.answer?.searches ?? []);
     expect(searches.length).toBeGreaterThan(0);
     // An answer that reported hits is not contradicted by more: its count is replaced by the measured one, and flagged.
@@ -263,7 +263,7 @@ describe("the graph re-runs the searches and records what it measured", () => {
   it("keeps a none-found answer whose searches measure zero, and records the zero as measured", () => {
     const s = scenarioWith("answer-no-library-with-whole-repo-search", (sc) => measuring(sc, 0, 0));
     const sim = simulate({ scenario: s });
-    expect(stopOf(sim)).toMatchObject({ reason: "report ready" });
+    expect(stopOf(sim)).toMatchObject({ reason: "answers accepted" });
     expect(jobsOf(sim, "Answer the questions")).toHaveLength(1);
     const none = finalOf(sim).filter((q) => q.answer?.none_found);
     expect(none.length).toBeGreaterThan(0);
@@ -289,7 +289,7 @@ describe("the graph re-runs the searches and records what it measured", () => {
       sc.results["answers-v1"] = [{ output: first }, { output: fixed }];
     });
     const sim = simulate({ scenario: s });
-    expect(stopOf(sim)).toMatchObject({ reason: "report ready" });
+    expect(stopOf(sim)).toMatchObject({ reason: "answers accepted" });
     expect(sim.qa!.markdown).toMatch(/→ 54 hits \(measured\)/);
     expect(sim.qa!.markdown).not.toMatch(/reported 54: mismatch/);
   });
@@ -300,7 +300,7 @@ describe("the graph re-runs the searches and records what it measured", () => {
       reporting(sc, 7);
     });
     const sim = simulate({ scenario: s });
-    expect(stopOf(sim)).toMatchObject({ reason: "report ready" });
+    expect(stopOf(sim)).toMatchObject({ reason: "answers accepted" });
     const checked = finalOf(sim).flatMap((q) => q.answer?.check.searches ?? []);
     expect(checked.length).toBeGreaterThan(0);
     for (const x of checked) expect(x).toMatchObject({ measured: 7, files: 2 });
@@ -310,7 +310,7 @@ describe("the graph re-runs the searches and records what it measured", () => {
   it("measures N1's searches, shows them in the Necessity part, and does not accept a design search reported as empty that matches", () => {
     const s = scenarioWith("necessity-necessary", (sc) => measuring(sc, 54, 9, /^cite-n-s-/));
     const sim = simulate({ scenario: s });
-    expect(stopOf(sim)).toMatchObject({ reason: "report ready" });
+    expect(stopOf(sim)).toMatchObject({ reason: "answers accepted" });
     expect(sim.qa!.markdown).toMatch(/Searched: .*measured 54 hits in 9 files \(reported 4: mismatch\)/);
     const empty = scenarioWith("necessity-necessary", (sc) => {
       measuring(sc, 54, 9, /^cite-n-s-/);
@@ -341,7 +341,7 @@ describe("the live run's failure: verdicts keyed with the type and the question'
   it("matches the verdicts and finishes, noting each normalization in review.md and qa.json", () => {
     const s = scenarioWith("answer-finds-existing-helper", (sc) => rekey(sc, (v) => `${v.question} [split-function] Could stream.(*writeCallback).Rev be split into smaller functions?`));
     const sim = simulate({ scenario: s });
-    expect(stopOf(sim)).toMatchObject({ reason: "report ready" });
+    expect(stopOf(sim)).toMatchObject({ reason: "answers accepted" });
     expect(sim.qa!.markdown).toMatch(/Note: the checker's id "Q1 \[split-function\] Could stream/);
     const notes = finalOf(sim).flatMap((q) => q.answer?.notes ?? []);
     expect(notes.length).toBeGreaterThan(0);
@@ -352,7 +352,7 @@ describe("the live run's failure: verdicts keyed with the type and the question'
       for (const key of ["answers-v1", "answers-revision-v1"]) for (const r of sc.results[key] ?? []) for (const a of (r.output as { answers: Answer[] }).answers) a.question = `${a.question} [existing-reuse-common] Does the codebase already have one?`;
     });
     const sim = simulate({ scenario: s });
-    expect(stopOf(sim)).toMatchObject({ reason: "report ready" });
+    expect(stopOf(sim)).toMatchObject({ reason: "answers accepted" });
     expect(sim.qa!.markdown).toMatch(/Note: the answerer's id "Q1 \[existing-reuse-common\]/);
   });
 
@@ -385,7 +385,7 @@ describe("a result the controller classed invalid because of an id", () => {
     });
     const sim = simulate({ scenario: s, tamper: classify });
     expect(sim.evidence.some((e) => e.contract?.status === "invalid")).toBe(true);
-    expect(stopOf(sim)).toMatchObject({ reason: "report ready" });
+    expect(stopOf(sim)).toMatchObject({ reason: "answers accepted" });
     expect(sim.qa!.markdown).toMatch(/Note: the answerer's id "Q1 \[existing-reuse-common\]/);
   });
 

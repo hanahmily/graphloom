@@ -33,6 +33,10 @@ describe("operator runner configuration", () => {
     });
   });
 
+  it("accepts github.writeTokenEnv beside tokenEnv: the variable whose token also allows the write executors", () => {
+    expect(parseRunnerConfig({ harness: "claude-code", allowUnrestricted: true, github: { tokenEnv: "GITHUB_TOKEN", writeTokenEnv: "GRAPHLOOM_GITHUB_WRITE_TOKEN" } }).github).toEqual({ tokenEnv: "GITHUB_TOKEN", writeTokenEnv: "GRAPHLOOM_GITHUB_WRITE_TOKEN" });
+  });
+
   it("checks every harness a job may choose before a run starts", async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), "gl-runner-config-"));
     dirs.push(dir);
@@ -73,6 +77,7 @@ describe("operator runner configuration", () => {
     { harness: "codex", allowUnrestricted: true, codex: { apiKey: "secret" } },
     { harness: "claude-code", allowUnrestricted: true, github: { token: "secret" } },
     { harness: "claude-code", allowUnrestricted: true, github: { tokenEnv: "not a name" } },
+    { harness: "claude-code", allowUnrestricted: true, github: { writeTokenEnv: "not a name" } },
     { harness: "claude-code", allowUnrestricted: true, command: { timeoutMs: 0 } },
     { harness: "pi", allowUnrestricted: true, apiKey: "secret" },
     { harness: "pi", allowUnrestricted: true, pi: { apiKey: "secret" } },

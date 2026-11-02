@@ -34,7 +34,7 @@ describe("review.html, the visual report of a standard report (design 6.11)", ()
   const appendix = appendixOf(sim);
 
   it("is written at the Report stage with the verdict and the questions pending, and whole at the Answers stage, beside review.md and the appendix", () => {
-    expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "report ready" } });
+    expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "answers accepted" } });
     const early = recordedHtml(sim.evidence, false);
     expect(early.state).toBe("read");
     expect((early as { value: string }).value).toContain('<span class="tile grey" title="the Questions and Answers stages follow the report">pending</span>');

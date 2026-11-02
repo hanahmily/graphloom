@@ -3,8 +3,9 @@
 
 /**
  * The draft review (design §8.4, §10): composed by plugin code from the aspects' records, the verdicts and the Q&A, never by
- * a model. `draft.json` (`pr-review-draft-v1`) is canonical; `draft.md` is its editable rendering. The maintainer posts the
- * draft; nothing here writes to GitHub. The summary is plain text from the ledger, at most 1,200 characters.
+ * a model. `draft.json` (`pr-review-draft-v1`) is canonical; `draft.md` is its rendering, for whoever wants to read it. The Publish
+ * stage (`publish.ts`) posts the draft's comments that are findings; nothing here writes to GitHub. The summary is plain text
+ * from the ledger, at most 1,200 characters.
  */
 import { ASPECTS, DRAFT_ORDER, type Aspect } from "./aspects.js";
 import { proofOf, type Proof } from "./proof.js";
@@ -64,10 +65,8 @@ export interface AspectView {
 
 /** What the report sections render: the scope and base, the aspects and every finding with its verdict. */
 export interface ReviewDoc {
-  scope: { mode: "standard" | "large"; source: string; areas: ScopeRecord["areas"]; files: number; areasInput?: string };
-  base: ScopeRecord["base"];
+  scope: { mode: "standard" | "large"; source: string; areas: ScopeRecord["areas"]; files: number };
   context: ScopeRecord["context"];
-  summary: ScopeRecord["summary"];
   aspects: AspectView[];
   findings: Finding[];
 }
@@ -244,7 +243,7 @@ export function composeDraft(i: DraftInput): Draft {
   const unsaturated = i.records.filter((r) => r.unsaturated).map((r) => r.aspect);
   const maintainer = [
     ...(i.necessity !== undefined ? [i.necessity] : []),
-    `Review scope: ${scopeLine(i.scope)}. Every reviewer was seeded (${i.scope.context.reason}); the base session was ${baseLine(i.scope.base)}.`,
+    `Review scope: ${scopeLine(i.scope)}. ${i.scope.context.reason[0]!.toUpperCase()}${i.scope.context.reason.slice(1)}.`,
     ...(unsaturated.length > 0 ? [`Not saturated: the ${unsaturated.join(", ")} sweep${unsaturated.length === 1 ? "" : "s"} reached ${MAX_SWEEP_PASSES} passes with findings still surviving verification; more may be there.`] : []),
     ...(nits > 0 ? [`${nits} nit${nits === 1 ? "" : "s"} (P3) raised and not verified or drafted.`] : []),
     ...dismissed.map((f) => `Dismissed ${f.id} (${f.aspect}, ${f.path}:${f.startLine}): refuted by the verifier — ${clip(f.verdict?.reason ?? "", 240)}${f.verdict !== undefined ? ` Quotes: ${f.verdict.quotes.map((x) => `${x.path}:${x.line}`).join(", ")}.` : ""}`),
@@ -268,10 +267,8 @@ export function composeDraft(i: DraftInput): Draft {
     dismissed: r.findings.filter((f) => f.state === "dismissed").length,
   }));
   const review: ReviewDoc = {
-    scope: { mode: i.scope.mode, source: i.scope.source, areas: i.scope.areas, files: i.scope.files.length, ...(i.scope.areasInput !== undefined ? { areasInput: i.scope.areasInput } : {}) },
-    base: i.scope.base,
+    scope: { mode: i.scope.mode, source: i.scope.source, areas: i.scope.areas, files: i.scope.files.length },
     context: i.scope.context,
-    summary: i.scope.summary,
     aspects: views,
     findings,
   };
@@ -295,19 +292,13 @@ export function composeDraft(i: DraftInput): Draft {
 
 const sourceText: Record<ScopeRecord["source"], string> = {
   whole: "the whole pull request",
-  operator: "the areas the operator picked",
   default: "the areas the briefing's risks, behavior and compatibility entries cite",
+  "all-areas": "every readable area (the briefing's risks, behavior and compatibility entries cite none)",
 };
 
 export function scopeLine(s: { source: ScopeRecord["source"]; areas: ScopeRecord["areas"]; files: { length: number } }): string {
   const areas = s.areas.length > 0 ? ` (${s.areas.map((a) => a.id).join(", ")})` : "";
   return `${sourceText[s.source]}${areas}, ${s.files.length} file${s.files.length === 1 ? "" : "s"}`;
-}
-
-export function baseLine(b: ScopeRecord["base"]): string {
-  if (b.kind === "conversation") return `the maintainer's latest conversation on ${b.stageId}${b.sessionRef !== undefined ? ` (${b.sessionRef})` : ""}`;
-  if (b.kind === "answerer") return `the answerer's own session${b.sessionRef !== undefined ? ` (${b.sessionRef})` : ""}`;
-  return "none (no session was recorded)";
 }
 
 function summaryText(scope: ScopeRecord, principled: readonly Finding[], aspects: readonly AspectView[], comments: readonly DraftEntry[], judgment: readonly DraftEntry[], questions: number, dismissed: number, recommended: Verdict): string {
@@ -347,7 +338,7 @@ function entryMarkdown(e: DraftEntry, level: "####" | "###"): string[] {
   return out;
 }
 
-/** The editable rendering (design §10.1). The maintainer moves an entry between sections; `draft.json` stays what the plugin wrote. */
+/** The readable rendering (design §10.1). `draft.json` is what the plugin wrote, and what Publish posts from. */
 export function draftMarkdown(d: Draft): string {
   const findings = d.comments.filter((c) => c.kind === "finding");
   const questions = d.comments.filter((c) => c.kind === "question");
@@ -392,7 +383,7 @@ export function reviewBriefingMarkdown(d: Draft): string {
   const verifier = (a: Aspect): string => d.review.aspects.find((x) => x.aspect === a)?.verifier ?? "?";
   const out = [
     "## Review",
-    `Recommended verdict: ${d.recommended}${d.recommended === "approve" ? " (drafted as comment)" : ""}. Scope: ${scopeLine({ source: d.review.scope.source as ScopeRecord["source"], areas: d.review.scope.areas, files: { length: d.review.scope.files } })}. Draft: draft.md in .graphloom/review/ (the maintainer posts it).`,
+    `Recommended verdict: ${d.recommended}${d.recommended === "approve" ? " (drafted as comment)" : ""}. Scope: ${scopeLine({ source: d.review.scope.source as ScopeRecord["source"], areas: d.review.scope.areas, files: { length: d.review.scope.files } })}. Draft: draft.md in .graphloom/review/ (the Publish stage posts its comments).`,
     `Findings: ${countBy(d.review.findings, "confirmed")} confirmed, ${countBy(d.review.findings, "disputed")} disputed, ${countBy(d.review.findings, "dismissed")} dismissed; ${d.comments.filter((c) => c.kind === "question").length} question(s) for the author.`,
   ];
   for (const sev of SEVERITIES) {

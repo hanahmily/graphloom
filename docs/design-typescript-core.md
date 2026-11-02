@@ -1746,7 +1746,9 @@ A graph declares the decisions it asks the operator for, as data
 which records an `operator-approval` evidence record under the run lock and
 lifts a final stop that waited for it. The controller never reads what an
 approval means; the graph's `advance` does
-([pr-review §11](design-pr-review-graph.md#11-approvals)).
+([pr-review §11](design-pr-review-graph.md#11-approvals): pr-review declared the
+`review-layer` approval below until 0.21 and now declares none; the mechanism is
+unchanged and these are its examples).
 
 **Inputs.** An approval may declare named values the operator gives with it:
 

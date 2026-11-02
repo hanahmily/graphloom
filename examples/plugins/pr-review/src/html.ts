@@ -22,7 +22,7 @@ import { DIVE_COLUMNS, DIVE_COMMAND, DIVE_HEADING, DIVE_LINE, DIVE_TEXT, diveRow
 import { hotspots, hotspotText, needAuthor, openQuestions, SCOPE_KINDS, SCOPE_TITLES, scopeText, type Scope } from "./scope.js";
 import { describeReasons, type ModeReason } from "./mode.js";
 import { exceeds, LIMITS, originOf, type Metric } from "./metrics/crap.js";
-import { baseLine, draftMarkdown, parseDraft, scopeLine, type Draft } from "./draft.js";
+import { draftMarkdown, parseDraft, scopeLine, type Draft } from "./draft.js";
 import { proofOf } from "./proof.js";
 import { SEVERITIES, type Finding } from "./review.js";
 import type { MetricsRecord } from "./metrics/record.js";
@@ -193,8 +193,8 @@ function reviewHtml(d: Draft | undefined, g: Github): string {
     return at.length === 0 ? [] : [`<h3>${esc(sev)} <span class="muted">(${at.length})</span></h3>${at.map((f) => findingHtml(f, d, g, false)).join("")}`];
   });
   const body = [
-    `<p>Recommended verdict: <strong>${esc(d.recommended)}</strong>${d.recommended === "approve" ? " (drafted as comment)" : ""}. Scope: ${esc(scopeLine({ source: d.review.scope.source as never, areas: d.review.scope.areas, files: { length: d.review.scope.files } }))}. The draft is draft.md in .graphloom/review/; the maintainer posts it.</p>`,
-    `<p class="muted">${esc(counts)} · ${d.comments.filter((c) => c.kind === "question").length} question(s) for the author. Every reviewer was seeded (${esc(d.review.context.reason)}); the base session was ${esc(baseLine(d.review.base))}.</p>`,
+    `<p>Recommended verdict: <strong>${esc(d.recommended)}</strong>${d.recommended === "approve" ? " (drafted as comment)" : ""}. Scope: ${esc(scopeLine({ source: d.review.scope.source as never, areas: d.review.scope.areas, files: { length: d.review.scope.files } }))}. The draft is draft.md in .graphloom/review/; the Publish stage posts its comments.</p>`,
+    `<p class="muted">${esc(counts)} · ${d.comments.filter((c) => c.kind === "question").length} question(s) for the author. ${esc(d.review.context.reason[0]!.toUpperCase() + d.review.context.reason.slice(1))}.</p>`,
     ...(groups.length === 0 ? [para("No finding survived verification.")] : groups),
     ...(d.judgment.length > 0 ? [para(`${d.judgment.length} finding(s) need your judgment: confirmed but not proven by a test, or disputed. The appendix lists them with the draft.`)] : []),
   ].join("");

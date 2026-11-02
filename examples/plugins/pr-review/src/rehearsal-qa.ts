@@ -82,8 +82,8 @@ export interface NecessitySpec {
 export interface QaSpec {
   necessity?: NecessitySpec;
   base?: BaseFixture;
-  /** Purposes the pull request's text states: the section of the change item, the source and a quote from it. */
-  purposes?: Array<{ section: string; source: "title" | "body" | "commit"; quote: string }>;
+  /** Purposes the pull request's text states: the section of the change item (or, to name one of several in a section, its id), the source and a quote from it. */
+  purposes?: Array<{ section: string; item?: string; source: "title" | "body" | "commit"; quote: string }>;
   /** Required questions the questioner leaves out, by type. */
   omit?: QuestionType[];
   /** Changes an answer the answerer gives; the argument is the plugin's default for that question. */
@@ -206,7 +206,7 @@ export function qaScenario(i: QaInput): QaScenario {
   const pinned = pinnedTexts({ title: i.pull.title, body: i.pull.body }, i.pull.commits.map((message) => ({ message })));
   const large = isLarge(questionsMode(i.reportMode ?? STANDARD, symbols.filter((s) => s.change === "new").length, profile.limits));
   const purposes: QuestionerOutput["purposes"] = (spec.purposes ?? []).flatMap((p) => {
-    const item = changeItems(view, large).find((x) => x.section === p.section);
+    const item = changeItems(view, large).find((x) => (p.item !== undefined ? x.id === p.item : x.section === p.section));
     return item === undefined ? [] : [{ item: item.id, source: p.source, quote: p.quote }];
   });
   const stated = statedPurposes({ purposes, questions: [] }, view, pinned, large).stated;

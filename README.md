@@ -219,10 +219,13 @@ crashes; filesystem and execution scopes require host enforcement.
   file. The first question is whether the change is necessary (is its problem
   real on the base, does the fix fit the design, is there a simpler way); an
   unnecessary change, confirmed by a checker, skips the rest (purpose, existing
-  equivalents, reusable libraries, shared logic, missing tests); report-only by default; on request, a review layer drafts verified findings
-  and inline comments, published as one GitHub review only after `graphloom
-  resume <run> --approve publish-review`. Later pushes get delta reports and
-  incremental reviews from a per-PR ledger ref.
+  equivalents, reusable libraries, shared logic, missing tests). No human is in a
+  run: one run reviews one head in two rounds. Round 1 is that report and Q&A;
+  its issues are posted to the PR and end the run. Without any, round 2, three
+  aspect reviewers with verified findings, runs in the same run, and the run posts
+  one `COMMENT` review whose first line is the verdict (`Review passed` or `Changes
+  requested: <n> open`). Later pushes continue from a per-PR ledger ref (re-checking
+  what an earlier review posted is the second part of 0.21).
 - [Code quality metrics](docs/design-code-quality-metrics.md) (proposed):
   one definition of cyclomatic complexity (< 10), nesting depth (≤ 3), CRAP
   (threshold 30) and mutation survival for changed functions only, with

@@ -380,7 +380,7 @@ function reviewSection(d: Draft | undefined, l: VisualLinks): string {
   const rows = aspects.map((a) => `<span class="fh">${esc(a)}</span>${SEVERITIES.map((s) => cell(a, s)).join("")}`).join("");
   const count = (t: FindingTone): number => live.filter((f) => findingTone(f) === t).length;
   const legend = FINDING_ORDER.map((t) => `<span class="key"><span class="sw ${FINDING_TONE[t]}"></span>${t} ${count(t)}</span>`).join("");
-  const verdict = tile(d.recommended === "request-changes" ? "bad" : d.recommended === "comment" ? "warn" : "ok", `<small>recommended</small><strong>${esc(d.recommended)}</strong>`, `the draft's verdict; the maintainer posts it`, undefined, " stat");
+  const verdict = tile(d.recommended === "request-changes" ? "bad" : d.recommended === "comment" ? "warn" : "ok", `<small>recommended</small><strong>${esc(d.recommended)}</strong>`, `the draft's verdict; the posted review's own verdict is its first line`, undefined, " stat");
   return `<section class="vis" id="review"><h2>Review</h2><div class="row">${verdict}<div class="fgrid">${head}${rows}</div></div><div class="legend">${legend}</div></section>`;
 }
 

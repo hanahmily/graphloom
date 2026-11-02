@@ -38,18 +38,20 @@ describe("the BanyanDB profile", () => {
     expect(p.sections.find((s) => s.id === "schema")!.routing).toContain("api/proto/**");
   });
 
-  it("describes a fixed stage list: Fetch, Report, Questions, Answers, Review, Draft", () => {
+  it("describes a fixed stage list: Fetch, Report, Questions, Answers, Round 1, Review, Draft, Publish", () => {
     const d = createGraph().describe(BANYANDB);
     expect(d.stages.map((s) => [s.id, s.requirementIds])).toEqual([
       ["fetch", ["pr-snapshot", "head-checked-out", "prior-ledger"]],
       ["report", ["change-report", "measurements", "claims-checked"]],
       ["questions", ["questions-complete"]],
       ["answers", ["answers-complete", "answers-grounded"]],
+      ["round1", ["round1-gated"]],
       ["review", ["code-review"]],
       ["draft", ["draft-composed"]],
+      ["publish", ["review-published"]],
     ]);
     expect(d.requirements.map((r) => r.id)).toEqual(d.defaultValidators.map((b) => b.requirementId));
-    expect(new Set(d.requirements.map((r) => r.id)).size).toBe(11);
+    expect(new Set(d.requirements.map((r) => r.id)).size).toBe(13);
     expect(d.resultContracts!.map((c) => [c.name, c.evidenceKind])).toEqual([["change-report-v1", "other"], ["change-report-revision-v1", "other"], ["diagrams-v1", "other"], ["claim-check-v1", "review"], ["questions-v1", "other"], ["answers-v1", "other"], ["answers-revision-v1", "other"], ["necessity-v1", "other"], ["necessity-revision-v1", "other"], ["answer-check-v1", "review"], ["pr-code-review-v1", "review"], ["pr-finding-verification-v1", "review"]]);
   });
 

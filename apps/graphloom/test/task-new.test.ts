@@ -464,9 +464,9 @@ describe("pr-review: graphloom task new, end to end against a fixture remote", (
     const task = await readFile(taskPath, "utf8");
     expect(task).toContain("graph: pr-review");
     expect(task).toContain(`base: ${w.base}`);
-    expect(task).toContain(`request: "Report on acme/widgets#7 at ${w.head}."`);
+    expect(task).toContain(`request: "Review on acme/widgets#7 at ${w.head}."`);
     expect(task).toContain("config: profile.json");
-    expect(r.lines[0]).toBe("plan: report-only review of acme/widgets#7 against main");
+    expect(r.lines[0]).toBe("plan: review of acme/widgets#7 against main");
     const checked = await check(taskPath);
     expect(checked.problems).toEqual([]);
     // A rerun without --force refuses; the pinned head is created once.
@@ -475,7 +475,7 @@ describe("pr-review: graphloom task new, end to end against a fixture remote", (
     expect(await w.repo.git("rev-parse", `${R}/heads/${w.head}`)).toBe(w.head);
   }, 120_000);
 
-  it("--base names another branch and --review writes the Review request; a wrong project, a missing profile and a malformed argument are refused", async () => {
+  it("--base names another branch and --review is accepted (every run reviews); a wrong project, a missing profile and a malformed argument are refused", async () => {
     const w = await prWorld();
     await execFileAsync("git", ["update-ref", "refs/heads/release", w.base], { cwd: w.bare });
     const r = await run({ graph: "pr-review", args: ["acme/widgets#7", "--base", "release", "--review"], repo: w.repo.path, out: w.out, profile: "widgets" });

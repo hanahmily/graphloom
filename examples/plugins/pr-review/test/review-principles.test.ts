@@ -15,7 +15,6 @@ import { scenarioWith, simulate, assignmentOf, type Simulation } from "./support
 
 const read: PrinciplesRead = { path: PRINCIPLES_PATH, commit: "c".repeat(40), file: "present", text: PRINCIPLES_FILE, truncated: false };
 const SYNC = "pkg/offline/sync.go";
-const approve: EvidenceRecord = { ref: "ev-approval-approve", kind: "other", generation: 1, payload: { type: "operator-approval", approvalId: "review-layer", decision: "approve", files: [], operator: "tester", at: "2026-10-30T10:00:00.000Z", generation: 1 } };
 const base = { pr: { mode: "review" as const, owner: "o", repo: "r", number: 1, head: "a".repeat(40) }, snapshot: { pull: { title: "t", body: "b" }, commits: [] } as never, aspect: "correctness" as const, pass: 1, files: [SYNC, "docs/x.md"], scopeLine: "the whole pull request", groups: [], summary: "", context: { kind: "seeded" as const, reason: "x" }, known: [], feedback: [], reviewDir: "/work/.graphloom/review" };
 
 describe("a reviewer's assignment lists the principles that apply to its scope", () => {
@@ -110,7 +109,7 @@ describe("the draft shows a finding's principle", () => {
 
 describe("the Review stage gives the reviewers the principles", () => {
   const withPrinciple = (principle: string): RehearsalScenario =>
-    scenarioWith("necessity-principles", (s) => {
+    scenarioWith("necessity-principles-clean", (s) => {
       const parts = reviewScenarioParts({ total: 1, path: SYNC });
       const passes = parts.results[REVIEW_SCHEMA_NAME]!;
       const first = passes[0]!.output as { comments: Array<Record<string, unknown>> };
@@ -118,7 +117,7 @@ describe("the Review stage gives the reviewers the principles", () => {
       s.results = { ...s.results, ...parts.results };
       s.commands = { ...s.commands, ...parts.commands };
     });
-  const run = (scenario: RehearsalScenario): Simulation => simulate({ scenario, request: REHEARSAL_REQUEST.replace("Report on", "Review on"), maxSteps: 400, seed: [approve] });
+  const run = (scenario: RehearsalScenario): Simulation => simulate({ scenario, request: REHEARSAL_REQUEST.replace("Report on", "Review on"), maxSteps: 500, through: "end" });
   const reviewers = (sim: Simulation): JobSpec[] => sim.jobs.filter((j) => j.stageId === "review" && j.jobId === "reviewer-correctness");
 
   it("lists the applicable principles with N1's verdicts and the checker's, and records the finding's principle", () => {

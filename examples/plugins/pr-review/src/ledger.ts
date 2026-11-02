@@ -10,7 +10,8 @@
  * from the value Fetch read; the loser of a race exits with LEDGER_MOVED and
  * the run stops retryably "ledger moved". Delta reports are a later phase:
  * this version records this head's report and Q&A and keeps the list of
- * heads the ledger has seen.
+ * heads the ledger has seen. After the review is posted, the Publish stage advances the ref once more (`publish.ts`,
+ * `ledger-published`) with the review's id on the head and the ids of its comments on the items it posted.
  */
 import type { EnvironmentCommand, EvidenceRecord } from "@graphloom/sdk";
 import { parseLedger, type Ledger } from "./commands.js";
@@ -107,7 +108,7 @@ if git -c core.hooksPath=/dev/null update-ref "$ref" "$new" "$expect"; then echo
   String(LEDGER_MOVED) +
   String.raw`; fi`;
 
-const GIT_IDENTITY = "export GIT_AUTHOR_NAME=graphloom GIT_AUTHOR_EMAIL=graphloom@localhost GIT_COMMITTER_NAME=graphloom GIT_COMMITTER_EMAIL=graphloom@localhost";
+export const GIT_IDENTITY = "export GIT_AUTHOR_NAME=graphloom GIT_AUTHOR_EMAIL=graphloom@localhost GIT_COMMITTER_NAME=graphloom GIT_COMMITTER_EMAIL=graphloom@localhost";
 
 const WRITE =
   String.raw`set -eu; ref="$1"; old="$2"; msg="$3"; n="$4"; shift 4

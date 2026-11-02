@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 import { effectiveRules, ruleFileText, ruleGroups, shippedRules } from "../src/aspects.js";
 import { anchored, clusters, composeDraft, draftMarkdown, scrub, type DraftInput } from "../src/draft.js";
-import { parseAreasInput, chooseScope, conversationSummary, cutBytes, seedReason, selectBase, SEED_MAX_BYTES, type Conversation } from "../src/reviewscope.js";
+import { chooseScope } from "../src/reviewscope.js";
 import { keptSuggestion, parsePass, parseVerification, type AspectRecord, type Finding } from "../src/review.js";
 import { proofOf } from "../src/proof.js";
 import type { Partition } from "../src/areas.js";
@@ -12,94 +12,6 @@ import type { PullFile } from "../src/snapshot.js";
 import { parsePatch } from "../src/patch.js";
 
 const file = (path: string, patch: string | null = "@@ -1,2 +1,3 @@\n a\n+b\n c"): PullFile => ({ path, status: "modified", previousPath: null, additions: 1, deletions: 0, patch, patchOmitted: patch === null, parsed: parsePatch(patch) });
-
-const turn = (operator: string, answer?: string) => ({ operator, ...(answer !== undefined ? { answer } : {}) });
-const conversation = (turns: Conversation["turns"], over: Partial<Conversation> = {}): Conversation => ({ ref: "e1", stageId: "answers", baseSession: "claude-job", forkSession: "claude-c1", endedAt: "2026-10-30T10:00:00.000Z", contextTokens: 1000, transcriptOmitted: false, turns, ...over });
-
-describe("the conversation summary", () => {
-  it("keeps each maintainer message verbatim and cuts each agent answer to 1 KiB, marked", () => {
-    const long = "a".repeat(3_000);
-    const s = conversationSummary([conversation([turn("A ttl of 0 must mean no expiry.", long), turn("And the flag?", "short")])]);
-    expect(s.text).toContain("Maintainer: A ttl of 0 must mean no expiry.");
-    expect(s.text).toContain("Agent: short");
-    const agent = s.text.split("\n").find((l) => l.startsWith("Agent: a"))!;
-    expect(Buffer.byteLength(agent.slice("Agent: ".length), "utf8")).toBeLessThanOrEqual(1_024);
-    expect(agent.endsWith("… [cut]")).toBe(true);
-    expect(s).toMatchObject({ cuts: 1, turns: 2 });
-  });
-
-  it("lists the conversations of the chain oldest first", () => {
-    const s = conversationSummary([conversation([turn("first question")], { endedAt: "2026-10-30T09:00:00.000Z" }), conversation([turn("second question")], { endedAt: "2026-10-30T10:00:00.000Z" })]);
-    expect(s.text.indexOf("Conversation 1")).toBeLessThan(s.text.indexOf("first question"));
-    expect(s.text.indexOf("first question")).toBeLessThan(s.text.indexOf("Conversation 2"));
-    expect(s.text.indexOf("Conversation 2")).toBeLessThan(s.text.indexOf("second question"));
-  });
-
-  it("is at most 32 KiB: the oldest agent answers go first, the maintainer's messages are cut last, every cut marked", () => {
-    const turns = Array.from({ length: 60 }, (_, i) => turn(`message ${i} ${"m".repeat(300)}`, "x".repeat(900)));
-    const s = conversationSummary([conversation(turns)]);
-    expect(s.bytes).toBeLessThanOrEqual(SEED_MAX_BYTES);
-    const lines = s.text.split("\n");
-    const agents = lines.filter((l) => l.startsWith("Agent: "));
-    // The oldest answers are the cut markers; the newest are whole.
-    expect(agents[0]).toBe("Agent: … [cut]");
-    expect(agents.at(-1)).toBe(`Agent: ${"x".repeat(900)}`);
-    // Every maintainer message is still whole: the answers alone made room.
-    expect(lines.filter((l) => l.startsWith("Maintainer: ")).every((l) => l.length > 300)).toBe(true);
-    expect(s.cuts).toBeGreaterThan(0);
-  });
-
-  it("cuts maintainer messages, oldest first, only when the answers' cuts are not enough, and then leaves out whole turns", () => {
-    const big = Array.from({ length: 12 }, (_, i) => turn(`m${i} ${"q".repeat(4_000)}`, "a"));
-    const s = conversationSummary([conversation(big)]);
-    expect(s.bytes).toBeLessThanOrEqual(SEED_MAX_BYTES);
-    const maint = s.text.split("\n").filter((l) => l.startsWith("Maintainer: "));
-    expect(maint.some((l) => l.endsWith("… [cut]"))).toBe(true);
-    // The newest messages are not cut before the oldest.
-    expect(maint.at(-1)!.endsWith("… [cut]")).toBe(false);
-    const many = Array.from({ length: 3_000 }, (_, i) => turn(`message number ${i} ${"z".repeat(100)}`));
-    const t = conversationSummary([conversation(many)]);
-    expect(t.bytes).toBeLessThanOrEqual(SEED_MAX_BYTES);
-    expect(t.text).toMatch(/\(\d+ older turns? of the conversation left out/);
-    expect(t.text).toContain("message number 2999");
-  });
-
-  it("is empty without a conversation and does not split a character", () => {
-    expect(conversationSummary([])).toEqual({ text: "", bytes: 0, cuts: 0, turns: 0 });
-    const cut = cutBytes("é".repeat(600), 1_024);
-    expect(Buffer.byteLength(cut, "utf8")).toBeLessThanOrEqual(1_024);
-    expect(cut.endsWith("… [cut]")).toBe(true);
-    expect(cut).not.toContain("�");
-  });
-});
-
-describe("the review base session", () => {
-  const conv = (forkSession: string, endedAt: string, stageId = "answers", baseSession = "claude-job"): { ref: string; kind: "other"; payload: unknown } => ({
-    ref: `ev-${forkSession}`,
-    kind: "other",
-    payload: { type: "operator-conversation", stageId, baseSession, rootSession: "claude-job", forkSession, harness: "claude-code", startedAt: endedAt, endedAt, transcript: { sha256: "x", bytes: 1 }, contextTokens: 5_000, turns: [turn("hello")] },
-  });
-  const job = { operationId: "op-answerer", stageId: "answers", attempt: 1, generation: 1, dispatchKey: "answerer", executorId: "x", status: "ok" as const, sessionRef: "claude-job", settledAt: "2026-10-30T08:00:00.000Z" };
-
-  it("is the latest operator conversation of the Answers stage by endedAt, and records its chain", () => {
-    const evidence = [conv("claude-c1", "2026-10-30T09:00:00.000Z"), conv("claude-c2", "2026-10-30T10:00:00.000Z", "answers", "claude-c1"), conv("claude-other", "2026-10-30T11:00:00.000Z", "questions")];
-    const sessions = [job, { ...job, operationId: "conv-2", origin: "operator" as const, parent: "conv-1", sessionRef: "claude-c2", dispatchKey: "operator" }];
-    const base = selectBase({ agentSessions: sessions, evidence, generation: 1 }, "answers", "answerer");
-    expect(base).toMatchObject({ kind: "conversation", sessionRef: "claude-c2", operationId: "conv-2", contextTokens: 5_000, chain: ["claude-c1", "claude-c2"] });
-  });
-
-  it("is the answerer's own session without a conversation, and none without a session", () => {
-    expect(selectBase({ agentSessions: [job, { ...job, operationId: "op-later", continuedFrom: "op-answerer", sessionRef: "claude-job2" }], evidence: [], generation: 1 }, "answers", "answerer")).toMatchObject({ kind: "answerer", operationId: "op-later", sessionRef: "claude-job2" });
-    expect(selectBase({ agentSessions: [], evidence: [], generation: 1 }, "answers", "answerer")).toEqual({ kind: "none", stageId: "answers", chain: [] });
-  });
-
-  it("gives the reason every reviewer is seeded: the token bound when it applies, else that forking is not available", () => {
-    expect(seedReason({ kind: "answerer", stageId: "answers", chain: [] }, 100_000)).toBe("forking is not available in this version");
-    expect(seedReason({ kind: "conversation", stageId: "answers", contextTokens: 143_000, chain: [] }, 100_000)).toBe("base context 143,000 tokens over 100,000");
-    expect(seedReason({ kind: "conversation", stageId: "answers", contextTokens: 90_000, chain: [] }, 100_000)).toBe("forking is not available in this version");
-    expect(seedReason({ kind: "conversation", stageId: "answers", transcriptOmitted: true, chain: [] }, 100_000)).toMatch(/transcript was omitted/);
-  });
-});
 
 describe("the files in scope", () => {
   const files = ["a/x.go", "a/y.go", "b/z.go", "c/w.go", "gen/g.go"].map((p) => file(p));
@@ -118,25 +30,15 @@ describe("the files in scope", () => {
 
   it("is the whole pull request in standard mode", () => {
     expect(chooseScope({ mode: { mode: "standard", reasons: [] }, files, check: check() })).toEqual({ mode: "standard", source: "whole", areas: [], files: files.map((f) => f.path) });
-    expect(chooseScope({ mode: { mode: "standard", reasons: [] }, files, check: check(), areasInput: "A1" })).toMatchObject({ problem: expect.stringContaining("reviewed whole") });
   });
 
-  it("is the areas the operator picked, in large mode", () => {
-    const s = chooseScope({ mode: large, files, partition, check: check(), areasInput: "A3,A1" });
-    expect(s).toEqual({ mode: "large", source: "operator", areas: [{ id: "A1", name: "a", files: 2 }, { id: "A3", name: "c", files: 1 }], files: ["a/x.go", "a/y.go", "c/w.go"] });
-  });
-
-  it("is, without a list, the areas that the risks, behavior and compatibility entries cite", () => {
+  it("is, in large mode, the areas that the risks, behavior and compatibility entries cite", () => {
     const s = chooseScope({ mode: large, files, partition, check: check({ risks: [bullet("b/z.go")], compatibility: [bullet("c/w.go")], behavior: [bullet("b/z.go")] }) });
     expect(s).toMatchObject({ source: "default", files: ["b/z.go", "c/w.go"], areas: [{ id: "A2" }, { id: "A3" }] });
   });
 
-  it("refuses a default that cites no area, an unknown or generated area, and a list that is not area ids", () => {
-    expect(chooseScope({ mode: large, files, partition, check: check() })).toMatchObject({ problem: expect.stringMatching(/no default scope.*the areas are A1, A2, A3/) });
-    expect(chooseScope({ mode: large, files, partition, check: check(), areasInput: "A9" })).toMatchObject({ problem: expect.stringMatching(/A9 is not an area/) });
-    expect(chooseScope({ mode: large, files, partition, check: check(), areasInput: "generated" })).toMatchObject({ problem: expect.stringContaining("not a comma-separated list of area ids") });
-    expect(parseAreasInput("A1, A2,A1")).toEqual(["A1", "A2"]);
-    expect(parseAreasInput("a1")).toMatchObject({ problem: expect.any(String) });
+  it("is every readable area when the briefing cites none, never the generated files, and says so", () => {
+    expect(chooseScope({ mode: large, files, partition, check: check() })).toEqual({ mode: "large", source: "all-areas", areas: [{ id: "A1", name: "a", files: 2 }, { id: "A2", name: "b", files: 1 }, { id: "A3", name: "c", files: 1 }], files: ["a/x.go", "a/y.go", "b/z.go", "c/w.go"] });
   });
 });
 
@@ -338,13 +240,5 @@ describe("assignment and summary bounds with very large inputs", () => {
     expect(text).toContain("F100");
     const spilled = ((planned as { spills: Array<{ text: string }> }).spills ?? []).map((s) => s.text).join("\n");
     for (const f of findings) expect(spilled).toContain(`${f.id} [`);
-  });
-
-  it("cuts even the newest maintainer message, marked, when it alone would pass the summary's bound", () => {
-    const turns = [...Array.from({ length: 2_000 }, (_, i) => turn(`short ${i}`)), turn("n".repeat(40_000))];
-    const s = conversationSummary([conversation(turns)]);
-    expect(s.bytes).toBeLessThanOrEqual(SEED_MAX_BYTES);
-    expect(s.text).toContain("… [cut]");
-    expect(s.text).toContain("nnnn");
   });
 });

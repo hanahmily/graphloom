@@ -90,7 +90,10 @@ export function createCliRunner(
     ]),
   );
   const tokenEnv = config.github?.tokenEnv;
-  const token = tokenEnv !== undefined ? env[tokenEnv] : undefined;
+  // A set `writeTokenEnv` is the operator's grant of writes: its token is the one the executors get, and the write executors are allowed.
+  const writeToken = config.github?.writeTokenEnv !== undefined ? env[config.github.writeTokenEnv] : undefined;
+  const allowWrites = writeToken !== undefined && writeToken !== "";
+  const token = allowWrites ? writeToken : tokenEnv !== undefined ? env[tokenEnv] : undefined;
   const githubPackages = config.github !== undefined
     ? [{
         // The real package is sandboxed (read-only closure, no writes); the
@@ -105,6 +108,7 @@ export function createCliRunner(
           : githubExecutorPackage,
         ...githubBinding({
           ...(token !== undefined && token !== "" ? { token } : {}),
+          ...(allowWrites ? { allowWrites: true } : {}),
           ...(config.github.baseUrl !== undefined ? { baseUrl: config.github.baseUrl } : {}),
         }),
         ...(githubModule !== undefined ? { allowUnrestricted: true as const } : {}),

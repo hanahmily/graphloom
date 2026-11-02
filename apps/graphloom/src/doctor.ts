@@ -230,6 +230,15 @@ function configurationChecks(d: Discovery): DoctorCheck[] {
     );
   }
 
+  const writeTokenEnv = r.config?.github?.writeTokenEnv;
+  if (writeTokenEnv !== undefined) {
+    checks.push(
+      d.env[writeTokenEnv]
+        ? check("configuration", "github write token", "pass", `${writeTokenEnv} is set: graphs may post to GitHub (pr-review posts its review)`)
+        : check("configuration", "github write token", "warn", `github.writeTokenEnv names ${writeTokenEnv}, which is not set: a graph that posts to GitHub will fail at its write`, `export ${writeTokenEnv}=<token>   (a token with "Pull requests: read and write" on the one repository)`),
+    );
+  }
+
   for (const l of d.sessionLaunchers ?? []) {
     const name = `session launcher ${l.harness}`;
     const where = l.setup.source === "environment" ? SESSION_LAUNCHER_ENV[l.harness] : `${l.harness === "claude-code" ? "claude" : "codex"}.sessionLauncher`;
