@@ -9,7 +9,7 @@ export const GRAPH_ID = "pr-review";
  * §18): 0.1 declares Fetch, Report, Questions and Answers; 0.18 adds Review
  * and Draft. Checks and Publish arrive with later versions.
  */
-export const GRAPH_VERSION = "0.19.1";
+export const GRAPH_VERSION = "0.20.0";
 
 /** The operator decision that would continue into the review layer (design §11). */
 export const REVIEW_LAYER_APPROVAL = "review-layer";

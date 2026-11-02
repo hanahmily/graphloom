@@ -413,7 +413,7 @@ export function fitPrinciples(c: PrinciplesContext, line: (p: PrinciplesContext[
   });
   const shown = fitLines(lines, PRINCIPLES_CHARS * scale, () => "").filter((l) => l !== "").length;
   if (shown >= lines.length) return lines;
-  return [...lines.slice(0, shown), `- … and ${lines.length - shown} more principles that apply, each of which gets a verdict too (their ids: ${c.applicable.slice(shown).map((p) => p.id).join(", ")}): read their statements in ${c.read.path} at ${principlesFrom(c.read)} (\`git show ${c.read.commit}:${c.read.path}\`: the commit the principles were recorded from, which is not HEAD when the profile names a ref).`];
+  return [...lines.slice(0, shown), `- … and ${lines.length - shown} more principles that apply (their ids: ${c.applicable.slice(shown).map((p) => p.id).join(", ")}): read their statements in ${c.read.path} at ${principlesFrom(c.read)} (\`git show ${c.read.commit}:${c.read.path}\`: the commit the principles were recorded from, which is not HEAD when the profile names a ref).`];
 }
 
 /** The principles that apply to the change, one block each, for N1's answerer. */
