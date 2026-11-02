@@ -6,11 +6,12 @@
  * question grid and its links, and the page rendered from a large-mode run.
  */
 import { describe, expect, it } from "vitest";
+import type { Draft } from "../src/draft.js";
 import { htmlPagesFrom, htmlProblems, parseReportDoc, renderReviewHtml, type ReportDoc } from "../src/html.js";
 import { LARGE_LIMITS, REHEARSAL_HEAD, REHEARSAL_MERGE_BASE } from "../src/rehearsal.js";
 import { recordedAppendix, recordedHtml } from "../src/parts.js";
 import { squarify } from "../src/treemap.js";
-import { areaRisk, checkCounts, questionGroups, riskAreas, scopeBarSvg, TYPE_ABBREVIATIONS, type QuestionTile } from "../src/visual.js";
+import { areaAnchor, areaReasons, areaRisk, checkCounts, questionGroups, riskAreas, scopeBarSvg, TYPE_ABBREVIATIONS, type QuestionTile } from "../src/visual.js";
 import { simulate } from "./support.js";
 
 const GITHUB = { owner: "apache", repo: "skywalking-banyandb", head: REHEARSAL_HEAD, base: REHEARSAL_MERGE_BASE };
@@ -199,5 +200,91 @@ describe("review.html of a large-mode run", () => {
   it("asks at most 16 questions: N1 and three for each of at most five high-level changes", () => {
     expect(qa.questions.length).toBeLessThanOrEqual(16);
     expect(qa.questions.length).toBe(1 + 3 * report.briefing.whatsNew.length);
+  });
+});
+
+describe("the reason cards under the risk map", () => {
+  const base = parseReportDoc(simulate({ scenarioName: "large-pull-request", config: { limits: LARGE_LIMITS }, maxSteps: 250 }).written!.json)!;
+  const areas = riskAreas(base);
+  const pathOf = (a: (typeof areas)[number]): string => [...a.paths][0]!;
+  const cite = (path: string, start = 3) => ({ path, side: "head" as const, start, end: start + 1, symbol: "" });
+  const long = `${"a long risk ".repeat(30)}end`;
+  const report: ReportDoc = {
+    ...base,
+    briefing: {
+      ...base.briefing,
+      check: {
+        surfaces: [{ text: "a new surface", cites: [cite(pathOf(areas[2]!))] }],
+        behavior: [],
+        compatibility: [{ text: "<b>compat</b> & more", cites: [cite(pathOf(areas[1]!), 7)] }],
+        risks: [{ text: long, cites: [cite(pathOf(areas[0]!)), cite(pathOf(areas[2]!), 20)] }],
+        tests: [{ text: "only a test", cites: [cite(pathOf(areas[3]!))] }],
+      },
+    },
+  };
+  const finding = { id: "F7", aspect: "correctness", raisedBy: "correctness", pass: 1, path: pathOf(areas[1]!), side: "RIGHT", startLine: 4, endLine: 4, severity: "P2", kind: "non-behavioral", content: "a finding", suggestion: "", evidence: "", distinct: true, state: "confirmed", reaffirmed: [], notes: [] };
+  const gone = { ...finding, id: "F8", state: "dismissed" };
+  const elsewhere = { ...finding, id: "F9", path: pathOf(areas[3]!) };
+  const draft = { recommended: "comment", review: { aspects: [{ aspect: "correctness" }], findings: [finding, gone, elsewhere] } } as unknown as Draft;
+  const html = renderReviewHtml({ report, review: draft });
+  const risk = html.slice(html.indexOf("<h2>Risk map</h2>"), html.indexOf("<h2>Questions</h2>"));
+  const github = { owner: report.pull.owner, repo: report.pull.repo, head: report.pull.head, ...(report.pull.base !== undefined ? { base: report.pull.base } : {}) };
+  const kindOf = (a: (typeof areas)[number]): string => areaRisk(a, report.briefing.check).kind;
+  const cardOf = (a: (typeof areas)[number]): string => risk.slice(risk.indexOf(`id="${areaAnchor(a.id)}"`)).split('<div class="rcard"')[0]!;
+
+  it("has a card for each coloured area, in the colour precedence then the area order, and none for a grey one", () => {
+    const ids = [...risk.matchAll(/<div class="rcard" id="area-([A-Za-z0-9_.:-]+)">/g)].map((m) => m[1]);
+    const order = ["risk", "compatibility", "behavior", "surface"];
+    const expected = order.flatMap((k) => areas.filter((a) => kindOf(a) === k).map((a) => a.id));
+    expect(expected.length).toBeGreaterThanOrEqual(3);
+    expect(ids).toEqual(expected);
+    for (const a of areas.filter((x) => kindOf(x) === "none")) {
+      expect(risk).not.toContain(`id="${areaAnchor(a.id)}"`);
+      expect(risk).not.toContain(`href="#${areaAnchor(a.id)}"`);
+    }
+  });
+
+  it("shows each entry with its category tag, its text clipped with the full text in the title, and its cites as GitHub links", () => {
+    expect(risk).toContain('<span class="rk risk">risk</span>');
+    expect(risk).toContain('<span class="rk compatibility">compatibility</span>');
+    expect(risk).toContain('<span class="rk surface">new surface</span>');
+    expect(risk).toContain(`title="${long}"`);
+    expect(risk).not.toContain(`>${long}<`);
+    expect(risk).toContain("&lt;b&gt;compat&lt;/b&gt; &amp; more");
+    expect(risk).toContain(`href="https://github.com/${github.owner}/${github.repo}/blob/${github.head}/${pathOf(areas[1]!).split("/").map(encodeURIComponent).join("/")}#L7-L8"`);
+    // The risk entry cites two areas; each card shows the cites inside its own area only.
+    expect(cardOf(areas[2]!)).toContain("#L20-L21");
+    expect(cardOf(areas[0]!)).not.toContain("#L20-L21");
+  });
+
+  it("shows the live findings located in the area's files as chips that link to the appendix, and none when the review layer did not run", () => {
+    expect(cardOf(areas[1]!)).toContain('<a class="fchip confirmed" href="review-appendix.html#f-F7" title="F7 P2 confirmed: a finding (');
+    expect(cardOf(areas[1]!)).toContain(">F7 P2</a>");
+    expect(risk).not.toContain("#f-F8");
+    expect(risk).not.toContain("#f-F9");
+    expect(renderReviewHtml({ report })).not.toContain('class="fchip');
+  });
+
+  it("links each coloured rectangle to its card and keeps the tooltip, and links no grey one", () => {
+    const cells = [...risk.matchAll(/(<a href="#area-[^"]+">)?<g><title>([^<]*)<\/title><rect /g)];
+    expect(cells).toHaveLength(areas.length);
+    for (const a of areas) {
+      const cell = cells.find((c) => c[2]!.startsWith(`${a.id} `))!;
+      expect(cell[1]).toBe(kindOf(a) === "none" ? undefined : `<a href="#${areaAnchor(a.id)}">`);
+      if (kindOf(a) !== "none") expect(risk).toContain(`id="${areaAnchor(a.id)}"`);
+    }
+    expect(areaReasons(areas[0]!, report.briefing.check).map((x) => x.kind)).toEqual(["risk"]);
+  });
+
+  it("styles the target card, runs no script and passes the inertness check; only in-page fragments are new", () => {
+    expect(html).toContain(".rcard:target{outline");
+    expect(html).not.toMatch(/<(script|ul|ol|table|details|pre)\b/);
+    expect(htmlProblems(html, github)).toEqual([]);
+    const page = (href: string): string => `<!doctype html><html><body><a href="${href}">x</a></body></html>`;
+    expect(htmlProblems(page("#area-A1"), github)).toEqual([]);
+    expect(htmlProblems(page("https://example.com/#area-A1"), github)).not.toEqual([]);
+    expect(htmlProblems(page("javascript:alert(1)"), github)).not.toEqual([]);
+    expect(htmlProblems(page("#a b"), github)).not.toEqual([]);
+    expect(htmlProblems(`<!doctype html><html><body><script>1</script></body></html>`, github)).not.toEqual([]);
   });
 });

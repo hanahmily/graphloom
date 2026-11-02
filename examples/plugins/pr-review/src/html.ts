@@ -659,7 +659,7 @@ const githubOf = (r: ReportDoc): Github => ({ owner: r.pull.owner, repo: r.pull.
 
 /** The links of the visual report: the pull request, its commits, and the appendix. */
 function visualLinks(r: ReportDoc, g: Github): VisualLinks {
-  return { pull: pullHref(g), head: commitHref(r.pull.head, g), ...(r.pull.base !== undefined ? { base: commitHref(r.pull.base, g) } : {}), appendix: APPENDIX_HREF };
+  return { pull: pullHref(g), head: commitHref(r.pull.head, g), ...(r.pull.base !== undefined ? { base: commitHref(r.pull.base, g) } : {}), appendix: APPENDIX_HREF, cite: (c) => citeLink(g, c) };
 }
 
 /**
@@ -770,7 +770,7 @@ export function htmlProblems(html: string, github: { owner: string; repo: string
   const rootRe = `https://github\\.com/${github.owner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/${github.repo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`;
   const shas = [github.head, ...(github.base !== undefined ? [github.base] : [])].map((s) => s.replace(/[^0-9a-f]/gi, ""));
   const allowed = new RegExp(`^${rootRe}/(?:pull/\\d+|commit/(?:${shas.join("|")})|blob/(?:${shas.join("|")})/[^\\s"<>]*)$`);
-  const local = /^(?:review|review-appendix)\.html(?:#[A-Za-z0-9_.:-]+)?$/;
+  const local = /^(?:(?:review|review-appendix)\.html(?:#[A-Za-z0-9_.:-]+)?|#[A-Za-z0-9_.:-]+)$/;
   const badCss = (css: string): string | undefined => {
     if (/@import/i.test(css)) return "@import";
     if (/url\(\s*(?!["']?#)/i.test(css)) return "a url( that is not a reference inside the document";
