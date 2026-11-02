@@ -70,6 +70,7 @@ export type {
   EnvironmentCommand,
   EnvironmentDeclaration,
   EvidenceRecord,
+  ExternalizedPart,
   EvidenceRef,
   Fingerprint,
   GraphAction,
@@ -213,6 +214,25 @@ export { createScriptedGraph, type ScriptedAdvance, type ScriptedGraphOptions } 
 export { writeScopeAllows, writeScopeExceptions, writeScopeExcludes, writeScopeIncludes, writeScopeProblem } from "./scope.js";
 
 export { stableHash, stableJson } from "./stable-hash.js";
+
+export {
+  DEFAULT_EXTERNALIZE_THRESHOLD,
+  EVIDENCE_STORE_ENV,
+  EvidenceUnavailableError,
+  evidenceBlobName,
+  evidenceBlobPath,
+  evidenceStoreReader,
+  externalizePayload,
+  hydrateRecord,
+  installLazyPayload,
+  isEvidenceUnavailable,
+  parseEvidenceBlob,
+  readEvidencePart,
+  writeEvidenceBlobs,
+  type EvidenceBlob,
+  type EvidencePartReader,
+  type ExternalizedPayload,
+} from "./evidence-store.js";
 
 export type {
   CaseAttempt,
