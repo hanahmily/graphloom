@@ -239,7 +239,7 @@ describe("the dependency inventory commands (design 7.2 item 3)", () => {
 describe("the answers' verification commands", () => {
   const { dir, base } = repo();
   const answer = (over: Partial<Answer>): Answer => ({ question: "Q1", answer: "x", status: "answered", none_found: false, citations: [], searches: [], inventory: [], metrics: [], proposal: { kind: "none", splits: [], testFile: "", testName: "", cases: [], assertion: "" }, ...over });
-  const ctx = { questions: [{ id: "Q1", type: "existing-equivalent", item: "R1", text: "?", origin: "required", key: "k" }], groundwork: { symbols: [], inventory: { dependencies: [], packages: [], truncated: [] } }, view: { items: [], records: [] }, packs: [] } as never;
+  const ctx = { questions: [{ id: "Q1", type: "existing-reuse-common", item: "R1", text: "?", origin: "required", key: "k" }], groundwork: { symbols: [], inventory: { dependencies: [], packages: [], truncated: [] } }, view: { items: [], records: [] }, packs: [] } as never;
 
   it("resolves each citation in the tree it names: the base commit, or the working tree for the head", () => {
     const plan = verificationPlan(

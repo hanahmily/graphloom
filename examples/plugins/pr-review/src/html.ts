@@ -28,6 +28,7 @@ import { SEVERITIES, type Finding } from "./review.js";
 import type { MetricsRecord } from "./metrics/record.js";
 import { isTestPath } from "./metrics/record.js";
 import { searchWhere, type MeasuredSearch } from "./searches.js";
+import { VISUAL_CSS, visualHeader, visualSections, type VisualLinks } from "./visual.js";
 
 // ---- the documents it renders ----
 
@@ -53,24 +54,9 @@ export interface ReportDoc {
   measurements: { tools?: string; coverage?: string[]; mutation?: string; records?: MetricsRecord[]; none?: string };
 }
 
-interface QaPart {
-  part: string;
-  answer: string;
-  status: string;
-  none_found?: boolean;
-  citations?: Array<{ path: string; tree: string; start: number; end: number; quote: string }>;
-  searches?: MeasuredSearch[];
-  inventory?: Array<{ name: string; version: string }>;
-  check?: { verdict: string; note: string; searches?: MeasuredSearch[] };
-  /** The part's earlier statement and its corrected one, when the answer was revised. */
-  history?: Array<{ answer: string; status: string }>;
-}
-
 interface QaAnswer {
   answer: string;
   status: string;
-  /** The three labelled parts of a combined existence/reuse/common-logic answer (design §7.6). */
-  parts?: QaPart[];
   none_found?: boolean;
   citations?: Array<{ path: string; tree: string; start: number; end: number; quote: string }>;
   searches?: MeasuredSearch[];
@@ -194,7 +180,7 @@ function findingHtml(f: Finding, d: Draft, g: Github, full: boolean): string {
     f.notes.length > 0 ? `<p class="muted">${esc(f.notes.join("; "))}.</p>` : "",
     full && f.suggestion.trim() !== "" ? `<p>Suggestion:</p><pre><code>${esc(f.suggestion)}</code></pre>` : "",
   ].join("");
-  return details(summary, body, isBlocking(f), "qa");
+  return details(summary, body, isBlocking(f), "qa", full ? `f-${f.id}` : "");
 }
 
 /** The Review part of the briefing: the findings by severity with counts, each collapsed except the blocking ones. */
@@ -317,7 +303,7 @@ function overviewHtml(r: ReportDoc): string {
 }
 
 function whatsNewHtml(b: FinalBriefing, g: Github): string {
-  return b.whatsNew.length === 0 ? para("None stated.") : `<ul class="plain new">${b.whatsNew.map((w) => `<li>${esc(w.text)} ${citesHtml(w.cites, g)}</li>`).join("")}</ul>`;
+  return b.whatsNew.length === 0 ? para("None stated.") : `<ul class="plain new">${b.whatsNew.map((w, n) => `<li id="W${n + 1}"><span class="rid">W${n + 1}</span> ${esc(w.text)} ${citesHtml(w.cites, g)}</li>`).join("")}</ul>`;
 }
 
 function scopeHtml(sc: Scope): string {
@@ -408,7 +394,7 @@ function openQuestionsHtml(i: HtmlInput): string {
   const sel = openQuestions(qa.questions, { id: NECESSITY_ID, conclusion: n1 });
   const rows = sel.open.map((q) => {
     const status = q.answer?.status ?? "not answered";
-    return `<li><a href="${APPENDIX_HREF}#q-${esc(q.id)}"><strong>${esc(q.id)}</strong></a> <span class="muted">[${esc(q.type)}]</span> ${badge(STATUS_CLASS[status] ?? "grey", status)} ${esc(clip(q.text, 200))}${q.answer !== undefined ? ` <div class="muted">${esc(clip(q.answer.answer, 240))}</div>${(q.answer.parts ?? []).length > 0 ? `<ul class="plain">${(q.answer.parts ?? []).map((p) => `<li>${esc(PART_TITLES[p.part] ?? p.part)} ${badge(STATUS_CLASS[p.status] ?? "grey", p.status)} <span class="muted">${esc(clip(p.answer, 200))}</span>${p.check?.verdict === "downgraded" && (p.history ?? []).length > 1 ? ` <div class="muted">Downgraded; first said (${esc(p.history![0]!.status)}): “${esc(clip(p.history![0]!.answer, 200))}”</div>` : ""}</li>`).join("")}</ul>` : ""}` : ""}</li>`;
+    return `<li><a href="${APPENDIX_HREF}#q-${esc(q.id)}"><strong>${esc(q.id)}</strong></a> <span class="muted">[${esc(q.type)}]</span> ${badge(STATUS_CLASS[status] ?? "grey", status)} ${esc(clip(q.text, 200))}${q.answer !== undefined ? ` <div class="muted">${esc(clip(q.answer.answer, 240))}</div>` : ""}</li>`;
   });
   const body = [
     sel.open.length === 0 ? para("No question needs a person.") : `<ul class="plain open">${rows.join("")}</ul>`,
@@ -549,32 +535,6 @@ function searchHtml(s: MeasuredSearch): string {
   return `<li><code>${esc(clip(s.pattern, 120))}</code> <span class="muted">(${esc(searchWhere(s))}) → ${esc(result)}</span></li>`;
 }
 
-const PART_TITLES: Record<string, string> = { "existing-equivalent": "Existing equivalent", "reuse-library": "Reusable library", "common-logic": "Common logic" };
-
-/** The evidence and checker line of an answer or of one part of it. */
-function evidenceHtml(a: Pick<QaPart, "citations" | "searches" | "inventory" | "check">, g: Github): string {
-  const check = a.check;
-  const verdict = check === undefined ? "" : check.verdict === "downgraded" ? `downgraded to needs author${check.note !== "" ? ` (${check.note})` : ""}` : `${check.verdict}${check.note !== "" ? `: ${check.note}` : ""}`;
-  return [
-    (a.citations ?? []).length > 0 ? `<p class="cites">Cites ${(a.citations ?? []).map((c) => `${citeLink(g, c)}${c.quote.trim() !== "" ? ` <q>${esc(clip(c.quote, 140))}</q>` : ""}`).join(" ")}</p>` : "",
-    (a.searches ?? []).length > 0 ? `<details class="steps"><summary>Searches (${(a.searches ?? []).length})</summary><ul class="plain">${(a.searches ?? []).map(searchHtml).join("")}</ul></details>` : "",
-    (a.inventory ?? []).length > 0 ? `<p class="muted">Inventory: ${(a.inventory ?? []).map((d) => esc(`${d.name}@${d.version}`)).join(", ")}</p>` : "",
-    check !== undefined ? `<p class="muted">Checker: ${esc(verdict)}.${(check.searches ?? []).length > 0 ? ` Its own searches: ${(check.searches ?? []).map((s) => esc(clip(s.pattern, 60))).join("; ")}.` : ""}</p>` : "",
-  ].join("");
-}
-
-/** A combined answer's three parts, each with its status, text and evidence (design §7.6). */
-function partsHtml(parts: readonly QaPart[], g: Github): string {
-  return `<div class="parts">${parts.map((p) => `<div class="part"><p><strong>${esc(PART_TITLES[p.part] ?? p.part)}</strong> ${badge(STATUS_CLASS[p.status] ?? "grey", p.status)}${p.none_found === true ? ' <span class="muted">none found</span>' : ""}</p><p>${esc(p.answer)}</p>${evidenceHtml(p, g)}${partHistoryHtml(p)}</div>`).join("")}</div>`;
-}
-
-/** A revised part's statements, oldest first, so a downgrade can be compared with what the answerer said first. */
-function partHistoryHtml(p: QaPart): string {
-  if ((p.history ?? []).length <= 1) return "";
-  const what = p.check?.verdict === "downgraded" ? "downgrade" : "correction";
-  return `<p class="muted">Statements before the ${what}: ${(p.history ?? []).map((h, n) => `${n === 0 ? "first" : "corrected"} (${esc(h.status)}): “${esc(clip(h.answer, 160))}”`).join("; ")}.</p>`;
-}
-
 function answerHtml(a: QaAnswer, g: Github): string {
   const p = a.proposal;
   const proposal =
@@ -585,12 +545,16 @@ function answerHtml(a: QaAnswer, g: Github): string {
         : p.kind === "test"
           ? `<p>Proposal: <code>${esc(p.testName ?? "")}</code> in ${esc(p.testFile ?? "")}${(p.cases ?? []).length > 0 ? `, cases ${(p.cases ?? []).map((c) => `${esc(c.input)} (${esc(c.branches)})`).join("; ")}` : ""}</p>`
           : `<p>Proposal: ${esc(p.assertion ?? "")}</p>`;
+  const check = a.check;
+  const verdict = check === undefined ? "" : check.verdict === "downgraded" ? `downgraded to needs author${check.note !== "" ? ` (${check.note})` : ""}` : `${check.verdict}${check.note !== "" ? `: ${check.note}` : ""}`;
   return [
     `<p>${esc(a.answer)}</p>`,
-    (a.parts ?? []).length > 0 ? partsHtml(a.parts ?? [], g) : evidenceHtml(a, g),
+    (a.citations ?? []).length > 0 ? `<p class="cites">Cites ${(a.citations ?? []).map((c) => `${citeLink(g, c)}${c.quote.trim() !== "" ? ` <q>${esc(clip(c.quote, 140))}</q>` : ""}`).join(" ")}</p>` : "",
+    (a.searches ?? []).length > 0 ? `<details class="steps"><summary>Searches (${(a.searches ?? []).length})</summary><ul class="plain">${(a.searches ?? []).map(searchHtml).join("")}</ul></details>` : "",
+    (a.inventory ?? []).length > 0 ? `<p class="muted">Inventory: ${(a.inventory ?? []).map((d) => esc(`${d.name}@${d.version}`)).join(", ")}</p>` : "",
     (a.metrics ?? []).length > 0 ? `<p class="muted">Metrics: ${(a.metrics ?? []).map((m) => esc(`${m.function} ${m.name} ${m.value}`)).join(", ")}</p>` : "",
     proposal,
-    (a.parts ?? []).length > 0 && a.check !== undefined ? `<p class="muted">Checker: ${esc(a.check.verdict === "downgraded" ? "downgraded to needs author" : a.check.verdict)}${a.check.note !== "" ? ` (${esc(a.check.note)})` : ""}.</p>` : "",
+    check !== undefined ? `<p class="muted">Checker: ${esc(verdict)}.${(check.searches ?? []).length > 0 ? ` Its own searches: ${(check.searches ?? []).map((s) => esc(clip(s.pattern, 60))).join("; ")}.` : ""}</p>` : "",
     (a.notes ?? []).length > 0 ? `<p class="muted">Note: ${esc((a.notes ?? []).join("; "))}.</p>` : "",
     (a.history ?? []).length > 1 ? `<p class="muted">Statements before the correction: ${(a.history ?? []).map((h, n) => `${n === 0 ? "first" : "corrected"} (${esc(h.status)}): “${esc(clip(h.answer, 160))}”`).join("; ")}.</p>` : "",
   ].join("");
@@ -601,7 +565,8 @@ function qaHtml(r: ReportDoc, qa: QaDoc | undefined, g: Github): string {
   if (qa.necessity?.skipped === true) return details("<h2>Q&amp;A</h2>", para(`${NECESSITY_ID} is answered above, under Necessity.`) + para(qa.necessity.note ?? SKIPPED_NOTE), true, "sec");
   const asked = qa.questions.filter((q) => q.id !== NECESSITY_ID);
   const count = (s: string): number => asked.filter((q) => q.answer?.status === s).length;
-  const items = new Map(r.sections.flatMap((s) => s.items).map((i) => [i.id, i] as const));
+  // The items the questions are about: the report's, and in a large report the high-level changes (W1…, the briefing's bullets).
+  const items = new Map([...r.sections.flatMap((s) => s.items).map((i) => [i.id, i] as const), ...r.briefing.whatsNew.map((w, n) => [`W${n + 1}`, w] as const)]);
   const groups = new Map<string, typeof asked>();
   for (const q of asked) groups.set(q.item, [...(groups.get(q.item) ?? []), q]);
   const body = [
@@ -677,13 +642,13 @@ ul.new li{margin:4px 0}ul.open li{margin:8px 0}.foot{margin:18px 0 0;font-size:1
 @media (max-width:700px){main{padding:10px 8px}.card{min-width:100px}}
 `;
 
-function page(i: HtmlInput, g: Github, nav: string, parts: string[]): string {
+function page(i: HtmlInput, g: Github, nav: string, parts: string[], header?: string): string {
   const r = i.report;
   return [
     "<!doctype html>",
-    `<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${esc(`${r.pull.owner}/${r.pull.repo}#${r.pull.number}: ${r.pull.title}`)}</title><style>${CSS}</style></head>`,
+    `<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${esc(`${r.pull.owner}/${r.pull.repo}#${r.pull.number}: ${r.pull.title}`)}</title><style>${CSS}${VISUAL_CSS}</style></head>`,
     `<body><main>`,
-    headerHtml(i, g, nav),
+    header ?? headerHtml(i, g, nav),
     ...parts,
     `</main></body></html>`,
     "",
@@ -692,29 +657,37 @@ function page(i: HtmlInput, g: Github, nav: string, parts: string[]): string {
 
 const githubOf = (r: ReportDoc): Github => ({ owner: r.pull.owner, repo: r.pull.repo, head: r.pull.head, base: r.pull.base, number: r.pull.number });
 
-/** The whole `review.html` (design §6.11): the briefing, one page, then a link to the appendix. */
+/** The links of the visual report: the pull request, its commits, and the appendix. */
+function visualLinks(r: ReportDoc, g: Github): VisualLinks {
+  return { pull: pullHref(g), head: commitHref(r.pull.head, g), ...(r.pull.base !== undefined ? { base: commitHref(r.pull.base, g) } : {}), appendix: APPENDIX_HREF };
+}
+
+/**
+ * The whole `review.html` (design §6.11): the report as diagrams and visual elements only, in order: the header strip,
+ * the verdict and scope tiles, the data-flow diagrams, the risk map and the question status grid. Labels, numbers and
+ * badges are the only text; the rest is in tooltips and in the appendix.
+ */
 export function renderReviewHtml(i: HtmlInput): string {
   const r = i.report;
   const g = githubOf(r);
-  return page(i, g, `<a href="${APPENDIX_HREF}">appendix</a>`, [
-    briefingHtml(i, g),
-    featuresHtml(r, g),
-    checkHtml(r.briefing, g),
-    reviewHtml(i.review, g),
-    hotspotsHtml(r, g),
-    areasHtml(r),
-    openQuestionsHtml(i),
-    `<p class="foot"><a href="${APPENDIX_HREF}">Appendix: every change item, the full measurements, the claim check's removals, and the whole Q&amp;A</a></p>`,
-  ]);
+  const l = visualLinks(r, g);
+  return page(i, g, "", visualSections(i, l), visualHeader(r, l));
 }
 
-/** The whole `review-appendix.html` (design §6.11): everything the briefing leaves out. */
+/** The whole `review-appendix.html` (design §6.11): everything `review.html` shows as a picture, in text, and the rest. */
 export function renderAppendixHtml(i: HtmlInput): string {
   const r = i.report;
   const g = githubOf(r);
   const c: Ctx = { g, files: r.files, diagrams: 0, drawn: r.diagrams };
   return page(i, g, `<a href="${REVIEW_HREF}">briefing</a>`, [
     `<p class="foot"><a href="${REVIEW_HREF}">Back to the briefing</a></p>`,
+    briefingHtml(i, g),
+    featuresHtml(r, g),
+    checkHtml(r.briefing, g),
+    hotspotsHtml(r, g),
+    areasHtml(r),
+    openQuestionsHtml(i),
+    reviewHtml(i.review, g),
     details("<h2>Summary</h2>", overviewHtml(r), true, "sec"),
     necessityHtml(i.necessity, g),
     changeMapHtml(r),

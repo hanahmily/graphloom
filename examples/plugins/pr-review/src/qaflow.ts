@@ -80,7 +80,7 @@ export function qaContext(evidence: readonly EvidenceRecord[], profile: Profile,
 /** The questioner's flow: its result checked by the deterministic rules. */
 export function questionerFlow(evidence: readonly EvidenceRecord[], ctx: QaContext): QuestionsFlow {
   const allPurposeKeys = requiredQuestions({ view: ctx.view, groundwork: ctx.groundwork, large: isLarge(ctx.mode) }, new Map());
-  return questionsFlow(evidence, (output) => questionerProblems(output, ctx.view, ctx.groundwork, allPurposeKeys));
+  return questionsFlow(evidence, (output) => questionerProblems(output, ctx.view, ctx.groundwork, allPurposeKeys, isLarge(ctx.mode)));
 }
 
 export interface QuestionSet {
@@ -99,10 +99,10 @@ export interface QuestionSet {
  */
 export function questionSet(ctx: QaContext, output: QuestionerOutput | undefined, skipped = false): QuestionSet {
   if (skipped) return { questions: [necessityQuestion()], purposes: [], rejected: [], skipped: true };
-  const { stated, rejected } = statedPurposes(output, ctx.view, ctx.pinned);
+  const { stated, rejected } = statedPurposes(output, ctx.view, ctx.pinned, isLarge(ctx.mode));
   const required = requiredQuestions({ view: ctx.view, groundwork: ctx.groundwork, large: isLarge(ctx.mode) }, stated);
-  const purposes: PurposeRecord[] = changeItems(ctx.view).map((i) => stated.get(i.id) ?? { item: i.id, status: "asked" });
-  return { questions: [necessityQuestion(), ...finalQuestions(required, output, ctx.groundwork)], purposes, rejected, skipped: false };
+  const purposes: PurposeRecord[] = changeItems(ctx.view, isLarge(ctx.mode)).map((i) => stated.get(i.id) ?? { item: i.id, status: "asked" });
+  return { questions: [necessityQuestion(), ...finalQuestions(required, output, ctx.groundwork, isLarge(ctx.mode))], purposes, rejected, skipped: false };
 }
 
 export const answerContext = (ctx: QaContext, questions: readonly Question[]): AnswerContext => ({ questions, groundwork: ctx.groundwork, view: ctx.view, packs: ctx.packs, pinned: ctx.pinned });

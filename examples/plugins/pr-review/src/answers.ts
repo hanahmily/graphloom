@@ -24,7 +24,7 @@ import type { MetricsRecord } from "./metrics/record.js";
 import { crapRounded } from "./metrics/crap.js";
 import { effectiveConclusion, NECESSITY_SCHEMA, NECESSITY_REVISION_SCHEMA_NAME, NECESSITY_SCHEMA_NAME, necessityAnswer, necessityProblems, statusOf, type Necessity, type PrincipleCheck } from "./necessity.js";
 import type { Principle } from "./principles.js";
-import { COMBINED_PARTS, COMBINED_TYPE, type CombinedPart, type PinnedText, type Question } from "./questions.js";
+import type { PinnedText, Question } from "./questions.js";
 import type { ReportView } from "./reportview.js";
 import { MAX_RERUN_SEARCHES, readSearchReport, searchCommand, searchKey, searchProblems, searchWhere, SEARCH_SCHEMA, type MeasuredSearch, type Search } from "./searches.js";
 import { packOf, type SymbolDef } from "./symbols.js";
@@ -53,33 +53,6 @@ export type AnswerVerdict = (typeof VERDICTS)[number];
 export const ANSWERS_REFERENCES = ["answers[].question"];
 export const ANSWER_CHECK_REFERENCES = ["verdicts[].question", "verdicts[].principles[].id"];
 
-const CITATIONS_SCHEMA = {
-  type: "array",
-  items: {
-    type: "object",
-    additionalProperties: false,
-    required: ["path", "tree", "start", "end", "quote"],
-    properties: { path: { type: "string" }, tree: { type: "string", enum: ["base", "head", "dependency"] }, start: { type: "integer" }, end: { type: "integer" }, quote: { type: "string" } },
-  },
-} as const;
-const INVENTORY_SCHEMA = { type: "array", items: { type: "object", additionalProperties: false, required: ["name", "version"], properties: { name: { type: "string" }, version: { type: "string" } } } } as const;
-
-/** One labelled part of a combined question's answer (design §7.6): its own text, status and evidence. */
-const PART_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  required: ["part", "answer", "status", "none_found", "citations", "searches", "inventory"],
-  properties: {
-    part: { type: "string", enum: COMBINED_PARTS },
-    answer: { type: "string" },
-    status: { type: "string", enum: STATUSES },
-    none_found: { type: "boolean" },
-    citations: CITATIONS_SCHEMA,
-    searches: { type: "array", items: SEARCH_SCHEMA },
-    inventory: INVENTORY_SCHEMA,
-  },
-} as const;
-
 export const ANSWERS_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -90,17 +63,23 @@ export const ANSWERS_SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["question", "answer", "status", "none_found", "citations", "searches", "inventory", "metrics", "proposal", "parts"],
+        required: ["question", "answer", "status", "none_found", "citations", "searches", "inventory", "metrics", "proposal"],
         properties: {
           question: { type: "string" },
           answer: { type: "string" },
           status: { type: "string", enum: STATUSES },
           none_found: { type: "boolean" },
-          citations: CITATIONS_SCHEMA,
+          citations: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["path", "tree", "start", "end", "quote"],
+              properties: { path: { type: "string" }, tree: { type: "string", enum: ["base", "head", "dependency"] }, start: { type: "integer" }, end: { type: "integer" }, quote: { type: "string" } },
+            },
+          },
           searches: { type: "array", items: SEARCH_SCHEMA },
-          inventory: INVENTORY_SCHEMA,
-          // The combined existence/reuse/common-logic question alone (design §7.6): its three labelled parts; empty for every other question.
-          parts: { type: "array", items: PART_SCHEMA },
+          inventory: { type: "array", items: { type: "object", additionalProperties: false, required: ["name", "version"], properties: { name: { type: "string" }, version: { type: "string" } } } },
           metrics: {
             type: "array",
             items: { type: "object", additionalProperties: false, required: ["function", "path", "name", "value"], properties: { function: { type: "string" }, path: { type: "string" }, name: { type: "string", enum: ["complexity", "nesting", "crap"] }, value: { type: "number" } } },
@@ -134,22 +113,12 @@ export const ANSWER_CHECK_SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["question", "verdict", "note", "searches", "principles", "parts"],
+        required: ["question", "verdict", "note", "searches", "principles"],
         properties: {
           question: { type: "string" },
           verdict: { type: "string", enum: VERDICTS },
           note: { type: "string" },
           searches: { type: "array", items: SEARCH_SCHEMA },
-          // The combined question alone (design §7.6): the judgment of each of its three parts, with the searches of its own each needs; empty for every other question.
-          parts: {
-            type: "array",
-            items: {
-              type: "object",
-              additionalProperties: false,
-              required: ["part", "verdict", "note", "searches"],
-              properties: { part: { type: "string", enum: COMBINED_PARTS }, verdict: { type: "string", enum: VERDICTS }, note: { type: "string" }, searches: { type: "array", items: SEARCH_SCHEMA } },
-            },
-          },
           // N1 only: the judgment of each design principle verdict (design §7.5.1); empty for every other question.
           principles: {
             type: "array",
@@ -176,16 +145,6 @@ export interface Proposal {
   cases: Array<{ input: string; branches: string }>;
   assertion: string;
 }
-/** One of the three labelled parts of a combined question's answer (design §7.6). */
-export interface AnswerPart {
-  part: CombinedPart;
-  answer: string;
-  status: AnswerStatus;
-  none_found: boolean;
-  citations: Citation[];
-  searches: Search[];
-  inventory: Array<{ name: string; version: string }>;
-}
 export interface Answer {
   question: string;
   answer: string;
@@ -196,36 +155,11 @@ export interface Answer {
   inventory: Array<{ name: string; version: string }>;
   metrics: Array<{ function: string; path: string; name: "complexity" | "nesting" | "crap"; value: number }>;
   proposal: Proposal;
-  /**
-   * The combined existence/reuse/common-logic question's three parts (design §7.6), in the order of COMBINED_PARTS; absent
-   * for every other question. Once read (`withParts`), the answer's own status is the weakest of the parts', and its
-   * none_found, citations, searches and inventory are the parts' together, so every check that reads an answer as a
-   * whole (citation verification, the re-run of searches) covers the parts.
-   */
-  parts?: AnswerPart[];
   /** The structured necessity answer, on N1 alone (design §7.5). */
   necessity?: Necessity;
 }
-
-/** The weakest of statuses: answered < partially answered < needs author. */
-export const weakestStatus = (statuses: readonly AnswerStatus[]): AnswerStatus => statuses.reduce<AnswerStatus>((w, s) => (STATUSES.indexOf(s) > STATUSES.indexOf(w) ? s : w), "answered");
-
-/** The answer with its parts folded in: the parts in canonical order, the status the weakest, the evidence together. An answer without parts is returned as it is. */
-export function withParts(a: Answer): Answer {
-  if (a.parts === undefined || a.parts.length === 0) return a;
-  const parts = [...a.parts].sort((x, y) => COMBINED_PARTS.indexOf(x.part) - COMBINED_PARTS.indexOf(y.part));
-  const seen = new Set<string>();
-  const inventory = parts.flatMap((p) => p.inventory).filter((d) => !seen.has(`${d.name}@${d.version}`) && seen.add(`${d.name}@${d.version}`));
-  return { ...a, parts, status: weakestStatus(parts.map((p) => p.status)), none_found: parts.some((p) => p.none_found), citations: parts.flatMap((p) => p.citations), searches: parts.flatMap((p) => p.searches), inventory };
-}
 export interface AnswersOutput {
   answers: Answer[];
-}
-export interface PartCheck {
-  part: CombinedPart;
-  verdict: AnswerVerdict;
-  note: string;
-  searches: Search[];
 }
 export interface CheckVerdict {
   question: string;
@@ -233,7 +167,6 @@ export interface CheckVerdict {
   note: string;
   searches: Search[];
   principles: PrincipleCheck[];
-  parts: PartCheck[];
 }
 
 export interface AnswerContext {
@@ -267,9 +200,7 @@ export function functionOf(q: Question, ctx: Pick<AnswerContext, "groundwork" | 
 
 const NEEDS_OWN_SEARCH: ReadonlySet<string> = new Set(["missing-test", "complexity-coverage", "weak-test", "necessity"]);
 /** Whether the checker must run searches of its own for this answer: every "none found", and every claim about a covering test. */
-export const needsOwnSearch = (q: Question, a: Pick<Answer, "none_found" | "parts">): boolean => (a.parts !== undefined && a.parts.length > 0 ? false : a.none_found || NEEDS_OWN_SEARCH.has(q.type));
-/** Whether the checker must run searches of its own for one part of a combined answer: when that part says none found. */
-export const partNeedsOwnSearch = (p: Pick<AnswerPart, "none_found">): boolean => p.none_found;
+export const needsOwnSearch = (q: Question, a: Pick<Answer, "none_found">): boolean => a.none_found || NEEDS_OWN_SEARCH.has(q.type);
 
 /** Every deterministic problem with `answers` for the `scope` questions (design §7.3, check 1). Empty when it passes. */
 export function answerProblems(answers: readonly Answer[], ctx: AnswerContext, scope?: ReadonlySet<string>): string[] {
@@ -295,12 +226,16 @@ export function answerProblems(answers: readonly Answer[], ctx: AnswerContext, s
   return problems;
 }
 
-/** The evidence of an answer, or of one part of it: it has some, and every search, citation and inventory entry is well formed. */
-function evidenceProblems(at: string, e: Pick<Answer, "citations" | "searches" | "inventory">, dirs: readonly string[], declared: ReadonlySet<string>): string[] {
+function answerProblemsOf(a: Answer, q: Question, ctx: AnswerContext, dirs: readonly string[], declared: ReadonlySet<string>): string[] {
   const out: string[] = [];
-  if (e.citations.length + e.searches.length + e.inventory.length === 0) out.push(`${at}: it has no evidence: cite the code, list the searches run, or name the inventory entries read`);
-  for (const s of e.searches) out.push(...searchProblems(s, at, dirs));
-  e.citations.forEach((c, i) => {
+  const at = a.question;
+  if (a.answer.trim() === "") out.push(`${at}: the answer is empty`);
+  if (a.answer.length > MAX_ANSWER_CHARS) out.push(`${at}: the answer is ${a.answer.length} characters, more than ${MAX_ANSWER_CHARS}`);
+  // The necessity answer has its own bounds (necessityProblems): its trace, design statements and changed lines are citations too.
+  if (q.type !== "necessity" && (a.citations.length > MAX_LIST || a.searches.length > MAX_LIST || a.inventory.length > MAX_LIST * 4 || a.metrics.length > MAX_LIST)) out.push(`${at}: more than ${MAX_LIST} citations, searches or metrics (cite the ones that settle it)`);
+  if (a.citations.length + a.searches.length + a.inventory.length === 0) out.push(`${at}: it has no evidence: cite the code, list the searches run, or name the inventory entries read`);
+  for (const s of a.searches) out.push(...searchProblems(s, at, dirs));
+  a.citations.forEach((c, i) => {
     const where = `${at} citation ${i + 1} (${c.path})`;
     if (c.start < 1 || c.end < c.start) out.push(`${where}: the lines ${c.start}-${c.end} are not a range`);
     if (c.tree === "dependency") {
@@ -309,65 +244,7 @@ function evidenceProblems(at: string, e: Pick<Answer, "citations" | "searches" |
     if (c.quote.length > 400) out.push(`${where}: the quote is longer than 400 characters`);
     if (c.path.length > MAX_PATH_CHARS) out.push(`${where}: the path is longer than ${MAX_PATH_CHARS} characters`);
   });
-  for (const inv of e.inventory) if (!declared.has(`${inv.name}@${inv.version}`)) out.push(`${at}: inventory entry ${inv.name}@${inv.version} is not in the dependency inventory`);
-  return out;
-}
-
-/**
- * What the answer to an existence question (an equivalent, a library, shared logic) must hold, for the question's own
- * answer or for one part of the combined question's: a "none found" lists the whole-repository searches, a library
- * "none found" is partial while the dependency inventory is incomplete, and a named candidate is cited.
- */
-function existenceProblems(at: string, type: CombinedPart, a: Pick<Answer, "none_found" | "status" | "citations" | "searches">, ctx: AnswerContext): string[] {
-  const out: string[] = [];
-  // Only a search of the whole base tree grounds an absence: one scoped to some paths covers less than the repository.
-  const baseSearches = a.searches.filter((s) => s.tree === "base" && s.paths.length === 0).length;
-  if (a.none_found) {
-    const need = absenceNeed({ type });
-    if (baseSearches < need) out.push(`${at}: a "none found" answer lists the whole-repository searches that found nothing (${need} or more over the whole base tree, with no paths: names and variants, signatures, key tokens; a search scoped to paths is supplementary), not ${baseSearches}`);
-    const inv = ctx.groundwork.inventory;
-    if (type === "reuse-library" && a.status === "answered" && (inv.dependencies.some((d) => d.source === undefined) || inv.truncated.length > 0)) {
-      out.push(`${at}: ${inv.truncated.length > 0 ? "the dependency inventory is incomplete" : "some declared dependency has no source available here"}, so a "none found" library answer is "partially answered", not "answered"`);
-    }
-  } else if (a.citations.length === 0 && a.status !== "needs author") out.push(`${at}: an answer that names an existing equivalent, library or duplicate cites it`);
-  return out;
-}
-
-/** The combined question's answer (design §7.6): exactly its three parts, each answered as the separate question would be, with its own evidence. */
-function partsProblems(a: Answer, ctx: AnswerContext, dirs: readonly string[], declared: ReadonlySet<string>): string[] {
-  const out: string[] = [];
-  const at = a.question;
-  const parts = a.parts ?? [];
-  if (parts.length === 0) out.push(`${at}: the answer has no parts: answer the existing equivalent, the reusable library and the common logic as three parts, each with its own evidence`);
-  else {
-    for (const name of COMBINED_PARTS) {
-      const n = parts.filter((p) => p.part === name).length;
-      if (n === 0) out.push(`${at}: the ${name} part is missing: the answer has all three parts (${COMBINED_PARTS.join(", ")})`);
-      else if (n > 1) out.push(`${at}: the ${name} part appears ${n} times`);
-    }
-  }
-  for (const p of parts) {
-    const where = `${at} (${p.part})`;
-    if (p.answer.trim() === "") out.push(`${where}: the part's answer is empty`);
-    if (p.answer.length > MAX_ANSWER_CHARS) out.push(`${where}: the part's answer is ${p.answer.length} characters, more than ${MAX_ANSWER_CHARS}`);
-    if (p.citations.length > MAX_LIST || p.searches.length > MAX_LIST || p.inventory.length > MAX_LIST * 4) out.push(`${where}: more than ${MAX_LIST} citations or searches (cite the ones that settle it)`);
-    out.push(...evidenceProblems(where, p, dirs, declared), ...existenceProblems(where, p.part, p, ctx));
-  }
-  return out;
-}
-
-function answerProblemsOf(a: Answer, q: Question, ctx: AnswerContext, dirs: readonly string[], declared: ReadonlySet<string>): string[] {
-  const out: string[] = [];
-  const at = a.question;
-  if (a.answer.trim() === "") out.push(`${at}: the answer is empty`);
-  if (a.answer.length > MAX_ANSWER_CHARS) out.push(`${at}: the answer is ${a.answer.length} characters, more than ${MAX_ANSWER_CHARS}`);
-  const combined = q.type === COMBINED_TYPE;
-  if (!combined && a.parts !== undefined && a.parts.length > 0) out.push(`${at}: parts belong to the combined ${COMBINED_TYPE} question alone`);
-  // The necessity answer has its own bounds (necessityProblems): its trace, design statements and changed lines are citations too. A combined answer's evidence is in its parts, checked below.
-  if (!combined) {
-    if (q.type !== "necessity" && (a.citations.length > MAX_LIST || a.searches.length > MAX_LIST || a.inventory.length > MAX_LIST * 4 || a.metrics.length > MAX_LIST)) out.push(`${at}: more than ${MAX_LIST} citations, searches or metrics (cite the ones that settle it)`);
-    out.push(...evidenceProblems(at, a, dirs, declared));
-  } else out.push(...partsProblems(a, ctx, dirs, declared));
+  for (const inv of a.inventory) if (!declared.has(`${inv.name}@${inv.version}`)) out.push(`${at}: inventory entry ${inv.name}@${inv.version} is not in the dependency inventory`);
   for (const m of a.metrics) {
     const r = ctx.view.records.find((x) => x.function === m.function && x.path === m.path);
     if (r === undefined) {
@@ -378,6 +255,8 @@ function answerProblemsOf(a: Answer, q: Question, ctx: AnswerContext, dirs: read
     if (truth !== m.value) out.push(`${at}: ${m.function} ${m.name} is ${truth} in its measurement record, not ${m.value}`);
   }
   const testCited = a.citations.some((c) => c.tree !== "dependency" && isTestPath(ctx.packs, c.path));
+  // Only a search of the whole base tree grounds an absence: one scoped to some paths covers less than the repository.
+  const baseSearches = a.searches.filter((s) => s.tree === "base" && s.paths.length === 0).length;
   const fn = functionOf(q, ctx);
   const mustNeedAuthor = ["missing-test", "complexity-coverage", "weak-test"].includes(q.type) && !testCited;
   switch (q.type) {
@@ -388,10 +267,15 @@ function answerProblemsOf(a: Answer, q: Question, ctx: AnswerContext, dirs: read
     case "purpose":
       if (a.status === "answered" && a.citations.length === 0) out.push(`${at}: a purpose is answered only from cited code, comments or documents; otherwise it needs the author`);
       break;
-    case "existing-equivalent":
-    case "common-logic":
-    case "reuse-library":
-      out.push(...existenceProblems(at, q.type, a, ctx));
+    case "existing-reuse-common":
+      if (a.none_found) {
+        const need = absenceNeed(q);
+        if (baseSearches < need) out.push(`${at}: a "none found" answer lists the whole-repository searches that found nothing (${need} or more over the whole base tree, with no paths: names and variants, signatures, key tokens; a search scoped to paths is supplementary), not ${baseSearches}`);
+        const inv = ctx.groundwork.inventory;
+        if (a.status === "answered" && (inv.dependencies.some((d) => d.source === undefined) || inv.truncated.length > 0)) {
+          out.push(`${at}: ${inv.truncated.length > 0 ? "the dependency inventory is incomplete" : "some declared dependency has no source available here"}, so a "none found" answer is "partially answered", not "answered"`);
+        }
+      } else if (a.citations.length === 0 && a.status !== "needs author") out.push(`${at}: an answer that names an existing equivalent, library or duplicate cites it`);
       break;
     case "split-function":
       if (a.status !== "answered") out.push(`${at}: a split-function answer is "answered" with a split proposal, never "${a.status}"`);
@@ -455,10 +339,7 @@ export function parseAnswers(output: unknown, listed?: ReadonlySet<string>): Par
   const shape = validateResultShape(output, ANSWERS_SCHEMA as unknown as Record<string, unknown>);
   if (shape.length > 0) return { problems: shape.slice(0, 20) };
   const notes = new Map<string, string[]>();
-  // A combined answer's evidence is in its parts: evidence beside them would be neither shown nor checked as a part.
-  const stray = (output as AnswersOutput).answers.filter((a) => (a.parts ?? []).length > 0 && a.citations.length + a.searches.length + a.inventory.length > 0).map((a) => a.question);
-  if (stray.length > 0) return { problems: stray.map((id) => `${id}: a combined answer keeps its citations, searches and inventory in its parts; leave the answer's own empty`) };
-  const answers = (output as AnswersOutput).answers.map(withParts).map((a) => {
+  const answers = (output as AnswersOutput).answers.map((a) => {
     if (listed === undefined) return a;
     // The contract's enum should have made the id exact; an id that is not is read only when it begins with one listed id.
     const r = resolveId(a.question, listed);
@@ -551,8 +432,8 @@ export function searchItems(list: ReadonlyArray<{ question: string; search: Sear
   });
 }
 
-/** How many whole-base-tree searches a "none found" answer needs (design §7.3): one for a library, three otherwise. */
-export const absenceNeed = (q: { type: string }): number => (q.type === "reuse-library" ? 1 : 3);
+/** How many whole-base-tree searches a "none found" answer needs (design §7.3): three, for the one existence/reuse/common-logic question. */
+export const absenceNeed = (_q: Pick<Question, "type">): number => 3;
 
 /**
  * The "none found" answers whose required whole-tree searches did not all get re-run, because more distinct searches
@@ -563,20 +444,12 @@ export function unmeasuredAbsences(answers: readonly Answer[], ctx: AnswerContex
   const out: string[] = [];
   for (const a of answers) {
     const q = ctx.questions.find((x) => x.id === a.question);
-    if (q === undefined) continue;
-    // A combined answer's absences are its parts': each part that says none found rests on its own searches.
-    const units: Array<{ label: string; type: string; none_found: boolean; searches: readonly Search[] }> =
-      q.type === COMBINED_TYPE ? (a.parts ?? []).map((p) => ({ label: `${a.question} (${p.part})`, type: p.part, none_found: p.none_found, searches: p.searches })) : [{ label: a.question, type: q.type, none_found: a.none_found, searches: a.searches }];
-    for (const u of units) absenceProblem(u, planned, out);
+    if (q === undefined || !a.none_found || q.type !== "existing-reuse-common") continue;
+    const need = absenceNeed(q);
+    const measured = new Set(a.searches.filter((s) => s.tree === "base" && s.paths.length === 0 && planned.has(searchKey(s))).map(searchKey)).size;
+    if (measured < need) out.push(`${a.question}: its "none found" answer rests on ${measured} of the ${need} whole-tree searches the plugin re-runs: at most ${MAX_RERUN_SEARCHES} distinct searches are re-run per result, those behind none-found answers first, and an absence rests on measured zeros; list fewer, and only the ones that settle it`);
   }
   return out;
-}
-
-function absenceProblem(u: { label: string; type: string; none_found: boolean; searches: readonly Search[] }, planned: ReadonlySet<string>, out: string[]): void {
-  if (!u.none_found || !["existing-equivalent", "common-logic", "reuse-library"].includes(u.type)) return;
-  const need = absenceNeed(u);
-  const measured = new Set(u.searches.filter((s) => s.tree === "base" && s.paths.length === 0 && planned.has(searchKey(s))).map(searchKey)).size;
-  if (measured < need) out.push(`${u.label}: its "none found" answer rests on ${measured} of the ${need} whole-tree searches the plugin re-runs: at most ${MAX_RERUN_SEARCHES} distinct searches are re-run per result, those behind none-found answers first, and an absence rests on measured zeros; list fewer, and only the ones that settle it`);
 }
 
 /** The commands that check a set of answers: each citation against its tree, each split proposal's names against the package, and each search they report, re-run. */
@@ -701,8 +574,6 @@ export interface AnswerReading {
   partial: Map<string, string>;
   unsupported: Map<string, string>;
   searches: Map<string, Search[]>;
-  /** The checker's judgment of each part of a combined answer (design §7.6), by question id, in the parts' order. */
-  parts: Map<string, PartCheck[]>;
   /** The checker's judgment of each principle verdict, on N1. */
   principles: Map<string, PrincipleCheck[]>;
   /** What was normalized in reading the verdicts' ids, by question id. */
@@ -732,7 +603,7 @@ export function readAnswerCheck(output: unknown, questions: readonly Question[],
     // Two verdicts for one question: the weaker stands.
     if (earlier === undefined || VERDICTS.indexOf(v.verdict) > VERDICTS.indexOf(earlier.verdict)) byQuestion.set(r.id, v);
   }
-  const reading: AnswerReading = { unchecked: [], supported: new Set(), partial: new Map(), unsupported: new Map(), searches: new Map(), parts: new Map(), principles: new Map(), notes, ignored };
+  const reading: AnswerReading = { unchecked: [], supported: new Set(), partial: new Map(), unsupported: new Map(), searches: new Map(), principles: new Map(), notes, ignored };
   for (const q of questions) {
     const a = answers.get(q.id);
     const v = byQuestion.get(q.id);
@@ -744,53 +615,23 @@ export function readAnswerCheck(output: unknown, questions: readonly Question[],
       if (earlier === undefined || VERDICTS.indexOf(c.verdict) > VERDICTS.indexOf(earlier.verdict)) judged.set(c.id, c);
     }
     const mine = (a.necessity?.principles ?? []).map((p) => p.id);
-    // A combined answer is judged part by part (the weaker judgment of two stands): every part needs a verdict, and one that says none found, searches of the checker's own.
-    const judgedParts = new Map<CombinedPart, PartCheck>();
-    for (const c of v?.parts ?? []) {
-      const earlier = judgedParts.get(c.part);
-      if (earlier === undefined || VERDICTS.indexOf(c.verdict) > VERDICTS.indexOf(earlier.verdict)) judgedParts.set(c.part, c);
-    }
-    const parts = a.parts ?? [];
-    const partsJudged = parts.every((p) => judgedParts.has(p.part) && (!partNeedsOwnSearch(p) || judgedParts.get(p.part)!.searches.length > 0));
-    if (v === undefined || (needsOwnSearch(q, a) && v.searches.length === 0) || !partsJudged || mine.some((id) => !judged.has(id))) {
+    if (v === undefined || (needsOwnSearch(q, a) && v.searches.length === 0) || mine.some((id) => !judged.has(id))) {
       reading.unchecked.push(q.id);
       continue;
     }
     if (mine.length > 0) reading.principles.set(q.id, mine.map((id) => ({ id, verdict: judged.get(id)!.verdict, note: judged.get(id)!.note.trim() })));
-    if (parts.length === 0) {
-      reading.searches.set(q.id, v.searches);
-      if (v.verdict === "supported") reading.supported.add(q.id);
-      else if (v.verdict === "partial") reading.partial.set(q.id, v.note.trim());
-      else reading.unsupported.set(q.id, v.note.trim());
-      continue;
-    }
-    // The question's verdict is the weakest of its parts', with the note of each part that did not hold, labelled.
-    const checks = parts.map((p) => ({ ...judgedParts.get(p.part)!, note: judgedParts.get(p.part)!.note.trim() }));
-    reading.parts.set(q.id, checks);
-    reading.searches.set(q.id, [...checks.flatMap((c) => c.searches), ...v.searches]);
-    const weakest = checks.reduce<AnswerVerdict>((w, c) => (VERDICTS.indexOf(c.verdict) > VERDICTS.indexOf(w) ? c.verdict : w), "supported");
-    const noteOf = (verdict: AnswerVerdict): string => checks.filter((c) => c.verdict === verdict).map((c) => `${c.part}: ${c.note === "" ? "(no note)" : c.note}`).join("; ");
-    if (weakest === "supported") reading.supported.add(q.id);
-    else if (weakest === "partial") reading.partial.set(q.id, noteOf("partial"));
-    else reading.unsupported.set(q.id, noteOf("unsupported"));
+    reading.searches.set(q.id, v.searches);
+    if (v.verdict === "supported") reading.supported.add(q.id);
+    else if (v.verdict === "partial") reading.partial.set(q.id, v.note.trim());
+    else reading.unsupported.set(q.id, v.note.trim());
   }
   return reading;
-}
-
-/** One part of a combined answer as the Q&A holds it: its status is needs author when the checker did not support it. */
-export interface FinalPart extends AnswerPart {
-  searches: MeasuredSearch[];
-  check: { verdict: AnswerVerdict | "downgraded"; note: string; searches: MeasuredSearch[] };
-  /** The answerer's statements of this part, oldest first, when the answer was revised: the first and the corrected one (design §7.3). */
-  history?: Array<{ answer: string; status: AnswerStatus }>;
 }
 
 /** One answer as the Q&A holds it: the answerer's, with the checker's verdict, and both statements when it was downgraded. */
 export interface FinalAnswer extends Answer {
   /** The searches as the plugin re-ran them: its own count beside the agent's, or why it has none. */
   searches: MeasuredSearch[];
-  /** A combined answer's parts, each with the checker's own judgment of it (design §7.6). */
-  parts?: FinalPart[];
   check: { verdict: AnswerVerdict | "downgraded"; note: string; searches: MeasuredSearch[]; /** N1: the checker's judgment of each principle verdict. */ principles?: PrincipleCheck[] };
   /** What was normalized in reading this answer's id and its verdict's, recorded and never silent. */
   notes: string[];
@@ -932,21 +773,7 @@ export function assemble(questions: readonly Question[], current: ReadonlyMap<st
     const history = revised && first !== undefined && first !== a ? [{ answer: first.answer, status: first.status }, { answer: a.answer, status: a.status }] : [];
     const searches = measured(reading.searches.get(q.id) ?? []);
     const notes = [...(idNotes.get(q.id) ?? []), ...(reading.notes.get(q.id) ?? [])];
-    // The parts of a combined answer, each with its own verdict; one the checker did not support is needs author, and the question's status (the weakest) follows.
-    const partChecks = reading.parts.get(q.id);
-    const parts: FinalPart[] | undefined =
-      a.parts === undefined || a.parts.length === 0 || partChecks === undefined
-        ? undefined
-        : a.parts.map((p) => {
-            const c = partChecks.find((x) => x.part === p.part);
-            const unsupported = c?.verdict === "unsupported";
-            // The part's earlier statement is kept beside the corrected one, so a downgrade can be compared with what was said first.
-            const earlier = revised && first !== undefined && first !== a ? first.parts?.find((x) => x.part === p.part) : undefined;
-            const partHistory = earlier !== undefined ? { history: [{ answer: earlier.answer, status: earlier.status }, { answer: p.answer, status: p.status }] } : {};
-            return { ...p, ...partHistory, status: unsupported ? "needs author" : p.status, searches: measured(p.searches), check: { verdict: unsupported ? "downgraded" : (c?.verdict ?? "supported"), note: c?.note ?? "", searches: measured(c?.searches ?? []) } };
-          });
-    const { parts: _wire, ...rest } = a;
-    const mine = { ...rest, searches: measured(a.searches), notes, ...(parts !== undefined ? { parts, status: weakestStatus(parts.map((p) => p.status)) } : {}) };
+    const mine = { ...a, searches: measured(a.searches), notes };
     const principles = reading.principles.get(q.id);
     const checked = (verdict: AnswerVerdict, note: string): FinalAnswer["check"] => ({ verdict, note, searches, ...(principles !== undefined ? { principles } : {}) });
     // A design principle the checker supports as broken makes N1 questionable, so its status says so (design §7.5.1).

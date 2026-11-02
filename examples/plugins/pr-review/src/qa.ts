@@ -16,7 +16,7 @@ import { describeReasons, type ReviewMode } from "./mode.js";
 import type { PurposeRecord, Question } from "./questions.js";
 import { needAuthor, openQuestions } from "./scope.js";
 import { searchLine, withMeasure } from "./searchview.js";
-import type { ReportView } from "./reportview.js";
+import { questionItems, type ReportView } from "./reportview.js";
 import type { PullRequest } from "./request.js";
 import type { SymbolDef } from "./symbols.js";
 
@@ -97,25 +97,17 @@ function proposalLines(a: FinalAnswer): string[] {
   return [];
 }
 
-const PART_LABELS: Record<string, string> = { "existing-equivalent": "Existing equivalent", "reuse-library": "Reusable library", "common-logic": "Common logic" };
-
-/** A combined answer's three labelled parts (design §7.6), each with its own status, text, evidence and checker verdict. */
-function partLines(a: FinalAnswer): string[] {
-  return (a.parts ?? []).flatMap((p) => [`  - **${PART_LABELS[p.part] ?? p.part} — ${p.status}${p.none_found ? ", none found" : ""}.** ${oneLine(p.answer)}`, `    ${evidenceLine({ ...a, ...p, metrics: [] } as FinalAnswer).trim()}`, ...((p.history ?? []).length > 1 ? [`    Statements before the ${p.check.verdict === "downgraded" ? "downgrade" : "correction"}: ${(p.history ?? []).map((h, n) => `${n === 0 ? "first" : "corrected"} (${h.status}): "${short(oneLine(h.answer), 160)}"`).join("; ")}.`] : [])]);
-}
-
 function questionLines(q: Question, a: FinalAnswer | undefined): string[] {
   const mark = a?.status === "needs author" ? " ▶ needs author" : "";
   const lines = [`- **${q.id} [${q.type}]${mark}** ${oneLine(q.text)}`];
   if (a === undefined) return [...lines, "  **A — not answered.**"];
-  if (a.parts !== undefined && a.parts.length > 0) lines.push(`  **A — ${a.status}.** ${oneLine(a.answer)}`, ...partLines(a), `  Checker: ${a.check.verdict === "downgraded" ? `downgraded to needs author${a.check.note !== "" ? ` (${oneLine(a.check.note)})` : ""}` : `${a.check.verdict}${a.check.note !== "" ? `: ${oneLine(a.check.note)}` : ""}`}.`);
-  else lines.push(`  **A — ${a.status}${a.proposal.kind === "split" && a.status === "answered" ? " (proposal)" : ""}.** ${oneLine(a.answer)}`, evidenceLine(a), ...proposalLines(a));
+  lines.push(`  **A — ${a.status}${a.proposal.kind === "split" && a.status === "answered" ? " (proposal)" : ""}.** ${oneLine(a.answer)}`, evidenceLine(a), ...proposalLines(a));
   if (a.notes.length > 0) lines.push(`  Note: ${a.notes.join("; ")}.`);
   if (a.history.length > 1) lines.push(`  Statements before the ${a.check.verdict === "downgraded" ? "downgrade" : "correction"}: ${a.history.map((h, n) => `${n === 0 ? "first" : "corrected"} (${h.status}): "${short(oneLine(h.answer), 160)}"`).join("; ")}.`);
   return lines;
 }
 
-const COMPACT: ReadonlySet<string> = new Set(["existing-equivalent", "reuse-library", "common-logic"]);
+const COMPACT: ReadonlySet<string> = new Set(["existing-reuse-common"]);
 
 /** The Q&A part of `review.md` (design §7.4). */
 export function renderQa(i: QaInput): string {
@@ -125,15 +117,15 @@ export function renderQa(i: QaInput): string {
   const by = (s: FinalAnswer["status"]): number => i.answers.filter((a) => a.question !== NECESSITY_ID && a.status === s).length;
   const lines = [
     "# Q&A",
-    ...(i.mode?.mode === "large" ? [`Mode: large (${describeReasons(i.mode.reasons)}): the questions follow the large-mode rules (one combined question per change item that adds symbols, asking whether the codebase already has an equivalent, whether a library can do it and whether there is common logic, answered in three labelled parts; one missing-test question per change item)${i.batches !== undefined ? `, answered in ${i.batches} batch(es) of at most 15 questions` : ""}.`] : []),
+    ...(i.mode?.mode === "large" ? [`Mode: large (${describeReasons(i.mode.reasons)}): the questions follow the large-mode rules (asked per high-level change, W1…: its purpose when the pull request does not state it, one question on whether the codebase already has it, a library can do it or common logic exists, and which tests cover it)${i.batches !== undefined ? `, answered in ${i.batches} batch(es) of at most 15 questions` : ""}.`] : []),
     ...(i.necessity !== undefined ? [`${NECESSITY_ID} (necessity) is answered above, under Necessity: ${effectiveConclusion(i.necessity.final)}; ${i.necessity.decision.reason}.`] : []),
     `${asked.length} question${asked.length === 1 ? "" : "s"} (${asked.filter((q) => q.origin === "required").length} required, ${asked.filter((q) => q.origin === "added").length} added by the questioner): ${by("answered")} answered, ${by("partially answered")} partially answered, ${by("needs author")} needs author. Weak-test questions: ${WEAK_TEST_NOTE}.`,
     `Dependency inventory: ${i.groundwork.inventory.dependencies.length} declared dependencies (${i.groundwork.inventory.dependencies.filter((d) => d.source !== undefined).length} with source available, ${i.groundwork.inventory.dependencies.filter((d) => d.source === undefined).length} source unavailable), ${i.groundwork.inventory.packages.length} internal directories${i.groundwork.inventory.truncated.length > 0 ? `; ${i.groundwork.inventory.truncated.join("; ")}` : ""}.`,
     "",
   ];
   const symbols = new Map(i.groundwork.symbols.map((s) => [s.id, s] as const));
-  const itemIds = [...new Set([...i.view.items.map((x) => x.id)].filter((id) => asked.some((q) => q.item === id) || i.purposes.some((p) => p.item === id && p.status === "stated")))];
-  const itemById = new Map(i.view.items.map((x) => [x.id, x] as const));
+  const itemIds = [...new Set([...questionItems(i.view).map((x) => x.id)].filter((id) => asked.some((q) => q.item === id) || i.purposes.some((p) => p.item === id && p.status === "stated")))];
+  const itemById = new Map(questionItems(i.view).map((x) => [x.id, x] as const));
   for (const id of itemIds) {
     const item = itemById.get(id)!;
     lines.push(`### ${id}. ${short(oneLine(item.text), 140)}`);
@@ -253,9 +245,7 @@ export function briefingQa(i: QaInput): { verdict: string; open: string } {
   const answers = new Map(i.answers.map((a) => [a.question, a] as const));
   const like = i.questions.map((q) => {
     const a = answers.get(q.id);
-    // A combined answer's open line shows its three parts, each with its status (design §7.6).
-    const text = a === undefined ? "" : a.parts !== undefined && a.parts.length > 0 ? `${a.answer} (${a.parts.map((p) => `${PART_LABELS[p.part] ?? p.part}: ${p.status}`).join("; ")})` : a.answer;
-    return { id: q.id, type: q.type, text: q.text, answer: a === undefined ? undefined : { status: a.status, answer: text } };
+    return { id: q.id, type: q.type, text: q.text, answer: a === undefined ? undefined : { status: a.status, answer: a.answer } };
   });
   const conclusion = i.necessity !== undefined ? effectiveConclusion(i.necessity.final) : undefined;
   const principles = i.necessity?.final.necessity?.principles ?? [];

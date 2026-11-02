@@ -20,93 +20,92 @@ const appendixOf = (sim: Simulation): string => {
   if (h.state !== "read") throw new Error("no review-appendix.html was written whole");
   return h.value;
 };
-/** The sections of the briefing, in the order the design gives, and the only ones review.html has. */
+/** The sections of review.html, in the order the design gives: pictures only. */
+const VISUAL = ["<h2>Verdict and scope</h2>", "<h2>Data flow</h2>", "<h2>Risk map</h2>", "<h2>Questions</h2>"];
+/** The text of the briefing, which review-appendix.html holds now that review.html is visual. */
 const BRIEFING = ["<h2>Briefing</h2>", "<h2>Data flow per new feature</h2>", "<h2>What you need to check</h2>", "<h2>Hotspots</h2>", "<h2>Areas</h2>", "<h2>Open questions</h2>"];
 const APPENDIX = ["<h2>Summary</h2>", "<h2>Necessity</h2>", "<h2>Change map</h2>", "<h2>Change items</h2>", "<h2>Measurements</h2>", "<h2>Q&amp;A</h2>", "<h2>Removed by the claim check, and notes</h2>"];
 const inOrder = (html: string, parts: string[]): boolean => parts.every((p, i) => html.includes(p) && (i === 0 || html.indexOf(p) > html.indexOf(parts[i - 1]!)));
 const headings = (html: string): string[] => [...html.matchAll(/<h2>.*?<\/h2>/g)].map((m) => m[0]);
 
-describe("review.html, the briefing of a standard report (design 6.1, 6.11)", () => {
+describe("review.html, the visual report of a standard report (design 6.11)", () => {
   const sim = simulate({ scenarioName: "feature-data-flow" });
   const html = htmlOf(sim);
   const appendix = appendixOf(sim);
 
-  it("is written at the Report stage with the verdict and the open questions pending, and whole at the Answers stage, beside review.md and the appendix", () => {
+  it("is written at the Report stage with the verdict and the questions pending, and whole at the Answers stage, beside review.md and the appendix", () => {
     expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "report ready" } });
     const early = recordedHtml(sim.evidence, false);
     expect(early.state).toBe("read");
-    expect((early as { value: string }).value).toContain('<h2>Open questions</h2> <span class="badge grey">pending</span>');
-    expect((early as { value: string }).value).toContain('<span class="label">N1: is it necessary?</span> <span class="badge grey">pending</span>');
-    expect(html).not.toContain("pending</span>");
+    expect((early as { value: string }).value).toContain('<span class="tile grey" title="the Questions and Answers stages follow the report">pending</span>');
+    expect((early as { value: string }).value).toContain("<strong>pending</strong>");
+    expect(html).not.toContain(">pending<");
     expect(sim.jobs.map((j) => j.instruction)).toEqual(expect.arrayContaining(["Write .graphloom/review/review.html", "Write .graphloom/review/review-appendix.html"]));
   });
 
-  it("has the six sections of the briefing in the approved order, and nothing else", () => {
-    expect(inOrder(html, BRIEFING)).toBe(true);
-    expect(headings(html)).toEqual(headings(html).filter((h, i, all) => all.indexOf(h) === i));
-    expect(headings(html).map((h) => h.replace(/<\/?h2>/g, "").replace(/&amp;/g, "&"))).toEqual(["Briefing", "Data flow per new feature", "What you need to check", "Hotspots", "Areas", "Open questions"]);
+  it("has the visual sections in the approved order, and nothing else", () => {
+    expect(inOrder(html, VISUAL)).toBe(true);
+    expect(headings(html).map((h) => h.replace(/<\/?h2>/g, ""))).toEqual(["Verdict and scope", "Data flow", "Risk map", "Questions"]);
     expect(html.startsWith("<!doctype html>")).toBe(true);
+    for (const gone of ["<h2>Briefing</h2>", "<h2>What you need to check</h2>", "<h2>Hotspots</h2>", "<h2>Areas</h2>", "<h2>Open questions</h2>", "<h2>Change items</h2>", "<h2>Necessity</h2>"]) expect(html).not.toContain(gone);
   });
 
-  it("does not hold the change items, the whole measurements table, the module diagram or the full Q&A", () => {
-    expect(html).not.toMatch(/<div class="item"/);
-    expect(html).not.toContain('<table class="metrics">');
-    expect(html).not.toContain("Architecture");
-    expect(html).not.toContain("<h2>Change items</h2>");
-    expect(html).not.toContain('<details class="qa"');
-    expect(html).not.toContain("<h2>Necessity</h2>");
-    expect(html).not.toMatch(/<table class="beh">|<div class="state">/);
+  it("renders no text list, table, paragraph or fold: only tiles, diagrams, labels and badges", () => {
+    expect(html).not.toMatch(/<(ul|ol|li|table|thead|tbody|tr|td|th|pre|details|summary|blockquote|q)[\s>]/);
+    expect(html).not.toMatch(/<p[\s>](?![^<]*class="sub")/);
+    expect(html).not.toContain('class="cites"');
+    expect(html).not.toContain("Stages and flows, with their cites");
   });
 
-  it("opens with the pull request, its size and links, then the purpose, what is new, the scope that matters and the verdict", () => {
-    const head = html.slice(0, html.indexOf("</header>"));
+  it("puts text beyond a short label only in a tooltip: every visible text node is short", () => {
+    const body = html.slice(html.indexOf("<body>"));
+    // The SVG of a diagram carries its own labels (each at most 60 characters); everything else is a tile, a chip or a legend entry.
+    const visible = [...body.replace(/<(desc|title)\b[^>]*>[^<]*<\/\1>/g, "").matchAll(/>([^<>]+)</g)].map((m) => m[1]!.replace(/&[a-z#0-9]+;/g, "x").trim()).filter((t) => t !== "");
+    expect(visible.length).toBeGreaterThan(20);
+    for (const t of visible) expect(t.length, t).toBeLessThanOrEqual(90);
+    // The long texts are there, as tooltips.
+    expect(html).toMatch(/title="[^"]{120,}"/);
+  });
+
+  it("opens with the pull request on one line, the head and base commits, and the link to the appendix", () => {
+    const head = html.slice(html.indexOf("<header"), html.indexOf("</header>"));
     expect(head).toContain("apache/skywalking-banyandb#7");
     expect(head).toContain(`href="https://github.com/apache/skywalking-banyandb/commit/${REHEARSAL_HEAD}"`);
-    expect(head).toContain("by contributor");
-    expect(head).toMatch(/\d+ files · <span class="plus">\+\d+<\/span> <span class="minus">−\d+<\/span> · \d+ commits · GitHub checks: .* · mode: standard · <a href="review-appendix.html">appendix<\/a>/);
-    const brief = html.slice(html.indexOf("<h2>Briefing</h2>"), html.indexOf("<h2>Data flow per new feature</h2>"));
-    expect(brief).toMatch(/<p class="lead"><strong>Purpose<\/strong> <span class="badge (ok|grey)">(stated|inferred)<\/span>/);
-    expect(brief).toMatch(/<h3>What's new<\/h3><ul class="plain new"><li>/);
-    expect(brief).toContain("<h3>Scope that matters</h3>");
-    for (const row of ["Production code", "Tests", "Docs", "Generated / other", "Total"]) expect(brief).toContain(`<th>${row}</th>`);
-    expect(brief).toContain("<h3>Verdict</h3>");
-    expect(brief).toMatch(/N1: is it necessary\?<\/span> <span class="badge (ok|warn|bad|grey)">(necessary|questionable|unnecessary|needs author)<\/span>/);
-    expect(brief).toContain("Principles touched");
-    expect(brief).toContain("Questions that need the author");
+    expect(head).toContain(`<code>${REHEARSAL_HEAD.slice(0, 7)}</code>`);
+    expect(head).toContain(`<code>${REHEARSAL_MERGE_BASE.slice(0, 7)}</code>`);
+    expect(head).toContain('<a href="review-appendix.html">appendix</a>');
+    expect(head).not.toContain("by contributor");
+    expect((head.match(/<h1>/g) ?? []).length).toBe(1);
   });
 
-  it("draws each feature's data flow as an inline SVG, with its stages and flows cited, and records the flow the claim check did not support in the appendix", () => {
-    const flow = html.slice(html.indexOf("<h2>Data flow per new feature</h2>"), html.indexOf("<h2>What you need to check</h2>"));
+  it("shows N1 as a large tile, the principles as a grid, the scope as one stacked bar, and the counts as tiles", () => {
+    const verdict = html.slice(html.indexOf("<h2>Verdict and scope</h2>"), html.indexOf("<h2>Data flow</h2>"));
+    expect(verdict).toMatch(/<a class="tile (ok|warn|bad|grey) big" href="review-appendix.html#q-N1" title="[^"]*"><small>N1: is it necessary\?<\/small><strong>(necessary|questionable|unnecessary|needs author)<\/strong><\/a>/);
+    expect(verdict).toContain("<h3>Principles</h3>");
+    expect(verdict).toContain("<h3>Scope</h3>");
+    expect(verdict).toContain('aria-label="Scope: +');
+    for (const label of ["files", "commits", "checks"]) expect(verdict).toContain(`<small>${label}</small>`);
+  });
+
+  it("draws each feature's data flow as an inline SVG with its name as the only caption; the stages and cites are in the appendix", () => {
+    const flow = html.slice(html.indexOf("<h2>Data flow</h2>"), html.indexOf("<h2>Risk map</h2>"));
     expect(flow).toContain("<svg");
-    expect(flow).toContain('<span class="rid">F1</span> Nightly retention sweep');
+    expect(flow).toContain('<span class="rid">F1</span> Nightly retention sweep</div>');
     for (const label of ["retention_days flag", "Group retention_days", "Nightly sweep", "robfig/cron scheduler"]) expect(flow).toContain(label);
     expect(flow).toContain("Data flow: Nightly retention sweep");
-    expect(flow).toContain("Stages and flows, with their cites");
+    expect(flow).not.toContain("<p>");
+    expect(appendix).toContain("Stages and flows, with their cites");
     const removed = appendix.slice(appendix.indexOf("<h2>Removed by the claim check"));
     expect(removed).toContain("<strong>F1.f2</strong>");
     expect(removed).toContain("schedules the nightly sweep");
   });
 
-  it("lists what to check in five lists, with cites, and the hotspots, areas and open questions after", () => {
-    const check = html.slice(html.indexOf("<h2>What you need to check</h2>"), html.indexOf("<h2>Hotspots</h2>"));
-    expect((check.match(/<h4>/g) ?? []).length).toBe(5);
-    for (const title of ["New surfaces", "Changed behavior of existing code paths", "Compatibility", "Risks", "Tests added"]) expect(check).toContain(title);
-    expect(check).toContain('class="cites"');
-    const areas = html.slice(html.indexOf("<h2>Areas</h2>"), html.indexOf("<h2>Open questions</h2>"));
-    expect(areas).toMatch(/<li>[^<]+: \d+ items?<\/li>/);
-    expect(areas).toContain("graphloom session open &lt;run&gt; --stage report");
-    const open = html.slice(html.indexOf("<h2>Open questions</h2>"));
-    expect(open).toMatch(/\d+ answered — see the appendix\./);
-  });
-
-  it("links to the appendix at the bottom, and only to GitHub at the pinned head and base or to the other file, and passes the inertness check", () => {
+  it("links only to GitHub at the pinned head and base or to the other file, and passes the inertness check", () => {
     expect(htmlProblems(html, GITHUB)).toEqual([]);
     expect(html).not.toMatch(/<script|<link|<img|<iframe|\ssrc=|\sonclick=/i);
     const hrefs = [...html.matchAll(/href="([^"]*)"/g)].map((m) => m[1]!);
     expect(hrefs.length).toBeGreaterThan(5);
     expect(hrefs.every((h) => h.startsWith("https://github.com/apache/skywalking-banyandb/") || /^review-appendix\.html(#[\w.:-]+)?$/.test(h))).toBe(true);
-    expect(html.trimEnd().endsWith('<p class="foot"><a href="review-appendix.html">Appendix: every change item, the full measurements, the claim check\'s removals, and the whole Q&amp;A</a></p>\n</main></body></html>')).toBe(true);
-    expect(hrefs.some((h) => h.includes(`/blob/${REHEARSAL_HEAD}/banyand/cmd/server/flags.go#L`))).toBe(true);
   });
 
   it("is of a reasonable size: inline SVG, no embedded images", () => {
@@ -128,6 +127,41 @@ describe("review.html, the briefing of a standard report (design 6.1, 6.11)", ()
     expect(text).toContain("### R1.");
     expect(text).toContain("`F1.f2`");
     expect(text).toContain("answered — see the appendix.");
+    expect(text).toMatch(/- \*\*W1\*\* /);
+  });
+});
+
+describe("review-appendix.html holds the briefing in text (design 6.11)", () => {
+  const sim = simulate({ scenarioName: "feature-data-flow" });
+  const html = appendixOf(sim);
+
+  it("has the briefing's sections before the rest, with the ids of what is new", () => {
+    expect(inOrder(html, [...BRIEFING, ...APPENDIX])).toBe(true);
+    expect(html).toMatch(/<li id="W1"><span class="rid">W1<\/span> /);
+  });
+
+  it("opens with the purpose, what is new, the scope that matters and the verdict", () => {
+    const brief = html.slice(html.indexOf("<h2>Briefing</h2>"), html.indexOf("<h2>Data flow per new feature</h2>"));
+    expect(brief).toMatch(/<p class="lead"><strong>Purpose<\/strong> <span class="badge (ok|grey)">(stated|inferred)<\/span>/);
+    expect(brief).toMatch(/<h3>What's new<\/h3><ul class="plain new"><li/);
+    expect(brief).toContain("<h3>Scope that matters</h3>");
+    for (const row of ["Production code", "Tests", "Docs", "Generated / other", "Total"]) expect(brief).toContain(`<th>${row}</th>`);
+    expect(brief).toContain("<h3>Verdict</h3>");
+    expect(brief).toMatch(/N1: is it necessary\?<\/span> <span class="badge (ok|warn|bad|grey)">(necessary|questionable|unnecessary|needs author)<\/span>/);
+    expect(brief).toContain("Principles touched");
+    expect(brief).toContain("Questions that need the author");
+  });
+
+  it("lists what to check in five lists, with cites, and the hotspots, areas and open questions after", () => {
+    const check = html.slice(html.indexOf("<h2>What you need to check</h2>"), html.indexOf("<h2>Hotspots</h2>"));
+    expect((check.match(/<h4>/g) ?? []).length).toBe(5);
+    for (const title of ["New surfaces", "Changed behavior of existing code paths", "Compatibility", "Risks", "Tests added"]) expect(check).toContain(title);
+    expect(check).toContain('class="cites"');
+    const areas = html.slice(html.indexOf("<h2>Areas</h2>"), html.indexOf("<h2>Open questions</h2>"));
+    expect(areas).toMatch(/<li>[^<]+: \d+ items?<\/li>/);
+    expect(areas).toContain("graphloom session open &lt;run&gt; --stage report");
+    const open = html.slice(html.indexOf("<h2>Open questions</h2>"));
+    expect(open).toMatch(/\d+ answered — see the appendix\./);
   });
 });
 
@@ -160,7 +194,7 @@ describe("review-appendix.html (design 6.11)", () => {
     expect(htmlProblems(html, GITHUB)).toEqual([]);
     expect(html).not.toMatch(/<script|<link|<img|<iframe|\ssrc=|\sonclick=/i);
     const hrefs = [...html.matchAll(/href="([^"]*)"/g)].map((m) => m[1]!);
-    expect(hrefs.every((h) => h.startsWith("https://github.com/apache/skywalking-banyandb/") || h === "review.html")).toBe(true);
+    expect(hrefs.every((h) => h.startsWith("https://github.com/apache/skywalking-banyandb/") || h === "review.html" || /^review-appendix\.html#[\w.:-]+$/.test(h))).toBe(true);
   });
 
   it("is written at the Report stage with the Necessity and the Q&A pending", () => {
@@ -176,23 +210,29 @@ describe("review.html of a large report", () => {
   const html = htmlOf(sim);
   const appendix = appendixOf(sim);
 
-  it("has the same six sections, the mode in the header, and the areas with the reporter's label, files and lines, and the dive-in command", () => {
-    expect(headings(html)).toHaveLength(6);
-    expect(inOrder(html, BRIEFING)).toBe(true);
-    expect(html).toContain("mode: large: ");
-    const areas = html.slice(html.indexOf("<h2>Areas</h2>"), html.indexOf("<h2>Open questions</h2>"));
-    expect(areas).toContain("<th>What it is</th>");
-    expect(areas).toMatch(/<td>A2<\/td><td>changes under pkg\/alpha<\/td><td>1<\/td><td>\+\d+ −0<\/td>/);
-    expect(areas).toContain("<td>generated code (generated)</td>");
-    expect(areas).toContain("graphloom session open &lt;run&gt; --stage report");
+  it("has the same visual sections, and the risk map of the areas with the reporter's labels", () => {
+    expect(headings(html)).toHaveLength(4);
+    expect(inOrder(html, VISUAL)).toBe(true);
+    const risk = html.slice(html.indexOf("<h2>Risk map</h2>"), html.indexOf("<h2>Questions</h2>"));
+    expect(risk).toContain("Risk map of ");
+    expect(risk).toMatch(/<title>A2 changes under pkg\/alpha \(\d+ lines changed\)/);
     expect(htmlProblems(html, GITHUB)).toEqual([]);
   });
 
   it("draws the feature's data flow", () => {
-    const flow = html.slice(html.indexOf("<h2>Data flow per new feature</h2>"), html.indexOf("<h2>What you need to check</h2>"));
+    const flow = html.slice(html.indexOf("<h2>Data flow</h2>"), html.indexOf("<h2>Risk map</h2>"));
     expect(flow).toContain("pkg/alpha rules");
     expect(flow).toContain("pkg/beta applier");
     expect(flow).toContain("applies Alpha1");
+  });
+
+  it("holds the mode, and the areas with their files and lines and the dive-in command, in the appendix", () => {
+    expect(appendix).toContain("mode: large: ");
+    const areas = appendix.slice(appendix.indexOf("<h2>Areas</h2>"), appendix.indexOf("<h2>Open questions</h2>"));
+    expect(areas).toContain("<th>What it is</th>");
+    expect(areas).toMatch(/<td>A2<\/td><td>changes under pkg\/alpha<\/td><td>1<\/td><td>\+\d+ −0<\/td>/);
+    expect(areas).toContain("<td>generated code (generated)</td>");
+    expect(areas).toContain("graphloom session open &lt;run&gt; --stage report");
   });
 
   it("shows the change map per area in the appendix", () => {
@@ -219,12 +259,16 @@ describe("review.html when N1 stops the questions, and when a question needs the
     expect(necessity).toContain('<span class="badge warn">questionable</span>');
     expect(recordedNecessityJson(sim.evidence).state).toBe("read");
     // The briefing shows the verdict: N1 questionable, the broken principle, and N1 among the open questions.
-    const brief = htmlOf(sim);
+    const brief = appendixOf(sim);
     const verdict = brief.slice(brief.indexOf("<h3>Verdict</h3>"), brief.indexOf("<h2>Data flow per new feature</h2>"));
     expect(verdict).toContain('<span class="badge warn">questionable</span>');
     expect(verdict).toContain('<span class="badge bad">offline-idempotent: breaks</span>');
     const open = brief.slice(brief.indexOf("<h2>Open questions</h2>"));
     expect(open).toContain('<a href="review-appendix.html#q-N1"><strong>N1</strong></a>');
+    // review.html shows the same as tiles: N1 questionable, the principle as a red tile.
+    const visual = htmlOf(sim);
+    expect(visual).toMatch(/<a class="tile warn big" href="review-appendix.html#q-N1"[^>]*><small>N1: is it necessary\?<\/small><strong>questionable<\/strong>/);
+    expect(visual).toMatch(/<a class="tile bad sm" href="review-appendix.html#q-N1" title="offline-idempotent breaks: [^"]*">offline-idempotent<\/a>/);
     // The link has a target: the appendix's Necessity section carries the id.
     expect(html).toMatch(/<details id="q-N1"[^>]*><summary><h2>Necessity<\/h2>/);
   });
@@ -234,8 +278,9 @@ describe("review.html when N1 stops the questions, and when a question needs the
     const html = appendixOf(sim);
     const qa = html.slice(html.indexOf("<h2>Q&amp;A</h2>"));
     expect(qa).toMatch(/<details id="q-[^"]+" open class="qa"><summary>[^]*?needs author<\/span>/);
-    const brief = htmlOf(sim);
+    const brief = appendixOf(sim);
     expect(brief.slice(brief.indexOf("<h2>Open questions</h2>"))).toMatch(/<span class="badge bad">needs author<\/span>/);
+    expect(htmlOf(sim)).toMatch(/<a class="tile bad q" href="review-appendix.html#q-Q\d+"/);
   });
 
   it("collapses answered and partially answered questions, with a badge each, and opens only those that need the author", () => {
@@ -265,8 +310,8 @@ describe("review.html when N1 stops the questions, and when a question needs the
         { id: "Q4", type: "common-logic", item: "R1", text: "shared?", origin: "required", answer: answer("answered") },
       ],
     };
-    const html = renderReviewHtml({ report: report(), qa });
-    const open = html.slice(html.indexOf("<h2>Open questions</h2>"));
+    const html = renderAppendixHtml({ report: report(), qa });
+    const open = html.slice(html.indexOf("<h2>Open questions</h2>"), html.indexOf("<h2>Summary</h2>"));
     expect(open).toContain("2 of 4");
     expect(open).toContain('href="review-appendix.html#q-Q2"');
     expect(open).toContain('href="review-appendix.html#q-Q3"');
@@ -275,6 +320,10 @@ describe("review.html when N1 stops the questions, and when a question needs the
     expect(open).toContain("2 answered — see the appendix.");
     expect(html).toContain('Questions that need the author</span> <span class="badge bad">1</span>');
     expect(htmlProblems(html, GITHUB)).toEqual([]);
+    // review.html shows each as a tile that links to its answer, coloured by its status.
+    const visual = renderReviewHtml({ report: report(), qa });
+    for (const [id, tone] of [["Q1", "ok"], ["Q2", "warn"], ["Q3", "bad"], ["Q4", "ok"]]) expect(visual).toMatch(new RegExp(`<a class="tile ${tone} q" href="review-appendix.html#q-${id}" title="${id} \\[[a-z-]+\\] [a-z ]+: [^"]*"><strong>${id}</strong>`));
+    expect(htmlProblems(visual, GITHUB)).toEqual([]);
   });
 
   it("names a dependency citation as such and never links it into the reviewed repository", () => {
@@ -290,7 +339,7 @@ describe("review.html when N1 stops the questions, and when a question needs the
   it("says the remaining questions were skipped when N1 concluded unnecessary", () => {
     const sim = simulate({ scenarioName: "necessity-unnecessary" });
     expect(appendixOf(sim)).toContain("Remaining questions skipped");
-    const open = htmlOf(sim).slice(htmlOf(sim).indexOf("<h2>Open questions</h2>"));
+    const open = appendixOf(sim).slice(appendixOf(sim).indexOf("<h2>Open questions</h2>"));
     expect(open).toContain('<a href="review-appendix.html#q-N1"><strong>N1</strong></a>');
   });
 });
@@ -381,13 +430,13 @@ describe("the briefing's counted parts (design 6.1)", () => {
   });
 
   it("shows the scope as four rows and a total, with plus and minus lines", () => {
-    const html = renderReviewHtml({ report: report({ scope: { production: { files: 3, added: 120, deleted: 20 }, tests: { files: 2, added: 80, deleted: 5 }, docs: { files: 1, added: 10, deleted: 0 }, generated: { files: 1, added: 400, deleted: 0 } } }) });
+    const html = renderAppendixHtml({ report: report({ scope: { production: { files: 3, added: 120, deleted: 20 }, tests: { files: 2, added: 80, deleted: 5 }, docs: { files: 1, added: 10, deleted: 0 }, generated: { files: 1, added: 400, deleted: 0 } } }) });
     expect(html).toContain('<tr><th>Production code</th><td>3</td><td class="plus">+120</td><td class="minus">−20</td></tr>');
     expect(html).toContain('<tr><th>Generated / other</th><td>1</td><td class="plus">+400</td><td class="minus">−0</td></tr>');
     expect(html).toContain('<tr class="total"><th>Total</th><td>7</td><td class="plus">+610</td><td class="minus">−25</td></tr>');
   });
 
-  it("lists the five hotspots by CRAP, then complexity, and says base → head where a modified function got worse; the full table is not in the briefing", () => {
+  it("lists the five hotspots by CRAP, then complexity, and says base → head where a modified function got worse", () => {
     const records = [
       record("small", 2, 2),
       record("a1", 40, 12),
@@ -398,33 +447,34 @@ describe("the briefing's counted parts (design 6.1)", () => {
       record("e", 5, 4),
       record("testfn", undefined, 30, { test: true }),
     ];
-    const html = renderReviewHtml({ report: report({ measurements: { tools: "static", coverage: [], mutation: "not run", records } as never }) });
+    const html = renderAppendixHtml({ report: report({ measurements: { tools: "static", coverage: [], mutation: "not run", records } as never }) });
     const spot = html.slice(html.indexOf("<h2>Hotspots</h2>"), html.indexOf("<h2>Areas</h2>"));
     const names = [...spot.matchAll(/<li>(\w+) — CRAP/g)].map((m) => m[1]);
     expect(names).toEqual(["a2", "a1", "b", "c", "d"]);
     expect(spot).toContain("b — CRAP 31 (upper bound, coverage unknown), complexity 6 → 9, nesting 1 (modified)");
     expect(spot).toContain("a2 — CRAP 40 (upper bound, coverage unknown), complexity 15, nesting 1 (added)");
     expect(spot).not.toContain("testfn");
-    expect(html).not.toContain('<table class="metrics">');
-    expect(renderAppendixHtml({ report: report({ measurements: { tools: "static", coverage: [], mutation: "not run", records } as never }) })).toContain('<table class="metrics">');
+    expect(html).toContain('<table class="metrics">');
+    // review.html has no table: the hotspots are dots on the risk map.
+    expect(renderReviewHtml({ report: report({ measurements: { tools: "static", coverage: [], mutation: "not run", records } as never }) })).not.toContain("<table");
   });
 
   it("says when nothing is measured", () => {
-    expect(renderReviewHtml({ report: report() })).toContain("No function is measured: no function was added or modified.");
+    expect(renderAppendixHtml({ report: report() })).toContain("No function is measured: no function was added or modified.");
   });
 
   it("shows the sections with their item counts for a report with no areas or a single one, and the areas for one with several", () => {
     const items = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `R${i + 1}`, text: "t", cites: [{ path: "pkg/a.go", side: "head" as const, start: 3, end: 3, symbol: "" }], facts: [], state: [], behavior: [] }));
     const sections = [{ id: "features", title: "Every feature", none: false, items: items(2) }, { id: "config", title: "Config", none: false, items: items(1) }, { id: "schema", title: "Schema", none: true, items: [] }];
-    const standard = renderReviewHtml({ report: report({ sections }) });
+    const standard = renderAppendixHtml({ report: report({ sections }) });
     const areas = standard.slice(standard.indexOf("<h2>Areas</h2>"), standard.indexOf("<h2>Open questions</h2>"));
     expect(areas).toContain("<li>Every feature: 2 items</li>");
     expect(areas).toContain("<li>Config: 1 item</li>");
     expect(areas).not.toContain("Schema");
     const area = (id: string) => ({ id, name: `dir/${id}`, kind: "read" as const, paths: ["pkg/a.go"], additions: 3, deletions: 1 });
-    const single = renderReviewHtml({ report: report({ sections, mode: "large", areas: [area("A1")] }) });
+    const single = renderAppendixHtml({ report: report({ sections, mode: "large", areas: [area("A1")] }) });
     expect(single).toContain("<li>Every feature: 2 items</li>");
-    const several = renderReviewHtml({ report: report({ sections, mode: "large", areas: [area("A1"), area("A2")], briefing: { ...report().briefing, areas: [{ id: "A2", label: "the write path" }] } }) });
+    const several = renderAppendixHtml({ report: report({ sections, mode: "large", areas: [area("A1"), area("A2")], briefing: { ...report().briefing, areas: [{ id: "A2", label: "the write path" }] } }) });
     expect(several).toContain("<td>A1</td><td>dir/A1</td>");
     expect(several).toContain("<td>A2</td><td>the write path</td><td>1</td><td>+3 −1</td>");
     expect(several).not.toContain("<li>Every feature: 2 items</li>");

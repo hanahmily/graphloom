@@ -267,7 +267,7 @@ export const questionsComplete: Validator = profiled((input, profile) => {
   const m = measurementsOf(input.evidence, start.ctx.analysis, profile);
   if (m.state !== "ready" && m.state !== "none") return inconclusive("the measurements are not recorded yet");
   const set = questionSet(start.ctx, flow.output);
-  const { stated } = statedPurposes(flow.output, start.ctx.view, start.ctx.pinned);
+  const { stated } = statedPurposes(flow.output, start.ctx.view, start.ctx.pinned, isLarge(start.ctx.mode));
   const have = new Set(set.questions.map((q) => q.key));
   const missing = requiredQuestions({ view: start.ctx.view, groundwork: start.ctx.groundwork, large: isLarge(start.ctx.mode) }, stated).filter((r) => !have.has(r.key));
   if (missing.length > 0) return failed(`required question(s) not asked: ${missing.slice(0, 5).map((r) => r.key).join(", ")}`);

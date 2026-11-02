@@ -125,8 +125,8 @@ describe("answer-finds-existing-helper", () => {
     expect(questioner).toMatchObject({ jobId: "questioner" });
   });
 
-  it("answers the existing-equivalent question from the base, with the helper's lines, its call site and the search, and the checker supports it", () => {
-    const q = qOf(sim, "existing-equivalent")[0]!;
+  it("answers the existing-reuse-common question from the base, with the helper's lines, its call site and the search, and the checker supports it", () => {
+    const q = qOf(sim, "existing-reuse-common")[0]!;
     expect(q.answer).toMatchObject({ status: "answered", none_found: false, check: { verdict: "supported" } });
     expect(q.answer!.citations.map((c) => c.path)).toEqual(["pkg/timestamp/duration.go", "banyand/measure/flusher.go"]);
     expect(q.answer!.answer).toContain("`ParseDuration` (pkg/timestamp/duration.go:30)");
@@ -193,7 +193,7 @@ describe("citations are resolved in the tree they name", () => {
 
 describe("answer-no-library-with-whole-repo-search", () => {
   const sim = simulate({ scenarioName: "answer-no-library-with-whole-repo-search" });
-  const q = () => qOf(sim, "reuse-library")[0]!;
+  const q = () => qOf(sim, "existing-reuse-common")[0]!;
 
   it("answers none found, listing the whole-repository searches and the dependency inventory with each source's status", () => {
     expect(q().answer).toMatchObject({ none_found: true, status: "partially answered", check: { verdict: "supported" } });
@@ -235,7 +235,7 @@ describe("answer-no-library-with-whole-repo-search", () => {
     const s2 = simulate({ scenario: wrong });
     const answerers = jobsOf(s2, "Answer the questions");
     expect(answerers).toHaveLength(2);
-    expect(assignmentOf(answerers[1]!)).toMatch(/source available here, so a "none found" library answer is "partially answered"/);
+    expect(assignmentOf(answerers[1]!)).toMatch(/source available here, so a "none found" answer is "partially answered"/);
     expect(answerers[1]).toMatchObject({ continueFrom: expect.any(String) });
     expect(answerers[0]!.continueFrom).toBeUndefined();
     expect(stopOf(s2)).toMatchObject({ reason: "report ready" });
@@ -252,10 +252,11 @@ describe("answer-checker-contradicts", () => {
     const text = assignmentOf(answerers[1]!);
     expect(text).toContain("Q1: the answer checker found it unsupported: git grep -n 'func Jitter' finds vendor/github.com/foo/jitter/jitter.go:12");
     expect(text).toContain("Questions (1):");
-    const q = qOf(sim, "existing-equivalent")[0]!;
+    const q = qOf(sim, "existing-reuse-common")[0]!;
     expect(q.answer).toMatchObject({ status: "answered", none_found: false, check: { verdict: "supported" } });
     expect(q.answer!.citations.map((c) => c.path)).toEqual(["vendor/github.com/foo/jitter/jitter.go"]);
-    expect(q.answer!.history.map((h) => h.status)).toEqual(["answered", "answered"]);
+    // The first, none-found answer is partial while a declared dependency has no source here; the corrected one cites the vendored equivalent.
+    expect(q.answer!.history.map((h) => h.status)).toEqual(["partially answered", "answered"]);
     expect(q.answer!.history[0]!.answer).toContain("No existing equivalent");
   });
 
@@ -263,7 +264,7 @@ describe("answer-checker-contradicts", () => {
     const checkers = jobsOf(sim, "Check the answers against");
     expect(checkers).toHaveLength(2);
     expect(checkers.every((j) => j.purpose === "review" && j.continueFrom === undefined)).toBe(true);
-    expect(assignmentOf(checkers[1]!)).toContain("[existing-equivalent]");
+    expect(assignmentOf(checkers[1]!)).toContain("[existing-reuse-common]");
   });
 
   it("verifies the corrected answer's citation before the second check", () => {
@@ -283,13 +284,13 @@ describe("answer-checker-contradicts", () => {
     const s2 = simulate({ scenario: stubborn });
     expect(stopOf(s2)).toMatchObject({ reason: "report ready" });
     expect(jobsOf(s2, "Answer the questions")).toHaveLength(2);
-    const q = qOf(s2, "existing-equivalent")[0]!;
+    const q = qOf(s2, "existing-reuse-common")[0]!;
     expect(q.answer).toMatchObject({ status: "needs author", check: { verdict: "downgraded", note: "the cited file does not define Jitter" } });
     expect(q.answer!.history).toHaveLength(2);
     expect(q.answer!.history[0]!.answer).toContain("No existing equivalent");
     expect(q.answer!.history[1]!.answer).toContain("vendor/github.com/foo/jitter/jitter.go:12");
-    expect(s2.qa!.markdown).toContain("**Q1 [existing-equivalent] ▶ needs author**");
-    expect(s2.qa!.markdown).toMatch(/Statements before the downgrade: first \(answered\): "No existing equivalent[^"]*"; corrected \(answered\): "`Jitter`/);
+    expect(s2.qa!.markdown).toContain("**Q1 [existing-reuse-common] ▶ needs author**");
+    expect(s2.qa!.markdown).toMatch(/Statements before the downgrade: first \(partially answered\): "No existing equivalent[^"]*"; corrected \(answered\): "`Jitter`/);
   });
 });
 
@@ -360,7 +361,7 @@ describe("complex-function", () => {
     const outside = scenarioWith("complex-function", (s) => {
       const bad = structuredClone(s.results["answers-v1"]![0]!);
       const answers = (bad.output as { answers: Array<{ question: string; proposal: { splits: Array<{ name: string; startLine: number; endLine: number }> } }> }).answers;
-      const split = answers.find((a) => a.question === "Q6")!;
+      const split = answers.find((a) => a.question === "Q4")!;
       split.proposal.splits[1]!.endLine = 99;
       split.proposal.splits[0]!.name = "ParseTTL";
       s.results["answers-v1"]!.unshift(bad);
@@ -369,8 +370,8 @@ describe("complex-function", () => {
     const answerers = jobsOf(s2, "Answer the questions");
     expect(answerers).toHaveLength(2);
     const text = assignmentOf(answerers[1]!);
-    expect(text).toMatch(/Q6 split "ParseTTL": the name already exists in the package pkg\/schema/);
-    expect(text).toMatch(/Q6 split "ParseTTLCheckRange": lines \d+-99 are not inside ParseTTL \(6-35\)/);
+    expect(text).toMatch(/Q4 split "ParseTTL": the name already exists in the package pkg\/schema/);
+    expect(text).toMatch(/Q4 split "ParseTTLCheckRange": lines \d+-99 are not inside ParseTTL \(6-35\)/);
     expect(stopOf(s2)).toMatchObject({ reason: "report ready" });
   });
 
@@ -379,7 +380,7 @@ describe("complex-function", () => {
       s.commands!["names-1"] = { exitCode: 0, stdout: "exists ParseTTLTokenize\nchecked 2\n" };
     });
     const s2 = simulate({ scenario: exists });
-    expect(superviseOf(s2)!.reason).toMatch(/still fail deterministic validation after 2 corrections: Q6: the proposed name ParseTTLTokenize already exists in the package/);
+    expect(superviseOf(s2)!.reason).toMatch(/still fail deterministic validation after 2 corrections: Q4: the proposed name ParseTTLTokenize already exists in the package/);
   });
 });
 

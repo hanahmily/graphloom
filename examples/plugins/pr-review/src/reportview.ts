@@ -27,6 +27,11 @@ export interface ViewItem {
 
 export interface ReportView {
   items: ViewItem[];
+  /**
+   * The high-level changes (design §7.6): one for each capability in the briefing's `whatsNew`, in order (ids `W1`…,
+   * the briefing's own numbering), with the bullet's cites as their own. Large mode asks about these, not about `items`.
+   */
+  changes?: ViewItem[];
   records: MetricsRecord[];
   /** Why there are no records, when the measurements say none were taken. */
   measurementsNone?: string;
@@ -53,9 +58,33 @@ export function reportView(evidence: readonly EvidenceRecord[]): ReportView | un
       }
     }
   }
+  // A large report is asked about per high-level change, one for each `whatsNew` bullet (design §7.6).
+  const whatsNew = isObject(json.briefing) && Array.isArray(json.briefing.whatsNew) ? json.briefing.whatsNew : [];
+  const changes: ViewItem[] = whatsNew.flatMap((w, n) => (isObject(w) && typeof w.text === "string" && Array.isArray(w.cites) ? [{ id: highLevelId(n + 1), section: "highlevel", text: w.text, cites: w.cites as Cite[], facts: [] }] : []));
+  // When the claim check left no capability, the coarsest report items stand in as the high-level changes, for every question type alike.
+  if (changes.length === 0) changes.push(...coarsestChanges(items));
   const m = isObject(json.measurements) ? json.measurements : {};
-  return { items, records: Array.isArray(m.records) ? (m.records as MetricsRecord[]) : [], ...(typeof m.none === "string" ? { measurementsNone: m.none } : {}) };
+  return { items, changes, records: Array.isArray(m.records) ? (m.records as MetricsRecord[]) : [], ...(typeof m.none === "string" ? { measurementsNone: m.none } : {}) };
 }
 
-/** The change items: report items in the sections the questions are about. */
-export const changeItems = (view: ReportView): ViewItem[] => view.items.filter((i) => CHANGE_SECTIONS.includes(i.section));
+/** The most high-level changes a report has (design §7.6), as the briefing allows capabilities. */
+export const MAX_HIGH_LEVEL = 5;
+
+/**
+ * The high-level changes of a report whose briefing kept no `whatsNew`: its change items, the features section first (the
+ * coarsest, one for each conceptual change), at most five, numbered `W1`… and marked in their text as standing in.
+ */
+export function coarsestChanges(items: readonly ViewItem[]): ViewItem[] {
+  const change = items.filter((i) => CHANGE_SECTIONS.includes(i.section));
+  const ranked = [...change.filter((i) => i.section === "features"), ...change.filter((i) => i.section !== "features")];
+  return ranked.slice(0, MAX_HIGH_LEVEL).map((i, n) => ({ id: highLevelId(n + 1), section: "highlevel", text: `(report item ${i.id}; the claim check kept no capability) ${i.text}`, cites: i.cites, facts: [] }));
+}
+
+/** The id of the n-th high-level change of a large report (`W1`…), which is also the id of its bullet in the briefing. */
+export const highLevelId = (n: number): string => `W${n}`;
+
+/** The change items the questions are about: the report's items in the change sections, or in large mode (design §7.6) its high-level changes (the items again when the briefing has none). */
+export const changeItems = (view: ReportView, large = false): ViewItem[] => (large && (view.changes ?? []).length > 0 ? view.changes! : view.items.filter((i) => CHANGE_SECTIONS.includes(i.section)));
+
+/** Every entry a question's item id may name: the report's items and the high-level changes. */
+export const questionItems = (view: ReportView): ViewItem[] => [...view.items, ...(view.changes ?? [])];

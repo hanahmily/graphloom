@@ -2,7 +2,8 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { checkAssignmentFidelity, type EvidenceRecord, type JobSpec, type RehearsalScenario } from "@graphloom/sdk";
-import { rehearsal } from "../src/rehearsal.js";
+import { REHEARSAL_HEAD, REHEARSAL_MERGE_BASE, rehearsal } from "../src/rehearsal.js";
+import { htmlProblems } from "../src/html.js";
 import { describe, expect, it } from "vitest";
 import { LARGE_LIMITS, REHEARSAL_REQUEST } from "../src/rehearsal.js";
 import { parseDraft } from "../src/draft.js";
@@ -163,13 +164,24 @@ describe("the review layer in Review mode", () => {
     expect(md.value).toMatch(/### P1 \(1\)\n- F1 · correctness · pkg\/schema\/ttl\.go:26-30 · confirmed \(verifier codex: confirmed\) · unproven:/);
     expect(md.value).toContain("## Review: findings and draft");
     expect(md.value.indexOf("## Review\n")).toBeLessThan(md.value.indexOf("## Open questions"));
-    // The briefing: counts by severity, the P1 that stands open, the P2 closed; the appendix holds the full findings and the draft.
+    // review.html: the findings that stand as a grid of aspect by severity, coloured by state, each tile linking to its finding in the appendix.
     expect(html.value).toContain("<h2>Review</h2>");
-    expect(html.value).toMatch(/<h3>P1 <span class="muted">\(1\)<\/span><\/h3><details open class="qa">/);
-    expect(html.value).toMatch(/<h3>P2 <span class="muted">\(1\)<\/span><\/h3><details class="qa">/);
-    expect(html.value).toContain("Checker (codex): <strong>confirmed</strong>");
-    expect(html.value).toContain('<span class="badge grey">correctness</span>');
-    expect(html.value).not.toContain("F2</span>");
+    expect(html.value.indexOf("<h2>Review</h2>")).toBeGreaterThan(html.value.indexOf("<h2>Questions</h2>"));
+    expect(html.value).toMatch(/<a class="tile grey cell" href="review-appendix.html#f-F1" title="P1 correctness\nF1 unproven: [^"]*"><strong>1<\/strong><\/a>/);
+    expect(html.value).toMatch(/<a class="tile bad cell" href="review-appendix.html#f-F3" title="P2 maintainability\nF3 confirmed: [^"]*"><strong>1<\/strong><\/a>/);
+    expect(html.value).toContain("<span class=\"fh\">correctness</span>");
+    expect(html.value).toMatch(/<span class="key"><span class="sw bad"><\/span>confirmed 1<\/span><span class="key"><span class="sw warn"><\/span>disputed 0<\/span><span class="key"><span class="sw grey"><\/span>unproven 1<\/span>/);
+    expect(html.value).not.toContain("#f-F2");
+    expect(html.value).not.toMatch(/<(details|ul|table|pre)\b/);
+    expect(htmlProblems(html.value, { owner: "apache", repo: "skywalking-banyandb", head: REHEARSAL_HEAD, base: REHEARSAL_MERGE_BASE })).toEqual([]);
+    // The appendix holds the findings in text, by severity with the P1 that stands open, and in full with the draft; each has the id a tile links to.
+    expect(appendix.value).toMatch(/<h3>P1 <span class="muted">\(1\)<\/span><\/h3><details open class="qa">/);
+    expect(appendix.value).toMatch(/<h3>P2 <span class="muted">\(1\)<\/span><\/h3><details class="qa">/);
+    expect(appendix.value).toContain("Checker (codex): <strong>confirmed</strong>");
+    expect(appendix.value).toContain('<span class="badge grey">correctness</span>');
+    expect(appendix.value).toMatch(/<details id="f-F1"[^>]*class="qa">/);
+    expect(appendix.value).toMatch(/<details id="f-F3"[^>]*class="qa">/);
+    expect(appendix.value.match(/id="f-F1"/g)).toHaveLength(1);
     expect(appendix.value).toContain("<h2>Review: findings and draft</h2>");
     expect(appendix.value).toContain("Dismissed F2");
     expect(appendix.value).toContain("F2</span>");

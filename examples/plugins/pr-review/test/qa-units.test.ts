@@ -207,9 +207,9 @@ function contextOf(name: string, config: Record<string, unknown> = {}): { ctx: Q
 describe("the required questions (design 7.1)", () => {
   const complex = contextOf("complex-function");
 
-  it("asks purpose per change item, the three of a new symbol, missing-test, split-function and complexity-coverage", () => {
+  it("asks purpose per change item, the one existence/reuse/common-logic question of a new symbol, missing-test, split-function and complexity-coverage", () => {
     const types = requiredQuestions({ view: complex.ctx.view, groundwork: complex.ctx.groundwork }, new Map()).map((q) => q.type);
-    expect(types).toEqual(["purpose", "existing-equivalent", "reuse-library", "common-logic", "missing-test", "split-function", "complexity-coverage"]);
+    expect(types).toEqual(["purpose", "existing-reuse-common", "missing-test", "split-function", "complexity-coverage"]);
   });
 
   it("asks split-function at complexity 10 and nesting 4, not below", () => {
@@ -292,7 +292,7 @@ describe("the questioner asks and cannot drop (design 7.1)", () => {
     expect(qs.map((q) => q.id)).toEqual(qs.map((_, i) => `Q${i + 1}`));
     const missing = qs.find((q) => q.type === "missing-test")!;
     expect(missing.text).toMatch(/^Which test covers quota\.Limit/);
-    expect(qs.find((q) => q.type === "existing-equivalent")!.text).toBe("phrased existing-equivalent");
+    expect(qs.find((q) => q.type === "existing-reuse-common")!.text).toBe("phrased existing-reuse-common");
   });
 
   it("keeps a question the questioner adds, after the required ones, and reads an addition that repeats a required one as its phrasing", () => {
@@ -360,7 +360,7 @@ describe("the answer rules (design 7.3 checks)", () => {
 
   it("rejects a cited number that is not the measurement record's, and a function no record has", () => {
     const base = split([{ name: "a1", startLine: fn.startLine + 1, endLine: fn.startLine + 5 }, { name: "b1", startLine: fn.startLine + 6, endLine: fn.startLine + 9 }]);
-    expect(problems({ ...base, metrics: [{ function: "schema.ParseTTL", path: "pkg/schema/ttl.go", name: "complexity", value: 11 }] })).toEqual(["Q6: schema.ParseTTL complexity is 12 in its measurement record, not 11"]);
+    expect(problems({ ...base, metrics: [{ function: "schema.ParseTTL", path: "pkg/schema/ttl.go", name: "complexity", value: 11 }] })).toEqual(["Q4: schema.ParseTTL complexity is 12 in its measurement record, not 11"]);
     expect(problems({ ...base, metrics: [{ function: "schema.ParseTTL", path: "pkg/other/ttl.go", name: "complexity", value: 12 }] })).toEqual([`${base.question}: the metric names "schema.ParseTTL" in "pkg/other/ttl.go", which no measurement record has`]);
     expect(problems({ ...base, metrics: [{ function: "schema.Nope", path: "pkg/schema/ttl.go", name: "nesting", value: 1 }] })).toEqual([`${base.question}: the metric names "schema.Nope" in "pkg/schema/ttl.go", which no measurement record has`]);
   });
@@ -376,27 +376,29 @@ describe("the answer rules (design 7.3 checks)", () => {
   });
 
   it("makes a none-found answer list its whole-repository searches, and a library answer partial while a dependency's source is unavailable", () => {
-    const one = answer("existing-equivalent", { none_found: true });
+    const one = answer("existing-reuse-common", { none_found: true });
     expect(problems(one).join("|")).toMatch(/3 or more over the whole base tree.*not 1/);
-    const three = answer("existing-equivalent", { none_found: true, searches: [1, 2, 3].map((n) => ({ pattern: `p${n}`, tree: "base", paths: [], ignoreCase: false as const, hits: 0 })) });
-    expect(problems(three)).toEqual([]);
-    expect(problems(answer("reuse-library", { none_found: true })).join("|")).toMatch(/source available here, so a "none found" library answer is "partially answered"/);
-    expect(problems(answer("reuse-library", { none_found: true, status: "partially answered" }))).toEqual([]);
+    const three = answer("existing-reuse-common", { none_found: true, searches: [1, 2, 3].map((n) => ({ pattern: `p${n}`, tree: "base", paths: [], ignoreCase: false as const, hits: 0 })) });
+    // A dependency of the fixture has no source here, so the none-found answer is partially answered.
+    expect(problems({ ...three, status: "partially answered" })).toEqual([]);
+    const four = answer("existing-reuse-common", { none_found: true, searches: [1, 2, 3].map((n) => ({ pattern: `p${n}`, tree: "base", paths: [], ignoreCase: false as const, hits: 0 })) });
+    expect(problems(four).join("|")).toMatch(/source available here, so a "none found" answer is "partially answered"/);
+    expect(problems({ ...four, status: "partially answered" })).toEqual([]);
   });
 
   it("makes a library answer partial while the inventory is incomplete, even when every source is available", () => {
     const cut = { ...actx, groundwork: { ...actx.groundwork, inventory: { dependencies: [], packages: [], truncated: ["dependency manifests cut: 3 more manifests"] } } };
-    const a = answer("reuse-library", { none_found: true });
-    expect(answerProblems([a], cut, new Set([a.question])).join("|")).toMatch(/the dependency inventory is incomplete, so a "none found" library answer is "partially answered"/);
+    const a = answer("existing-reuse-common", { none_found: true, searches: [1, 2, 3].map((n) => ({ pattern: `p${n}`, tree: "base", paths: [], ignoreCase: false as const, hits: 0 })) });
+    expect(answerProblems([a], cut, new Set([a.question])).join("|")).toMatch(/the dependency inventory is incomplete, so a "none found" answer is "partially answered"/);
   });
 
   it("makes an answer name an equivalent it claims, with a citation, and an answer carry evidence", () => {
-    expect(problems(answer("existing-equivalent", { citations: [], searches: [] })).join("|")).toMatch(/no evidence/);
-    expect(problems(answer("existing-equivalent", { searches: [{ pattern: "p", tree: "base", paths: [], ignoreCase: false, hits: 2 }] })).join("|")).toMatch(/cites it/);
+    expect(problems(answer("existing-reuse-common", { citations: [], searches: [] })).join("|")).toMatch(/no evidence/);
+    expect(problems(answer("existing-reuse-common", { searches: [{ pattern: "p", tree: "base", paths: [], ignoreCase: false, hits: 2 }] })).join("|")).toMatch(/cites it/);
   });
 
   it("rejects a citation outside the tree it names: a parent path, an absolute base path, a dependency path outside the mounted directories, and a backwards range", () => {
-    const cite = (c: Partial<Answer["citations"][number]>) => problems(answer("existing-equivalent", { citations: [{ path: "a.go", tree: "base", start: 1, end: 2, quote: "", ...c }] })).join("|");
+    const cite = (c: Partial<Answer["citations"][number]>) => problems(answer("existing-reuse-common", { citations: [{ path: "a.go", tree: "base", start: 1, end: 2, quote: "", ...c }] })).join("|");
     expect(cite({ path: "../secret" })).toMatch(/repository-relative/);
     expect(cite({ path: "/etc/passwd" })).toMatch(/repository-relative/);
     expect(cite({ tree: "dependency", path: "/etc/passwd" })).toMatch(/inside one of the inventory's source directories \(none is available here\)/);
@@ -442,25 +444,25 @@ describe("reading the answer checker", () => {
   const { ctx } = contextOf("missing-test");
   // The answers after N1, whose check has its own flow (necessity.test.ts).
   const set = { questions: afterNecessity(questionSet(ctx, undefined)) };
-  const answers = new Map(set.questions.map((x) => [x.id, { question: x.id, none_found: x.type === "existing-equivalent" } as Answer] as const));
+  const answers = new Map(set.questions.map((x) => [x.id, { question: x.id, none_found: x.type === "existing-reuse-common" } as Answer] as const));
 
   it("leaves a question unchecked when it has no verdict, or a none-found or test answer has no searches of the checker's own", () => {
-    const verdicts = set.questions.map((x) => ({ question: x.id, verdict: "supported", note: "", searches: [], principles: [], parts: [] }));
+    const verdicts = set.questions.map((x) => ({ question: x.id, verdict: "supported", note: "", searches: [], principles: [] }));
     const reading = readAnswerCheck({ verdicts }, set.questions, answers) as { unchecked: string[] };
-    const needing = set.questions.filter((x) => x.type === "existing-equivalent" || x.type === "missing-test").map((x) => x.id);
+    const needing = set.questions.filter((x) => x.type === "existing-reuse-common" || x.type === "missing-test").map((x) => x.id);
     expect(reading.unchecked).toEqual(needing);
     const less = readAnswerCheck({ verdicts: verdicts.slice(1) }, set.questions, answers) as { unchecked: string[] };
     expect(less.unchecked).toContain(set.questions[0]!.id);
   });
 
   it("takes the weaker of two verdicts for one question", () => {
-    const id = set.questions.find((x) => x.type === "common-logic")!.id;
-    const verdicts = [{ question: id, verdict: "supported", note: "", searches: [], principles: [], parts: [] }, { question: id, verdict: "unsupported", note: "found one", searches: [], principles: [], parts: [] }];
+    const id = set.questions.find((x) => x.type === "purpose")!.id;
+    const verdicts = [{ question: id, verdict: "supported", note: "", searches: [], principles: [] }, { question: id, verdict: "unsupported", note: "found one", searches: [], principles: [] }];
     const reading = readAnswerCheck({ verdicts }, set.questions, answers) as { unsupported: Map<string, string> };
     expect(reading.unsupported.get(id)).toBe("found one");
   });
 
   it("refuses a result the contract refuses", () => {
-    expect(readAnswerCheck({ verdicts: [{ question: "Q1", verdict: "maybe", note: "", searches: [], principles: [], parts: [] }] }, set.questions, answers)).toMatchObject({ problems: [expect.stringMatching(/verdict must be one of/)] });
+    expect(readAnswerCheck({ verdicts: [{ question: "Q1", verdict: "maybe", note: "", searches: [], principles: [] }] }, set.questions, answers)).toMatchObject({ problems: [expect.stringMatching(/verdict must be one of/)] });
   });
 });

@@ -330,7 +330,7 @@ const bulletLine = (b: Bullet): string => `- ${oneLine(b.text)} — ${b.cites.ma
 
 /** "What's new" for `review.md`: one bullet for each new capability. */
 export function whatsNewLines(b: FinalBriefing): string[] {
-  return ["## What's new", ...(b.whatsNew.length === 0 ? ["- None stated."] : b.whatsNew.map(bulletLine)), ""];
+  return ["## What's new", ...(b.whatsNew.length === 0 ? ["- None stated."] : b.whatsNew.map((w, n) => `- **W${n + 1}** ${oneLine(w.text)} — ${w.cites.map(briefingCite).join(", ")}`)), ""];
 }
 
 /** The data flow of each new feature as text: its stages, then its flows, each with its cite. */

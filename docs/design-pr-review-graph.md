@@ -123,7 +123,7 @@ graphloom task new pr-review apache/skywalking-banyandb#1234 --repo ../skywalkin
 # fetches the head and base refs, pins the head, writes reviews/skywalking-banyandb-1234/task.yaml
 graphloom check reviews/skywalking-banyandb-1234/task.yaml
 graphloom run reviews/skywalking-banyandb-1234/task.yaml --on-stop '…'
-# stops "report ready": open <worktree>/.graphloom/review/review.html, the one-page briefing (review-appendix.html beside it holds the rest;
+# stops "report ready": open <worktree>/.graphloom/review/review.html, the visual report, diagrams and tiles only (review-appendix.html beside it holds the text;
 # review.md is the plain-text copy of both; graphloom inspect prints the path)
 graphloom session open <run> --stage answers               # optional: chat with a fork of the answerer's session; recorded on exit
 graphloom session open <run> --stage answers               # optional again: continues that conversation (--from-original starts over)
@@ -287,7 +287,7 @@ generation's evidence holds a `--decline review-layer`.
 | Report | `change-report` | Every template section is present, with cited items or an explicit "None". Every citation is inside the PR's diff. Every changed file and every detector fact is cited. No item carries a severity, finding or verdict (the contract has no such field). Every report opens with a briefing the reporter writes (what is new, the data flow of each new feature, what to check, [§6.1](#61-template), [§6.10](#610-features-and-their-data-flow)), and `review.html` (the briefing) and `review-appendix.html` are written beside `review.md` ([§6.11](#611-the-html-report)); an artifact too large for one command is written in parts ([§6.6](#66-output)) | `change-report-v1`, `report-write` | `change-report` |
 | Report | `measurements` | For every function the PR adds or modifies, complexity and nesting were measured by the pinned tools over the head tree, and coverage (on by default) and then mutation (on by default, at covered sites only) were measured in the Docker sandbox over a checkout of the head, or carry a not-run reason (switched off by the profile, Docker unavailable, image missing, a dependency not cached, no vitest coverage provider, no coverage). Every value recomputes from its evidence ([metrics §5](design-code-quality-metrics.md#5-records-and-recomputation)) | `graphloom-metrics-v1` command reports | `measurements` |
 | Report | `claims-checked` | An independent `<report-checker>` judged every report item against the diff, and every item left is `supported` with matching quotes | `claim-check-v1` | `claims-checked` |
-| Questions | `questions-complete` | N1, the necessity question, was asked first ([§7.5](#75-the-necessity-question-n1)): its three parts have their evidence, an independent checker verified every cited design statement, trace step and the conclusion, and N1's checked answer and decision are recorded in `necessity.json`. When N1 concluded `unnecessary`, the checker supports it and the operator did not ask for every question, N1 is the only question required and the skip is recorded. Otherwise every required question was asked ([§7.1](#71-questions)): purpose for each change item whose purpose the PR text does not state (a stated purpose recorded with a matching quote instead); `existing-equivalent`, `reuse-library` and `common-logic` for each new symbol (in large mode, one combined `existing-reuse-common` question per change item that adds a symbol, answered in three labelled parts, [§7.6](#76-questions-in-large-mode)); `missing-test` for each new or modified symbol with no mapped test; and one question per value over a metric limit and per surviving mutant. Every changed function has a measurement record or a not-run reason | `necessity-v1`, `answer-check-v1`, `necessity-write`, `questions-v1`, search and test-map reports | `questions-complete` (`independence: separate-reviewer`: N1's check is its latest review) |
+| Questions | `questions-complete` | N1, the necessity question, was asked first ([§7.5](#75-the-necessity-question-n1)): its three parts have their evidence, an independent checker verified every cited design statement, trace step and the conclusion, and N1's checked answer and decision are recorded in `necessity.json`. When N1 concluded `unnecessary`, the checker supports it and the operator did not ask for every question, N1 is the only question required and the skip is recorded. Otherwise every required question was asked ([§7.1](#71-questions)): purpose for each change item whose purpose the PR text does not state (a stated purpose recorded with a matching quote instead); `existing-reuse-common` for each new symbol, one question with one answer (in large mode, for each high-level change instead, [§7.6](#76-questions-in-large-mode)); `missing-test` for each new or modified symbol with no mapped test; and one question per value over a metric limit and per surviving mutant. Every changed function has a measurement record or a not-run reason | `necessity-v1`, `answer-check-v1`, `necessity-write`, `questions-v1`, search and test-map reports | `questions-complete` (`independence: separate-reviewer`: N1's check is its latest review) |
 | Answers | `answers-complete` | N1 has its recorded answer first (alone, with the skip recorded in the Q&A, when it was skipped past). Every other question has an answer from the `<answerer>`, with evidence (citations, the searches run, each re-run by the plugin with the count it measured, quotes) and a status of `answered`, `partially answered` or `needs author`. Every "none found" answer lists its whole-repository searches and the dependency inventory. Every cited metric equals its record. Every proposal cites line ranges inside its function. `review.md`, `report.json` and `qa.json` are written | `answers-v1`, `qa-write` | `answers-complete` |
 | Answers | `answers-grounded` | An independent `<answer-checker>` verified N1's cited design statements, trace steps and conclusion, and re-checked every cited equivalent, library, duplicate and covering test, and every "none found" claim, against the trees. Every answer left is `supported` or `partial`. An answer still unsupported after one correction is `needs author`, with both statements recorded | `claim-check-v1` | `answers-grounded` |
 | Review | `code-review` | Unless report-only: for each aspect (correctness, maintainability, security), the latest read-only `<reviewer-aspect>` pass reviewed every file in scope with that aspect's rule file, every rule group `ocr delegate rule` returned for it has source `custom` and that file's rule text, and the pass gave a status for every open prior finding of the aspect. Every pass started, on the answerer's harness, as a fork of the review's base session or seeded with its recorded reason. Each aspect's sweep saturated or ran four passes. Every finding has a verdict from its `<verifier-aspect>`, in a fresh session on a harness different from its reviewer's | `pr-code-review-v1`, `ocr-rule-groups` command reports, `pr-finding-verification-v1` | `open-code-review` |
@@ -1093,8 +1093,9 @@ plugin's own SVG is only the fallback:
 - **One correction.** The problems of the diagrams that failed go back to the
   same session once, which returns the whole set again; a diagram that still
   fails after it is drawn by the plugin instead. The latest attempt that passed
-  stands. The run never stops for a diagram: `review.html` says "drawn by the
-  plugin: the diagram-design drawing failed its checks (<reason>)" beside it.
+  stands. The run never stops for a diagram: the appendix says "drawn by the
+  plugin: the diagram-design drawing failed its checks (<reason>)" beside it, and
+  `review.html` puts it in the tooltip of the diagram's caption.
 - **What is embedded.** The plugin never copies the model's markup. It reads the
   `<svg>` into a tree, keeps only an allow-list of elements and attributes
   (`g`, `rect`, `line`, `path`, `polygon`, `polyline`, `circle`, `ellipse`, `text`,
@@ -1125,14 +1126,14 @@ Mermaid block.
 ### 6.11 The HTML report
 
 Beside `review.md`, the plugin writes two self-contained files in
-`.graphloom/review/`, for every pull request: **`review.html`**, the briefing,
-one page a maintainer reads in about two minutes, and
-**`review-appendix.html`**, everything else. Plugin code renders both from
-`report.json`, `qa.json`, `necessity.json` and the measurement records, at the
-same two points `review.md` is written (Report, with the Q&A pending; Answers,
-whole). `review.md` beside them is their plain-text copy, for agents and
-`graphloom session open`, and it stays complete: the briefing, then the
-appendix's content. No model writes HTML: the one piece of a model's markup
+`.graphloom/review/`, for every pull request: **`review.html`**, the report as
+**diagrams and visual elements only**, which a maintainer reads in about two
+minutes, and **`review-appendix.html`**, everything else, in text. Plugin code
+renders both from `report.json`, `qa.json`, `necessity.json` and the measurement
+records, at the same two points `review.md` is written (Report, with the Q&A
+pending; Answers, whole). `review.md` beside them is their plain-text copy, for
+agents and `graphloom session open`, and it stays complete: the briefing, then
+the appendix's content. No model writes HTML: the one piece of a model's markup
 they hold is the `<svg>` of a diagram the skill drew
 ([§6.10](#610-features-and-their-data-flow)), which plugin code re-serializes
 from an allow-list.
@@ -1145,51 +1146,70 @@ an optional `#fragment` of letters, digits and `_.:-`). Every text that came
 from a model or the pull request is HTML-escaped. A deterministic check on the
 written bytes of both files enforces this, for the embedded diagram SVGs too (an
 allow-list of elements and attributes, `data-*` and `aria-*` by prefix, no `href`
-outside `<a>`, no `url(` that leaves the document). Sections use `<details>`, so
-they collapse without JavaScript. A diagram sits inline in an `overflow-x: auto`
-wrapper and scales to the container width.
+outside `<a>`, no `url(` that leaves the document). `review-appendix.html` uses
+`<details>`, so its sections collapse without JavaScript. A diagram sits inline in
+an `overflow-x: auto` wrapper and scales to the container width. Light theme,
+readable on a laptop.
 
-**`review.html`, in this order, and nothing else:**
+**`review.html`, in this order, and nothing else.** It holds no prose paragraph and
+no list of text items: only short labels, numbers and badges. Anything longer is a
+tooltip (an SVG `<title>`, an HTML `title` attribute; no script) and is in the
+appendix.
 
-1. **Briefing**, one screen: the **purpose** (one sentence, quoted when the pull
-   request states it, marked inferred otherwise); **What's new**, the reporter's
-   3 to 5 bullets, one for each new capability, with their cites; **Scope that
-   matters**, the lines added and deleted split into production code, tests,
-   docs, and generated or other files, counted by plugin code from the file list
-   (a generated file is one the profile's `questions.excludeRoots` or its
-   generated globs name; docs are `docs/**` and `*.md`; tests are the files the
+1. **Header strip:** the pull request's number and title on one line, the head and
+   base short SHAs (links to the commits) and a link to the appendix.
+2. **Verdict and scope tiles.** N1's conclusion as a large coloured tile
+   (necessary green, questionable amber, unnecessary red, needs author grey), a
+   **principle grid** (one small tile for each principle id the change touches,
+   coloured preserves green, breaks red, not applicable grey, pending grey; the
+   tooltip is the one-line explanation, [§7.5.1](#751-project-design-principles)); the
+   **scope bar**, one horizontal stacked bar of the lines added split into
+   production code, tests, docs and generated or other files, with the counts as
+   labels (the lines deleted are a thin second bar), counted by plugin code from
+   the file list (a generated file is one the profile's `questions.excludeRoots` or
+   its generated globs name; docs are `docs/**` and `*.md`; tests are the files the
    plugin's own rule classifies as tests, `_test.go`, `*.test.ts`, `*.spec.ts`,
-   and any file in a `test`, `tests` or `__tests__` directory; production code
-   is the rest); and the **Verdict panel**: N1's conclusion as a coloured badge
-   (necessary green, questionable amber, unnecessary red, needs author grey), the
-   project principles the change touches with a badge for each verdict
-   (preserves, breaks, not applicable, [§7.5.1](#751-project-design-principles))
-   and the number of questions that need the author.
-2. **Data flow per new feature** ([§6.10](#610-features-and-their-data-flow)): for
-   each feature its name, its summary, the skill's Data flow (or the plugin's SVG
-   with its note) and, collapsed, its stages and flows with their cites.
-3. **What you need to check:** the five lists of the reporter's `check` field
-   (new surfaces; changed behavior of existing code paths; compatibility;
-   risks; tests added), one line each with cites.
-4. **Hotspots:** the top 5 functions by CRAP, then complexity, from the
-   measurement records (a test file's functions have no CRAP and are not
-   ranked); a modified function that got worse than at the base says
-   `base → head` ([§6.8](#68-measurements)).
-5. **Areas:** for a large report with more than one area, one line for each area
-   (its id, what it is as the reporter labelled it or its path, files, lines
-   added and deleted) and the command that opens the reporter's session
-   ([§6.9](#69-large-pull-requests)); otherwise the report's sections with how
-   many items each holds, and the same command.
-6. **Open questions:** only the questions whose answer status is "needs author"
-   or "partially answered" (or not answered), and N1 when its conclusion is
-   questionable or unnecessary ([§7.4](#74-output-one-file)), each linking to its
-   place in the appendix; the answered ones are a count, "N answered — see the
-   appendix". Pending (the Questions and Answers stages follow) at the Report stage.
+   and any file in a `test`, `tests` or `__tests__` directory; production code is
+   the rest); and counts tiles for files, commits and checks.
+3. **Data-flow diagrams** ([§6.10](#610-features-and-their-data-flow)): one for each
+   feature, the skill's drawing or the plugin's fallback, with only the feature's
+   name as its caption (the summary, and the note when the plugin drew it, are the
+   caption's tooltip).
+4. **Risk map:** an SVG treemap of the areas (the areas of a large report; the
+   report's sections otherwise), laid out by a squarified treemap implemented in
+   plugin code (deterministic, no dependency). Each rectangle is sized by the lines
+   changed in the area and coloured by what the briefing's `check` lists cite in its
+   files, the most serious kind winning: **risk** (the `risks` list), then
+   **compatibility**, then **changed behavior**, then **new surface**, then
+   **none** (the `tests` list says nothing of risk); a legend names the colours with
+   their counts. The label is the area id and its short label where it fits. The
+   tooltip is the area's label and the one-line `check` entries that cite it. The
+   hotspot functions (the top 5 by CRAP, then complexity, [§6.8](#68-measurements);
+   a test file's functions are not ranked) are small dots in their area, each with
+   a tooltip.
+5. **Question status grid:** one tile for each question, N1 first, then grouped by
+   the high-level change the questions are about (`W1`…; the report's item ids in
+   standard mode), coloured answered green, partially answered amber, needs author
+   red, unanswered grey, labelled with the question id and a type abbreviation
+   (WHY, REUSE, TEST, SPLIT, COV, WEAK). The tooltip is the question in one line,
+   and each tile links to its answer in the appendix (`#q-<id>`). A legend gives
+   the counts. Pending (the Questions and Answers stages follow) at the Report
+   stage.
+6. **Review**, when the review layer ran ([§8](#8-the-review-layer)): the findings as
+   a grid of tiles by aspect and severity with counts, coloured by state
+   (disputed when its verifier did not settle it, unproven when it is a
+   behavioral finding no test proves, confirmed otherwise; a cell takes its most
+   serious state, and dismissed findings are not shown), each linking to its
+   finding in the appendix (`#f-<id>`).
 
-It ends with a link to the appendix. It holds no change item, no full
-measurements table, no Q&A and no module diagram.
+It holds no change item, no table, no list and no Q&A text. The text that used to
+be the briefing (the purpose, what is new with its `W` ids, the scope table, the
+verdict panel, the data flow with its stages and cites, the five check lists, the
+hotspots, the areas with the dive-in command, the open questions) is the first part
+of the appendix, in the same words.
 
-**`review-appendix.html`, in this order:** the **Summary** (the reporter's
+**`review-appendix.html`, in this order:** the briefing in text (see above);
+the **Summary** (the reporter's
 overview of the mechanism); the **Necessity** part (the base trace as numbered
 steps with their citations, the design statements, the principles block with
 one badge per verdict and the checker's judgment, and the simpler-way answer);
@@ -1204,11 +1224,11 @@ base, made worse or introduced said in the cell, coverage as a bar, CRAP as a
 bar with the threshold marked, and the coverage run's note, with the files not
 measured); the whole **Q&A** (per item, each question with a status badge, the
 answer, its evidence and the checker's judgment, collapsed by default except
-"needs author", each with an `id` the briefing links to); and **Removed by the
+"needs author", each with an `id` (`q-<id>`) that `review.html`'s tiles link to; N1's answer is the Necessity part, `q-N1`); and **Removed by the
 claim check**, with the notes. It links back to the briefing at the top and the
 bottom.
 
-The stop message names the briefing first: "the report is the briefing
+The stop message names the visual report first: "the report is
 `.graphloom/review/review.html`, with the appendix
 `.graphloom/review/review-appendix.html`; `review.md` beside them is the
 plain-text copy of both for agents and `graphloom session open`".
@@ -1236,11 +1256,8 @@ question.
 | Type | Required for |
 |---|---|
 | `necessity` | Always, as the first question, id `N1`: is the change necessary ([§7.5](#75-the-necessity-question-n1))? It is the plugin's own wording. The questioner neither asks nor drops it |
-| `purpose` | Every change item whose purpose the PR text, linked issue and commit messages do not state. When they state it, the item records `stated` with the matching quote, and no question is asked |
-| `existing-equivalent` | Every new symbol: does the codebase already have the same or an equivalent? |
-| `reuse-library` | Every new symbol: could an existing internal package or an already-declared third-party library do this? |
-| `common-logic` | Every new symbol: does it duplicate logic elsewhere, in the base or in the PR, that could become shared code? |
-| `existing-reuse-common` | **Large mode only** ([§7.6](#76-questions-in-large-mode)): the three questions above, always asked, as one question per change item that adds a symbol. In large mode it replaces the three separate types |
+| `purpose` | Every change item whose purpose the PR text, linked issue and commit messages do not state (in large mode, every high-level change, [§7.6](#76-questions-in-large-mode)). When they state it, the item records `stated` with the matching quote, and no question is asked |
+| `existing-reuse-common` | Every new symbol (standard mode), every high-level change (large mode, [§7.6](#76-questions-in-large-mode)): **one question** with one answer. For the new functions and features: do we already have it, can we reuse an existing internal package or an already-declared third-party library, and is there common logic, in the base or in the PR, that could become shared code? |
 | `missing-test` | Every new or modified symbol or feature that the test map finds no covering test for: which test covers it? |
 | `split-function` | Every changed function with complexity ≥ 10 or nesting > 3: could it be split into smaller functions with one intent each? The question says, per metric over its limit, whether the excess is **inherited** from the base, **made worse** by the change or **introduced** by it ([§6.8](#68-measurements)) |
 | `complexity-coverage` | Every changed function with **measured** coverage and CRAP ≥ 30, or with **unknown** coverage and complexity ≥ 10: which tests cover its branches? The question gives a modified function's base complexity and where the value comes from. An upper-bound CRAP alone ([metrics §2.4](design-code-quality-metrics.md#24-crap)) is shown in Measurements but asks nothing |
@@ -1345,42 +1362,20 @@ tokens, and the dependency inventory with each library's source status. That
 way an absence is grounded rather than assumed, and it rests on **measured**
 zero counts ([Searches](#searches-and-their-counts)). Only a search of the
 whole base tree (`tree` `base`, no `paths`) counts toward the required number
-(three for an equivalent or shared logic, one for a library); a search scoped to
+(three); a search scoped to
 paths, over the head or over a dependency is supplementary evidence, since it
 covers less than the repository. A dependency marked
 `source unavailable` makes the answer `partially answered`.
 
-#### The combined question's answer
-
-The one question of large mode that asks three things
-(`existing-reuse-common`, [§7.6](#76-questions-in-large-mode)) is answered in
-three **labelled parts**, `existing-equivalent`, `reuse-library` and
-`common-logic`, in the `parts` of the answer (empty for every other question; the
-contract requires the field). Each part has its own answer text, status,
-`none_found`, citations, searches and inventory entries, and is held to the rules
-of the separate question of that name: a part that finds nothing lists its own
-whole-repository searches (three, or one for the library), a library part that
-finds nothing is `partially answered` while a declared dependency has no source
-here, and a part that names a candidate cites it. Evidence shared by two parts is
-listed in both. The answer's own text is a one-line summary; its own citations,
-searches and inventory stay empty (evidence beside the parts is refused, since it
-would be neither shown nor checked as a part), and its **status is the weakest of
-the three parts'** (`answered`, then `partially answered`, then `needs author`),
-computed by the plugin. All three parts are required, once each.
-
-The checker's verdict for the question carries a judgment for each part, with the
-searches of its own that a part saying none found needs (the question's own
-`searches` stay empty), and the question's verdict is the weakest of the parts'.
-A part still unsupported after the one revision is `needs author` with both
-statements kept, and the question is `needs author` with it. Each part of a
-revised answer records the answerer's first and corrected statement of that part
-(`history`), shown beside the part's verdict in `qa.json`, `review.md`,
-`review-appendix.html` and, for a downgraded part, the open question of
-`review.html`; the question's own `history` keeps the one-line summaries. The citations of
-every part are verified and its searches re-run like any answer's, and a part's
-absence rests on its own measured searches. `qa.json` records the parts with
-their verdicts; `review.md`, the open questions of `review.html` and
-`review-appendix.html` show the three parts, each with its status.
+The existence/reuse/common-logic question (`existing-reuse-common`, [§7.1](#71-questions))
+asks three things and has **one answer**: one statement that addresses all three
+(does it already exist, is there a library to reuse, is there common logic), one
+status and its evidence as for every other question (citations, searches, inventory
+entries), and the checker judges the answer as a whole, with one verdict. A
+"none found" answer lists its whole-repository searches (three over the whole base
+tree) and, while a declared dependency has no source here, is `partially answered`.
+There are no per-part statuses, histories or contracts: a question that has several
+concerns is still one question.
 
 #### Ids
 
@@ -1479,7 +1474,7 @@ Each question type has a typical outcome:
 | Type | `answered` when | `needs author` when |
 |---|---|---|
 | `purpose` | A code comment, a linked design document or a call site shows the purpose (cited) | Nothing states it |
-| `existing-equivalent`, `reuse-library`, `common-logic` | A candidate is found and described, or the searches show none | The candidate is equivalent, and only the author can say why it was not used |
+| `existing-reuse-common` | The candidate (an equivalent, a library, shared logic) is found and described, or the searches show none, in one statement | The candidate is equivalent, and only the author can say why it was not used |
 | `missing-test` | The answerer finds a covering test that the test map missed: an integration test, or an indirect caller (cited) | No test covers it. The answer names where a test would live and what to cover |
 | `split-function` | Always, as a proposal: a concrete split with line ranges, the intended function names and each one's single responsibility | — |
 | `complexity-coverage`, `weak-test` | A test already exercises the branch or would catch the mutant (cited) | No test does. The answer proposes the missing assertion, or the cases for the branches |
@@ -1596,12 +1591,9 @@ out, and proposals follow their answer:
 Purpose: stated — "so retention can be set per group" (PR body)
 
 #### `ParseTTL` — pkg/schema/ttl.go:14 (new)
-- **Q1 [existing-equivalent]** Does the codebase already parse TTL-like durations?
-  **A — answered.** `ParseDuration` (pkg/timestamp/duration.go:30) parses the same `<n><unit>` grammar (similarity 0.71); called from 7 places, e.g. banyand/measure/flusher.go:52.
-  Evidence: searches `func \w*Parse\w*(Duration|TTL)` (base) → 3 hits (measured); quotes duration.go:30-41. Checker: supported.
-- **Q2 [reuse-library]** Could a declared library do this?
-  **A — answered.** None of the 41 go.mod requires provides unit-suffixed duration parsing beyond `time.ParseDuration` (stdlib, no `d` unit).
-  Evidence: inventory go.mod:5-60; searches `ParseDuration|units\.` (base) → 9 hits (measured), none outside pkg/timestamp. Checker: supported.
+- **Q1 [existing-reuse-common]** Do we already have `ParseTTL`, can an existing library do it, and is there common logic to share?
+  **A — answered.** `ParseDuration` (pkg/timestamp/duration.go:30) parses the same `<n><unit>` grammar (similarity 0.71) and is called from 7 places, e.g. banyand/measure/flusher.go:52; none of the 41 go.mod requires provides unit-suffixed duration parsing beyond `time.ParseDuration` (stdlib, no `d` unit); the unit table in `ParseDuration` is the logic to share.
+  Evidence: searches `func \w*Parse\w*(Duration|TTL)` (base) → 3 hits (measured), `ParseDuration|units\.` (base) → 9 hits (measured); inventory go.mod:5-60; quotes duration.go:30-41. Checker: supported.
 - **Q3 [missing-test] ▶ needs author** Which test covers `ParseTTL`?
   **A — needs author.** No test references `ParseTTL` or its caller `schema.(*Group).Validate` (searched: all `*_test.go` in the base and PR; test/integration/**).
   Proposal: `TestParseTTL` in pkg/schema/ttl_test.go, table cases `"7d"` (unit path :18–30), `"0h"` (lower bound :35), `"9999d"` (upper bound :41), `"7x"` (unknown unit :52).
@@ -1872,36 +1864,45 @@ it): offline-idempotent."
 ### 7.6 Questions in large mode
 
 In large mode ([§6.9](#69-large-pull-requests)) the report is high level, and so
-are the questions. N1 is unchanged. Then, **per change item**:
+are the questions, and they are **scoped to the PR's size**: a change item of the
+report (an `R` id) is too small a unit for a large PR, where there may be dozens. The
+unit a per-change question is asked about is a **high-level change**: one for each
+capability in the briefing's `whatsNew` (3 to 5, each with its cites), with the id
+`W1`…`W5` that the briefing's bullets, `qa.json`, `review.md` and both HTML files
+use (the bullet's place in the claim-checked briefing). N1 is unchanged and first.
+Then, **per high-level change**:
 
 | Type | Required for, in large mode |
 |---|---|
-| `purpose` | Unchanged: every change item whose purpose the PR text does not state |
-| `existing-reuse-common` | Once per **change item** that adds a symbol, about the mechanism the item adds: one question that asks all three of "do we already have the same or an equivalent?", "can an existing internal package or declared library do it?" and "is there common logic that could be shared?". The question may name the item's new **exported** symbols (Go: an identifier starting with an upper-case letter; TypeScript: exported); the unexported ones are only counted in it |
-| `missing-test` | Once per change item: "which tests cover it", listing every new or modified function of the item the test map finds no covering test for |
+| `purpose` | Every high-level change whose purpose the PR text does not state |
+| `existing-reuse-common` | Every high-level change: one question, one answer, for the new functions and features it adds: do we already have it, can an existing library or internal package do it, is there common logic to share |
+| `missing-test` | Every high-level change: which tests cover it, listing the new or modified functions in the files its cites name that the test map finds no covering test for |
 
-**One question, three parts.** The three questions are always asked, as the
-requirement is that a new mechanism is checked for an existing equivalent, a
-reusable library and common logic. In large mode they are asked **together**:
-before this, each change item raised three separate questions, and on
-apache/skywalking-banyandb#1445 that was 102 of 128 questions, each answered,
-checked and re-run separately. The combined question's text asks all three, and
-its answer has three labelled parts (existing equivalent, reusable library, common
-logic), each with its own evidence and status, and each judged by the answer
-checker; the question's status is the weakest of the three
-([§7.3](#73-answers), "The combined question's answer"). Nothing is dropped:
-every part is as grounded as the separate answer would be. Standard mode is
-unchanged: the three separate questions for each new symbol. Question ids, the
-`Q<n>` numbering, the enums and the batches of at most 15 are as they were.
+The question names the change and its cites. The answerer works out which code
+belongs to the change from the cites and the areas; the plugin does not guess it. So
+a PR of any size asks N1 and at most 15 more questions (five changes of three), where
+apache/skywalking-banyandb#1445 asked 128. Question ids, the `Q<n>`
+numbering, the enums and the batches of at most 15 are as they were. Standard mode
+keeps the report's items and one `existing-reuse-common` question for each new
+symbol, beside `missing-test`, `split-function` and `complexity-coverage`.
+
+**No question is added in large mode.** The questioner phrases the required ones and
+adds none (its prompt says so, validation refuses an addition, and the plugin drops
+one that gets through), so the set is exactly N1 and three questions for each
+high-level change: at most 16, one batch.
+
+**When the briefing keeps no capability** (the claim check removed every `whatsNew`
+bullet), the report's coarsest change items stand in as the high-level changes for
+purpose, `existing-reuse-common` and `missing-test` alike: the features section's
+items first, then the other change items, at most five, numbered `W1`… with their
+text marked "(report item R<n>; the claim check kept no capability)".
 
 **Not asked in large mode:** `split-function`, `complexity-coverage`, `weak-test`,
-the three separate questions (also not for each exported symbol: the combined
-question names the item's exported symbols instead), and `missing-test` for each
-function. The
-**measurements still run and show every function**, the over-limit ones visible
-in the table ([§6.8](#68-measurements)), so the maintainer sees them without being
-asked about each. A maintainer who wants a function looked at asks for it in the
-reporter's session ([§6.9](#69-large-pull-requests)).
+anything per symbol or per function. The **measurements still run and show every
+function**, the over-limit ones visible in the table ([§6.8](#68-measurements)), so
+the maintainer sees them without being asked about each. A maintainer who wants a
+function looked at asks for it in the reporter's session
+([§6.9](#69-large-pull-requests)).
 
 **Answers in batches.** The `batch-answerer` role ([§13.1](#131-roles); the
 `answerer`'s harness, model and effort when the profile names none) answers the
@@ -3104,15 +3105,15 @@ recorded, so they do not decide CI verdicts.
 | `necessity-principle-broken` | As above, N1 says `offline-idempotent` is broken and the checker supports it | N1 is `questionable`, naming `offline-idempotent`; every other question is asked |
 | `necessity-principle-unsupported` | As above, but the checker does not support the break | N1 stays `necessary`; review.md shows both the break and the checker's note |
 | `report-delta` | Seeded ledger with a report at L; rebased with one new commit | A since-L section with that commit's facts and items, then the full report |
-| `answer-finds-existing-helper` | The PR adds `ParseTTL`; the base has `ParseDuration`, outside any path the PR touches | `existing-equivalent` answered with `ParseDuration`'s `path:line`, its call sites and the search; checker `supported`; status `answered`, not posted |
-| `answer-no-library-with-whole-repo-search` | The PR adds a back-off helper; no declared dependency or internal package provides one | `reuse-library` answered "none found", listing the name, signature and token searches over the whole base tree and every go.mod entry with its source status; checker `supported` |
+| `answer-finds-existing-helper` | The PR adds `ParseTTL`; the base has `ParseDuration`, outside any path the PR touches | `existing-reuse-common` answered with `ParseDuration`'s `path:line`, its call sites and the search; checker `supported`; status `answered`, not posted |
+| `answer-no-library-with-whole-repo-search` | The PR adds a back-off helper; no declared dependency or internal package provides one | `existing-reuse-common` answered "none found" (partially, while a dependency has no source here), listing the name, signature and token searches over the whole base tree and every go.mod entry with its source status; checker `supported` |
 | `answer-checker-contradicts` | The answerer says "none found"; the base has an equivalent in a vendored directory | The checker's own search finds it → `unsupported` → one correction; the corrected answer cites it. A second unsupported reply becomes `needs author`, with both statements recorded |
 | `needs-author-purpose` | A new config flag; nothing in the PR text, commits, issue or code comments says why | A `purpose` question answered `needs author`, listing what was read; marked in `review.md`; offered as a draft comment in the review layer |
 | `purpose-stated` | The PR body states why the flag is added | A purpose record `stated` with the matching quote; no `purpose` question |
 | `missing-test` | A new exported function that no test references; the questioner omits the question | The plugin adds the required `missing-test` question; the answerer's whole-repository search finds no test → `needs author`, naming the package's `_test.go` |
-| `large-pull-request` | Run with `limits: { maxFiles: 2, areaMaxBytes: 500, areaMinBytes: 1 }` (`LARGE_LIMITS`): two packages (`alpha`: six exported functions; `beta`: an exported function and an unexported helper), a guide, a generated `*.pb.go` file and a binary file GitHub gave no patch for. Under the profile's own limits the same pull request is an ordinary small one | Stops `report ready`: three areas (`A1` docs, `A2` `pkg/alpha`, `A3` `pkg/beta`) and the generated area; **one** reporter job (given the digest: the areas with the names of their exported symbols, the file list, the facts and the guide's patch, the only interface file) and **one** claim check whose quotes are verified in the trees (`arch-quote-1`), then the diagrams; no area job, no synthesis; the generated file and `assets/logo.png` listed in `other` ("generated code, not summarised", "patch not provided by GitHub"); `report.json` says `mode: "large"` with the limit passed and the areas, `review.md` says so in its header and its Areas section lists the areas with the reporter's labels and the "Dive into an area" command; the questions follow [§7.6](#76-questions-in-large-mode) (one combined `existing-reuse-common` question for the `alpha` item and one for the `beta` item, each answered in three labelled parts, a `purpose` question for the item the PR text does not explain, one `missing-test` question for each item, none per symbol and none per function): N1 and 5 more, answered in one batch by the `batch-answerer`, checked in a fresh session and recorded; `qa.json` and `review.md` written once; every receipt valid |
+| `large-pull-request` | Run with `limits: { maxFiles: 2, areaMaxBytes: 500, areaMinBytes: 1 }` (`LARGE_LIMITS`): two packages (`alpha`: six exported functions; `beta`: an exported function and an unexported helper), a guide, a generated `*.pb.go` file and a binary file GitHub gave no patch for. Under the profile's own limits the same pull request is an ordinary small one | Stops `report ready`: three areas (`A1` docs, `A2` `pkg/alpha`, `A3` `pkg/beta`) and the generated area; **one** reporter job (given the digest: the areas with the names of their exported symbols, the file list, the facts and the guide's patch, the only interface file) and **one** claim check whose quotes are verified in the trees (`arch-quote-1`), then the diagrams; no area job, no synthesis; the generated file and `assets/logo.png` listed in `other` ("generated code, not summarised", "patch not provided by GitHub"); `report.json` says `mode: "large"` with the limit passed and the areas, `review.md` says so in its header and its Areas section lists the areas with the reporter's labels and the "Dive into an area" command; the questions follow [§7.6](#76-questions-in-large-mode) (the briefing has two high-level changes, `W1` and `W2`; for each, one `existing-reuse-common` question with one answer, a `purpose` question when the PR text does not explain it, and one `missing-test` question; none per symbol and none per function): N1 and 6 more, answered in one batch by the `batch-answerer`, checked in a fresh session and recorded; `qa.json` and `review.md` written once; every receipt valid |
 | `feature-data-flow` | The `report` pull request with one feature, the nightly retention sweep: four stages (the `retention_days` flag as a source, the group's `retention_days` as a store, the sweep as a process, the cron library as an external) and three flows, each cited in the diff; the claim check does not support one flow (`F1.f2`) twice | The checker is asked for `W1`…, `F1`, `F1.s1`…`F1.s4` and `F1.f1`…`F1.f3`; the flow is dropped from `report.json` and listed under "Removed by the claim check" in `review.md` and `review-appendix.html`; the skill's Data flow (passing its real `self_check.py` and `verify-geometry.py` and the label rule) holds the two other flows in `review.html`; the same `diagram-corrected` and `diagram-fallback` variants draw it by a corrected document and by the plugin |
-| `review-layer` | One Go file (`pkg/schema/ttl.go`); the report path as `complex-function`; the review replies: correctness raises a P1 (confirmed by its verifier) and a P2 (refuted, with a quote the head shows), so a second pass runs and raises nothing; maintainability raises a non-behavioral P2 (confirmed), then an empty pass; security raises nothing. Ends at `report ready`; the tests then run it in `Review` mode, after `--approve review-layer` and after `--decline review-layer` | Review mode: `draft ready`; the verifiers on Codex, the reviewers on Claude Code; F1 under "Needs your judgment" (unproven), F3 a comment, F2 under "For the maintainer" as dismissed; `review.md`, `review.html` and the appendix hold the Review section; the decline: `succeeded`, `code-review` and `draft-composed` valid on the decline |
+| `review-layer` | One Go file (`pkg/schema/ttl.go`); the report path as `complex-function`; the review replies: correctness raises a P1 (confirmed by its verifier) and a P2 (refuted, with a quote the head shows), so a second pass runs and raises nothing; maintainability raises a non-behavioral P2 (confirmed), then an empty pass; security raises nothing. Ends at `report ready`; the tests then run it in `Review` mode, after `--approve review-layer` and after `--decline review-layer` | Review mode: `draft ready`; the verifiers on Codex, the reviewers on Claude Code; F1 under "Needs your judgment" (unproven), F3 a comment, F2 under "For the maintainer" as dismissed; `review.md` and the appendix hold the Review section, `review.html` its grid of findings; the decline: `succeeded`, `code-review` and `draft-composed` valid on the decline |
 | `large-artifacts` | A pull request of 1,000 data files (large mode), whose `report.json` and `review-appendix.html` pass one write command | Both are written as part sets (`report-json-p1`…, `review-appendix-html-p1`…), each part its own job, while the briefing `review.html` stays small; the validators reconstruct them from the recorded parts and pass; `succeeded` at `report ready` |
 | `complex-function` | A new function with 12 decision points and nesting 4; `metrics.coverage: false` | A Measurements row (12, 4, CRAP with coverage unknown as the upper bound, mutation not run with its reason); `split-function` answered with a proposal (line ranges, names new to the package, one responsibility each) and `complexity-coverage` entries; the `measurements` validator rejects a canned record whose `complexity` disagrees with its `decisions` |
 | `crap-upper-bound` | A modified function with complexity 6 in a package that does not build offline | Coverage `unknown` with that reason; CRAP 42 shown as the upper bound; no `complexity-coverage` question; mutation `not run: no coverage` |
@@ -3330,6 +3331,36 @@ What 0.11 does, where this document leaves it open:
   as before, so their size is bounded by what one command carries; a report or
   Q&A that does not fit still stops the run "incompatible task" and says so.
   (0.12 lifts this: [§6.6](#66-output), multi-part writes.)
+
+### Version 0.19: a visual-only report; large PRs asked per high-level change; one question, one answer
+
+The maintainer's feedback on the live run of apache/skywalking-banyandb#1445: the report
+still showed too much, so `review.html` is now only diagrams and visual elements; and the
+granularity of the questions was too small, and "do we already have it, can we reuse a
+library, is there common logic" is one question, not three. What 0.19 does:
+
+- `review.html` is visual only ([§6.11](#611-the-html-report)): the header strip, the
+  verdict and scope tiles (N1 tile, principle grid, scope bar, counts), the data-flow
+  diagrams, the risk map (a squarified treemap of the areas, coloured by what the
+  briefing's `check` lists cite, with the hotspot functions as dots) and the question
+  status grid, whose tiles link to the appendix. Text beyond a label is a tooltip. The
+  text of the former briefing moves to the top of `review-appendix.html`; `review.md` is
+  unchanged except that each "What's new" bullet carries its `W` id.
+- Large mode asks per **high-level change**, one for each `whatsNew` capability (`W1`…),
+  not per report item ([§7.6](#76-questions-in-large-mode)): N1, then purpose,
+  `existing-reuse-common` and `missing-test` for each change, at most 16 questions.
+  `largeNeeds` assumes five changes of three questions.
+- `existing-reuse-common` is one question with **one answer** in both modes
+  ([§7.1](#71-questions), [§7.3](#73-answers)): the types `existing-equivalent`,
+  `reuse-library` and `common-logic` are gone, standard mode asks it once for each new
+  symbol, and the parts of 0.17 (`parts` in `answers-v1` and `answer-check-v1`, their
+  statuses and histories) are removed.
+- The Review section of `review.html` (0.18) is a grid of tiles by aspect and severity
+  with counts, coloured by state (confirmed red, disputed amber, unproven grey: a
+  behavioral finding no test proves), each linking to the finding in the appendix
+  (`#f-<id>`); the findings in text are the appendix's.
+- Results of 0.17 and 0.18 are not read by 0.19: the two contracts changed shape, and a
+  run is pinned to one plugin version.
 
 ### Version 0.18: the review layer (part 1)
 
