@@ -16,7 +16,7 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "ab5890a6038c32a2d980c2f6bae6505e48e5465a0c1d1c4cca38db23f834e565",
+    "sourceTree": "4eff2cd1a0fea494eee5136ec2f202293094eb00755a7200a18351df123646fc",
     "packageLock": "09a6f6afb99342fe744a5788889dc1fba0af02c93a38d7787e3e25d754def261",
     "files": {
       "package.json": "ad386e0051aaaea9a523c72239f0aab35d7dfc7a49fc0f87eb52303a53f8457b",
@@ -146,6 +146,7 @@
       "test/detectors.test.ts": "cb780849cbe65e86cc7a536c7b98e995192a6c4fb1c92bb5c7c0f7aaf715d7dc",
       "test/diagrams.test.ts": "06a2bfd294c008ae981776aa64605b4bdf74c7a2ef847a6d38fba440f37934d0",
       "test/digest.test.ts": "1674a217024a7284e06221332382c8c903976b68b0e46c54af9ae9721ea4fdc8",
+      "test/externalized-evidence.test.ts": "6fc6ff10bf39da46c413cf81b0fdee26a082d4bbc4d5a7d08f7b146397235b2b",
       "test/flowlayout.test.ts": "3e23e83c7ce3f857091c65381f374b18dca1d12d5a9b0847195d2ad75b6f5383",
       "test/git.test.ts": "67fdb5892a0f040e869f31422b7e82daba8ae1c1a34a3257aaf64b89f2fa9ab3",
       "test/gometrics.test.ts": "d8b4ce32aa4ac8314eecfa9b7c6762e7527cce6dc0f302f7f975a737f92a9c62",
@@ -169,7 +170,7 @@
       "test/scope.test.ts": "594904c01dde39cf2c3ef211707e9ad853ee79e9840bfbb0e78fe685cbb23611",
       "test/static-batches.test.ts": "d5f9f472c56aec8c3770cc584c1ea3f5cbcec3a67faf095f1e4bc2c4d59a7e7a",
       "test/static-tools.test.ts": "b24836a8eec8cadf70f89f00ee8ef651ebc298bc37456526095e93ab23505545",
-      "test/support.ts": "bf08ee080b66c45e5d54c2468975a0e7dbdfc73a1807f25a731e4601fbd69a4a",
+      "test/support.ts": "5d83c50e0a4b4db0d591c1ba5da163096492a6d7d2a5b8221b2b01a0c35da678",
       "test/symbols.test.ts": "97c763e078f97e2d67089f8b55559842032067d024a0c724a0095a76fad01370",
       "test/tsmetrics.test.ts": "15e64d695be1bc3e92e75bd0b0f03bbc84ff4637e789885db66ff4e34dd907cd",
       "test/validate.test.ts": "5e75eef9e625e98a50452eacf261bde3813eabbec3f1e62ee15c562634e18170",

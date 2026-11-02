@@ -21,6 +21,7 @@ import {
   assertGraphDecision,
   BUILTIN_COMMAND_EXECUTOR_ID,
   checkReferences,
+  isEvidenceUnavailable,
   dispatch,
   MAX_TIMEOUT_CONTINUATIONS,
   returnToNormal,
@@ -71,6 +72,7 @@ import {
   type EvidenceProducer,
 } from "./admit.js";
 import { HostObservationError } from "./host-validators.js";
+import { evidenceForHost, evidenceForView, externalizeRecord, hydrateEvidenceBestEffort, markExternalized } from "./evidence.js";
 import { manifestRepairContract, type IntakePin } from "./intake.js";
 import { startActiveClock, type ActiveClock } from "./active-time.js";
 import { assertSafeRunId } from "./ids.js";
@@ -724,7 +726,7 @@ async function runNormalLoopSteps(
                   triggerCode: trigger.code,
                   decision: candidate,
                   evidence: [
-                    ...state.evidence.filter((e) => cited.has(e.ref)),
+                    ...hydrateEvidenceBestEffort(state.stateDir, state.evidence.filter((e) => cited.has(e.ref))),
                     ...citedProbeEvidence(state, refs),
                     ...citedInvestigationEvidence(investigationNow(), refs),
                   ],
@@ -1051,14 +1053,11 @@ async function runNormalLoopSteps(
         // A graph may check the input it composes against the limits an executor declares.
         const declared = executorViews(state);
         const view = { ...toRunView(state), ...(declared !== undefined ? { executors: declared } : {}) };
-        const advanced = await deps.host.advance(
-          {
-            runId: state.runId,
-            operationId: `adv-${state.stateRevision}-${step}`,
-            expectedStateRevision: state.stateRevision,
-          },
-          view,
-        );
+        const advanced = await advanceWithEvidence(deps.host, state, view, {
+          runId: state.runId,
+          operationId: `adv-${state.stateRevision}-${step}`,
+          expectedStateRevision: state.stateRevision,
+        });
         if (!advanced.ok) {
           lastAction = `plugin host failure (${advanced.observation.code})`;
           const contained = await containHostFailure(
@@ -1666,6 +1665,27 @@ async function restartDeadChildHost(
 }
 
 /** Shared advance/evaluate host-failure containment → recovery or concrete stop. */
+/**
+ * Calls the plugin's `advance` with the view's evidence in the form the host reads: externalized for a host that
+ * hydrates lazily (the plugin worker), hydrated here for any other. A blob that cannot be read is the host
+ * observation `evidence_unavailable`, not a crash.
+ */
+async function advanceWithEvidence(
+  host: PluginHost,
+  state: DurableRunState,
+  view: RunView,
+  ctx: { runId: string; operationId: string; expectedStateRevision: number },
+): ReturnType<PluginHost["advance"]> {
+  let sent = view;
+  try {
+    sent = { ...view, evidence: evidenceForHost(host, state.stateDir, view.evidence) };
+  } catch (err) {
+    if (!isEvidenceUnavailable(err)) throw err;
+    return { ok: false, observation: { kind: "child_observation", code: "evidence_unavailable", message: err instanceof Error ? err.message : String(err) } };
+  }
+  return host.advance(ctx, sent);
+}
+
 async function containHostFailure(
   state: DurableRunState,
   deps: LoopDeps,
@@ -1727,7 +1747,11 @@ function mapHostFailureCode(
   }
 }
 
-export function toRunView(state: DurableRunState): RunView {
+/**
+ * `inline` is for a read-only consumer whose evidence is already hydrated (replay): the records are sent as they
+ * are, with no safety-valve externalization, so building the view never writes into the run's evidence store.
+ */
+export function toRunView(state: DurableRunState, options: { inline?: boolean } = {}): RunView {
   const view: RunView = {
     runId: state.runId,
     task: {
@@ -1736,7 +1760,7 @@ export function toRunView(state: DurableRunState): RunView {
     },
     current: structuredClone(state.current),
     receipts: structuredClone(state.receipts),
-    evidence: structuredClone(state.evidence),
+    evidence: structuredClone(options.inline === true ? state.evidence : evidenceForView(state.stateDir, state.evidence)),
     outstanding: structuredClone(state.outstanding),
     budgets: { ...state.budgets },
     validatorBindings: structuredClone(state.validatorBindings),
@@ -3290,8 +3314,9 @@ function recordJobEvidence(
       if (item.fingerprint !== undefined) {
         record.fingerprint = item.fingerprint;
       }
-      added.push(record);
+      added.push(externalizeRecord(next.stateDir, record));
     }
+    markExternalized(added);
     next = {
       ...next,
       evidence: [...next.evidence, ...added],
@@ -3341,29 +3366,34 @@ async function observeWorkspace(
       return inadmissible(state, { precondition: "observe rejected", detail: err instanceof Error ? err.message : String(err) });
     }
     const ref = newEvidenceRef(next);
-    added.push({
-      ref,
-      kind: "file",
-      generation: next.generation,
-      payload: { path: rel, bytes: bytes ?? "" },
-      fingerprint: bytes === undefined ? "missing" : hash(bytes),
-      ...stamp,
-    });
+    added.push(
+      externalizeRecord(next.stateDir, {
+        ref,
+        kind: "file",
+        generation: next.generation,
+        payload: { path: rel, bytes: bytes ?? "" },
+        fingerprint: bytes === undefined ? "missing" : hash(bytes),
+        ...stamp,
+      }),
+    );
   }
 
   if (spec.includeWorkspaceManifest) {
     const changedPaths = await workspaceChangeManifest(state.worktreePath);
     workspaceFp = hash(JSON.stringify(changedPaths));
     const ref = newEvidenceRef(next);
-    added.push({
-      ref,
-      kind: "workspace",
-      generation: next.generation,
-      payload: { changedPaths },
-      fingerprint: workspaceFp,
-      ...stamp,
-    });
+    added.push(
+      externalizeRecord(next.stateDir, {
+        ref,
+        kind: "workspace",
+        generation: next.generation,
+        payload: { changedPaths },
+        fingerprint: workspaceFp,
+        ...stamp,
+      }),
+    );
   }
+  markExternalized(added);
 
   const out: DurableRunState = {
     ...next,

@@ -175,5 +175,6 @@ function evidenceKey(e: EvidenceRecord): string {
   const identity = typeof record?.path === "string" ? record.path : "";
   if (e.fingerprint !== undefined) return `${e.kind}:${identity}:${e.fingerprint}`;
   const payload = record !== undefined ? Object.fromEntries(Object.entries(record).filter(([k]) => k !== "producer")) : e.payload;
-  return `${e.kind}:${identity}:${stableHash(payload ?? null)}`;
+  // The externalized parts' digests stand in for their content; an inline record keys as it always did.
+  return `${e.kind}:${identity}:${stableHash(e.externalized !== undefined ? [payload ?? null, e.externalized] : (payload ?? null))}`;
 }

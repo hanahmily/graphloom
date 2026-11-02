@@ -31,7 +31,7 @@ import {
 } from "@graphloom/sdk";
 import { createScriptedRunner, type Runner } from "@graphloom/runner";
 import { createScriptedSupervisor } from "@graphloom/supervisor";
-import { createController, loadRunState, type ResumeRequest } from "./index.js";
+import { createController, hydrateEvidence, loadRunState, type ResumeRequest } from "./index.js";
 import type { InstallRecord } from "./state.js";
 import { CURRENT_STATE_FORMAT, type StateFormatRegistry } from "./state-migrations/index.js";
 
@@ -250,7 +250,7 @@ describe("run ownership (docs/design-release.md §5.1)", () => {
     await editState(stateDir, (s) => (s.stateFormat = CURRENT_STATE_FORMAT + 1));
     const before = await snapshot(stateDir);
     await expect(createController().resume({ runRef: stateDir, plugin: createScriptedGraph({ definition, advances: REVIEW_STEPS }), validators, runner: reviewRunner() })).rejects.toThrow(
-      /state format 2, written by a newer GraphLoom/,
+      new RegExp(`state format ${CURRENT_STATE_FORMAT + 1}, written by a newer GraphLoom`),
     );
     expect(await snapshot(stateDir)).toEqual(before);
   });
@@ -273,15 +273,17 @@ describe("resume --upgrade (docs/design-release.md §5.2)", () => {
     expect(moved).toEqual([{ runId: "up1", stateDir, install: target, bundlePath: expect.stringMatching(/plugins\/fixture$/) }]);
     const inspect = await createController().inspect(stateDir);
     expect(inspect.install).toEqual(target);
-    expect(inspect.installHistory).toEqual([expect.objectContaining({ from: OWNER, to: target, fromStateFormat: 1, toStateFormat: 1 })]);
+    expect(inspect.installHistory).toEqual([expect.objectContaining({ from: OWNER, to: target, fromStateFormat: CURRENT_STATE_FORMAT, toStateFormat: CURRENT_STATE_FORMAT })]);
     expect(inspect.stateMigrations).toEqual([]);
-    expect(inspect.versionHistory.map((v) => v.reason)).toContain("upgrade: GraphLoom 0.0.0 -> 0.1.0, state format 1 -> 1");
+    expect(inspect.versionHistory.map((v) => v.reason)).toContain(`upgrade: GraphLoom 0.0.0 -> 0.1.0, state format ${CURRENT_STATE_FORMAT} -> ${CURRENT_STATE_FORMAT}`);
     const state = await loadRunState(stateDir);
     expect(state.evidence.some((e) => (e.payload as { upgrade?: unknown } | undefined)?.upgrade !== undefined)).toBe(true);
   });
 
   it("applies ordered migrators with a backup, a recorded transition, and protected content unchanged", async () => {
     const { stateDir } = await stoppedRun();
+    // A run saved in format 1, whatever format this release writes.
+    await editState(stateDir, (s) => (s.stateFormat = 1));
     const original = await readFile(path.join(stateDir, "state.json"), "utf8");
     const before = JSON.parse(original) as { receipts: unknown; evidence: unknown[] };
     const order: string[] = [];
@@ -326,8 +328,30 @@ describe("resume --upgrade (docs/design-release.md §5.2)", () => {
     expect(state.evidence.slice(0, before.evidence.length)).toEqual(before.evidence);
   });
 
+  it("moves a format 1 run's large evidence into the evidence store, keeps its content, and completes the run", async () => {
+    const { stateDir } = await stoppedRun();
+    const big = "y".repeat(40_000);
+    await editState(stateDir, (s) => {
+      s.stateFormat = 1;
+      (s.evidence as unknown[]).push({ ref: "ev-g1-90-eeeeeeee", kind: "other", generation: 1, payload: { report: { id: "x", text: big } } });
+    });
+    const original = await readFile(path.join(stateDir, "state.json"), "utf8");
+    const report = await resumeUpgrade(stateDir, target);
+    expect(report.status).toBe("succeeded");
+    const raw = await readFile(path.join(stateDir, "state.json"), "utf8");
+    expect(raw).not.toContain("y".repeat(100));
+    const state = await loadRunState(stateDir);
+    expect(state.stateFormat).toBe(CURRENT_STATE_FORMAT);
+    const moved = state.evidence.find((e) => e.ref === "ev-g1-90-eeeeeeee")!;
+    expect(moved.payload).toEqual({ report: { id: "x", text: null } });
+    expect(hydrateEvidence(stateDir, [moved])[0]!.payload).toEqual({ report: { id: "x", text: big } });
+    // The backup keeps the format 1 file as it was.
+    expect(await readFile(path.join(stateDir, "migrations", "1-2", "state.json"), "utf8")).toBe(original);
+  });
+
   it("refuses a migrator that changes accepted receipts, with the run unchanged", async () => {
     const { stateDir } = await stoppedRun();
+    await editState(stateDir, (s) => (s.stateFormat = 1));
     const before = await snapshot(stateDir);
     const formats: StateFormatRegistry = {
       current: 2,
@@ -350,7 +374,7 @@ describe("resume --upgrade (docs/design-release.md §5.2)", () => {
     { name: "a downgrade", edit: (s) => (s.install = { version: "0.2.0", root: "/opt/graphloom/versions/0.2.0" }), error: /downgrade: run up1 belongs to GraphLoom 0\.2\.0, which is newer than 0\.1\.0/ },
     { name: "a downgrade to a dev build of an older version", target: { version: "0.0.0-dev+abc1234", root: "/src/graphloom" }, edit: (s) => (s.install = { version: "0.0.1", root: "/x" }), error: /downgrade/ },
     { name: "crossing a major (0.x to 1.0)", target: { version: "1.0.0", root: "/opt/graphloom/versions/1.0.0" }, error: /another major version; a run never crosses a major version, so finish it on 0\.0\.0/ },
-    { name: "an unknown future format", edit: (s) => (s.stateFormat = 7), error: /unknown state format 7: GraphLoom 0\.1\.0 writes format 1/ },
+    { name: "an unknown future format", edit: (s) => (s.stateFormat = 7), error: new RegExp(`unknown state format 7: GraphLoom 0\\.1\\.0 writes format ${CURRENT_STATE_FORMAT}`) },
     { name: "a missing migrator", formats: { current: 3, migrators: [{ from: 1, to: 2, migrate: (f) => f }] }, error: /no state migrator from format 2 to 3/ },
     {
       name: "an unsettled repair activation",

@@ -17,6 +17,7 @@ import type {
 } from "@graphloom/sdk";
 import type { SupervisorEpisodeRecord } from "@graphloom/supervisor";
 import type { IntakePin } from "./intake.js";
+import { sweepEvidence } from "./evidence.js";
 import { bookBudgetUsage, rebaseBudgetUsage, type BudgetUsage } from "./budget-usage.js";
 import { withDirectoryLock } from "./lock.js";
 
@@ -649,6 +650,8 @@ export function citedEvidence(state: DurableRunState, refs: readonly string[] | 
  * which loadRunState books as a raise.
  */
 export async function saveRunState(input: DurableRunState): Promise<void> {
+  // Any evidence record not yet externalized is, and its blobs are on disk, before state.json references them.
+  sweepEvidence(input.stateDir, input.evidence);
   const state = bookBudgetUsage(input);
   await withDirectoryLock(state.stateDir, "state.lock", async () => {
     await mkdir(state.stateDir, { recursive: true });

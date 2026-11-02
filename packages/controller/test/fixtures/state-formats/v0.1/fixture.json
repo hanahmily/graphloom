@@ -1,0 +1,10 @@
+{
+  "runId": "fixture-run",
+  "stateFormat": 2,
+  "owner": {
+    "version": "0.0.0",
+    "root": "/opt/graphloom/versions/0.0.0"
+  },
+  "worktreeBranch": "graphloom/fixture-run",
+  "stoppedAfter": "Write"
+}

@@ -17,7 +17,14 @@ import {
   assertGraphRehearsal,
   assertValidationResult,
   assertWireRequest,
+  EVIDENCE_STORE_ENV,
+  EvidenceUnavailableError,
+  evidenceStoreReader,
+  installLazyPayload,
+  isEvidenceUnavailable,
   parseJsonBounded,
+  type EvidencePartReader,
+  type EvidenceRecord,
   type GraphPlugin,
   type GraphRehearsal,
   type Validator,
@@ -91,6 +98,7 @@ async function main(): Promise<void> {
         continue;
       }
       if (req.kind === "advance") {
+        installLazyEvidence(req.view.evidence);
         const decision = assertGraphDecision(await Promise.resolve(plugin.advance(req.view)));
         writeResponse({ ...envelope, kind: "advance_ok", decision });
         continue;
@@ -101,6 +109,7 @@ async function main(): Promise<void> {
           writeError(envelope, "unknown", `validator not found: ${req.validatorId}`);
           continue;
         }
+        installLazyEvidence(req.input.evidence, req.input.history);
         const result = assertValidationResult(
           await Promise.resolve(validator.evaluate(req.input)),
         );
@@ -127,13 +136,33 @@ async function main(): Promise<void> {
       // failure. Recover what we can from the raw line so the error we send
       // back still names the run it came from.
       if (envelope.runId === "") envelope = recoverEnvelope(line);
-      if (isWireValidationError(err)) {
+      if (isEvidenceUnavailable(err)) {
+        writeError(envelope, "evidence_unavailable", errorMessage(err));
+      } else if (isWireValidationError(err)) {
         writeError(envelope, err.code, err.message);
       } else {
         writeError(envelope, "internal", errorMessage(err));
       }
     }
   }
+}
+
+/**
+ * Evidence records arrive in their externalized form (large payload parts are `null` and listed on the record).
+ * Installs a lazy getter at each listed path, reading the blob from the run's evidence store on first access, so
+ * plugin code reads `record.payload.command.argv` as if it were inline. One cache per call shares a part that
+ * several records carry.
+ */
+function installLazyEvidence(...lists: Array<readonly EvidenceRecord[] | undefined>): void {
+  const store = process.env[EVIDENCE_STORE_ENV];
+  const read: EvidencePartReader =
+    store !== undefined && store !== ""
+      ? evidenceStoreReader(store)
+      : (part) => {
+          throw new EvidenceUnavailableError(part.sha256, `${EVIDENCE_STORE_ENV} is not set`);
+        };
+  const cache = new Map<string, unknown>();
+  for (const list of lists) for (const record of list ?? []) installLazyPayload(record, read, cache);
 }
 
 /**
@@ -218,7 +247,7 @@ function writeResponse(response: WireResponse): void {
 
 function writeError(
   envelope: WireEnvelope,
-  code: "malformed" | "stale" | "oversized" | "unknown" | "internal",
+  code: "malformed" | "stale" | "oversized" | "unknown" | "internal" | "evidence_unavailable",
   message: string,
 ): void {
   writeResponse({ ...envelope, kind: "error", code, message });

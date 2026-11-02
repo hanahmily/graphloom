@@ -47,6 +47,7 @@ import {
   runNormalLoop,
 } from "./loop.js";
 import { sanitizedPluginEnv } from "./plugin-env.js";
+import { evidenceReaderFor, evidenceStoreDir, validatorInput } from "./evidence.js";
 import { assertPinnedBundleUnchanged, readInstalledBundlePin } from "./pin.js";
 import {
   claimRunOwner,
@@ -423,6 +424,7 @@ export function createController(): Controller {
         intake,
         activeVersion,
         generation: 1,
+        stateDir: path.join(stateRoot, runId),
         ...(request.plugin !== undefined ? { plugin: request.plugin } : {}),
         ...(request.host !== undefined ? { host: request.host } : {}),
       });
@@ -462,6 +464,7 @@ export function createController(): Controller {
           definition.defaultValidators.map((b) => b.validatorId),
           {
             runId,
+            stateDir: path.join(stateRoot, runId),
             getStateRevision: () => revisionBridge.current,
           },
         );
@@ -877,6 +880,7 @@ export function createController(): Controller {
           intake: pluginUpdate !== undefined ? { ...state.intake, bundle: pluginUpdate } : state.intake,
           activeVersion: state.activeVersion,
           generation: state.generation,
+          stateDir: state.stateDir,
           ...(request.plugin !== undefined ? { plugin: request.plugin } : {}),
           ...(request.host !== undefined ? { host: request.host } : {}),
         });
@@ -948,6 +952,7 @@ export function createController(): Controller {
           state.definition.defaultValidators.map((b) => b.validatorId),
           {
             runId: state.runId,
+            stateDir: state.stateDir,
             getStateRevision: () => revisionBridge.current,
           },
         );
@@ -1137,13 +1142,15 @@ async function recheckReceipts(
         failure = "cannot be rechecked";
       } else {
         const result = await Promise.resolve(
-          validator.evaluate({
-            requirementId: receipt.requirementId,
-            statement: requirement.statement,
-            evidence: evidence.filter((e) => e !== undefined),
-            candidateFingerprint: receipt.candidateFingerprint,
-            ...(receipt.candidateDigest !== undefined ? { candidateDigest: receipt.candidateDigest } : {}),
-          }),
+          validator.evaluate(
+            validatorInput(validator, state.stateDir, {
+              requirementId: receipt.requirementId,
+              statement: requirement.statement,
+              evidence: evidence.filter((e) => e !== undefined),
+              candidateFingerprint: receipt.candidateFingerprint,
+              ...(receipt.candidateDigest !== undefined ? { candidateDigest: receipt.candidateDigest } : {}),
+            }),
+          ),
         ).catch((err: unknown) => ({ status: "failed" as const, reason: err instanceof Error ? err.message : String(err) }));
         if (result.status !== "passed") failure = `${result.status}: ${result.reason}`;
       }
@@ -1168,7 +1175,7 @@ function resolveValidators(
   explicit: Record<string, AdmissionValidator> | undefined,
   getHost: () => PluginHost,
   ids: string[],
-  ctx: { runId: string; getStateRevision: () => number },
+  ctx: { runId: string; stateDir: string; getStateRevision: () => number },
 ): Record<string, AdmissionValidator> {
   if (explicit) {
     // Activation swaps validators in place; never mutate the caller's map.
@@ -1283,6 +1290,8 @@ async function openHost(args: {
   intake: IntakePin;
   activeVersion: string;
   generation: number;
+  /** The run's state directory: its `evidence/` is what the plugin worker reads externalized evidence from. */
+  stateDir?: string;
 }): Promise<PluginHost> {
   if (args.host) {
     return args.host;
@@ -1294,6 +1303,7 @@ async function openHost(args: {
     return createInProcessPluginHost(args.plugin, {
       activeVersion: args.activeVersion,
       generation: args.generation,
+      ...(args.stateDir !== undefined ? { evidenceReader: evidenceReaderFor(args.stateDir) } : {}),
       ...(config !== undefined ? { config } : {}),
     });
   }
@@ -1303,7 +1313,7 @@ async function openHost(args: {
     activeVersion: args.activeVersion,
     generation: args.generation,
     cwd: args.intake.bundle.bundlePath,
-    env: sanitizedPluginEnv(args.intake.bundle.bundlePath),
+    env: sanitizedPluginEnv(args.intake.bundle.bundlePath, args.stateDir !== undefined ? evidenceStoreDir(args.stateDir) : undefined),
     ...(config !== undefined ? { config } : {}),
   });
 }
@@ -1349,6 +1359,7 @@ function resolveRecreateHost(
         intake: ctx.intake,
         activeVersion: ctx.activeVersion,
         generation: ctx.generation,
+        stateDir: session.stateDir,
       });
       session.host = next;
       return next;
@@ -1444,6 +1455,7 @@ async function checkPluginUpdate(state: DurableRunState, request: ResumeRequest)
       intake,
       activeVersion: state.activeVersion,
       generation: state.generation,
+      stateDir: state.stateDir,
       ...(request.plugin !== undefined ? { plugin: request.plugin } : {}),
       ...(request.host !== undefined ? { host: request.host } : {}),
     });

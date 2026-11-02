@@ -920,6 +920,61 @@ a JavaScript mutex alone cannot serialize CLI processes. Immutable artifacts are
 addressed by digest. Journaling must reconcile process outcomes rather than blindly
 replay a dispatched effect after a crash.
 
+### Evidence storage
+
+A large run's evidence is mostly content: file reads, search output, every version
+of an artifact written through command argv, agent outputs, metrics. Carried inline,
+it was rewritten to `state.json` on every save and cloned into every plugin view and
+validation (a 1,713-record review carried 16.1 MB). The controller therefore keeps
+the **externalized form** canonical, in memory, in `state.json` and on the wire.
+
+- **At record time.** When the controller makes an evidence record (job results,
+  observations, the environment preflight, child tool calls, and every other
+  record, through a sweep before each state save), every payload part, an object,
+  array or string subtree, whose JSON serialization is over the threshold (8 KiB)
+  moves into `<stateDir>/evidence/sha256/<hex>.json`: content-addressed, immutable,
+  deduplicated, written once and fsynced **before** any state save that references
+  it. The part becomes `null` in the payload and is listed on the record as
+  `externalized: [{ path, sha256, bytes }]`. A part is moved at the deepest level
+  that leaves its enclosing object within the threshold, so small identifying
+  fields (`command.id`, `exitCode`, `path`) stay inline; the payload root and
+  `producer` are never moved; many tiny members move with their container, not one
+  blob each. Largest first, deterministic: the same payload always gives the same
+  record. A crash between a blob write and the save leaves an orphan blob, never a
+  dangling reference. Blobs live under the state directory, so deleting the run
+  deletes them.
+- **In the plugin worker.** Before calling `advance` or a validator's `evaluate`,
+  the worker (GraphLoom's code, not the bundle's) installs an enumerable lazy getter
+  at each recorded path of `view.evidence` and of the validation input's `evidence`
+  and `history`. The first read loads the blob from `GRAPHLOOM_EVIDENCE_STORE` (the
+  run's `evidence/`, set by the controller), verifies its digest, parses it, caches it
+  for the call and replaces the getter. Plugin code is unchanged:
+  `record.payload.command.argv` reads as it did. A missing or corrupt blob is the
+  host observation `evidence_unavailable`, distinct from `internal`: the run goes to
+  recovery with that cause, not as a plugin defect. The in-process host (scripted
+  and test graphs) hydrates eagerly through a reader the controller gives it; a host
+  that does not hydrate itself is handed hydrated records by the controller.
+- **Readers in the controller.** Anything that shows or compares content hydrates
+  first: the supervisor's `get_evidence` (bounded by the tool), settlement lines,
+  the reviewer's cited evidence, replay and `record-scenario`, and an artifact's
+  accepted identity (which is a digest of content however it is stored). A synchronous
+  validator in the controller's process gets hydrated records; a host validator
+  gets them externalized and its worker hydrates.
+- **Fingerprints and keys** that hash a record's payload hash its externalized form
+  (the digests stand in for the content). An inline record hashes as before; a
+  record that has parts moved hashes differently from its inline form, so
+  `candidateFingerprint` and the supervisor's no-progress evidence keys of a run
+  change once, across the upgrade below.
+- **Safety valve.** If a view's inline evidence still passes 8 MB, the view is built
+  with a halved threshold (down to 256 bytes), a deterministic function of the
+  state; the extra blobs are ordinary blobs and the stored state is unchanged. The
+  64 MB wire bound stays as a runaway guard.
+- **Format 2.** The state format is 2. The 1 to 2 migrator moves the large parts of
+  an existing run's evidence into `evidence/` and sets the references; its protected
+  view hydrates both sides, so the migration machinery checks that every record still
+  says exactly what it said. `graphloom resume --upgrade` moves a run, writing the
+  blobs durably before `state.json`.
+
 Stop records an atomic request, fences the generation, cancels/reaps the process
 group, and preserves a resumable stopped state. Late messages cannot advance it.
 Inspect and stop read/control state without importing plugin code. Run status is

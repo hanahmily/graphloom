@@ -38,6 +38,11 @@ interface Options {
   maxSteps?: number;
   /** The budgets the run has left, over the generous defaults of the simulation. */
   budgets?: Partial<RunView["budgets"]>;
+  /**
+   * Also hand the graph (every `every` steps) and each validator the same evidence in another form (externalized
+   * with lazy getters, as the plugin worker presents it), and record both answers in `compared`.
+   */
+  shadow?: { records: (records: EvidenceRecord[]) => EvidenceRecord[]; every: number; compared: Array<{ step: number; what: string; recorded: string; shadow: string }> };
   /** Change a job's recorded result before the graph sees it. */
   tamper?: (job: JobSpec, evidence: EvidenceRecord[]) => EvidenceRecord[] | undefined;
 }
@@ -75,7 +80,8 @@ export function candidateEvidence(evidence: EvidenceRecord[], digest: string): E
 }
 
 /** Runs the real graph against a scenario's recorded reads, command results and agent replies: a scripted controller. */
-export function simulate(options: Options = {}): Simulation {
+/** One simulation as a generator that yields between steps, so a long one can give its event loop back. */
+function* simulationSteps(options: Options = {}): Generator<undefined, Simulation, undefined> {
   const config = { ...BANYANDB, ...(options.config ?? {}) };
   const scenario = options.scenario ?? rehearsal(config).scenarios[options.scenarioName ?? "report"]!;
   const definition = definitionFor(parseProfile(config));
@@ -98,6 +104,7 @@ export function simulate(options: Options = {}): Simulation {
   let lastWork: string | undefined;
   let digest = "d0";
   for (let step = 0; step < (options.maxSteps ?? 60); step += 1) {
+    yield;
     const view: RunView = {
       runId: "rehearsal-sim",
       task: { request: options.request ?? REHEARSAL_REQUEST },
@@ -115,6 +122,10 @@ export function simulate(options: Options = {}): Simulation {
       agentSessions: sessions,
     };
     const decision = advancePullRequest(view);
+    if (options.shadow !== undefined && step % options.shadow.every === 0) {
+      const shadowDecision = advancePullRequest({ ...view, evidence: options.shadow.records(evidence) });
+      options.shadow.compared.push({ step, what: "advance", recorded: JSON.stringify(decision), shadow: JSON.stringify(shadowDecision) });
+    }
     decisions.push(decision);
     const action = decision.action;
     if (action.type === "stop" || action.type === "supervise") return { decisions, jobs, evidence, receipts, final: decision, ...(written !== undefined ? { written } : {}), ...(qa !== undefined ? { qa } : {}) };
@@ -136,6 +147,10 @@ export function simulate(options: Options = {}): Simulation {
           if (who === undefined || !who.readOnly || who.purpose !== "review" || who.operationId === lastWork) throw new Error(`the controller would refuse ${id}: no independent review evidence`);
         }
         const result = validatorById(binding.validatorId)!.evaluate({ requirementId: id, statement: "", evidence: candidateEvidence(evidence, digest), candidateDigest: digest, config });
+        if (options.shadow !== undefined) {
+          const shadowResult = validatorById(binding.validatorId)!.evaluate({ requirementId: id, statement: "", evidence: options.shadow.records(candidateEvidence(evidence, digest)), history: [], candidateDigest: digest, config });
+          options.shadow.compared.push({ step, what: `validate ${id}`, recorded: JSON.stringify(result), shadow: JSON.stringify(shadowResult) });
+        }
         receipts.push({ id: `r${(n += 1)}`, stageId: stage.id, requirementId: id, validatorBinding: binding, candidateFingerprint: "x", evidenceRefs: [], valid: result.status === "passed", candidateDigest: digest });
       }
       continue;
@@ -186,6 +201,28 @@ export function simulate(options: Options = {}): Simulation {
     }
   }
   throw new Error("the simulation did not settle");
+}
+
+/** Runs a simulation to its end. */
+export function simulate(options: Options = {}): Simulation {
+  const steps = simulationSteps(options);
+  for (;;) {
+    const r = steps.next();
+    if (r.done === true) return r.value;
+  }
+}
+
+/**
+ * Runs a simulation to its end, giving the event loop back every `every` steps: a simulation at the scale of
+ * #1445 runs for over a minute, and a test worker that never yields misses its own RPC deadlines.
+ */
+export async function simulateYielding(options: Options = {}, every = 10): Promise<Simulation> {
+  const steps = simulationSteps(options);
+  for (let n = 0; ; n += 1) {
+    const r = steps.next();
+    if (r.done === true) return r.value;
+    if (n % every === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+  }
 }
 
 /** The agent assignment of a job. */

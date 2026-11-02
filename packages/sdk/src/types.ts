@@ -264,11 +264,26 @@ export interface Receipt {
   prerequisiteBindings?: Record<RequirementId, ValidatorBinding>;
 }
 
+/**
+ * A part of an evidence payload the controller moved out into a content-addressed blob
+ * (`<stateDir>/evidence/sha256/<hex>.json`); the payload holds `null` where it was.
+ */
+export interface ExternalizedPart {
+  /** Keys and indexes from the payload root to the part; never empty. */
+  path: Array<string | number>;
+  /** SHA-256 (hex) of the part's JSON text, which is also the blob's name. */
+  sha256: string;
+  /** Size of that JSON text in bytes. */
+  bytes: number;
+}
+
 export interface EvidenceRecord {
   ref: EvidenceRef;
   kind: "file" | "command" | "workspace" | "review" | "other";
   fingerprint?: Fingerprint;
   payload?: unknown;
+  /** Large payload parts stored outside the record; each is `null` in `payload` at its path. Absent when the payload is inline. */
+  externalized?: ExternalizedPart[];
   /** Controller generation that produced this evidence: producer metadata and a version-transition/crash-recovery fence, not a freshness boundary. */
   generation?: number;
   /**
@@ -755,6 +770,6 @@ export type WireResponse =
   | (WireEnvelope & { kind: "prepare_task_ok"; reply?: import("./task-plan.js").PrepareTaskReply })
   | (WireEnvelope & {
       kind: "error";
-      code: "malformed" | "stale" | "oversized" | "unknown" | "internal";
+      code: "malformed" | "stale" | "oversized" | "unknown" | "internal" | "evidence_unavailable";
       message: string;
     });

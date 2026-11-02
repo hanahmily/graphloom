@@ -95,3 +95,5 @@ export {
   type StateMigrator,
 } from "./state-migrations/index.js";
 export { compareProductVersions, isReleaseVersion, parseProductVersion, UpgradeRefusedError, type ProductVersion, type UpgradeRequest } from "./upgrade.js";
+
+export { EVIDENCE_DIR, evidenceReaderFor, evidenceStoreDir, externalizeRecord, hydrateEvidence, hydrateEvidenceBestEffort, hydrateOne } from "./evidence.js";

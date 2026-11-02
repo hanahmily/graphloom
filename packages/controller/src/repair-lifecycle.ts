@@ -15,6 +15,7 @@ import type {
 } from "@graphloom/sdk";
 import type { Supervisor } from "@graphloom/supervisor";
 import type { PluginHost } from "@graphloom/plugin-host";
+import { hydrateEvidenceBestEffort } from "./evidence.js";
 import { invalidateStageAndAfter, type AdmissionValidator } from "./admit.js";
 import { resolveBundleEntryFromManifest } from "./bundle.js";
 import { manifestRepairContract } from "./intake.js";
@@ -378,7 +379,7 @@ export async function applyQualifyRepair(
           : undefined;
       // Recorded evidence the proposal cites, and the results of the episode's probes it cites.
       const evidence: EvidenceRecord[] = [
-        ...state.evidence.filter((e) => (qualify.evidenceRefs ?? []).includes(e.ref)),
+        ...hydrateEvidenceBestEffort(state.stateDir, state.evidence.filter((e) => (qualify.evidenceRefs ?? []).includes(e.ref))),
         ...citedProbeEvidence(state, qualify.evidenceRefs),
         ...(state.recoveryEpisodeId !== undefined
           ? citedInvestigationEvidence(episodeInvestigation(state, state.recoveryEpisodeId), qualify.evidenceRefs)
