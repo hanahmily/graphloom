@@ -1093,8 +1093,9 @@ plugin's own SVG is only the fallback:
 - **One correction.** The problems of the diagrams that failed go back to the
   same session once, which returns the whole set again; a diagram that still
   fails after it is drawn by the plugin instead. The latest attempt that passed
-  stands. The run never stops for a diagram: `review.html` says "drawn by the
-  plugin: the diagram-design drawing failed its checks (<reason>)" beside it.
+  stands. The run never stops for a diagram: the appendix says "drawn by the
+  plugin: the diagram-design drawing failed its checks (<reason>)" beside it, and
+  `review.html` puts it in the tooltip of the diagram's caption.
 - **What is embedded.** The plugin never copies the model's markup. It reads the
   `<svg>` into a tree, keeps only an allow-list of elements and attributes
   (`g`, `rect`, `line`, `path`, `polygon`, `polyline`, `circle`, `ellipse`, `text`,
@@ -1196,7 +1197,10 @@ appendix.
    stage.
 6. **Review**, when the review layer ran ([§8](#8-the-review-layer)): the findings as
    a grid of tiles by aspect and severity with counts, coloured by state
-   (confirmed, disputed, unproven), each linking to its finding in the appendix.
+   (disputed when its verifier did not settle it, unproven when it is a
+   behavioral finding no test proves, confirmed otherwise; a cell takes its most
+   serious state, and dismissed findings are not shown), each linking to its
+   finding in the appendix (`#f-<id>`).
 
 It holds no change item, no table, no list and no Q&A text. The text that used to
 be the briefing (the purpose, what is new with its `W` ids, the scope table, the
@@ -3098,7 +3102,7 @@ recorded, so they do not decide CI verdicts.
 | `missing-test` | A new exported function that no test references; the questioner omits the question | The plugin adds the required `missing-test` question; the answerer's whole-repository search finds no test → `needs author`, naming the package's `_test.go` |
 | `large-pull-request` | Run with `limits: { maxFiles: 2, areaMaxBytes: 500, areaMinBytes: 1 }` (`LARGE_LIMITS`): two packages (`alpha`: six exported functions; `beta`: an exported function and an unexported helper), a guide, a generated `*.pb.go` file and a binary file GitHub gave no patch for. Under the profile's own limits the same pull request is an ordinary small one | Stops `report ready`: three areas (`A1` docs, `A2` `pkg/alpha`, `A3` `pkg/beta`) and the generated area; **one** reporter job (given the digest: the areas with the names of their exported symbols, the file list, the facts and the guide's patch, the only interface file) and **one** claim check whose quotes are verified in the trees (`arch-quote-1`), then the diagrams; no area job, no synthesis; the generated file and `assets/logo.png` listed in `other` ("generated code, not summarised", "patch not provided by GitHub"); `report.json` says `mode: "large"` with the limit passed and the areas, `review.md` says so in its header and its Areas section lists the areas with the reporter's labels and the "Dive into an area" command; the questions follow [§7.6](#76-questions-in-large-mode) (the briefing has two high-level changes, `W1` and `W2`; for each, one `existing-reuse-common` question with one answer, a `purpose` question when the PR text does not explain it, and one `missing-test` question; none per symbol and none per function): N1 and 6 more, answered in one batch by the `batch-answerer`, checked in a fresh session and recorded; `qa.json` and `review.md` written once; every receipt valid |
 | `feature-data-flow` | The `report` pull request with one feature, the nightly retention sweep: four stages (the `retention_days` flag as a source, the group's `retention_days` as a store, the sweep as a process, the cron library as an external) and three flows, each cited in the diff; the claim check does not support one flow (`F1.f2`) twice | The checker is asked for `W1`…, `F1`, `F1.s1`…`F1.s4` and `F1.f1`…`F1.f3`; the flow is dropped from `report.json` and listed under "Removed by the claim check" in `review.md` and `review-appendix.html`; the skill's Data flow (passing its real `self_check.py` and `verify-geometry.py` and the label rule) holds the two other flows in `review.html`; the same `diagram-corrected` and `diagram-fallback` variants draw it by a corrected document and by the plugin |
-| `review-layer` | One Go file (`pkg/schema/ttl.go`); the report path as `complex-function`; the review replies: correctness raises a P1 (confirmed by its verifier) and a P2 (refuted, with a quote the head shows), so a second pass runs and raises nothing; maintainability raises a non-behavioral P2 (confirmed), then an empty pass; security raises nothing. Ends at `report ready`; the tests then run it in `Review` mode, after `--approve review-layer` and after `--decline review-layer` | Review mode: `draft ready`; the verifiers on Codex, the reviewers on Claude Code; F1 under "Needs your judgment" (unproven), F3 a comment, F2 under "For the maintainer" as dismissed; `review.md`, `review.html` and the appendix hold the Review section; the decline: `succeeded`, `code-review` and `draft-composed` valid on the decline |
+| `review-layer` | One Go file (`pkg/schema/ttl.go`); the report path as `complex-function`; the review replies: correctness raises a P1 (confirmed by its verifier) and a P2 (refuted, with a quote the head shows), so a second pass runs and raises nothing; maintainability raises a non-behavioral P2 (confirmed), then an empty pass; security raises nothing. Ends at `report ready`; the tests then run it in `Review` mode, after `--approve review-layer` and after `--decline review-layer` | Review mode: `draft ready`; the verifiers on Codex, the reviewers on Claude Code; F1 under "Needs your judgment" (unproven), F3 a comment, F2 under "For the maintainer" as dismissed; `review.md` and the appendix hold the Review section, `review.html` its grid of findings; the decline: `succeeded`, `code-review` and `draft-composed` valid on the decline |
 | `large-artifacts` | A pull request of 1,000 data files (large mode), whose `report.json` and `review-appendix.html` pass one write command | Both are written as part sets (`report-json-p1`…, `review-appendix-html-p1`…), each part its own job, while the briefing `review.html` stays small; the validators reconstruct them from the recorded parts and pass; `succeeded` at `report ready` |
 | `complex-function` | A new function with 12 decision points and nesting 4; `metrics.coverage: false` | A Measurements row (12, 4, CRAP with coverage unknown as the upper bound, mutation not run with its reason); `split-function` answered with a proposal (line ranges, names new to the package, one responsibility each) and `complexity-coverage` entries; the `measurements` validator rejects a canned record whose `complexity` disagrees with its `decisions` |
 | `crap-upper-bound` | A modified function with complexity 6 in a package that does not build offline | Coverage `unknown` with that reason; CRAP 42 shown as the upper bound; no `complexity-coverage` question; mutation `not run: no coverage` |
@@ -3340,6 +3344,10 @@ library, is there common logic" is one question, not three. What 0.19 does:
   `reuse-library` and `common-logic` are gone, standard mode asks it once for each new
   symbol, and the parts of 0.17 (`parts` in `answers-v1` and `answer-check-v1`, their
   statuses and histories) are removed.
+- The Review section of `review.html` (0.18) is a grid of tiles by aspect and severity
+  with counts, coloured by state (confirmed red, disputed amber, unproven grey: a
+  behavioral finding no test proves), each linking to the finding in the appendix
+  (`#f-<id>`); the findings in text are the appendix's.
 - Results of 0.17 and 0.18 are not read by 0.19: the two contracts changed shape, and a
   run is pinned to one plugin version.
 
