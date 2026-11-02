@@ -106,26 +106,65 @@ export function evidenceStoreReader(storeDir: string): EvidencePartReader {
   return (part) => readEvidencePart(storeDir, part);
 }
 
+/** The file system calls `writeEvidenceBlobs` makes, so a test can watch the order of them. */
+export interface EvidenceFs {
+  existsSync(file: string): boolean;
+  statSync(file: string): { size: number };
+  mkdirSync(dir: string, options: { recursive: true }): unknown;
+  openSync(file: string, flags: string): number;
+  writeSync(fd: number, text: string, position: null, encoding: "utf8"): unknown;
+  fsyncSync(fd: number): void;
+  closeSync(fd: number): void;
+  renameSync(from: string, to: string): void;
+}
+
+const nodeFs: EvidenceFs = { existsSync, statSync, mkdirSync, openSync, writeSync, fsyncSync, closeSync, renameSync };
+
+/** fsync of a directory makes the entries created or renamed in it durable; a file system that cannot is skipped. */
+function syncDirectory(fs: EvidenceFs, dir: string): void {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(dir, "r");
+    fs.fsyncSync(fd);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== "EINVAL" && code !== "ENOTSUP" && code !== "EISDIR" && code !== "EPERM" && code !== "EACCES") throw err;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
 /**
- * Writes blobs durably: each is fsynced under a temporary name and renamed into place, and one already present
- * with the right size is left alone (content addressing makes a rewrite pointless). Call before the state save
- * that references them; a crash in between leaves an orphan blob and never a dangling reference.
+ * Writes blobs durably: each is fsynced under a temporary name and renamed into place, and then its directory is
+ * fsynced so the rename itself survives a crash. Directories this call creates (the store, `sha256`, parents) are
+ * made durable too, each by an fsync of its parent. One already present with the right size is left alone (content
+ * addressing makes a rewrite pointless). Call before the state save that references them; a crash in between
+ * leaves an orphan blob, never a dangling reference.
  */
-export function writeEvidenceBlobs(storeDir: string, blobs: readonly EvidenceBlob[]): void {
+export function writeEvidenceBlobs(storeDir: string, blobs: readonly EvidenceBlob[], fs: EvidenceFs = nodeFs): void {
   for (const blob of blobs) {
     const file = evidenceBlobPath(storeDir, blob.sha256);
     const bytes = Buffer.byteLength(blob.text, "utf8");
-    if (existsSync(file) && statSync(file).size === bytes) continue;
-    mkdirSync(path.dirname(file), { recursive: true });
-    const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
-    const fd = openSync(tmp, "w");
-    try {
-      writeSync(fd, blob.text, null, "utf8");
-      fsyncSync(fd);
-    } finally {
-      closeSync(fd);
+    if (fs.existsSync(file) && fs.statSync(file).size === bytes) continue;
+    const dir = path.dirname(file);
+    // Each directory that does not exist yet, outermost first.
+    const created: string[] = [];
+    for (let d = dir; !fs.existsSync(d); d = path.dirname(d)) {
+      created.unshift(d);
+      if (path.dirname(d) === d) break;
     }
-    renameSync(tmp, file);
+    fs.mkdirSync(dir, { recursive: true });
+    const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+    const fd = fs.openSync(tmp, "w");
+    try {
+      fs.writeSync(fd, blob.text, null, "utf8");
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(tmp, file);
+    syncDirectory(fs, dir);
+    for (const made of created) syncDirectory(fs, path.dirname(made));
   }
 }
 

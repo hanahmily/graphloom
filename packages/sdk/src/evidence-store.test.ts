@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
-import { mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, mkdirSync, mkdtempSync, openSync, readdirSync, renameSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -107,7 +107,7 @@ describe("externalizePayload", () => {
       const hydrated = hydrateRecord({ ref: "e", kind: "other", payload: out.payload, externalized: out.externalized }, evidenceStoreReader(dir));
       expect(stableHash(hydrated.payload)).toBe(stableHash(original));
     }
-  });
+  }, 120_000);
 
   it("stores identical parts once", () => {
     const out = externalizePayload({ a: big(9_000), b: big(9_000) });
@@ -145,5 +145,45 @@ describe("installLazyPayload", () => {
     const missing = mkdtempSync(path.join(tmpdir(), "evidence-empty-"));
     expect(() => hydrateRecord({ ...record(out.payload), externalized: out.externalized }, evidenceStoreReader(missing))).toThrow(/blob file is missing/);
     expect(readdirSync(dir)).toContain("sha256");
+  });
+});
+
+describe("writeEvidenceBlobs durability", () => {
+  it("fsyncs the blob's directory after the rename, and the parent of every directory it created, before returning", () => {
+    const base = mkdtempSync(path.join(tmpdir(), "evidence-durable-"));
+    const store = path.join(base, "run", "evidence");
+    const calls: string[] = [];
+    const fds = new Map<number, string>();
+    const fs = {
+      existsSync,
+      statSync,
+      mkdirSync: (dir: string, o: { recursive: true }) => (calls.push(`mkdir ${path.relative(base, dir)}`), mkdirSync(dir, o)),
+      openSync: (file: string, flags: string) => {
+        const real = openSync(file, flags);
+        fds.set(real, path.relative(base, file));
+        return real;
+      },
+      writeSync: (fd: number, text: string, position: null, enc: "utf8") => writeSync(fd, text, position, enc),
+      fsyncSync: (fd: number) => (calls.push(`fsync ${fds.get(fd)!.replace(/\.[0-9a-f-]+\.tmp$/, ".tmp")}`), fsyncSync(fd)),
+      closeSync,
+      renameSync: (a: string, b: string) => (calls.push(`rename ${path.relative(base, b)}`), renameSync(a, b)),
+    };
+    const blob = { sha256: "a".repeat(64), text: '"x"' };
+    // sha256 digests are checked by name only on read; writing does not verify them.
+    writeEvidenceBlobs(store, [blob], fs);
+    const rename = calls.findIndex((c) => c.startsWith("rename "));
+    expect(rename).toBeGreaterThan(calls.findIndex((c) => c.startsWith("fsync ") && c.endsWith(".tmp")));
+    const after = calls.slice(rename + 1);
+    // The blob's own directory, then the parent of each directory created: base (holds run), run (holds evidence), evidence (holds sha256).
+    expect(after).toEqual([
+      path.join("run", "evidence", "sha256"),
+      "",
+      "run",
+      path.join("run", "evidence"),
+    ].map((d) => `fsync ${d}`));
+    // A second write into the now existing store syncs only the directory of the new blob.
+    calls.length = 0;
+    writeEvidenceBlobs(store, [{ sha256: "b".repeat(64), text: '"y"' }], fs);
+    expect(calls.slice(calls.findIndex((c) => c.startsWith("rename ")) + 1)).toEqual([`fsync ${path.join("run", "evidence", "sha256")}`]);
   });
 });

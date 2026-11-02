@@ -38,6 +38,7 @@ import { createInProcessPluginHost } from "@graphloom/plugin-host";
 import { createAdmissionTools } from "@graphloom/supervisor";
 import { createController, loadRunState, replayRun, saveRunState, toRunView } from "./index.js";
 import { deleteRun } from "./delete-run.js";
+import { admitValidation, invalidateFromStage } from "./admit.js";
 import { evidenceReaderFor, evidenceStoreDir, externalizeRecord, hydrateEvidence } from "./evidence.js";
 import { createSupervisorInspection, type InspectionHooks } from "./inspection.js";
 import { CURRENT_STATE_FORMAT, migrateStateFiles, migrationPath, STATE_FORMATS } from "./state-migrations/index.js";
@@ -399,5 +400,46 @@ describe("replay is read-only", () => {
     const report = await replayRun(recorded, host);
     expect(report.nextDecision).toMatchObject({ decision: { action: { stop: { reason: `saw ${recorded.evidence.length}` } } } });
     expect(listing()).toEqual(before);
+  });
+});
+
+describe("an artifact identity whose latest blob is missing", () => {
+  async function stateWithLostArtifact() {
+    const { state, stateDir } = await stoppedState();
+    const record = externalizeRecord(stateDir, {
+      ref: "ev-g1-60-abababab",
+      kind: "other",
+      generation: state.generation,
+      resultSchema: "report-v1",
+      payload: { report: { id: "art", text: "w".repeat(40_000) } },
+    });
+    await rm(evidenceStoreDir(stateDir), { recursive: true, force: true });
+    const withIdentity: DurableRunState = {
+      ...state,
+      definition: { ...state.definition, requirements: state.definition.requirements.map((r) => ({ ...r, identityArtifactSchema: "report-v1" })) },
+      evidence: [...state.evidence, record],
+    };
+    return withIdentity;
+  }
+
+  it("is the observation evidence_unavailable at receipt creation, not a bare error", async () => {
+    const state = await stateWithLostArtifact();
+    const passing = { readsExternalizedEvidence: true, evaluate: () => ({ status: "passed" as const, reason: "ok" }) };
+    await expect(admitValidation(state, { stageId: "work" }, { "full-text": passing })).rejects.toMatchObject({ name: "HostObservationError", code: "evidence_unavailable" });
+  });
+
+  it("is the observation evidence_unavailable when receipts are checked for invalidation", async () => {
+    const state = await stateWithLostArtifact();
+    const receipt = {
+      id: "rcpt-1",
+      stageId: "work",
+      requirementId: "report",
+      validatorBinding: state.definition.defaultValidators[0]!,
+      candidateFingerprint: "x",
+      evidenceRefs: [],
+      valid: true,
+      acceptedIdentity: { "report-v1": "0".repeat(64) },
+    };
+    await expect(invalidateFromStage({ ...state, receipts: [receipt] })).rejects.toMatchObject({ name: "HostObservationError", code: "evidence_unavailable" });
   });
 });

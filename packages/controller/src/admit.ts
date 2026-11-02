@@ -2,7 +2,8 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { createHash, randomUUID } from "node:crypto";
-import { stableHash as stableDigest } from "@graphloom/sdk";
+import { isEvidenceUnavailable, stableHash as stableDigest } from "@graphloom/sdk";
+import { HostObservationError } from "./host-validators.js";
 import type {
   EvidenceRecord,
   GraphDefinition,
@@ -520,7 +521,14 @@ function currentArtifactDigest(state: DurableRunState, resultSchema: string): st
   const latest = [...state.evidence].reverse().find((e) => e.resultSchema === resultSchema);
   if (latest === undefined) return undefined;
   // An artifact's identity is its content, however the record stores it.
-  const hydratedLatest = hydrateOne(state.stateDir, latest);
+  let hydratedLatest;
+  try {
+    hydratedLatest = hydrateOne(state.stateDir, latest);
+  } catch (err) {
+    // The same containment as a validator's input: the observation `evidence_unavailable`, handled by the loop.
+    if (!isEvidenceUnavailable(err)) throw err;
+    throw new HostObservationError("evidence_unavailable", err instanceof Error ? err.message : String(err));
+  }
   const payload = hydratedLatest.payload !== null && typeof hydratedLatest.payload === "object" ? (hydratedLatest.payload as Record<string, unknown>) : hydratedLatest.payload;
   if (payload === null || typeof payload !== "object") return stableDigest(payload);
   const { producer: _producer, ...content } = payload as Record<string, unknown>;

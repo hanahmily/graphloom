@@ -232,6 +232,7 @@ export {
   readEvidencePart,
   writeEvidenceBlobs,
   type EvidenceBlob,
+  type EvidenceFs,
   type EvidencePartReader,
   type ExternalizedPayload,
 } from "./evidence-store.js";
