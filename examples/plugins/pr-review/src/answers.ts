@@ -38,6 +38,8 @@ export const ANSWER_CHECK_SCHEMA_NAME = "answer-check-v1";
 export const MAX_ANSWER_CORRECTIONS = 2;
 export const MAX_ANSWER_CHECK_RETRIES = 2;
 export const MAX_ANSWER_CHARS = 2_000;
+/** An existing-reuse-common answer covers three concerns (already exists, a reusable library, common logic) in one statement. */
+export const MAX_COMBINED_ANSWER_CHARS = 4_000;
 const MAX_LIST = 12;
 /** Citations one verification command carries: four arguments each beside five fixed ones, within the executor's 64. */
 const CITES_PER_COMMAND = 14;
@@ -230,7 +232,8 @@ function answerProblemsOf(a: Answer, q: Question, ctx: AnswerContext, dirs: read
   const out: string[] = [];
   const at = a.question;
   if (a.answer.trim() === "") out.push(`${at}: the answer is empty`);
-  if (a.answer.length > MAX_ANSWER_CHARS) out.push(`${at}: the answer is ${a.answer.length} characters, more than ${MAX_ANSWER_CHARS}`);
+  const maxChars = q.type === "existing-reuse-common" ? MAX_COMBINED_ANSWER_CHARS : MAX_ANSWER_CHARS;
+  if (a.answer.length > maxChars) out.push(`${at}: the answer is ${a.answer.length} characters, more than ${maxChars}`);
   // The necessity answer has its own bounds (necessityProblems): its trace, design statements and changed lines are citations too.
   if (q.type !== "necessity" && (a.citations.length > MAX_LIST || a.searches.length > MAX_LIST || a.inventory.length > MAX_LIST * 4 || a.metrics.length > MAX_LIST)) out.push(`${at}: more than ${MAX_LIST} citations, searches or metrics (cite the ones that settle it)`);
   if (a.citations.length + a.searches.length + a.inventory.length === 0) out.push(`${at}: it has no evidence: cite the code, list the searches run, or name the inventory entries read`);

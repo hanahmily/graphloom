@@ -121,7 +121,13 @@ export function pathProblem(p: string, tree: SearchTree, dirs: readonly string[]
   if (p.split("/").includes("..")) return "has a .. segment, which would leave the tree";
   if (tree === "dependency") return p.startsWith("/") && dirs.some((d) => p === d || p.startsWith(`${d}/`)) ? undefined : `must, in a dependency search, be an absolute directory inside one of the inventory's source directories${dirs.length === 0 ? " (none is available here)" : ""}`;
   if (p.startsWith("/")) return "is absolute; a path is relative to the tree's root";
-  if (p.startsWith(":")) return "begins with :, which git reads as pathspec magic";
+  // One pathspec magic is accepted: exclusion (":!glob", ":^glob" or ":(exclude)glob"), whose glob is checked like any path.
+  const excluded = /^:(?:!|\^|\(exclude\))(.*)$/.exec(p);
+  if (excluded !== null) {
+    const why = excluded[1] === "" ? "is empty" : pathProblem(excluded[1]!, tree, dirs);
+    return why === undefined ? undefined : `excludes a path that ${why}`;
+  }
+  if (p.startsWith(":")) return "begins with :, which git reads as pathspec magic (only an exclusion, \":!<glob>\", is accepted)";
   return undefined;
 }
 
