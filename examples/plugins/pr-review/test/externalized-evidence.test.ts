@@ -8,7 +8,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { evidenceStoreReader, externalizePayload, installLazyPayload, writeEvidenceBlobs, type EvidenceRecord } from "@graphloom/sdk";
 import { hugeRehearsal } from "../src/rehearsal.js";
 import { HUGE_LIMITS } from "../src/rehearsal-huge.js";
-import { BANYANDB, simulate, type Simulation } from "./support.js";
+import { BANYANDB, simulateYielding, type Simulation } from "./support.js";
 
 /**
  * The plugin worker hands the plugin evidence in its externalized form with lazy getters
@@ -55,12 +55,12 @@ function lazyForm(stats: Stats): (records: EvidenceRecord[]) => EvidenceRecord[]
 }
 
 describe("pr-review reads externalized evidence exactly as it reads inline evidence", () => {
-  it("answers the same on the same run at the scale of #1445, in advance and in every validator", () => {
+  it("answers the same on the same run at the scale of #1445, in advance and in every validator", async () => {
     const CONFIG = { limits: HUGE_LIMITS };
     const { scenario, headFiles } = hugeRehearsal({ ...BANYANDB, ...CONFIG });
     const stats: Stats = { records: 0, externalizedRecords: 0, parts: 0, inlineBytes: 0, externalizedBytes: 0 };
     const compared: Array<{ step: number; what: string; recorded: string; shadow: string }> = [];
-    const sim: Simulation = simulate({
+    const sim: Simulation = await simulateYielding({
       scenario,
       config: CONFIG,
       files: headFiles,
