@@ -155,7 +155,13 @@
     "questioner": { "harness": "codex", "effort": "medium" },
     "answerer": { "harness": "claude-code", "model": "opus", "effort": "high" },
     "batch-answerer": { "harness": "claude-code", "model": "sonnet", "effort": "high" },
-    "answer-checker": { "harness": "codex", "effort": "medium" }
+    "answer-checker": { "harness": "codex", "effort": "medium" },
+    "reviewer-correctness": { "harness": "claude-code", "model": "opus", "effort": "high" },
+    "reviewer-maintainability": { "harness": "claude-code", "model": "opus", "effort": "high" },
+    "reviewer-security": { "harness": "claude-code", "model": "opus", "effort": "high" },
+    "verifier-correctness": { "harness": "codex", "effort": "medium" },
+    "verifier-maintainability": { "harness": "codex", "effort": "medium" },
+    "verifier-security": { "harness": "codex", "effort": "medium" }
   },
   "supervisor": {
     "harnesses": ["pi", "claude-code", "codex"]

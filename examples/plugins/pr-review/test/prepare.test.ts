@@ -81,10 +81,11 @@ describe("prepareTask", () => {
 });
 
 describe("approvals", () => {
-  it("declares review-layer as unavailable in this version, in the pinned definition", () => {
+  it("declares review-layer, with its areas input, in the pinned definition", () => {
     const declared = definitionFor(parseProfile(banyandb)).approvals;
     expect(declared).toEqual(approvalDeclarations());
-    expect(declared).toEqual([expect.objectContaining({ id: "review-layer", stageId: "review", unavailable: expect.stringContaining("no Review stage") })]);
+    expect(declared).toEqual([{ id: "review-layer", stageId: "review", description: expect.stringContaining("review layer"), inputs: [{ name: "areas", description: expect.stringContaining("A3,A17"), pattern: "A[0-9]+(,A[0-9]+)*" }] }]);
+    expect(declared![0]).not.toHaveProperty("unavailable");
   });
 
   it("reads the latest decision on an approval from operator-approval evidence", () => {

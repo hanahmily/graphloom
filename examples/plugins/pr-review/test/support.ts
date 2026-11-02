@@ -36,6 +36,10 @@ interface Options {
   /** Replace the files the worktree holds, by path (the stubbed checkout writes none). */
   files?: Record<string, string>;
   maxSteps?: number;
+  /** Evidence the run already holds when the graph first runs: an operator's approval, a recorded conversation. */
+  seed?: EvidenceRecord[];
+  /** Agent sessions the run already holds (a conversation's row), before any job settles. */
+  sessions?: NonNullable<RunView["agentSessions"]>;
   /** The budgets the run has left, over the generous defaults of the simulation. */
   budgets?: Partial<RunView["budgets"]>;
   /**
@@ -91,7 +95,8 @@ function* simulationSteps(options: Options = {}): Generator<undefined, Simulatio
   const decisions: GraphDecision[] = [];
   const jobs: JobSpec[] = [];
   const cursors = new Map<string, number>();
-  const sessions: NonNullable<RunView["agentSessions"]> = [];
+  const sessions: NonNullable<RunView["agentSessions"]> = [...(options.sessions ?? [])];
+  evidence.push(...(options.seed ?? []));
   let n = 0;
   const next = (kind: string, key: string): unknown => {
     const list = (kind === "reads" ? scenario.reads?.[key] : scenario.results[key]) ?? [];
@@ -197,7 +202,7 @@ function* simulationSteps(options: Options = {}): Generator<undefined, Simulatio
       const tampered = options.tamper?.(job, [record]);
       if (tampered !== undefined) record = tampered[0]!;
       evidence.push(record);
-      sessions.push({ operationId: producer.operationId, stageId: job.stageId, attempt: 1, generation: 1, dispatchKey: job.jobId ?? `${job.purpose}:${CODING_AGENT.id}`, executorId: CODING_AGENT.id, status: "ok" });
+      sessions.push({ operationId: producer.operationId, stageId: job.stageId, attempt: 1, generation: 1, dispatchKey: job.jobId ?? `${job.purpose}:${CODING_AGENT.id}`, executorId: CODING_AGENT.id, status: "ok", sessionRef: `claude-${producer.operationId}`, settledAt: `2026-01-01T00:00:${String(sessions.length % 60).padStart(2, "0")}.000Z` });
     }
   }
   throw new Error("the simulation did not settle");

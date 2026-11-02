@@ -8,6 +8,7 @@
  * are refused, as issue-fix's parser refuses them.
  */
 import { confinementProblem, GRAPH_BUDGET_KEYS, MAX_JOB_TIMEOUT_MS, SUPERVISOR_HARNESSES, type EnvironmentCommand, type GraphBudgetDefaults, type SupervisorPreference } from "@graphloom/sdk";
+import { ASPECTS, isAspect, type Aspect, type RuleEntry } from "./aspects.js";
 import { RESERVED_CHECKS } from "./constants.js";
 
 export type SectionId = string;
@@ -134,8 +135,15 @@ export const MAX_GINKGO_LABEL_FILTER_CHARS = 200;
 /** An argv element's longest text; the whole setup must also fit the coverage command's spec. */
 const MAX_SETUP_ARG_CHARS = 2_000;
 
-export type Role = "reporter" | "diagrammer" | "report-checker" | "questioner" | "answerer" | "batch-answerer" | "answer-checker";
-export const ROLES: readonly Role[] = ["reporter", "diagrammer", "report-checker", "questioner", "answerer", "batch-answerer", "answer-checker"];
+export type ReviewerRole = `reviewer-${Aspect}`;
+export type VerifierRole = `verifier-${Aspect}`;
+export type Role = "reporter" | "diagrammer" | "report-checker" | "questioner" | "answerer" | "batch-answerer" | "answer-checker" | ReviewerRole | VerifierRole;
+export const reviewerRole = (a: Aspect): ReviewerRole => `reviewer-${a}`;
+export const verifierRole = (a: Aspect): VerifierRole => `verifier-${a}`;
+export const ROLES: readonly Role[] = [
+  "reporter", "diagrammer", "report-checker", "questioner", "answerer", "batch-answerer", "answer-checker",
+  ...ASPECTS.map(reviewerRole), ...ASPECTS.map(verifierRole),
+];
 
 /** The harness each role defaults to (design §13.1). */
 const DEFAULT_ROLES: Record<Role, string> = {
@@ -148,6 +156,20 @@ const DEFAULT_ROLES: Record<Role, string> = {
   // Optional: absent, it takes the answerer's harness, model and effort too (checkRoles).
   "batch-answerer": "claude-code",
   "answer-checker": "codex",
+  // The review layer's roles resolve from the answerer's harness (checkRoles): the reviewer's, then the verifier's other one.
+  "reviewer-correctness": "claude-code",
+  "reviewer-maintainability": "claude-code",
+  "reviewer-security": "claude-code",
+  "verifier-correctness": "codex",
+  "verifier-maintainability": "codex",
+  "verifier-security": "pi",
+};
+
+/** The harnesses a verifier takes the first of that is not its reviewer's (design §13.1): Pi first for security, as the design's table has it. */
+const VERIFIER_PREFERENCE: Readonly<Record<Aspect, readonly string[]>> = {
+  correctness: ["claude-code", "codex", "pi"],
+  maintainability: ["claude-code", "codex", "pi"],
+  security: ["pi", "claude-code", "codex"],
 };
 
 /** The pairs that must not share a harness: [checked, author]. */
@@ -157,6 +179,7 @@ export const DISTINCT_PAIRS: ReadonlyArray<readonly [Role, Role]> = [
   ["answerer", "questioner"],
   ["answer-checker", "answerer"],
   ["answer-checker", "batch-answerer"],
+  ...ASPECTS.map((a): readonly [Role, Role] => [verifierRole(a), reviewerRole(a)]),
 ];
 
 /** What a role asks of its harness beyond which one: either may be absent, which inherits the harness's own. */
@@ -190,6 +213,7 @@ export interface ProfileData {
   context?: ContextRef[];
   privateRepos?: string[];
   harnesses?: Partial<Record<Role, RoleHarness>>;
+  review?: { fork?: { maxParentTokens?: number }; aspects?: Partial<Record<Aspect, { rules?: RuleEntry[] }>> };
   supervisor?: SupervisorPreference;
   budgets?: GraphBudgetDefaults;
   limits?: Partial<Limits>;
@@ -219,7 +243,18 @@ export interface Profile {
   budgets?: GraphBudgetDefaults;
   limits: Limits;
   agentTimeoutMs?: number;
+  /** The review layer's settings (design §8.1). */
+  review: ReviewConfig;
 }
+
+/** What a profile's `review` says: the base session's token bound for forking, and each aspect's rule entries over the shipped ones. */
+export interface ReviewConfig {
+  fork: { maxParentTokens: number };
+  rules: Record<Aspect, RuleEntry[]>;
+}
+
+/** The base session's context beyond which a reviewer is seeded instead of forked (design §8.1). */
+export const DEFAULT_MAX_PARENT_TOKENS = 100_000;
 
 /** The sandbox's limits when a profile says nothing: the ones issue-fix's banyandb-ql `bench-gates` already uses (design-code-quality-metrics.md §4). */
 export const SANDBOX_LIMITS = { cpus: 4, memory: "8g", pids: 512, tmp: "1g", wallClockMs: 30 * 60_000 } as const;
@@ -241,7 +276,6 @@ const HARNESSES: Readonly<Record<string, string>> = { "claude-code": "Claude Cod
 
 /** Fields of a later version of pr-review: refused with that reason instead of "unknown". */
 const LATER_FIELDS: Readonly<Record<string, string>> = {
-  review: "the review layer",
   rules: "the review layer",
   checks: "the Checks stage",
   comments: "the review layer",
@@ -579,11 +613,7 @@ function checkSupervisor(raw: unknown): SupervisorPreference {
 function checkRoles(raw: unknown): { roles: Record<Role, string>; settings: Partial<Record<Role, RoleSettings>> } {
   need(raw === undefined || isObject(raw), "harnesses must be an object");
   const h = (raw ?? {}) as Record<string, unknown>;
-  const names = [...ROLES, "reviewer-correctness", "reviewer-maintainability", "reviewer-security"] as readonly string[];
-  for (const key of Object.keys(h)) {
-    need(names.includes(key), `harnesses.${key} is not a role; the roles of this version are ${ROLES.join(", ")}`);
-    need(ROLES.includes(key as Role), `harnesses.${key} belongs to the review layer, which this version does not have`);
-  }
+  for (const key of Object.keys(h)) need((ROLES as readonly string[]).includes(key), `harnesses.${key} is not a role; the roles of this version are ${ROLES.join(", ")}`);
   const roles = { ...DEFAULT_ROLES };
   const settings: Partial<Record<Role, RoleSettings>> = {};
   for (const role of ROLES) {
@@ -613,6 +643,21 @@ function checkRoles(raw: unknown): { roles: Record<Role, string>; settings: Part
     roles["batch-answerer"] = roles.answerer;
     if (settings.answerer !== undefined) settings["batch-answerer"] = { ...settings.answerer };
   }
+  // The review layer's roles (design §13.1). A reviewer takes the answerer's harness, model and effort unless the profile
+  // sets it; the base session it forks (once forking exists) runs on the answerer's harness, so a reviewer on another one is refused.
+  for (const a of ASPECTS) {
+    const r = reviewerRole(a);
+    if (h[r] === undefined) {
+      roles[r] = roles.answerer;
+      if (settings.answerer !== undefined) settings[r] = { ...settings.answerer };
+    }
+    need(roles[r] === roles.answerer, `harnesses.${r} must be the answerer's harness (${roles.answerer}; it is ${roles[r]}): a reviewer starts from the answerer's session, and a session continues only on its own harness`);
+  }
+  // A verifier takes the first harness of its preference that is not its reviewer's.
+  for (const a of ASPECTS) {
+    const v = verifierRole(a);
+    if (h[v] === undefined) roles[v] = VERIFIER_PREFERENCE[a].find((x) => x !== roles[reviewerRole(a)])!;
+  }
   // The maintainer opens the answerer's session (design §13.1; in large mode the batch-answerer's), and a Pi session has no interactive restore.
   need(roles.answerer !== "pi", 'harnesses.answerer must be claude-code or codex: a Pi session cannot be opened by the maintainer, so the review layer could not continue from it');
   need(roles["batch-answerer"] !== "pi", 'harnesses.batch-answerer must be claude-code or codex: a Pi session cannot be opened by the maintainer, so the review layer could not continue from it');
@@ -620,6 +665,46 @@ function checkRoles(raw: unknown): { roles: Record<Role, string>; settings: Part
     need(roles[checked] !== roles[author], `harnesses.${checked} must differ from harnesses.${author} (both are ${roles[checked]}): an artifact is checked on a harness other than its author's`);
   }
   return { roles, settings };
+}
+
+function checkReview(raw: unknown): ReviewConfig {
+  const rules = Object.fromEntries(ASPECTS.map((a) => [a, [] as RuleEntry[]])) as Record<Aspect, RuleEntry[]>;
+  const out: ReviewConfig = { fork: { maxParentTokens: DEFAULT_MAX_PARENT_TOKENS }, rules };
+  if (raw === undefined) return out;
+  need(isObject(raw), "review must be an object");
+  const r = raw as Record<string, unknown>;
+  need(r.repro === undefined, "review.repro is not supported in this version: the reproducing tests are a later part of the review layer");
+  onlyKeys(r, "review", ["fork", "aspects"]);
+  if (r.fork !== undefined) {
+    need(isObject(r.fork), "review.fork must be an object");
+    onlyKeys(r.fork as Record<string, unknown>, "review.fork", ["maxParentTokens"]);
+    const t = (r.fork as Record<string, unknown>).maxParentTokens;
+    need(t === undefined || (isCount(t) && (t as number) <= 10_000_000), "review.fork.maxParentTokens must be a positive integer");
+    if (t !== undefined) out.fork.maxParentTokens = t as number;
+  }
+  if (r.aspects !== undefined) {
+    need(isObject(r.aspects), "review.aspects must be an object");
+    for (const [name, v] of Object.entries(r.aspects as Record<string, unknown>)) {
+      need(isAspect(name), `review.aspects.${name} is not an aspect; the aspects are ${ASPECTS.join(", ")}`);
+      need(isObject(v), `review.aspects.${name} must be an object`);
+      onlyKeys(v as Record<string, unknown>, `review.aspects.${name}`, ["rules"]);
+      const list = (v as Record<string, unknown>).rules;
+      if (list === undefined) continue;
+      need(Array.isArray(list) && list.length <= 16, `review.aspects.${name}.rules must be a list of at most 16 entries`);
+      const seen = new Set<string>();
+      for (const [i, e] of (list as unknown[]).entries()) {
+        need(isObject(e), `review.aspects.${name}.rules[${i}] must be an object with a path and a rule`);
+        const entry = e as Record<string, unknown>;
+        onlyKeys(entry, `review.aspects.${name}.rules[${i}]`, ["path", "rule"]);
+        need(isString(entry.path) && !(entry.path as string).startsWith("/") && !(entry.path as string).split("/").includes("..") && !/[\n\u0000]/.test(entry.path as string), `review.aspects.${name}.rules[${i}].path must be a repository-relative glob`);
+        need(isString(entry.rule) && (entry.rule as string).length <= 2_000, `review.aspects.${name}.rules[${i}].rule must be text of at most 2,000 characters`);
+        need(!seen.has(entry.path as string), `review.aspects.${name}.rules has the path ${JSON.stringify(entry.path)} twice`);
+        seen.add(entry.path as string);
+        rules[name as Aspect].push({ path: entry.path as string, rule: entry.rule as string });
+      }
+    }
+  }
+  return out;
 }
 
 /** The profile the task's config holds, checked, or a ProfileError naming the first problem. */
@@ -630,7 +715,7 @@ export function parseProfile(config: unknown): Profile {
   for (const key of Object.keys(p)) {
     if (LATER_FIELDS[key] !== undefined) throw new ProfileError(`${key} is not supported in this version: it belongs to ${LATER_FIELDS[key]}`);
   }
-  onlyKeys(p, "", ["name", "description", "project", "baseBranch", "issues", "environment", "report", "symbols", "questions", "metrics", "context", "privateRepos", "harnesses", "supervisor", "budgets", "limits", "agent"]);
+  onlyKeys(p, "", ["name", "description", "project", "baseBranch", "issues", "environment", "report", "symbols", "questions", "metrics", "context", "privateRepos", "harnesses", "supervisor", "budgets", "limits", "agent", "review"]);
   need(isString(p.name), "name is required");
   need(typeof p.description === "undefined" || isString(p.description), "description must be text");
   need(typeof p.project === "string" && REPO_NAME.test(p.project), 'project is required, as "owner/name"');
@@ -672,6 +757,7 @@ export function parseProfile(config: unknown): Profile {
   const context = checkContext(p.context);
   need(p.privateRepos === undefined || (isStrings(p.privateRepos) && (p.privateRepos as string[]).every((r) => REPO_NAME.test(r))), 'privateRepos must be a list of "owner/name"');
   const { roles, settings: roleSettings } = checkRoles(p.harnesses);
+  const review = checkReview(p.review);
   const budgets = checkBudgets(p.budgets);
   const supervisorPreference = checkSupervisor(p.supervisor);
   let limits = { ...DEFAULT_LIMITS };
@@ -715,6 +801,7 @@ export function parseProfile(config: unknown): Profile {
     ...(budgets !== undefined ? { budgets } : {}),
     limits,
     ...(agentTimeoutMs !== undefined ? { agentTimeoutMs } : {}),
+    review,
   };
 }
 

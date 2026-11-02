@@ -103,7 +103,11 @@ the request, which `advance` reads, not in `describe(config)`:
 - **`Report on owner/repo#N at <sha>.`** (the default, written by
   `graphloom task new`, [§3.1](#31-task)). After Answers, the run stops,
   final, with reason `report ready`.
-  - `--approve review-layer` continues into Review.
+  - `--approve review-layer` continues into Review. For a large pull request,
+    `--approve review-layer --input areas=A3,A17,A18` names the areas the
+    reviewers review ([§8.1](#81-review)); the plugin declares the input as
+    data and the controller records it with the approval
+    ([core §17](design-typescript-core.md#17-operator-approvals-and-their-inputs)).
   - `--decline review-layer` makes the later requirements pass on that
     decline, as their statements say ([§5](#5-stages-and-requirements)), and
     the run **succeeds** as report-only.
@@ -1919,6 +1923,61 @@ user.
 
 ### 8.1 Review
 
+**Status (0.18, part 1).** The Review and Draft stages are implemented, with
+these differences from the text below, each recorded where it applies:
+
+- **Seeded, never forked.** `JobSpec.forkFrom` does not exist yet, so every
+  reviewer pass starts a fresh session seeded with `review.md` and the
+  conversation summary, and records `context: seeded` with the reason
+  `forking is not available in this version` (or, when it applies, the
+  token-bound reason `base context 143,000 tokens over 100,000`, or that the
+  base's transcript was omitted). The base session is still selected as
+  below and recorded in the `review-scope` record (its session ref, its
+  operation id for `forkFrom` and the chain of conversations), so forks can
+  be switched on by changing how the pass is dispatched. Reviewer roles still
+  must run on the answerer's harness, for the same reason.
+- **Scope.** A standard pull request is reviewed whole. In large mode the
+  reviewers review only the files of the areas the operator picks with
+  `--approve review-layer --input areas=A3,A17` (the `areas` input of the
+  `review-layer` approval, a comma-separated list of area ids; the
+  generated area cannot be picked). Without a list, the default is the areas
+  that the briefing's "What you need to check" entries for risks, behavior and
+  compatibility cite: each cite names a file, and each file is in one area. A
+  default that cites no area, an unknown id, or `areas` on a pull request
+  that is not large stops the run `review scope refused` (retryable) and
+  asks for an approval with the areas: a large pull request is never reviewed
+  whole by default. The scope is decided once and recorded.
+- **Aspects run one after another** (correctness, maintainability, security),
+  each with its own sweep, so the findings are numbered `F1`, `F2`, … aspect
+  by aspect. A comment whose `aspect` is not its pass's stays in the raising
+  pass's sweep and verification (verified by that pass's verifier) and is
+  listed under its own aspect in the draft; it does not join another
+  aspect's sweep.
+- **Rule groups are resolved by plugin code, not by `ocr delegate rule`.** The
+  effective rule file is written to `.graphloom/review/rules/<aspect>.json`
+  in the format ocr honors, and plugin code asserts from the written bytes
+  that every file of the scope falls under one entry (the first whose glob
+  matches, `**` last) and gives the reviewer those groups; a file under none
+  fails the aspect before any reviewer runs. The ocr binary is not run.
+- **No reproducing tests** ([§8.2](#82-reproducing-tests) is part 2). Every
+  behavioral finding is therefore `unproven`, as §8.2 specifies for
+  `review.repro.enabled: false`: listed under "Needs your judgment", never
+  drafted as P0 or P1, never a reason for `request-changes`. The one place
+  that decides it is `proofOf` (`src/proof.ts`); part 2 replaces it with
+  the recomputation from `graphloom-repro-v1` reports, adds `repro` to
+  `pr-code-review-v1` and `test` to `pr-finding-verification-v1`, adds the
+  `findings-proven` requirement and turns `review.repro` on in the profile
+  (it is refused today). A suggestion of a non-behavioral finding is kept when
+  the verifier says it fixes the finding, it replaces exactly the commented
+  RIGHT range and is at most 20 lines; there is no fix run.
+- **Not in this version:** the `rule-checks` requirement, the Checks stage
+  (the profile still refuses `checks`), the ledger update with the
+  findings' states, "already raised" human threads (`earlier` is empty),
+  `comments.nits` (P3 comments are counted and not verified), the reroute of
+  off-aspect findings into another aspect's sweep, prior-finding statuses
+  (one candidate, so `resolved` could not apply) and the publish half
+  ([§8.5](#85-publish), [§10.2](#102-edits-and-their-validation)).
+
 **Three aspect reviewers.** Three reviewer sessions review the same file
 scope, each for one aspect:
 
@@ -2494,6 +2553,20 @@ Admission allows a `write`-effect dispatch only when its `approvalRef` names
 current-generation approval evidence that lists the executor and has
 dispatches left. Retries under the same idempotency key do not count.
 
+An approval may also declare **operator inputs**, as data, which the operator
+gives with `--input <name>=<value>` on the `--approve`
+([core §17](design-typescript-core.md#17-operator-approvals-and-their-inputs)):
+
+```ts
+{ id: "review-layer", stageId: "review",
+  inputs: [{ name: "areas", description: "…", pattern: "A[0-9]+(,A[0-9]+)*" }] }
+```
+
+The controller checks each value against the declared name and pattern and
+records it in the `operator-approval` evidence; the plugin reads it from the
+run's evidence and decides what it means (here: the areas of a large pull
+request to review, [§8.1](#81-review)).
+
 Why this mechanism:
 
 - It is the existing gesture for an operator taking responsibility, as
@@ -2810,6 +2883,20 @@ fork, on a harness other than the reviewers', and a finding rerouted to
 another aspect ([§8.1](#81-review)) is still verified by the verifier of the
 pass that raised it.
 
+**Implemented in 0.18.** The profile accepts the six review roles
+(`harnesses.reviewer-<aspect>`, `harnesses.verifier-<aspect>`, the same string or
+`{ harness, model?, effort? }` form) with the fallbacks of the table above:
+a reviewer takes the answerer's harness, model and effort, and `parseProfile`
+refuses a reviewer on another harness (`sameAs` is enforced there, not as an
+SDK declaration); a verifier takes the first harness of its preference that
+is not its reviewer's, Pi first for security, and `parseProfile` refuses a
+verifier on its reviewer's harness. Pi counts as available only when the
+runner config names it, which `graphloom doctor --task` reports; a profile
+without Pi sets the verifiers explicitly, as `profiles/banyandb.json` does:
+reviewers on Claude Code (Opus, high effort), all three verifiers on Codex
+(medium effort). `review.fork.maxParentTokens` and
+`review.aspects.<aspect>.rules` are accepted; `review.repro` is refused.
+
 **The answerer is Claude Code or Codex.** `parseProfile` refuses
 `harnesses.answerer: "pi"` and `harnesses.batch-answerer: "pi"`. A Pi session has no interactive restore, so the
 maintainer could not open it, and a Pi answerer would leave the reviewers
@@ -2988,6 +3075,8 @@ schema name enters the controller, SDK or CLI.
 | `JobSpec.confinement` kind `bwrap`: `{ kind: "bwrap", network, mask, binds }` | `packages/sdk/src/types.ts` (`JobSpec`, line 419), `packages/runner/src/confine.ts` | For agents and static tools: a hidden home with `ownState` holes, masks, read-only binds, network on or off. Refused without bwrap. A definition flag `untrustedWorkspace` applies the masks to supervisor jobs |
 | `JobSpec.confinement` kind `docker`: `{ kind: "docker", image, cpus, memory, pids, tmp, wallClockMs, writable, readOnly, env }` | `packages/sdk/src/types.ts`; a new `packages/runner/src/sandbox-docker.ts`; `graphloom doctor` and `check` probes (CLI, daemon, image by digest) | A generic, plugin-neutral option for any graph command job that runs untrusted code. The runner builds the `docker run` of [§12.2](#122-confinement) from the data, refuses an image without a digest, always passes `--pull never`, labels the container with the run, and kills it by name on stop. issue-fix's `bench-gates` could move onto it |
 | Approvals | `GraphDefinition.approvals`, `resume --approve/--decline`, `operator-approval` evidence, write admission by `approvalRef`, `github.writeTokenEnv`, `inspect` | [§11](#11-approvals). Rehearsal scenarios gain `operator: { approve?, decline? }` |
+| Approval inputs | `ApprovalDeclaration.inputs` (`name`, `description`, `pattern`), `resume --approve <id> --input <name>=<value>`, the `inputs` of the `operator-approval` evidence | Implemented in 0.18: [core §17](design-typescript-core.md#17-operator-approvals-and-their-inputs) |
+| `AgentSessionView.sessionRef` and `settledAt` | `packages/sdk/src/types.ts`, `packages/controller/src/agent-sessions.ts` | Implemented in 0.18: the plugin matches an `operator-conversation` (which names its `forkSession`) with its session row, to record the review base session's operation id |
 | `graphloom session list/open` | `apps/graphloom`; `AgentSessionRecord` gains `harness`, `confinement`, `origin`, `parent` and `contextTokens`; fork, capture and turn-extract helpers beside the session save/restore in `@graphloom/agent-harness`; `operator-conversation` evidence; `maxConversationBytes`, and per harness `sessionLauncher` and `sessionLauncherStateDirs` (with the `GRAPHLOOM_<HARNESS>_SESSION_LAUNCHER` overrides and a `doctor` probe), in the runner config | [Core §15](design-typescript-core.md#15-opening-a-recorded-agent-session): the conversation is captured on exit, `--stage` continues the latest one, `--from-original` starts over |
 | `JobSpec.forkFrom` | `packages/sdk/src/types.ts`, controller admission, the coding-agent executor | The fork form of `continueFrom`: across stages and dispatch keys, same harness only, the parent never written ([core §15](design-typescript-core.md#15-opening-a-recorded-agent-session)) |
 | `AgentRoleDeclaration.sameAs` | `packages/sdk/src/types.ts`, role resolution and `inspect` | A role that must run on another role's harness, as the reviewers on the answerer's ([§13.1](#131-roles)) |
@@ -3023,6 +3112,7 @@ recorded, so they do not decide CI verdicts.
 | `missing-test` | A new exported function that no test references; the questioner omits the question | The plugin adds the required `missing-test` question; the answerer's whole-repository search finds no test → `needs author`, naming the package's `_test.go` |
 | `large-pull-request` | Run with `limits: { maxFiles: 2, areaMaxBytes: 500, areaMinBytes: 1 }` (`LARGE_LIMITS`): two packages (`alpha`: six exported functions; `beta`: an exported function and an unexported helper), a guide, a generated `*.pb.go` file and a binary file GitHub gave no patch for. Under the profile's own limits the same pull request is an ordinary small one | Stops `report ready`: three areas (`A1` docs, `A2` `pkg/alpha`, `A3` `pkg/beta`) and the generated area; **one** reporter job (given the digest: the areas with the names of their exported symbols, the file list, the facts and the guide's patch, the only interface file) and **one** claim check whose quotes are verified in the trees (`arch-quote-1`), then the diagrams; no area job, no synthesis; the generated file and `assets/logo.png` listed in `other` ("generated code, not summarised", "patch not provided by GitHub"); `report.json` says `mode: "large"` with the limit passed and the areas, `review.md` says so in its header and its Areas section lists the areas with the reporter's labels and the "Dive into an area" command; the questions follow [§7.6](#76-questions-in-large-mode) (one combined `existing-reuse-common` question for the `alpha` item and one for the `beta` item, each answered in three labelled parts, a `purpose` question for the item the PR text does not explain, one `missing-test` question for each item, none per symbol and none per function): N1 and 5 more, answered in one batch by the `batch-answerer`, checked in a fresh session and recorded; `qa.json` and `review.md` written once; every receipt valid |
 | `feature-data-flow` | The `report` pull request with one feature, the nightly retention sweep: four stages (the `retention_days` flag as a source, the group's `retention_days` as a store, the sweep as a process, the cron library as an external) and three flows, each cited in the diff; the claim check does not support one flow (`F1.f2`) twice | The checker is asked for `W1`…, `F1`, `F1.s1`…`F1.s4` and `F1.f1`…`F1.f3`; the flow is dropped from `report.json` and listed under "Removed by the claim check" in `review.md` and `review-appendix.html`; the skill's Data flow (passing its real `self_check.py` and `verify-geometry.py` and the label rule) holds the two other flows in `review.html`; the same `diagram-corrected` and `diagram-fallback` variants draw it by a corrected document and by the plugin |
+| `review-layer` | One Go file (`pkg/schema/ttl.go`); the report path as `complex-function`; the review replies: correctness raises a P1 (confirmed by its verifier) and a P2 (refuted, with a quote the head shows), so a second pass runs and raises nothing; maintainability raises a non-behavioral P2 (confirmed), then an empty pass; security raises nothing. Ends at `report ready`; the tests then run it in `Review` mode, after `--approve review-layer` and after `--decline review-layer` | Review mode: `draft ready`; the verifiers on Codex, the reviewers on Claude Code; F1 under "Needs your judgment" (unproven), F3 a comment, F2 under "For the maintainer" as dismissed; `review.md`, `review.html` and the appendix hold the Review section; the decline: `succeeded`, `code-review` and `draft-composed` valid on the decline |
 | `large-artifacts` | A pull request of 1,000 data files (large mode), whose `report.json` and `review-appendix.html` pass one write command | Both are written as part sets (`report-json-p1`…, `review-appendix-html-p1`…), each part its own job, while the briefing `review.html` stays small; the validators reconstruct them from the recorded parts and pass; `succeeded` at `report ready` |
 | `complex-function` | A new function with 12 decision points and nesting 4; `metrics.coverage: false` | A Measurements row (12, 4, CRAP with coverage unknown as the upper bound, mutation not run with its reason); `split-function` answered with a proposal (line ranges, names new to the package, one responsibility each) and `complexity-coverage` entries; the `measurements` validator rejects a canned record whose `complexity` disagrees with its `decisions` |
 | `crap-upper-bound` | A modified function with complexity 6 in a package that does not build offline | Coverage `unknown` with that reason; CRAP 42 shown as the upper bound; no `complexity-coverage` question; mutation `not run: no coverage` |
@@ -3160,6 +3250,14 @@ the architecture diagram removed ([§6.1](#61-template),
 [§6.10](#610-features-and-their-data-flow), [§6.11](#611-the-html-report),
 [Version 0.16](#version-016-a-one-page-briefing-report)).
 
+**Landed in 0.18 (part 1 of P4):** the Review and Draft stages: three aspect
+reviewers seeded with the conversation summary, their rule files, the sweep
+and independent verifiers per aspect, the draft review, the Review section of
+the reports, the operator's `areas` input for large pull requests and the
+generic approval inputs behind it ([§8](#8-the-review-layer),
+[Version 0.18](#version-018-the-review-layer-part-1)). The reproducing tests
+([§8.2](#82-reproducing-tests)) are part 2.
+
 | Phase | Scope | Verification |
 |---|---|---|
 | P1 | **First layer, report-only.** Fetch, workspace, report, questions, answers, static measurements. Generic: `base:`, the GitHub reads, `bwrap` confinement (agents, static tools) and the `docker` sandbox (coverage), image checks and pulls in Fetch, doctor and check probes. pr-review 0.1 with stages Fetch, Report, Questions and Answers; it stops `report ready` after Answers and `--decline review-layer` finishes it. Also: detectors; symbol packs (Go, TypeScript); whole-repository search; similarity; the dependency inventory; test mapping; the reporter, questioner and answerer with both checkers; `gometrics` and `tsmetrics`; confined coverage (**built in wave 3b**: `go test -coverprofile`; for TypeScript the repository's own `vitest run --coverage` with its `@vitest/coverage-v8`, or `not run (no vitest coverage provider)` when the repository declares none) with measured CRAP and the unknown-coverage rule; `review.md`, `report.json`, `qa.json`; the ledger; the BanyanDB mapping. **Wave 3**, with the Questions and Answers work: generic `graphloom session list/open` ([core §15](design-typescript-core.md#15-opening-a-recorded-agent-session)) with conversation capture (`operator-conversation` evidence, the turn extract, the 32 MiB bound, `contextTokens`), chained forks and `--from-original`; the operator's session launcher (`claude.sessionLauncher`, `codex.sessionLauncher`, their state directories, the environment overrides and the launcher probe in `session open` and `doctor`); `parseProfile` refusing a Pi answerer; and the decision half of approvals (`GraphDefinition.approvals`, `resume --approve/--decline`, `operator-approval` evidence) for the `report ready` stop; 0.1 has no Review stage, so it refuses `--approve review-layer` and names the version; and task preparation: the generic `prepareTask` hook, `TaskPlan` and `validateTaskPlan`, `graphloom task new` ([core §16](design-typescript-core.md#16-preparing-a-task-graphloom-task-new)), pr-review's `prepareTask` ([§3.1](#31-task)), and the `graphloom-run` skill using `task new` | Intake, executor contract and confinement tests. Unit tests per detector, symbol pattern (new vs modified, receivers, generics), query builder, similarity scorer, test-map rule and validator rule. `gometrics` matches gocyclo on a fixture corpus. Nesting and changed-function scope fixtures. The `measurements` validator rejects each kind of inconsistent record. Real-Git tests: searches read the base commit only, and materialization runs no hook or filter. Ledger CAS race. Rehearsal `report`, `report-corrections`, `answer-finds-existing-helper`, `answer-no-library-with-whole-repo-search`, `answer-checker-contradicts`, `needs-author-purpose`, `purpose-stated`, `missing-test`, `complex-function`, `crap-upper-bound`, `sandbox-unavailable`, `injection`. Wave 3: opening a session and capturing its fork leave the recorded transcript, side files and rollout byte-identical; a second `--stage answers` open forks the first conversation and `--from-original` forks the answerer; `session list` shows each conversation with its parent; a fork with no operator turn records nothing, one over the bound records `transcript: omitted`, and a capture after the run finished records nothing; the turn extract keeps the operator's messages verbatim (Claude Code and Codex fixtures); a stub launcher prefixes `session open` only and headless jobs keep `claude.command`, the environment override wins, its state directories are writable in the confinement, a launcher that cannot resume is refused by the probe before launch, and capture through a stub launcher finds the fork by the id GraphLoom chose; `session open` refuses a Pi session, a ref whose harness disagrees with its record and a finished run, and refuses while the owning job or a continuation of it runs; the opened session's confinement (repository agent-config masks applied, no GitHub token in its environment, the checkout read-only); `--stage answers` opens the answerer, not the checker; `--decline review-layer` records `operator-approval` evidence and finishes the run; `--approve review-layer` refused by 0.1. Task preparation: `validateTaskPlan` refuses a step that would run a command (an unknown kind, an extra property) and any `intoRef` or `to` outside `refs/graphloom/<graph>/`; a `fetch` from a local smart-HTTP fixture runs no hook (a `reference-transaction` hook's marker never appears) and leaves the working tree, index and `HEAD` unchanged; `--dry-run` creates no ref and writes no file; an existing `task.yaml` is refused without `--force`; pr-review's plan for a temporary repository whose fixture remote serves a fake `refs/pull/7/head`: the six steps of [§3.1](#31-task), `heads/<sha>` pinned at the fetched head, `base` the merge base, the request naming that sha, and the written task passing `graphloom check`; a URL argument gives the same plan; another `owner/repo` than the profile's `project`, a missing profile and a malformed argument are refused. Under real Docker: a coverage run with `--network none`, where a test that dials out fails; the limits enforced (a fork bomb stops at `--pids-limit`, an allocation at `--memory`, the host unaffected); only the checkout and the build cache writable, the root read-only, no host home, `--pull never`; the container killed by name on stop and removed on resume; coverage attributed by line range, Go from the coverprofile and TypeScript from `coverage-final.json` statements, with the report written under the job's temporary directory and the checkout unchanged. One live run on a real BanyanDB PR, read by the user, with recall of new symbols, tests and existing equivalents checked by hand |
@@ -3232,6 +3330,42 @@ What 0.11 does, where this document leaves it open:
   as before, so their size is bounded by what one command carries; a report or
   Q&A that does not fit still stops the run "incompatible task" and says so.
   (0.12 lifts this: [§6.6](#66-output), multi-part writes.)
+
+### Version 0.18: the review layer (part 1)
+
+What 0.18 does ([§8](#8-the-review-layer) says how each part differs from the text):
+
+- **Stages.** The stage list gains Review (`code-review`) and Draft
+  (`draft-composed`). After Answers the run stops `report ready` unless the
+  request is `Review on …`; `--approve review-layer` enters Review,
+  `--decline review-layer` passes both requirements on the decline and the run
+  succeeds report only. The Draft stage ends the run `draft ready`; nothing is
+  posted. Both requirements are recomputed by validators from records the plugin
+  wrote (`review-scope`, `review-aspect-<aspect>`), the rule files and the draft
+  files; `code-review` is `separate-reviewer`.
+- **Contracts.** `pr-code-review-v1` (comments with `side`, `suggestion`, `aspect`,
+  `kind`; a summary that must account for every file in scope) and
+  `pr-finding-verification-v1` (confirmed with a `path:line` witness, refuted with
+  one to three quotes that the head's files show, or uncertain; `kind`; `fixes`).
+  A comment the contract or the rules refuse goes back with every problem; two
+  retries, then the supervisor.
+- **Roles and profile.** Six roles and `review.fork`/`review.aspects` ([§13.1](#131-roles));
+  `profiles/banyandb.json` sets the reviewers and verifiers.
+- **Reports.** `review.html` gets a Review section (findings by severity with
+  counts, each with its one-line claim, aspect badge, cite and checker verdict,
+  collapsed except the P0 and P1 findings that stand) and the appendix the full
+  findings and the draft; `review.md` mirrors both. They are written again at
+  the end of the Draft stage and recompute from `report.json`, `qa.json`,
+  `necessity.json` and `draft.json`.
+- **Generic.** Approval inputs ([core §17](design-typescript-core.md#17-operator-approvals-and-their-inputs));
+  `AgentSessionView` carries `sessionRef` and `settledAt`.
+- **Ambiguities resolved.** Reviewers' sessions are fresh, not forked, with the
+  reason recorded; the reviewer roles must be the answerer's harness already;
+  the checker of a finding is the aspect's verifier; a default scope that cites
+  no area asks the operator rather than reviewing everything; a finding is
+  "blocking" in the report (open by default) when it is P0 or P1 and still
+  stands, whatever its proof; `Checks`, `rule-checks`, the ledger update and
+  the incremental re-review wait for later versions.
 
 ### Version 0.17: one combined question per item in large mode, and a batch-answerer role
 
