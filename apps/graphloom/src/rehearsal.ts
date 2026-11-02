@@ -39,6 +39,7 @@ import {
   type ReplayReport,
   type RunReport,
   type UpgradeRequest,
+  hydrateEvidence,
 } from "@graphloom/controller";
 import { createChildPluginHost } from "@graphloom/plugin-host";
 import { createScriptedSupervisor, SUPERVISOR_HARNESS_NAMES } from "@graphloom/supervisor";
@@ -870,7 +871,9 @@ export interface RecordedScenario {
  */
 export async function recordScenario(runRef: string, options: { stateRoot?: string } = {}): Promise<RecordedScenario> {
   const stateDir = await resolveStateDir(runRef, options.stateRoot);
-  const state = await loadRunState(stateDir);
+  const loaded = await loadRunState(stateDir);
+  // The recorded scenario carries agent outputs and command results whole: read the externalized parts back in.
+  const state = { ...loaded, evidence: hydrateEvidence(stateDir, loaded.evidence) };
 
   const failureSummaries = new Map<string, string>();
   for (const record of state.evidence) {

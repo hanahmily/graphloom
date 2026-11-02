@@ -20,6 +20,7 @@ import { checkContract } from "@graphloom/sdk";
 import type { CallContext, PluginHost } from "@graphloom/plugin-host";
 import type { DurableRunState } from "./state.js";
 import { toRunView } from "./loop.js";
+import { hydrateEvidence } from "./evidence.js";
 
 export interface ReclassifiedRecord {
   ref: string;
@@ -177,10 +178,12 @@ export async function replayRun(recorded: DurableRunState, host: PluginHost): Pr
   }
   const definition = described.value;
 
-  const reclassifiedEvidence = recorded.evidence.map((record) => reclassify(definition, record));
+  // Replay reads and re-sends agent outputs, so it works on the hydrated records (it only reads; it writes no blobs).
+  const hydratedRecorded = hydrateEvidence(recorded.stateDir, recorded.evidence);
+  const reclassifiedEvidence = hydratedRecorded.map((record) => reclassify(definition, record));
   const reclassified: ReclassifiedRecord[] = [];
   for (let i = 0; i < recorded.evidence.length; i += 1) {
-    const before = recorded.evidence[i]!;
+    const before = hydratedRecorded[i]!;
     const after = reclassifiedEvidence[i]!;
     if (before.kind !== after.kind || before.contract?.status !== after.contract?.status) {
       reclassified.push({ ref: after.ref, before: before.kind, after: after.kind, ...(after.contract !== undefined ? { contract: after.contract } : {}) });

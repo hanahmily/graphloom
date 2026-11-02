@@ -41,6 +41,12 @@ An observation alone does not establish accepted progress.
 **Requirement**:
 A stated outcome a task must satisfy, independent of the mechanism used to check it.
 
+**Externalized evidence part**:
+A large piece of an evidence record's payload that the controller stores in a
+content-addressed file under the run's state directory instead of in the record.
+The record names it by digest and path; a plugin worker reads it lazily, so plugin
+code sees the full payload.
+
 **Validator**:
 An implementation that evaluates evidence against a requirement and reports a
 pass, failure, or inconclusive result.

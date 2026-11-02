@@ -1,8 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
-/** Minimal env for plugin children — no inherited credentials or preload hooks. */
-export function sanitizedPluginEnv(bundlePath: string): NodeJS.ProcessEnv {
+import { EVIDENCE_STORE_ENV } from "@graphloom/sdk";
+
+/**
+ * Minimal env for plugin children — no inherited credentials or preload hooks.
+ * `evidenceStore` is the run's `<stateDir>/evidence`: the worker reads externalized evidence parts from it
+ * (EVIDENCE_STORE_ENV). It is always the run's own directory, never a value inherited from the controller's environment.
+ */
+export function sanitizedPluginEnv(bundlePath: string, evidenceStore?: string): NodeJS.ProcessEnv {
   const allow = [
     "PATH",
     "HOME",
@@ -28,6 +34,9 @@ export function sanitizedPluginEnv(bundlePath: string): NodeJS.ProcessEnv {
     if (value !== undefined) {
       env[key] = value;
     }
+  }
+  if (evidenceStore !== undefined) {
+    env[EVIDENCE_STORE_ENV] = evidenceStore;
   }
   return env;
 }

@@ -11,10 +11,16 @@ import type {
   ValidatorBinding,
 } from "@graphloom/sdk";
 import type { DurableRunState } from "./state.js";
+import { hydrateOne, validatorInput } from "./evidence.js";
 import { candidateChange, readWorktreeFile, workspaceChangeManifest } from "./worktree.js";
 
 /** Sync SDK validators or async host-backed evaluators. */
 export type AdmissionValidator = {
+  /**
+   * True when the validator reads externalized evidence itself (a host validator: the plugin worker hydrates
+   * lazily). Any other validator is handed hydrated records.
+   */
+  readsExternalizedEvidence?: boolean;
   evaluate(
     input: import("@graphloom/sdk").ValidationInput,
   ):
@@ -84,6 +90,8 @@ export function candidateFingerprint(evidence: EvidenceRecord[]): string {
     h.update(e.kind);
     h.update(e.fingerprint ?? "");
     h.update(JSON.stringify(e.payload ?? null));
+    // The externalized parts' digests stand in for their content; inline records hash as they always did.
+    if (e.externalized !== undefined) h.update(JSON.stringify(e.externalized));
   }
   return h.digest("hex");
 }
@@ -296,14 +304,16 @@ export async function admitValidation(
       }
     }
 
-    const result = validator.evaluate({
-      requirementId,
-      statement: requirement.statement,
-      evidence,
-      history,
-      candidateFingerprint: fingerprint,
-      ...(liveDigest !== undefined ? { candidateDigest: liveDigest } : {}),
-    });
+    const result = validator.evaluate(
+      validatorInput(validator, state.stateDir, {
+        requirementId,
+        statement: requirement.statement,
+        evidence,
+        history,
+        candidateFingerprint: fingerprint,
+        ...(liveDigest !== undefined ? { candidateDigest: liveDigest } : {}),
+      }),
+    );
     const resolved = await Promise.resolve(result);
     outcomes.push({ requirementId, status: resolved.status, reason: resolved.reason });
 
@@ -509,7 +519,9 @@ async function liveReceiptWorkspaceDigest(
 function currentArtifactDigest(state: DurableRunState, resultSchema: string): string | undefined {
   const latest = [...state.evidence].reverse().find((e) => e.resultSchema === resultSchema);
   if (latest === undefined) return undefined;
-  const payload = latest.payload !== null && typeof latest.payload === "object" ? (latest.payload as Record<string, unknown>) : latest.payload;
+  // An artifact's identity is its content, however the record stores it.
+  const hydratedLatest = hydrateOne(state.stateDir, latest);
+  const payload = hydratedLatest.payload !== null && typeof hydratedLatest.payload === "object" ? (hydratedLatest.payload as Record<string, unknown>) : hydratedLatest.payload;
   if (payload === null || typeof payload !== "object") return stableDigest(payload);
   const { producer: _producer, ...content } = payload as Record<string, unknown>;
   void _producer;

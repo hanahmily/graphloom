@@ -38,6 +38,11 @@ interface Options {
   maxSteps?: number;
   /** The budgets the run has left, over the generous defaults of the simulation. */
   budgets?: Partial<RunView["budgets"]>;
+  /**
+   * Also hand the graph (every `every` steps) and each validator the same evidence in another form (externalized
+   * with lazy getters, as the plugin worker presents it), and record both answers in `compared`.
+   */
+  shadow?: { records: (records: EvidenceRecord[]) => EvidenceRecord[]; every: number; compared: Array<{ step: number; what: string; recorded: string; shadow: string }> };
   /** Change a job's recorded result before the graph sees it. */
   tamper?: (job: JobSpec, evidence: EvidenceRecord[]) => EvidenceRecord[] | undefined;
 }
@@ -115,6 +120,10 @@ export function simulate(options: Options = {}): Simulation {
       agentSessions: sessions,
     };
     const decision = advancePullRequest(view);
+    if (options.shadow !== undefined && step % options.shadow.every === 0) {
+      const shadowDecision = advancePullRequest({ ...view, evidence: options.shadow.records(evidence) });
+      options.shadow.compared.push({ step, what: "advance", recorded: JSON.stringify(decision), shadow: JSON.stringify(shadowDecision) });
+    }
     decisions.push(decision);
     const action = decision.action;
     if (action.type === "stop" || action.type === "supervise") return { decisions, jobs, evidence, receipts, final: decision, ...(written !== undefined ? { written } : {}), ...(qa !== undefined ? { qa } : {}) };
@@ -136,6 +145,10 @@ export function simulate(options: Options = {}): Simulation {
           if (who === undefined || !who.readOnly || who.purpose !== "review" || who.operationId === lastWork) throw new Error(`the controller would refuse ${id}: no independent review evidence`);
         }
         const result = validatorById(binding.validatorId)!.evaluate({ requirementId: id, statement: "", evidence: candidateEvidence(evidence, digest), candidateDigest: digest, config });
+        if (options.shadow !== undefined) {
+          const shadowResult = validatorById(binding.validatorId)!.evaluate({ requirementId: id, statement: "", evidence: options.shadow.records(candidateEvidence(evidence, digest)), history: [], candidateDigest: digest, config });
+          options.shadow.compared.push({ step, what: `validate ${id}`, recorded: JSON.stringify(result), shadow: JSON.stringify(shadowResult) });
+        }
         receipts.push({ id: `r${(n += 1)}`, stageId: stage.id, requirementId: id, validatorBinding: binding, candidateFingerprint: "x", evidenceRefs: [], valid: result.status === "passed", candidateDigest: digest });
       }
       continue;

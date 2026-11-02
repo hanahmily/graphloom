@@ -12,6 +12,7 @@ import {
 } from "@graphloom/sdk";
 import type { ChildOperationPort, JobConfinement, JobResult, Runner } from "@graphloom/runner";
 import { newEvidenceRef, type EvidenceProducer } from "./admit.js";
+import { externalizeRecord, markExternalized } from "./evidence.js";
 import { continuedOperations, earlierToolCallRefusal } from "./agent-sessions.js";
 import { resolveExecutorPin } from "./executor-catalog.js";
 import { boundedRetryAfter, recordExecutorFailure } from "./executor-failure.js";
@@ -224,16 +225,19 @@ export function createChildPort(parent: ParentJob, deps: ChildPortDeps): Control
         parentOperationId: record.parentOperationId,
         toolCallId: record.toolCallId,
       };
-      const added: EvidenceRecord[] = (result.evidence ?? []).map((item) => ({
-        ref: newEvidenceRef(working),
-        kind: item.kind,
-        generation: working.generation,
-        payload:
-          item.payload !== null && typeof item.payload === "object" && !Array.isArray(item.payload)
-            ? { ...(item.payload as Record<string, unknown>), producer }
-            : { value: item.payload, producer },
-        ...(item.fingerprint !== undefined ? { fingerprint: item.fingerprint } : {}),
-      }));
+      const added: EvidenceRecord[] = (result.evidence ?? []).map((item) =>
+        externalizeRecord(working.stateDir, {
+          ref: newEvidenceRef(working),
+          kind: item.kind,
+          generation: working.generation,
+          payload:
+            item.payload !== null && typeof item.payload === "object" && !Array.isArray(item.payload)
+              ? { ...(item.payload as Record<string, unknown>), producer }
+              : { value: item.payload, producer },
+          ...(item.fingerprint !== undefined ? { fingerprint: item.fingerprint } : {}),
+        }),
+      );
+      markExternalized(added);
       let next: DurableRunState = {
         ...working,
         evidence: [...working.evidence, ...added],

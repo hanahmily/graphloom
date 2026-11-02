@@ -1,19 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
+import { isEvidenceUnavailable } from "@graphloom/sdk";
 import type {
   ValidationInput,
   ValidationResult,
 } from "@graphloom/sdk";
 import type { ChildObservation, PluginHost } from "@graphloom/plugin-host";
+import { hydratedInput } from "./evidence.js";
 
 /** Sync SDK validators or async host-backed evaluators. */
 export interface ControllerValidator {
+  /** True: the validator's host reads externalized evidence itself, so inputs go to it as recorded. */
+  readsExternalizedEvidence?: boolean;
   evaluate(input: ValidationInput): ValidationResult | Promise<ValidationResult>;
 }
 
 export interface HostValidatorContext {
   runId: string;
+  /** The run's state directory, where externalized evidence lives. */
+  stateDir: string;
   /** Always read the live revision — never capture a stale snapshot. */
   getStateRevision: () => number;
 }
@@ -50,6 +56,7 @@ export function createHostValidators(
   let seq = 0;
   for (const validatorId of validatorIds) {
     out[validatorId] = {
+      readsExternalizedEvidence: true,
       async evaluate(input: ValidationInput): Promise<ValidationResult> {
         const host = getHost();
         if (!host.evaluate) {
@@ -59,6 +66,14 @@ export function createHostValidators(
           );
         }
         seq += 1;
+        // A host that reads externalized parts itself gets them as recorded; any other gets them hydrated here.
+        let sent = input;
+        try {
+          if (host.hydratesEvidence !== true) sent = hydratedInput(ctxBase.stateDir, input);
+        } catch (err) {
+          if (!isEvidenceUnavailable(err)) throw err;
+          throw new HostObservationError("evidence_unavailable", `validator ${validatorId} host error: ${err instanceof Error ? err.message : String(err)}`);
+        }
         const result = await host.evaluate(
           {
             runId: ctxBase.runId,
@@ -66,7 +81,7 @@ export function createHostValidators(
             expectedStateRevision: ctxBase.getStateRevision(),
           },
           validatorId,
-          input,
+          sent,
         );
         if (!result.ok) {
           throw new HostObservationError(

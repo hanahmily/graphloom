@@ -7,6 +7,7 @@ import type { CheckoutSpec, EvidenceRecord, Receipt } from "@graphloom/sdk";
 import type { EvidenceFilter, ProbeResult, SupervisorInspection } from "@graphloom/supervisor";
 import { admitValidation, AdmissionError, type AdmissionValidator } from "./admit.js";
 import { HostObservationError } from "./host-validators.js";
+import { hydrateOne } from "./evidence.js";
 import { activateRefusal, checkoutSpecRefusal, describeInadmissible } from "./inadmissible.js";
 import type { DurableRunState, ProbeRecord } from "./state.js";
 import { selectPaths } from "./checkout.js";
@@ -262,7 +263,8 @@ export function createSupervisorInspection(hooks: InspectionHooks): SupervisorIn
   const inspection: SupervisorInspection = {
     getEvidence: (ref) => {
       const found = hooks.state().evidence.find((e) => e.ref === ref);
-      return found === undefined ? undefined : structuredClone(found);
+      // The supervisor reads a record's content: hydrate its externalized parts (the tool bounds what it shows).
+      return found === undefined ? undefined : structuredClone(hydrateOne(hooks.state().stateDir, found));
     },
     listEvidence: (filter: EvidenceFilter) =>
       structuredClone(

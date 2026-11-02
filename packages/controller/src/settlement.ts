@@ -8,6 +8,7 @@ import {
   type SupervisorSettlement,
 } from "@graphloom/supervisor";
 import type { DurableRunState, SupervisorMark } from "./state.js";
+import { hydrateEvidenceBestEffort } from "./evidence.js";
 
 const MAX_FACTS = 16;
 const MAX_TEXT = 300;
@@ -62,7 +63,7 @@ export function settleProposal(state: DurableRunState): SupervisorSettlement | u
 
   const knownEvidence = new Set(mark.evidenceRefs);
   for (const record of state.evidence) {
-    if (!knownEvidence.has(record.ref)) facts.push(describeEvidence(record));
+    if (!knownEvidence.has(record.ref)) facts.push(describeEvidence(readable(state.stateDir, record)));
   }
   const knownReceipts = new Set(mark.receiptIds);
   for (const receipt of state.receipts) {
@@ -102,6 +103,10 @@ export function settleProposal(state: DurableRunState): SupervisorSettlement | u
   const shown = facts.slice(0, MAX_FACTS).map(bounded);
   if (facts.length > MAX_FACTS) shown.push(`${facts.length - MAX_FACTS} more changes omitted`);
   return { action: mark.action, reason: mark.reason, facts: shown };
+}
+
+function readable(stateDir: string, record: EvidenceRecord): EvidenceRecord {
+  return hydrateEvidenceBestEffort(stateDir, [record])[0]!;
 }
 
 function describeEvidence(record: EvidenceRecord): string {
