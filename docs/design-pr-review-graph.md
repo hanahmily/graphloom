@@ -2411,7 +2411,10 @@ the variable and resume.
 
 A run reviews one head and ends ([§2](#2-the-run-two-rounds-and-no-human)); what a
 later run does with the earlier runs' ledger is this section. **Status (0.22):**
-a run reads the ledger whole in Fetch (`ledger-prior`) and uses it three ways.
+a run reads the ledger whole in Fetch (`ledger-prior`, in parts: a registry past one command
+report's 65,536 bytes is read as several `ledger-prior-<k>` commands, each printing a header with the part
+count and the digest of the whole and its slice of the registry's ASCII JSON, joined and checked
+against the digest) and uses it three ways.
 **Continuity:** `Q<n>` and `F<n>` continue across heads, and the same issue on
 a new head maps to its earlier id by a stable key
 ([§9.1](#91-where-the-ledger-lives)). **Re-checking:** every earlier open item
@@ -2504,8 +2507,10 @@ carried open, not re-checked. The rest are given to their aspect's reviewer in i
 or `fixed`, with a reason. The verifier confirms the ones still present like a new finding: `confirmed`
 keeps it open, `refuted` (with quotes of the head that the tree check verifies) makes it `fixed`,
 and anything it cannot settle leaves it open. A finding the reviewer calls `fixed` is closed
-without a verifier job. A prior finding never makes the sweep run another pass; new findings do,
-as before. The record of the aspect (`pr-review-aspect-v1`) has a `prior` list with each one's
+without a verifier job. The earlier findings are judged in the first pass only; they never make
+the sweep run another pass (new findings do, as before), and a later pass keeps their settled outcomes.
+A finding a 0.21 run posted records no aspect or kind: it goes to the maintainability sweep (the
+non-behavioral findings were what 0.21 posted), and with no recorded anchor it is judged as outdated. The record of the aspect (`pr-review-aspect-v1`) has a `prior` list with each one's
 outcome (`open` or `fixed`, and `how`: the reviewer, the verifier, the file leaving the change, or
 carried).
 
@@ -2523,7 +2528,7 @@ question (and for N1), so it can check what they claim against the code; they de
 | Round 1: the item is no longer an issue | `fixed` | fixed in `<sha>` |
 | Round 1: still an issue | still open; no new comment unless its old thread is outdated | still open (link to the earlier comment) |
 | `fixed` by the reviewer, or the verifier refutes `still_present` | `fixed` | fixed in `<sha>` |
-| `still_present` and confirmed (or not settled) | still open; a new inline comment only if the old thread is outdated on GitHub or the anchor was not found again | still open (link), or "its old thread is outdated, so it is commented again" |
+| `still_present` and confirmed (or not settled) | still open; a new inline comment only if the old thread is outdated on GitHub **and** its anchor was found again on this head (it is posted at that place, and the stored anchor is recomputed there). An anchor that was not found again is never posted at its old coordinates: the item is listed in the body with its link and the ledger marks it `outdated`, its stored anchor unchanged | still open (link), or "its old thread is outdated, so it is commented again" |
 | Round 2 did not run (round 1 has open issues), or the file is outside the scope | still open, not re-checked | still open (link), with the reason |
 | A new finding a verifier dismissed | recorded `withdrawn` | not listed |
 

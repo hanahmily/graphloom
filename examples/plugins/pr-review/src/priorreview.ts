@@ -7,7 +7,7 @@
  * scope); and the places where a new comment is suppressed, because an earlier finding, open or closed, already covers them.
  */
 import type { Aspect } from "./aspects.js";
-import { reanchor, type PriorItem, type PriorRegistry } from "./prior.js";
+import { aspectOfItem, reanchor, type PriorItem, type PriorRegistry } from "./prior.js";
 import type { PriorFinding, PriorOutcome } from "./review.js";
 import type { PullFile } from "./snapshot.js";
 
@@ -32,7 +32,7 @@ export function aspectPrior(registry: PriorRegistry, aspect: Aspect, files: read
       if (where.state === "found") out.suppress.push({ path: item.path, side: item.side ?? "RIGHT", start: where.line, end: where.endLine });
       continue;
     }
-    if (item.aspect !== aspect) {
+    if (aspectOfItem(item) !== aspect) {
       if (where.state === "found") out.suppress.push({ path: item.path, side: item.side ?? "RIGHT", start: where.line, end: where.endLine });
       continue;
     }

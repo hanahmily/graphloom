@@ -626,7 +626,8 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
         findings.push(f);
       }
       passes.push({ n, reviewed: parsed.summary.reviewed_files, raised: raised.map((f) => f.id), reaffirmed, nits, merged, ...(suppressed > 0 ? { suppressed } : {}) });
-      awaiting = [...raised.map((f) => f.id), ...priors.filter((f) => said.get(f.id)?.status === "still_present").map((f) => f.id)];
+      // The earlier findings are judged in the first pass only: a later pass verifies what it raised, and what was settled stays settled.
+      awaiting = [...raised.map((f) => f.id), ...(n === 1 ? priors.filter((f) => said.get(f.id)?.status === "still_present").map((f) => f.id) : [])];
       verdicts = undefined;
       verifyRetries = 0;
       verifyFeedback = [];

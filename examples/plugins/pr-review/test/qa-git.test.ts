@@ -5,7 +5,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { EnvironmentCommand } from "@graphloom/sdk";
+import type { EnvironmentCommand, EvidenceRecord } from "@graphloom/sdk";
 import { afterAll, describe, expect, it } from "vitest";
 import { verificationPlan, type Answer } from "../src/answers.js";
 import { GIT_ENV } from "../src/commands.js";
@@ -13,7 +13,7 @@ import { COMMAND } from "../src/constants.js";
 import { AGENT_CONFIG_NAMES, baseExportCommand, parseBaseExport } from "../src/basetree.js";
 import { baseDefsCommand } from "../src/groundwork.js";
 import { buildInventory, declaredDependencies, manifestsCommand, parseManifests, parseSites, parseSources, parseTree, siteCommands, sourceCommands, treeCommand } from "../src/inventory.js";
-import { ledgerWriteCommand, ledgerWriteCommands, priorShowCommand } from "../src/ledger.js";
+import { ledgerWriteCommand, ledgerWriteCommands, priorShowCommand, priorState } from "../src/ledger.js";
 import { GO_PACK } from "../src/packs.js";
 import { bodyFromSnippet, candidateCommand, parseSearch, planFor, searchCommand } from "../src/queries.js";
 import { LEDGER_MOVED, ledgerRef } from "../src/constants.js";
@@ -315,7 +315,9 @@ describe("the ledger compare-and-swap (design 9.1)", () => {
     expect(git(dir, ["rev-parse", `${second}^`])).toBe(first);
     expect(git(dir, ["log", "--format=%an", "-1", ref])).toBe("graphloom");
     // The prior read keeps the schema, the heads, the questions' ids and keys and the posted items.
-    expect(JSON.parse(run(dir, priorShowCommand(first, process.execPath)).report)).toEqual({ schema: "graphloom-pr-ledger-v1", qa: [], findings: [] });
+    const one = run(dir, priorShowCommand(first, process.execPath)).report;
+    expect(one).toMatch(/^graphloom-prior 0 1 [0-9a-f]{64}\n/);
+    expect(JSON.parse(one.slice(one.indexOf("\n") + 1))).toEqual({ schema: "graphloom-pr-ledger-v1", qa: [], findings: [] });
   });
 
   it("reads the heads of a prior ledger far larger than a command report holds, and fails when git cannot read it", () => {
@@ -328,9 +330,42 @@ describe("the ledger compare-and-swap (design 9.1)", () => {
     const sha = git(dir, ["rev-parse", ref]);
     const read = run(dir, priorShowCommand(sha, process.execPath));
     expect(read.code, read.stderr).toBe(0);
-    expect(JSON.parse(read.report)).toMatchObject({ schema: "graphloom-pr-ledger-v1", heads, findings: [] });
-    expect(read.report.length).toBeLessThan(100_000);
+    expect(read.report.length).toBeLessThan(65_536);
+    const registry = JSON.parse(read.report.slice(read.report.indexOf("\n") + 1)) as unknown;
+    expect(registry).toMatchObject({ schema: "graphloom-pr-ledger-v1", heads, findings: [] });
     expect(run(dir, priorShowCommand("f".repeat(40), process.execPath)).code).not.toBe(0);
+  });
+
+  it("reads a prior ledger with about 200 KB of findings in parts that each fit a command report, and joins them against their digest", () => {
+    const dir = setup();
+    const findings = Array.from({ length: 200 }, (_, i) => ({ head: "a".repeat(40), id: `F${i + 1}`, origin: "round2", key: `k${i}`, state: "open", path: "pkg/a.go", line: i + 1, text: `finding ${i} ${i === 0 ? "é☃ café" : ""} ${"x".repeat(1000)}`, history: [{ head: "a".repeat(40), status: "open" }], github: { head: "a".repeat(40), reviewId: 1, commentId: i, inline: true } }));
+    const big = JSON.stringify({ schema: "graphloom-pr-ledger-v1", pull: { owner: "o", repo: "r", number: 1 }, heads: [{ sha: "a".repeat(40) }], purposes: [], qa: [], findings });
+    expect(big.length).toBeGreaterThan(200_000);
+    const writes = ledgerWriteCommands(pr, "absent", big, "# big\n");
+    for (const c of [...writes.parts, writes.write]) expect(run(dir, c).code).toBe(0);
+    const sha = git(dir, ["rev-parse", ref]);
+    let evidence: EvidenceRecord[] = [];
+    let state = priorState(evidence, sha);
+    const reads: number[] = [];
+    for (let guard = 0; state.state === "missing" && guard < 40; guard += 1) {
+      for (const c of state.next) {
+        const r = run(dir, c);
+        expect(r.code, r.stderr).toBe(0);
+        reads.push(r.report.length);
+        evidence = [...evidence, { ref: `e${evidence.length}`, kind: "command", candidateDigest: "d", generation: 1, payload: { command: { id: c.id, argv: c.argv, exitCode: 0, stdoutTail: r.report, stderrTail: "" } } } as EvidenceRecord];
+      }
+      state = priorState(evidence, sha);
+    }
+    expect(reads.length).toBeGreaterThan(5);
+    expect(Math.max(...reads)).toBeLessThan(65_536);
+    expect(state.state).toBe("read");
+    const value = (state as { value: { findings: Array<{ id: string; text: string }> } }).value;
+    expect(value.findings).toHaveLength(200);
+    expect(value.findings[0]!.text).toContain("é☃ café");
+    expect(value.findings[199]!.text).toContain("finding 199");
+    // A part from another read, or one missing its digest, is never joined.
+    const tampered = evidence.map((e, i) => (i === 2 ? { ...e, payload: { command: { ...(e.payload as { command: object }).command, stdoutTail: "graphloom-prior 2 99 " + "0".repeat(64) + "\nx" } } } : e)) as EvidenceRecord[];
+    expect(priorState(tampered, sha)).toMatchObject({ state: "unreadable", reason: expect.stringContaining("not of the same read") });
   });
 
   it("loses the race: a write from a stale value exits with LEDGER_MOVED and leaves the ref where the winner put it", () => {

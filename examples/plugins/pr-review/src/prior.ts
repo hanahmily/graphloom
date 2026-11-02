@@ -248,6 +248,13 @@ export function anchorInfo(file: PullFile | undefined, side: "RIGHT" | "LEFT", l
 /** The round-2 key of a finding: its aspect and its anchor (the file and the text of the commented line, else the line). */
 export const findingKey = (aspect: string, path: string, line: number, anchorText: string | undefined): string => `${aspect}|${path}|${anchorText !== undefined ? sha(anchorText) : `L${line}`}`;
 
+/**
+ * The aspect whose sweep judges an earlier round-2 finding. A finding a 0.21 run posted records none (nor its kind), so it goes to a
+ * fixed aspect: correctness when its kind is known to be behavioral, else maintainability (what a 0.21 run posted were the
+ * non-behavioral findings, since a behavioral one was not drafted as a comment).
+ */
+export const aspectOfItem = (item: Pick<PriorItem, "aspect" | "kind">): string => item.aspect ?? (item.kind === "behavioral" ? "correctness" : "maintainability");
+
 /** The window (in lines) around its old place in which an earlier finding's anchor text is looked for in the new patch. */
 export const REANCHOR_WINDOW = 20;
 

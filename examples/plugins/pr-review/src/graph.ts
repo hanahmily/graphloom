@@ -107,7 +107,7 @@ import { appendixWriteCommands, htmlWriteCommands, partCommands, recordCommands,
 import { ANSWER_CHECK_REFERENCES, ANSWER_CHECK_SCHEMA, ANSWER_CHECK_SCHEMA_NAME, ANSWERS_REFERENCES, ANSWERS_REVISION_SCHEMA_NAME, ANSWERS_SCHEMA, ANSWERS_SCHEMA_NAME, answersFlow } from "./answers.js";
 import { baseDirIn } from "./basetree.js";
 import { sourceDirs } from "./inventory.js";
-import { ledgerRead, oldValue, priorShowCommand, priorState, writtenLedger } from "./ledger.js";
+import { ledgerRead, oldValue, priorState, writtenLedger } from "./ledger.js";
 import { QUESTIONS_REFERENCES, QUESTIONS_SCHEMA, QUESTIONS_SCHEMA_NAME, requiredQuestions, type Question } from "./questions.js";
 import { CLAIM_CHECK_REFERENCES } from "./claims.js";
 import { necessityQuestion, NECESSITY_ID, NECESSITY_REFERENCES, NECESSITY_REVISION_SCHEMA_NAME, NECESSITY_SCHEMA, NECESSITY_SCHEMA_NAME, parseNecessityRecord, type NecessityRecord } from "./necessity.js";
@@ -430,7 +430,8 @@ function fetch(ctx: Context, view: RunView): GraphDecision {
   if (ledgerValue !== undefined && ledgerValue.ledger.present) {
     const prior = priorState(view.evidence, oldValue(ledgerValue.ledger));
     if (prior.state === "missing" || (prior.state === "unreadable" && retryOf(view)(prior.run))) {
-      return withPrivate(dispatch(commandJob(FETCH_STAGE, "Read the prior ledger's ledger.json", { commands: [priorShowCommand(oldValue(ledgerValue.ledger), process.execPath)], continueOnFailure: true, env: { ...GIT_ENV } }), "read the prior ledger.json, so this run continues its ids and re-checks the items it posted"));
+      const commands = prior.state === "missing" ? prior.next : [{ id: prior.run.command.id, argv: prior.run.command.argv }];
+      return withPrivate(dispatch(commandJob(FETCH_STAGE, "Read the prior ledger's ledger.json", { commands, continueOnFailure: true, env: { ...GIT_ENV } }), "read the prior ledger.json, so this run continues its ids and re-checks the items it posted"));
     }
     if (prior.state === "unreadable") return supervise({ reason: `the prior ledger's ledger.json cannot be read (${prior.reason}); the ledger is not overwritten`, evidenceRefs: [prior.run.record.ref] }, "escalate a prior ledger that cannot be read");
   }
@@ -1046,7 +1047,7 @@ function recordLedger(ctx: Context, view: RunView, c: QaContext, w: ReturnType<t
   const lr = commandState(view, COMMAND.ledger);
   if (lr.failed && lr.run !== undefined) return supervise({ reason: `the ledger read failed: ${describeCommand(lr.run.command)}`, evidenceRefs: [lr.run.record.ref] }, "escalate a failed ledger read");
   if (w.prior?.state === "missing" || (w.prior?.state === "unreadable" && retryOf(view)(w.prior.run))) {
-    return withPrivate(dispatch(commandJob(ANSWERS_STAGE, "Read the prior ledger's ledger.json", { commands: [priorShowCommand(w.old, process.execPath)], continueOnFailure: true, env: { ...GIT_ENV } }), "read the prior ledger.json, so the new one keeps its heads"));
+    return withPrivate(dispatch(commandJob(ANSWERS_STAGE, "Read the prior ledger's ledger.json", { commands: w.prior?.state === "missing" ? w.prior.next : [{ id: w.prior!.run.command.id, argv: w.prior!.run.command.argv }], continueOnFailure: true, env: { ...GIT_ENV } }), "read the prior ledger.json, so the new one keeps its heads"));
   }
   if (w.prior?.state === "unreadable") {
     return supervise({ reason: w.problem ?? "the prior ledger cannot be read", evidenceRefs: [w.prior.run.record.ref] }, "escalate a prior ledger that cannot be read: it is never overwritten");

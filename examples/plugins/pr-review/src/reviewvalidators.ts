@@ -19,7 +19,7 @@ import { FRESH_START_REASON } from "./reviewscope.js";
 import { draftWrites, recordedAspect, recordedRound1, recordedRules, recordedScope, round1Computed, writtenDraftFiles } from "./reviewdraft.js";
 import { round1Json } from "./round1.js";
 import { publishFlow, publishPlan } from "./publish.js";
-import { registryFromEvidence } from "./prior.js";
+import { aspectOfItem, registryFromEvidence } from "./prior.js";
 import { secretFindings } from "./secrets.js";
 
 const passed = (reason: string): ValidationResult => ({ status: "passed", reason });
@@ -98,7 +98,7 @@ export const codeReview: Validator = profiled((input, profile) => {
     if (r.state === "failed") return failed(r.reason);
     problems.push(...aspectProblems(r.value, a, s.files.length, s.context.reason, profile, firstId));
     // Every earlier finding of the aspect that was open is judged on this head, once.
-    const owed = registry.items.filter((x) => x.origin === "round2" && x.status === "open" && x.aspect === a).map((x) => x.id).sort();
+    const owed = registry.items.filter((x) => x.origin === "round2" && x.status === "open" && aspectOfItem(x) === a).map((x) => x.id).sort();
     const judged = (r.value.prior ?? []).map((x) => x.id).sort();
     if (JSON.stringify(owed) !== JSON.stringify(judged)) problems.push(`${a}: the earlier findings ${owed.join(", ") || "(none)"} are open, and the record judges ${judged.join(", ") || "none"}`);
     firstId += r.value.findings.length;

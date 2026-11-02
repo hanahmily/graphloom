@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import { afterAll, describe, expect, it } from "vitest";
 import { findingMeta, ledgerPublishedCommand, ledgerPatch, planReview, priorLines, type PriorLine } from "../src/publish.js";
 import { partCommands, readParts } from "../src/parts.js";
-import { priorShowCommand, writtenLedger } from "../src/ledger.js";
+import { priorChunkText, priorShowCommand, writtenLedger } from "../src/ledger.js";
 import { continueIds, patchId, questionKeys, reanchor, registryOf, REANCHOR_WINDOW, type PriorItem, type PriorRegistry } from "../src/prior.js";
 import { REHEARSAL_HEAD } from "../src/rehearsal.js";
 import { passReply, verifyReply } from "../src/rehearsal-review.js";
@@ -210,11 +210,16 @@ describe("the review body and the verdict with earlier items", () => {
     // Round 2 did not run (round 1 had issues): every open finding is carried, still open.
     const blocked = priorLines(registry, PULL, { ...round1, issues: [issue("Q9")] }, undefined, [], threads);
     expect(blocked.map((l) => [l.id, l.status, l.carried])).toEqual([["Q1", "fixed", false], ["F3", "open", true], ["F4", "open", true]]);
-    // The sweep judged F3 fixed and F4 still present with an outdated anchor: the second is posted again.
+    // The sweep judged F3 fixed and F4 still present, but F4's anchor was not found again: it is listed in the body, not posted again at coordinates that may be other code.
     const outcome = (id: string, status: "open" | "fixed", outdated: boolean) => ({ id, status, how: "reviewer" as const, reason: "r", path: "pkg/a.go", side: "RIGHT" as const, line: 12, endLine: 12, outdated });
     const records = [{ schema: "pr-review-aspect-v1", aspect: "maintainability", prior: [outcome("F3", "fixed", false)] }, { schema: "pr-review-aspect-v1", aspect: "security", prior: [outcome("F4", "open", true)] }] as never;
     const judged = priorLines(registry, PULL, round1, records, [], threads);
-    expect(judged.map((l) => [l.id, l.status, l.repost])).toEqual([["Q1", "fixed", false], ["F3", "fixed", false], ["F4", "open", true]]);
+    expect(judged.map((l) => [l.id, l.status, l.repost])).toEqual([["Q1", "fixed", false], ["F3", "fixed", false], ["F4", "open", false]]);
+    expect(judged[2]).toMatchObject({ outdated: true });
+    expect(judged[2]!.moved).toBeUndefined();
+    // Found again, with its old thread outdated on GitHub, it is posted again at the place found.
+    const found = [{ schema: "pr-review-aspect-v1", aspect: "security", prior: [outcome("F4", "open", false)] }] as never;
+    expect(priorLines(registry, PULL, round1, found, [], threads).find((l) => l.id === "F4")).toMatchObject({ repost: true, outdated: false });
   });
 });
 
@@ -302,7 +307,7 @@ describe("a pull request reviewed on three heads", () => {
     private git = async (...args: string[]): Promise<string> => (await sh("git", args, { cwd: this.dir, env })).stdout.trim();
     private exec = async (argv: readonly string[], extra: Record<string, string> = {}) => sh(argv[0]!, argv.slice(1), { cwd: this.dir, env: { ...env, ...extra } });
     /** What the run's Answers and Publish stages leave in the ledger once the run ends, with its head renamed to `label` (every run of a fixture shows the same head). */
-    async advance(sim: Simulation, label: string): Promise<{ sha: string; extract: string; ledger: { heads: Array<Record<string, unknown>>; qa: Array<Record<string, unknown>>; findings: Array<Record<string, unknown>> } }> {
+    async advance(sim: Simulation, label: string): Promise<{ sha: string; extract: Record<string, string>; ledger: { heads: Array<Record<string, unknown>>; qa: Array<Record<string, unknown>>; findings: Array<Record<string, unknown>> } }> {
       const rename = (s: string): string => s.split(REHEARSAL_HEAD).join(label);
       const job = sim.jobs.find((j) => j.instruction.startsWith("Advance the pull"))!;
       const written = writtenLedger((job.input as { commands: Array<{ argv: string[] }> }).commands[0]!.argv)!;
@@ -321,17 +326,24 @@ describe("a pull request reviewed on three heads", () => {
       const sha = await this.git("rev-parse", REF);
       const ledger = JSON.parse(await this.git("show", `${sha}:ledger.json`)) as { heads: []; qa: []; findings: [] };
       const out = path.join(this.dir, ".report");
-      const prior = priorShowCommand(sha, process.execPath);
-      await this.exec(prior.argv, { GRAPHLOOM_REPORT_FILE: out });
-      return { sha, extract: await readFile(out, "utf8"), ledger };
+      // The prior ledger is read in parts, as Fetch reads it: the first says how many there are.
+      const parts: Record<string, string> = {};
+      for (let k = 0, n = 1; k < n; k += 1) {
+        const prior = priorShowCommand(sha, process.execPath, k);
+        await this.exec(prior.argv, { GRAPHLOOM_REPORT_FILE: out });
+        const text = await readFile(out, "utf8");
+        parts[prior.id] = text;
+        if (k === 0) n = Number(/^graphloom-prior 0 (\d+) /.exec(text)![1]);
+      }
+      return { sha, extract: parts, ledger };
     }
   }
 
   /** A scenario that runs on the ledger `at` holds: the ledger ref and its prior ledger.json, as Fetch reads them. */
-  const onLedger = (name: string, at: { sha: string; extract: string }, change: (s: ReturnType<typeof scenarioWith>) => void = () => undefined) =>
+  const onLedger = (name: string, at: { sha: string; extract: Record<string, string> }, change: (s: ReturnType<typeof scenarioWith>) => void = () => undefined) =>
     scenarioWith(name, (s) => {
       s.commands!["ledger-read"] = { exitCode: 0, stdout: `present ${at.sha}\n` };
-      s.commands!["ledger-prior"] = { exitCode: 0, stdout: at.extract };
+      for (const [id, stdout] of Object.entries(at.extract)) s.commands![id] = { exitCode: 0, stdout };
       change(s);
     });
   /** The `review-layer` scenario with its first answer only partial: round 1 finds that one issue on the head, and the run ends after posting it. The same questions are asked on every head, so their ids match. */
@@ -467,6 +479,36 @@ describe("a pull request reviewed on three heads", () => {
     expect(body(c).split("\n")[0]).toBe("Changes requested: 1 open");
     expect(body(c)).toContain("- F3: fixed in 0123456");
     expect(c.github.creates[0]!.comments).toMatchObject([{ path: "pkg/schema/ttl.go", body: expect.stringMatching(/<!-- graphloom-finding: F4 -->$/) }]);
+  });
+
+  it("head 3: the earlier findings are verified in the first pass only; a later pass keeps their settled outcomes and asks nothing more of them", () => {
+    const comment = { path: "pkg/schema/ttl.go", start_line: 20, end_line: 22, aspect: "maintainability", kind: "non-behavioral", severity: "P2", content: "The unit switch repeats the hour arithmetic for each case; name it once." };
+    const verified = verifyReply([
+      { finding: "F4", verdict: "confirmed", kind: "non-behavioral", witness: "pkg/schema/ttl.go:20", reason: "the arithmetic is repeated", fixes: false },
+      { finding: "F3", verdict: "confirmed", kind: "non-behavioral", witness: "pkg/schema/ttl.go:14", reason: "the loop is still there", fixes: false },
+    ]);
+    // Pass 2 raises nothing; with the earlier finding queued again it would need a second verifier job, which the script does not have.
+    const c = end(onLedger("review-layer", state.lb!, reviewers([[1, []], [1, [comment], [{ finding: "F3", status: "still_present" }]], [1, []], [1, []]], [verified])));
+    expect(stopOf(c)).toMatchObject({ reason: "complete" });
+    expect(c.jobs.filter((j) => j.instruction.startsWith("Verify the maintainability")).length).toBe(1);
+    expect(aspectOf(c, "maintainability").prior).toMatchObject([{ id: "F3", status: "open", how: "verifier" }]);
+    expect(aspectOf(c, "maintainability").passes).toHaveLength(2);
+  });
+
+  it("head 3 of a 0.21 ledger: a finding recorded without its aspect goes to the maintainability sweep and is judged there", () => {
+    // What a 0.21 run left: no aspect, no key, no anchor, a single line.
+    const old21 = { schema: "graphloom-pr-ledger-v1", heads: [{ sha: hexOf("a"), reviewed: true }], qa: [], findings: [{ head: hexOf("a"), id: "F3", origin: "round2", path: "pkg/schema/ttl.go", line: 16, state: "open", github: { head: hexOf("a"), reviewId: 9, commentId: 55, inline: true } }] };
+    const at = { sha: hexOf("d"), extract: { "ledger-prior": priorChunkText(JSON.stringify(old21), 0) } };
+    const c = end(onLedger("review-layer", at, reviewers([[1, []], [1, [], [{ finding: "F3", status: "fixed", reason: "gone" }]], [1, []]])));
+    expect(aspectOf(c, "maintainability").prior).toMatchObject([{ id: "F3", status: "fixed" }]);
+    expect(aspectOf(c, "correctness").prior).toBeUndefined();
+    expect(body(c).split("\n")[0]).toBe("Review passed");
+    expect(body(c)).toContain("- F3: fixed in 0123456 (gone)");
+    // Its anchor was never recorded, so a pass that cannot find it says so and the finding is listed, with its link, not posted again.
+    const open = end(onLedger("review-layer", at, reviewers([[1, []], [1, [], [{ finding: "F3", status: "still_present" }]], [1, []]], [verifyReply([{ finding: "F3", verdict: "confirmed", kind: "non-behavioral", witness: "pkg/schema/ttl.go:16", reason: "still there", fixes: false }])])));
+    expect(aspectOf(open, "maintainability").prior).toMatchObject([{ id: "F3", status: "open", outdated: true }]);
+    expect(body(open)).toContain("- F3: still open ([earlier comment](https://github.com/apache/skywalking-banyandb/pull/7#discussion_r55))");
+    expect(open.github.creates[0]!.comments).toEqual([]);
   });
 
   it("head 4: a finding that was closed, fixed or dismissed, is not raised again; a comment over its place is dropped before verification", () => {
