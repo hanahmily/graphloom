@@ -10,7 +10,7 @@
  * plugin's own functions, so a scenario cannot drift from the graph.
  */
 import type { RehearsalCommandResult, RehearsalReply } from "@graphloom/sdk";
-import { needsOwnSearch, searchItems, verificationPlan, weakestStatus, withParts, type Answer, type AnswerPart, type CheckVerdict, type VerifyItem } from "./answers.js";
+import { needsOwnSearch, searchItems, verificationPlan, type Answer, type CheckVerdict, type VerifyItem } from "./answers.js";
 import { COMMAND } from "./constants.js";
 import { isLarge, questionsMode, STANDARD, type ReviewMode } from "./mode.js";
 import { answerBatches, batchCitePrefix, batchRecordId } from "./qaflow.js";
@@ -22,8 +22,8 @@ import type { MetricsRecord } from "./metrics/record.js";
 import { effectivePacks } from "./packs.js";
 import type { Profile } from "./profile.js";
 import { parseSearch, type SearchSection } from "./queries.js";
-import { COMBINED_PARTS, COMBINED_TYPE, finalQuestions, itemOfSymbol, pinnedTexts, requiredQuestions, statedPurposes, type Question, type QuestionerOutput, type QuestionType } from "./questions.js";
-import { changeItems, type ReportView } from "./reportview.js";
+import { REUSE_TYPE, finalQuestions, itemOfSymbol, pinnedTexts, requiredQuestions, statedPurposes, type Question, type QuestionerOutput, type QuestionType } from "./questions.js";
+import { changeItems, highLevelId, type ReportView } from "./reportview.js";
 import type { ReporterOutput } from "./report.js";
 import { numbered } from "./report.js";
 import type { PullFile } from "./snapshot.js";
@@ -116,25 +116,13 @@ const dirOf = (p: string): string => (p.includes("/") ? p.slice(0, p.lastIndexOf
 
 function defaultAnswer(q: Question, sym: SymbolDef | undefined, record: MetricsRecord | undefined, hasDeps: boolean): Answer {
   const searches = (names: string[]): Answer["searches"] => names.map((pattern) => ({ pattern, tree: "base", paths: [], ignoreCase: false as const, hits: 0 }));
-  const base: Answer = { question: q.id, answer: "", status: "answered", none_found: false, citations: [], searches: [], inventory: [], metrics: [], proposal: { ...emptyProposal }, parts: [] };
+  const base: Answer = { question: q.id, answer: "", status: "answered", none_found: false, citations: [], searches: [], inventory: [], metrics: [], proposal: { ...emptyProposal } };
   const name = sym?.name ?? "the function";
   switch (q.type) {
-    case COMBINED_TYPE: {
-      // The three parts, each as the separate question's default; the answer's own evidence stays empty (design §7.6).
-      const parts = COMBINED_PARTS.map((part): AnswerPart => {
-        const a = defaultAnswer({ ...q, type: part }, sym, record, hasDeps);
-        return { part, answer: a.answer, status: a.status, none_found: a.none_found, citations: a.citations, searches: a.searches, inventory: a.inventory };
-      });
-      return { ...base, answer: `No existing equivalent, reusable library or shared logic was found for ${name}; each of the three parts lists what was searched.`, status: weakestStatus(parts.map((p) => p.status)), parts };
-    }
     case "purpose":
       return { ...base, answer: "Nothing the pull request's text, its commits or the code comments state why this change is made.", status: "needs author", searches: searches(["retention|purpose|why", "the pull request's title, body and commit messages (read)", "comments next to the change (read)"]) };
-    case "existing-equivalent":
-      return { ...base, answer: `No existing equivalent of ${name} was found: no declaration with its name or variants, its signature or its key tokens.`, none_found: true, searches: searches([`\\b${name}\\b`, `func .*\\(.*\\).*`, "key body tokens"]) };
-    case "reuse-library":
-      return { ...base, answer: `No internal package or declared library provides what ${name} does; no dependency's source is available here to read, so this is only what the searches and the manifests show.`, none_found: true, status: hasDeps ? "partially answered" : "answered", searches: searches([`\\b${name}\\b`]) };
-    case "common-logic":
-      return { ...base, answer: `No logic elsewhere in the base or in the pull request duplicates ${name}.`, none_found: true, searches: searches([`\\b${name}\\b`, "signature", "key body tokens"]) };
+    case REUSE_TYPE:
+      return { ...base, answer: `No existing equivalent of ${name} was found (no declaration with its name or variants, its signature or its key tokens), no internal package or declared library provides what it does${hasDeps ? "; no dependency's source is available here to read, so that is only what the searches and the manifests show" : ""}, and no logic elsewhere in the base or in the pull request duplicates it.`, none_found: true, status: hasDeps ? "partially answered" : "answered", searches: searches([`\\b${name}\\b`, `func .*\\(.*\\).*`, "key body tokens"]) };
     case "missing-test": {
       const path = sym?.path ?? record?.path ?? "pkg/x/x.go";
       return { ...base, answer: `No test references ${name} or its callers: every *_test.go in the base and in the pull request was searched. A test would live beside it, in ${dirOf(path)}.`, status: "needs author", searches: [{ pattern: `\\b${name}\\b`, tree: "base", paths: ["*_test.go"], ignoreCase: false, hits: 0 }, { pattern: `\\b${name}\\b`, tree: "base", paths: [], ignoreCase: false, hits: 0 }], proposal: { ...emptyProposal, kind: "test", testFile: `${dirOf(path)}/${stemOf(path)}_test.go`, testName: `Test${upper(name)}`, cases: [{ input: "a typical value", branches: "the main path" }, { input: "an empty or invalid value", branches: "the error path" }] } };
@@ -206,7 +194,7 @@ export function qaScenario(i: QaInput): QaScenario {
   const base = spec.base ?? {};
   // The report as the Report stage wrote it: every item, with the ids the Q&A refers to.
   const items = numbered(i.good, { sections: i.sections }).map(({ id, section, item }) => ({ id, section, text: item.text, cites: item.cites, facts: item.facts }));
-  const view: ReportView = { items, records: [...i.records] };
+  const view: ReportView = { items, changes: i.good.whatsNew.map((w, n) => ({ id: highLevelId(n + 1), section: "highlevel", text: w.text, cites: w.cites, facts: [] })), records: [...i.records] };
   // Symbols, as the graph derives them from the head files, the patches and the base's declarations.
   const baseByPath = new Map<string, Set<string>>();
   const parsed = parseBaseDefinitions(base.defs ?? "", packs[0]!);
@@ -216,12 +204,12 @@ export function qaScenario(i: QaInput): QaScenario {
   const groundwork = { symbols, testMap: new Map(symbols.map((s) => [s.id, mapTests(s, symbols, i.files, packs)] as const)) } as unknown as Groundwork;
   // The questioner.
   const pinned = pinnedTexts({ title: i.pull.title, body: i.pull.body }, i.pull.commits.map((message) => ({ message })));
+  const large = isLarge(questionsMode(i.reportMode ?? STANDARD, symbols.filter((s) => s.change === "new").length, profile.limits));
   const purposes: QuestionerOutput["purposes"] = (spec.purposes ?? []).flatMap((p) => {
-    const item = changeItems(view).find((x) => x.section === p.section);
+    const item = changeItems(view, large).find((x) => x.section === p.section);
     return item === undefined ? [] : [{ item: item.id, source: p.source, quote: p.quote }];
   });
-  const stated = statedPurposes({ purposes, questions: [] }, view, pinned).stated;
-  const large = isLarge(questionsMode(i.reportMode ?? STANDARD, symbols.filter((s) => s.change === "new").length, profile.limits));
+  const stated = statedPurposes({ purposes, questions: [] }, view, pinned, large).stated;
   const required = requiredQuestions({ view, groundwork, large }, stated);
   const asked = required.filter((r) => !(spec.omit ?? []).includes(r.type));
   const questionerOutput: QuestionerOutput = { purposes, questions: asked.map((r) => ({ key: r.key, type: r.type, item: r.item, symbol: r.symbol ?? "", text: r.text })) };
@@ -250,7 +238,7 @@ export function qaScenario(i: QaInput): QaScenario {
   const n1Verdicts = (round: number, n: Necessity): CheckVerdict[] => {
     const given = nChecks[round];
     const principles = n.principles.map((p) => ({ id: p.id, verdict: nspec.principles?.checks?.[p.id] ?? "supported", note: nspec.principles?.checks?.[p.id] === undefined ? "" : `the checker's note on ${p.id}` }));
-    return [{ question: necessityQuestion().id, verdict: given?.verdict ?? "supported", note: given?.note ?? "", principles, searches: [{ pattern: "design|flush|write path|acknowledg", tree: "base", paths: [], ignoreCase: false, hits: 4 }, { pattern: n.problem.trace[0]?.path ?? "path", tree: "base", paths: [], ignoreCase: false, hits: 1 }], parts: [] }];
+    return [{ question: necessityQuestion().id, verdict: given?.verdict ?? "supported", note: given?.note ?? "", principles, searches: [{ pattern: "design|flush|write path|acknowledg", tree: "base", paths: [], ignoreCase: false, hits: 4 }, { pattern: n.problem.trace[0]?.path ?? "path", tree: "base", paths: [], ignoreCase: false, hits: 1 }] }];
   };
   const n1Rounds = [n1Verdicts(0, n1First), ...(n1Revised !== undefined ? [n1Verdicts(1, n1Revised)] : [])];
   const lastN1 = nChecks[n1Rounds.length - 1];
@@ -258,13 +246,10 @@ export function qaScenario(i: QaInput): QaScenario {
   const n1Asked = !(effectiveConclusion({ necessity: n1Final, check: { verdict: lastN1?.verdict === "unsupported" ? "downgraded" : (lastN1?.verdict ?? "supported") } }) === "unnecessary" && n1Supported);
   const verdicts = (round: number, set: readonly Answer[]): CheckVerdict[] =>
     questions.map((q, n) => {
-      const a = withParts(set[n]!);
+      const a = set[n]!;
       const given = spec.checks?.[round]?.(q, a);
-      const own = (): CheckVerdict["searches"] => [{ pattern: `\\b${symOf(q)?.name ?? "x"}\\b|test`, tree: "base", paths: [], ignoreCase: false as const, hits: 0 }];
-      const searches = given?.searches ?? (needsOwnSearch(q, a) ? own() : []);
-      // A combined answer is judged part by part, a part that says none found with searches of the checker's own (design §7.6).
-      const parts = (a.parts ?? []).map((p) => ({ part: p.part, verdict: given?.verdict ?? "supported", note: given?.note ?? "", searches: given?.searches ?? (p.none_found ? own() : []) }));
-      return { question: q.id, verdict: given?.verdict ?? "supported", note: given?.note ?? "", searches: parts.length > 0 ? [] : searches, principles: [], parts };
+      const searches = given?.searches ?? (needsOwnSearch(q, a) ? [{ pattern: `\\b${symOf(q)?.name ?? "x"}\\b|test`, tree: "base", paths: [], ignoreCase: false as const, hits: 0 }] : []);
+      return { question: q.id, verdict: given?.verdict ?? "supported", note: given?.note ?? "", searches, principles: [] };
     });
   const rounds = revised.length > 0 || (spec.checks?.length ?? 0) > 1 ? [verdicts(0, first), verdicts(1, final)] : [verdicts(0, final)];
   // Large mode (design §7.6): the answerer takes the questions in batches, each checked in a fresh session; a scenario revises none.
@@ -318,11 +303,11 @@ export function qaScenario(i: QaInput): QaScenario {
   };
   if (large) {
     batches.forEach((b, k) => {
-      for (const item of verificationPlan(batchAnswers(b).map(withParts), { ...ctx, questions: b }, i.mergeBase, batchCitePrefix(k))) canned(item);
+      for (const item of verificationPlan(batchAnswers(b), { ...ctx, questions: b }, i.mergeBase, batchCitePrefix(k))) canned(item);
       commands[batchRecordId(k)] = ok("written\n");
     });
   } else {
-    for (const set of [first, revised, final]) for (const item of verificationPlan(set.map(withParts), ctx, i.mergeBase)) canned(item);
+    for (const set of [first, revised, final]) for (const item of verificationPlan(set, ctx, i.mergeBase)) canned(item);
   }
   const nctx = { questions: [necessityQuestion()], groundwork, view, packs };
   for (const n of [n1First, ...(n1Revised !== undefined ? [n1Revised] : [])]) for (const item of verificationPlan([necessityAnswer(n)], nctx, i.mergeBase, COMMAND.citeNecessity)) canned(item);

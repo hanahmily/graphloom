@@ -66,7 +66,7 @@ describe("the answer checker's and the answerer's ids are read tolerantly, and n
   const ctx = contextOf("missing-test");
   const questions = afterNecessity(questionSet(ctx, undefined));
   const answers = new Map(questions.map((x) => [x.id, { question: x.id, none_found: false } as Answer] as const));
-  const verdict = (question: string, over: object = {}) => ({ question, verdict: "supported", note: "", searches: [search("x", { hits: 0 })], principles: [], parts: [], ...over });
+  const verdict = (question: string, over: object = {}) => ({ question, verdict: "supported", note: "", searches: [search("x", { hits: 0 })], principles: [], ...over });
 
   it("matches verdicts keyed with the type or the whole text after the id, and records the normalization", () => {
     const verdicts = questions.map((x) => verdict(`${x.id} [${x.type}] ${x.text}`));
@@ -88,7 +88,7 @@ describe("the answer checker's and the answerer's ids are read tolerantly, and n
   });
 
   it("reads the answerer's answers keyed with the text after the id, and records it", () => {
-    const base = { answer: "a", status: "answered", none_found: false, citations: [], searches: [], inventory: [], metrics: [], proposal: { kind: "none", splits: [], testFile: "", testName: "", cases: [], assertion: "" }, parts: [] };
+    const base = { answer: "a", status: "answered", none_found: false, citations: [], searches: [], inventory: [], metrics: [], proposal: { kind: "none", splits: [], testFile: "", testName: "", cases: [], assertion: "" } };
     const out = { answers: questions.map((x) => ({ ...base, question: `${x.id} [${x.type}] ${x.text}` })) };
     const parsed = parseAnswers(out, new Set(questions.map((x) => x.id)));
     if ("problems" in parsed) throw new Error(parsed.problems.join(";"));
@@ -332,11 +332,11 @@ describe("the live run's failure: verdicts keyed with the type and the question'
 
   it("matches the answerer's answers keyed the same way", () => {
     const s = scenarioWith("answer-finds-existing-helper", (sc) => {
-      for (const key of ["answers-v1", "answers-revision-v1"]) for (const r of sc.results[key] ?? []) for (const a of (r.output as { answers: Answer[] }).answers) a.question = `${a.question} [existing-equivalent] Does the codebase already have one?`;
+      for (const key of ["answers-v1", "answers-revision-v1"]) for (const r of sc.results[key] ?? []) for (const a of (r.output as { answers: Answer[] }).answers) a.question = `${a.question} [existing-reuse-common] Does the codebase already have one?`;
     });
     const sim = simulate({ scenario: s });
     expect(stopOf(sim)).toMatchObject({ reason: "report ready" });
-    expect(sim.qa!.markdown).toMatch(/Note: the answerer's id "Q1 \[existing-equivalent\]/);
+    expect(sim.qa!.markdown).toMatch(/Note: the answerer's id "Q1 \[existing-reuse-common\]/);
   });
 
   it("does not match an ambiguous or unknown key: the checker's verdicts stay unjudged, and the escalation names the keys", () => {
@@ -364,17 +364,17 @@ describe("a result the controller classed invalid because of an id", () => {
 
   it("still reads the answerer's answers when only an id is off, and notes it", () => {
     const s = scenarioWith("answer-finds-existing-helper", (sc) => {
-      for (const key of ["answers-v1", "answers-revision-v1"]) for (const r of sc.results[key] ?? []) for (const a of (r.output as { answers: Answer[] }).answers) a.question = `${a.question} [existing-equivalent] Does the codebase already have one?`;
+      for (const key of ["answers-v1", "answers-revision-v1"]) for (const r of sc.results[key] ?? []) for (const a of (r.output as { answers: Answer[] }).answers) a.question = `${a.question} [existing-reuse-common] Does the codebase already have one?`;
     });
     const sim = simulate({ scenario: s, tamper: classify });
     expect(sim.evidence.some((e) => e.contract?.status === "invalid")).toBe(true);
     expect(stopOf(sim)).toMatchObject({ reason: "report ready" });
-    expect(sim.qa!.markdown).toMatch(/Note: the answerer's id "Q1 \[existing-equivalent\]/);
+    expect(sim.qa!.markdown).toMatch(/Note: the answerer's id "Q1 \[existing-reuse-common\]/);
   });
 
   it("does not read the checker's: its review evidence is not admitted when invalid, so it is asked again, and then escalated", () => {
     const s = scenarioWith("answer-finds-existing-helper", (sc) => {
-      for (const r of sc.results["answer-check-v1"]!) for (const v of (r.output as { verdicts: Array<{ question: string }> }).verdicts) if (v.question !== "N1") v.question = `${v.question} [existing-equivalent] text`;
+      for (const r of sc.results["answer-check-v1"]!) for (const v of (r.output as { verdicts: Array<{ question: string }> }).verdicts) if (v.question !== "N1") v.question = `${v.question} [existing-reuse-common] text`;
     });
     const sim = simulate({ scenario: s, tamper: classify });
     expect(superviseOf(sim)?.reason).toMatch(/the answer checker did not judge every answer after 3 tries/);
@@ -386,8 +386,8 @@ describe("only a search of the whole base tree grounds an absence", () => {
   const ctx = contextOf("complex-function");
   const set = questionSet(ctx, undefined);
   const actx = answerContext(ctx, set.questions);
-  const q = set.questions.find((x) => x.type === "existing-equivalent")!;
-  const none = (searches: Search[]): Answer => ({ question: q.id, answer: "a", status: "answered", none_found: true, citations: [], searches, inventory: [], metrics: [], proposal: { kind: "none", splits: [], testFile: "", testName: "", cases: [], assertion: "" } });
+  const q = set.questions.find((x) => x.type === "existing-reuse-common")!;
+  const none = (searches: Search[]): Answer => ({ question: q.id, answer: "a", status: "partially answered", none_found: true, citations: [], searches, inventory: [], metrics: [], proposal: { kind: "none", splits: [], testFile: "", testName: "", cases: [], assertion: "" } });
   const problems = (searches: Search[]) => answerProblems([none(searches)], actx, new Set([q.id])).join("|");
 
   it("sends a none-found answer back when its required searches fall beyond the bound of re-runs, and accepts it when they are re-run", () => {

@@ -99,9 +99,9 @@ export interface QuestionSet {
  */
 export function questionSet(ctx: QaContext, output: QuestionerOutput | undefined, skipped = false): QuestionSet {
   if (skipped) return { questions: [necessityQuestion()], purposes: [], rejected: [], skipped: true };
-  const { stated, rejected } = statedPurposes(output, ctx.view, ctx.pinned);
+  const { stated, rejected } = statedPurposes(output, ctx.view, ctx.pinned, isLarge(ctx.mode));
   const required = requiredQuestions({ view: ctx.view, groundwork: ctx.groundwork, large: isLarge(ctx.mode) }, stated);
-  const purposes: PurposeRecord[] = changeItems(ctx.view).map((i) => stated.get(i.id) ?? { item: i.id, status: "asked" });
+  const purposes: PurposeRecord[] = changeItems(ctx.view, isLarge(ctx.mode)).map((i) => stated.get(i.id) ?? { item: i.id, status: "asked" });
   return { questions: [necessityQuestion(), ...finalQuestions(required, output, ctx.groundwork)], purposes, rejected, skipped: false };
 }
 

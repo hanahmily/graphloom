@@ -12,7 +12,7 @@ import { LIST_CHECK_RUNS, GET_PULL, LIST_PULL_COMMITS, LIST_PULL_FILES, LIST_PUL
 import { definitionFor } from "../src/graph.js";
 import { assembleReport, asReporterOutput, reportProblems } from "../src/report.js";
 import { pullFile } from "../src/snapshot.js";
-import { reviewHtmlFrom } from "../src/html.js";
+import { appendixHtmlFrom, reviewHtmlFrom } from "../src/html.js";
 import { reporterSections } from "../src/template.js";
 import { budgetShortfall, largeNeeds } from "../src/large.js";
 import { largeReporterInstruction } from "../src/largeprompts.js";
@@ -151,7 +151,8 @@ describe("a large pull request, reported at a high level (design §6.9)", () => 
     // It is part of the briefing: before the open questions and the appendix.
     expect(md.indexOf("## Areas")).toBeGreaterThan(md.indexOf("## What you need to check"));
     expect(md.indexOf("## Areas")).toBeLessThan(md.indexOf("# Appendix"));
-    const html = reviewHtmlFrom(sim.written!.json)!;
+    // The areas are text, so they are in the appendix; review.html shows them as the risk map.
+    const html = appendixHtmlFrom(sim.written!.json)!;
     expect(html).toContain("<h2>Areas</h2>");
     expect(html).toContain("<pre><code>graphloom session open &lt;run&gt; --stage report</code></pre>");
     expect(html).toContain("<td>A2</td><td>changes under pkg/alpha</td><td>1</td>");
@@ -176,36 +177,40 @@ describe("a large pull request, reported at a high level (design §6.9)", () => 
     expect(sim.receipts.filter((r) => r.stageId === "answers").every((r) => r.valid)).toBe(true);
   });
 
-  it("asks exactly the high-level questions, even though functions exceed the limits: N1, then per change item the one combined question, purpose and missing-test", () => {
+  it("asks exactly the high-level questions, even though functions exceed the limits: N1, then per high-level change the one existence/reuse/common-logic question, purpose and missing-test", () => {
     const q = qa(sim);
-    const questions = q.questions as Array<{ id: string; type: string; item: string; symbol?: string; text: string; answer?: { status: string; parts?: Array<{ part: string; status: string }> } }>;
+    const questions = q.questions as Array<{ id: string; type: string; item: string; symbol?: string; text: string; answer?: { status: string; answer: string; parts?: unknown } }>;
     const types = new Set(questions.filter((x) => x.id !== "N1").map((x) => x.type));
-    // The three separate types are never asked in large mode: the combined question replaces them.
     expect([...types].sort()).toEqual(["existing-reuse-common", "missing-test", "purpose"]);
     expect(questions[0]!.id).toBe("N1");
     // Not asked in large mode: split-function, complexity-coverage, anything per symbol or per function.
     expect(questions.filter((x) => x.type === "split-function" || x.type === "complexity-coverage" || x.type === "weak-test")).toEqual([]);
     expect(questions.filter((x) => x.symbol !== undefined)).toEqual([]);
-    // Once per change item, about the mechanism, naming the item's new exported symbols.
-    const combined = questions.filter((x) => x.type === "existing-reuse-common");
-    expect(combined.length).toBeGreaterThan(0);
-    expect(new Set(combined.map((x) => x.item)).size).toBe(combined.length);
-    const itemQuestion = questions.find((x) => x.type === "existing-reuse-common" && x.text.includes("alpha.Alpha1"))!;
-    expect(itemQuestion.text).toContain("alpha.Alpha6");
-    // It asks all three: an equivalent, a library, common logic.
-    expect(itemQuestion.text).toMatch(/already have the same or an equivalent.*existing internal package or an already-declared third-party library.*duplicate logic/s);
-    // Each is answered in three labelled parts, and the question's status is the weakest of them.
-    for (const c of combined) {
-      expect(c.answer!.parts!.map((p) => p.part)).toEqual(["existing-equivalent", "reuse-library", "common-logic"]);
-      const order = ["answered", "partially answered", "needs author"];
-      expect(c.answer!.status).toBe(c.answer!.parts!.map((p) => p.status).sort((a, b) => order.indexOf(b) - order.indexOf(a))[0]);
+    // The unit is the high-level change: one per capability of the briefing's whatsNew, W1... in order, with the questions of each.
+    const changes = report(sim).briefing.whatsNew as Array<{ text: string; cites: Array<{ path: string }> }>;
+    expect(changes.length).toBeGreaterThan(0);
+    const ids = changes.map((_, n) => `W${n + 1}`);
+    expect(new Set(questions.filter((x) => x.id !== "N1").map((x) => x.item))).toEqual(new Set(ids));
+    for (const id of ids) expect(questions.filter((x) => x.item === id).map((x) => x.type).sort()).toEqual(["existing-reuse-common", "missing-test", "purpose"]);
+    expect(questions.length).toBe(1 + 3 * changes.length);
+    // The question names the change and its cites, and asks all three concerns at once.
+    const reuse = questions.filter((x) => x.type === "existing-reuse-common");
+    expect(reuse).toHaveLength(changes.length);
+    reuse.forEach((x, n) => {
+      expect(x.text).toContain(`W${n + 1} "`);
+      expect(x.text).toContain(changes[n]!.cites[0]!.path);
+      expect(x.text).toMatch(/already have the same or an equivalent.*existing internal package or an already-declared third-party library.*common logic/s);
+    });
+    // One question, one answer: a single statement with one status, and no parts.
+    for (const x of reuse) {
+      expect(x.answer!.status).toMatch(/^(answered|partially answered|needs author)$/);
+      expect(x.answer!.answer.length).toBeGreaterThan(0);
+      expect(x.answer!.parts).toBeUndefined();
     }
-    const unexported = questions.find((x) => x.text.includes("beta.Beta"))!;
-    expect(unexported.text).toMatch(/1 unexported symbol\(s\)/);
-    expect(unexported.text).not.toContain("beta.twice");
     const missing = questions.filter((x) => x.type === "missing-test");
-    expect(missing.length).toBeGreaterThan(0);
     expect(new Set(missing.map((x) => x.item)).size).toBe(missing.length);
+    // The test map's findings in the cited files are listed in the question.
+    expect(missing.some((x) => /found none in the pull request for: /.test(x.text))).toBe(true);
   });
 
   it("shows every function in the measurements, the over-limit ones included", () => {
@@ -218,7 +223,9 @@ describe("a large pull request, reported at a high level (design §6.9)", () => 
     expect(stopOf(standard)!.reason).toBe("report ready");
     const q = qa(standard);
     expect(q.mode).toBe("standard");
-    expect(q.questions.filter((x: { type: string }) => x.type === "existing-equivalent")).toHaveLength(8);
+    // One existence/reuse/common-logic question for each new symbol, not three.
+    expect(q.questions.filter((x: { type: string; symbol?: string }) => x.type === "existing-reuse-common" && x.symbol !== undefined)).toHaveLength(8);
+    expect(q.questions.filter((x: { type: string }) => ["existing-equivalent", "reuse-library", "common-logic"].includes(x.type))).toEqual([]);
     expect(q.questions.filter((x: { type: string }) => x.type === "missing-test")).toHaveLength(8);
   });
 });
@@ -391,12 +398,12 @@ describe("the budget pre-check before the reporter job (design §6.9)", () => {
   it("counts one reporter, one check and the quote commands, not an area's jobs, and is covered by the default budgets for a ten-area pull request", () => {
     const defaults = definitionFor(profileOf()).defaultBudgets!;
     const ten = largeNeeds(10);
-    // Three questions per item (purpose, the combined existing-reuse-common, missing-test): 60 questions in 4 batches.
-    // 2 (reporter, check) + 1 questioner + 2 N1 + 4 batches of 2 + 2 diagrams = 15 agent invocations; 2 + 1 + 1 + 4 + 20 + 34 + 4 jobs.
-    expect(ten).toMatchObject({ areas: 10, questions: 60, batches: 4, agentInvocations: 15, jobs: 66, decisions: 78 });
-    expect(largeNeeds(1).jobs).toBeLessThan(ten.jobs);
+    // Three questions per high-level change (purpose, existing-reuse-common, missing-test), at most five changes: 15 questions in one batch,
+    // whatever the number of areas. 2 (reporter, check) + 1 questioner + 2 N1 + 1 batch of 2 + 2 diagrams = 9 agent invocations.
+    expect(ten).toMatchObject({ areas: 10, questions: 15, batches: 1, agentInvocations: 9, jobs: 51, decisions: 63 });
+    expect(largeNeeds(1)).toEqual({ ...ten, areas: 1 });
     expect(budgetShortfall(ten, { agentInvocations: defaults.agentInvocations!, jobs: defaults.jobs!, decisions: defaults.decisions! })).toBeUndefined();
-    expect(budgetShortfall(largeNeeds(100), { agentInvocations: defaults.agentInvocations!, jobs: defaults.jobs!, decisions: defaults.decisions! })).toContain("budgets.jobs");
+    expect(budgetShortfall(ten, { agentInvocations: 1, jobs: 1, decisions: 1 })).toContain("budgets.jobs");
   });
 
   it("completes a large simulated run end to end within the plugin's default budgets", () => {

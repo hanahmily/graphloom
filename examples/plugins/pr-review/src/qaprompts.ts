@@ -164,6 +164,8 @@ export interface QuestionerAssignment {
   baseDir?: string;
   /** The absolute `.graphloom/review/` directory, where the report and the files an assignment points to are. */
   reviewDir?: string;
+  /** Large mode (design §7.6): the changes listed are the briefing's high-level changes. */
+  large?: boolean;
 }
 
 /** The characters of required questions an assignment lists before the rest go to a file; a large pull request has more than fit one executor input. */
@@ -173,8 +175,8 @@ const ITEMS_INLINE_CHARS = 14_000;
 const ITEMS_INDEX_CHARS = 14_000;
 
 /** The change items of the report as an assignment lists them: in full while they fit, else an index and the files that hold the report. */
-function itemsBlock(view: ReportView, scale: number, dir: string | undefined, label = "Change items"): string[] {
-  const all = changeItems(view);
+function itemsBlock(view: ReportView, scale: number, dir: string | undefined, label = "Change items", large = false): string[] {
+  const all = changeItems(view, large);
   const full = all.map((i) => `${i.id} [${i.section}] ${oneLine(i.text)} — ${i.cites.map((c) => citeLabel(c)).join(", ")}`);
   if (full.join("\n").length <= ITEMS_INLINE_CHARS * scale) return [`${label} (${all.length}):`, ...(all.length === 0 ? ["(none)"] : full)];
   const json = reviewFile(dir, "report.json");
@@ -202,7 +204,7 @@ export const questionerInstruction = (a: QuestionerAssignment): string => planQu
 /** The questioner's assignment and the files it points to: the report's items, the required questions and the groundwork, each inlined while it fits. */
 export function planQuestioner(a: QuestionerAssignment): Fitted {
   return shrinkToFit((scale) => {
-    const items = itemsBlock(a.view, scale, a.reviewDir);
+    const items = itemsBlock(a.view, scale, a.reviewDir, a.large === true ? "High-level changes (each is asked about as one change)" : "Change items", a.large === true);
     const required = requiredBlock(a.required, scale, a.reviewDir);
     const groundwork = groundworkBlock(a.groundwork, a.view, scale, a.reviewDir);
     const feedback = feedbackBlock(a.feedback, scale, a.reviewDir);
@@ -220,7 +222,7 @@ export function planQuestioner(a: QuestionerAssignment): Fitted {
     `Required questions (${a.required.length}). Return every one in the questions of your result, with its key copied exactly, its type, item and symbol as listed (symbol is "" when none), and your own clearer wording in text (at most ${MAX_QUESTION_CHARS} characters, one question, no answer, no severity or verdict). You cannot drop or merge a required question; one you leave out is asked in the plugin's wording.`,
     ...required.lines,
     "",
-    'You may add questions the rules do not require: key "", a type (purpose, existing-equivalent, reuse-library, common-logic, missing-test, split-function, complexity-coverage or other), an item id, a symbol id or "", and the text. Add one only where the change raises a question a maintainer would ask and the rules missed.',
+    'You may add questions the rules do not require: key "", a type (purpose, existing-reuse-common, missing-test, split-function, complexity-coverage or other), an item id, a symbol id or "", and the text. Add one only where the change raises a question a maintainer would ask and the rules missed.',
     "",
     "Groundwork the plugin prepared (deterministic: symbol extraction, whole-repository searches over the base commit, similarity, the dependency inventory, the test map, measurements):",
     ...groundwork.lines,
@@ -288,10 +290,10 @@ export function planAnswerer(a: AnswererAssignment): Fitted {
     a.mountedDirs.length > 0 ? `Dependency source is mounted read-only at: ${a.mountedDirs.join(", ")}. Read library source there; cite it with tree "dependency" and the absolute path.` : "No dependency source is available on this machine; every dependency is marked source unavailable.",
     "",
     "Every answer has three elements. The answer: what exists or is covered, in factual terms. The evidence: citations (path, tree base, head or dependency, first and last line, a short verbatim quote), the searches you ran (each a structured record, below), and inventory entries you read (name and version, copied from the inventory). The status: answered when the code and its dependencies settle the question (or you give a concrete proposal for the maintainer to weigh); partially answered when part is settled and the rest is stated with what was searched; needs author when the answer depends on intent the code cannot show, or asks for an action only the author can take (a test to add, an assertion to strengthen).",
-    'A "none found" answer (no existing equivalent, no library, no shared logic) sets none_found true and lists the whole-repository searches that found nothing: the name and its variants, the signature, the key tokens (three or more searches over the whole base tree, with no paths, for an equivalent or shared logic; at least one for a library; a search scoped to paths is supplementary and does not count). A dependency marked source unavailable makes a library answer partially answered. Set none_found false otherwise.',
+    'A "none found" answer (no existing equivalent, no library, no shared logic) sets none_found true and lists the whole-repository searches that found nothing: the name and its variants, the signature, the key tokens (three or more searches over the whole base tree, with no paths; a search scoped to paths is supplementary and does not count). A dependency marked source unavailable makes the answer partially answered. Set none_found false otherwise.',
     SEARCH_HELP,
     "Every number you cite from a measurement goes in metrics (function, path, complexity, nesting or crap, value) and must equal the measurement record below. Cite no number you did not take from there.",
-    "Per type. purpose: answered only from a code comment, a linked design document or a call site you cite; else needs author, with what you read. existing-equivalent, reuse-library, common-logic: describe and cite the candidate, or state the searches that show none; needs author when an equivalent exists and only the author can say why it was not used. existing-reuse-common (one question that asks all three of those about a mechanism): answer it in the parts of your answer, exactly three, labelled by their part field: existing-equivalent (does the codebase already have the same or an equivalent), reuse-library (could an existing internal package or declared library do it), common-logic (does it duplicate logic that could be shared). Each part has its own answer text, status, none_found, citations, searches and inventory, judged by the rules of the single question of that name (a part that finds none lists its own whole-repository searches: three or more for existing-equivalent and common-logic, one or more for reuse-library); evidence shared by two parts is listed in both. The answer's own text is a one-line summary, its own citations, searches and inventory are empty, and its status is the weakest of the parts' (answered, then partially answered, then needs author), which the plugin computes. Every other question has empty parts. missing-test and complexity-coverage: answered only when you find and cite a covering test (a test file); otherwise needs author with a proposal of kind test: the test file (where the package's tests live), the test name, and cases (inputs, and the branches each reaches). split-function: always answered, with a proposal of kind split: at least two functions, each with a name that is new to the package, line ranges inside the function, and one responsibility. weak-test: answered when a cited test would catch the mutant; else needs author with a proposal of kind assertion. Every other answer has a proposal of kind none (with empty splits, testFile, testName, cases and assertion). Never state a severity, a verdict or a recommendation.",
+    "Per type. purpose: answered only from a code comment, a linked design document or a call site you cite; else needs author, with what you read. existing-reuse-common (one question that asks whether the codebase already has the same or an equivalent, whether an existing internal package or declared library could do it, and whether it duplicates logic that could be shared): give ONE answer, one statement that addresses all three concerns, with one status, and the evidence for all of them (citations, searches, inventory entries); describe and cite each candidate you found, or state the searches that show none; needs author when an equivalent exists and only the author can say why it was not used. In a large pull request the question is about a high-level change: work out which code belongs to it from its cites and the areas. missing-test and complexity-coverage: answered only when you find and cite a covering test (a test file); otherwise needs author with a proposal of kind test: the test file (where the package's tests live), the test name, and cases (inputs, and the branches each reaches). split-function: always answered, with a proposal of kind split: at least two functions, each with a name that is new to the package, line ranges inside the function, and one responsibility. weak-test: answered when a cited test would catch the mutant; else needs author with a proposal of kind assertion. Every other answer has a proposal of kind none (with empty splits, testFile, testName, cases and assertion). Never state a severity, a verdict or a recommendation.",
     "",
     `Return the answers of your result: one entry for ${a.only !== undefined ? "each question below" : "every question below, none left out"}. The question field is the bare id exactly as listed below (${asked.slice(0, 2).map((q) => q.id).join(" or ") || "Q1"}, never the type or the text after it); the result contract accepts no other value.`,
     `Questions (${asked.length}):`,
@@ -328,9 +330,6 @@ export interface CheckerAssignment {
 const ANSWERS_INLINE_CHARS = 30_000;
 
 function answerText(a: Answer): string {
-  if (a.parts !== undefined && a.parts.length > 0) {
-    return [`status ${a.status}: ${oneLine(a.answer)}`, ...a.parts.map((p) => `PART ${p.part}: status ${p.status}${p.none_found ? ", none found" : ""}: ${oneLine(p.answer)}${p.citations.length > 0 ? ` | cites ${p.citations.map((c) => `${c.tree}:${c.path}:${c.start}-${c.end}`).join(", ")}` : ""}${p.searches.length > 0 ? ` | its searches ${p.searches.map(reportedSearch).join("; ")}` : ""}${p.none_found ? " | this part needs searches of your own" : ""}`)].join("\n    ");
-  }
   const parts = [`status ${a.status}${a.none_found ? ", none found" : ""}: ${oneLine(a.answer)}`];
   if (a.citations.length > 0) parts.push(`cites ${a.citations.map((c) => `${c.tree}:${c.path}:${c.start}-${c.end}`).join(", ")}`);
   if (a.searches.length > 0) parts.push(`its searches ${a.searches.map(reportedSearch).join("; ")}`);
@@ -340,8 +339,7 @@ function answerText(a: Answer): string {
 
 /** One answer as a short line: its status, the start of its text, and how many citations, searches and what proposal it has. */
 function answerSummary(a: Answer): string {
-  if (a.parts !== undefined && a.parts.length > 0) return `status ${a.status}: ${clipText(a.answer, 160)} | parts ${a.parts.map((p) => `${p.part} ${p.status}${p.none_found ? " none found" : ""} (${p.citations.length} cite(s), ${p.searches.length} search(es))`).join("; ")}`;
-  return`status ${a.status}${a.none_found ? ", none found" : ""}: ${clipText(a.answer, 160)} | ${a.citations.length} cite(s), ${a.searches.length} search(es)${a.proposal.kind !== "none" ? `, proposal ${a.proposal.kind}` : ""}`;
+  return `status ${a.status}${a.none_found ? ", none found" : ""}: ${clipText(a.answer, 160)} | ${a.citations.length} cite(s), ${a.searches.length} search(es)${a.proposal.kind !== "none" ? `, proposal ${a.proposal.kind}` : ""}`;
 }
 
 /** The answer checker's assignment (design §7.3): re-check the claims against the trees, with searches of its own. */

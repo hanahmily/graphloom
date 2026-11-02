@@ -10,6 +10,7 @@
  */
 import type { EvidenceRecord } from "@graphloom/sdk";
 import { areaFiles, GENERATED_AREA, type Partition } from "./areas.js";
+import { MAX_WHATS_NEW } from "./briefing.js";
 import { QUESTION_BATCH_SIZE } from "./constants.js";
 import type { CommandRun } from "./evidence.js";
 import { reportFlow, type ReportFlow } from "./flow.js";
@@ -67,7 +68,7 @@ export function largeReportFlow(evidence: readonly EvidenceRecord[], ctx: Report
 /** What large mode needs of a run's budgets, in the pre-check before the reporter job (design §6.9, "Budgets"). */
 export interface LargeNeeds {
   areas: number;
-  /** The Q&A estimate, made before the groundwork exists: `ASSUMED_ITEMS_PER_AREA` items of `ASSUMED_QUESTIONS_PER_ITEM` questions an area, in batches. */
+  /** The Q&A estimate, made before the groundwork exists: at most `MAX_WHATS_NEW` high-level changes of `ASSUMED_QUESTIONS_PER_CHANGE` questions, in batches; it does not grow with the pull request. */
   questions: number;
   batches: number;
   agentInvocations: number;
@@ -75,10 +76,8 @@ export interface LargeNeeds {
   decisions: number;
 }
 
-/** A high-level report has about one item per area or subsystem. */
-export const ASSUMED_ITEMS_PER_AREA = 2;
-/** Per item in large mode: purpose, the one combined existing-reuse-common question and missing-test (design §7.6). */
-export const ASSUMED_QUESTIONS_PER_ITEM = 3;
+/** Per high-level change in large mode: purpose, the one existing-reuse-common question and missing-test (design §7.6). */
+export const ASSUMED_QUESTIONS_PER_CHANGE = 3;
 /**
  * Jobs the stages around the agents need in any run (measurements, coverage, the groundwork's reads, the quote check of the
  * claims, the writes with review.html and its appendix, the ledger, and the writes of the files the agents read instead of an
@@ -100,7 +99,7 @@ const FIXED_DECISIONS = 12;
  * Corrections and retries come on top, which is why this is a floor and not a promise.
  */
 export function largeNeeds(areas: number): LargeNeeds {
-  const questions = areas * ASSUMED_ITEMS_PER_AREA * ASSUMED_QUESTIONS_PER_ITEM;
+  const questions = MAX_WHATS_NEW * ASSUMED_QUESTIONS_PER_CHANGE;
   const batches = Math.max(1, Math.ceil(questions / QUESTION_BATCH_SIZE));
   const agentInvocations = REPORT_INVOCATIONS + 1 + 2 + batches * 2 + DIAGRAM_INVOCATIONS;
   const jobs = REPORT_INVOCATIONS + REPORT_COMMAND_JOBS + 1 + 4 + batches * 5 + FIXED_JOBS + DIAGRAM_INVOCATIONS * 2;

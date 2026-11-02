@@ -15,7 +15,7 @@ import { agentRuns, type AgentRun } from "./evidence.js";
 import type { Groundwork } from "./groundwork.js";
 import { checkThresholds, exceeds, LIMITS, originText, type Metric } from "./metrics/crap.js";
 import type { MetricsRecord } from "./metrics/record.js";
-import { changeItems, type ReportView, type ViewItem } from "./reportview.js";
+import { changeItems, questionItems, type ReportView, type ViewItem } from "./reportview.js";
 import type { SymbolDef } from "./symbols.js";
 
 export const QUESTIONS_SCHEMA_NAME = "questions-v1";
@@ -24,19 +24,17 @@ export const MAX_ADDED_QUESTIONS = 30;
 export const MAX_QUESTION_CORRECTIONS = 2;
 const MIN_QUOTE_CHARS = 12;
 
-export const QUESTION_TYPES = ["necessity", "purpose", "existing-equivalent", "reuse-library", "common-logic", "existing-reuse-common", "missing-test", "split-function", "complexity-coverage", "weak-test", "other"] as const;
+export const QUESTION_TYPES = ["necessity", "purpose", "existing-reuse-common", "missing-test", "split-function", "complexity-coverage", "weak-test", "other"] as const;
 export type QuestionType = (typeof QUESTION_TYPES)[number];
 /**
- * The three questions every new mechanism is asked (design §7.1): is there an equivalent, can a library do it, is there
- * common logic. Standard mode asks them separately per symbol; large mode asks them as one `existing-reuse-common`
- * question per change item (design §7.6), whose answer has one labelled part for each.
+ * The one question every new mechanism is asked (design §7.1): does the codebase already have it, can an existing
+ * library do it, is there common logic to share. Standard mode asks it for each new symbol, large mode for each
+ * high-level change (design §7.6); its answer is one statement with one status that addresses all three.
  */
-export const COMBINED_PARTS = ["existing-equivalent", "reuse-library", "common-logic"] as const;
-export type CombinedPart = (typeof COMBINED_PARTS)[number];
-export const COMBINED_TYPE = "existing-reuse-common";
+export const REUSE_TYPE = "existing-reuse-common";
 
-/** The types the questioner may add: a weak-test question exists only for a surviving mutant, which the graph, not the questioner, finds; the necessity question N1 is the plugin's own and comes first, and the combined question is the plugin's own too. */
-const ADDABLE: readonly string[] = QUESTION_TYPES.filter((t) => t !== "weak-test" && t !== "necessity" && t !== COMBINED_TYPE);
+/** The types the questioner may add: a weak-test question exists only for a surviving mutant, which the graph, not the questioner, finds; the necessity question N1 is the plugin's own and comes first. */
+const ADDABLE: readonly string[] = QUESTION_TYPES.filter((t) => t !== "weak-test" && t !== "necessity");
 
 /** The id fields of the questioner's contract: each is constrained, per job, to the report's item ids and the groundwork's symbol ids. */
 export const QUESTIONS_REFERENCES = ["purposes[].item", "questions[].item", "questions[].symbol"] as const;
@@ -122,7 +120,7 @@ export interface Question {
 export interface QuestionInputs {
   view: ReportView;
   groundwork: Groundwork;
-  /** Large mode (design §7.6): a high-level review. Per change item, the combined existence/reuse/common-logic question (about the mechanism) and a missing-test question; nothing per symbol or per function. */
+  /** Large mode (design §7.6): a high-level review. Per high-level change (`W1`…), a purpose question, the existence/reuse/common-logic question and a missing-test question; nothing per symbol or per function. */
   large?: boolean;
 }
 
@@ -155,36 +153,38 @@ export function survivors(r: MetricsRecord): Array<{ line: number; from: string;
   });
 }
 
-/** The most symbols an item-level question names; the rest are counted. */
+/** The most symbols a change-level question names; the rest are counted. */
 const MAX_NAMED = 40;
 
+/** The files a high-level change cites, in order. */
+const citedPaths = (change: ViewItem): Set<string> => new Set(change.cites.map((c) => c.path));
+
+/** What names a high-level change in a question: its id, its text and the places its bullet cites. */
+function describeChange(change: ViewItem): string {
+  const where = change.cites.slice(0, 4).map((c) => (c.start > 0 ? `${c.path}:${c.start}${c.end > c.start ? `-${c.end}` : ""}` : c.path)).join(", ");
+  return `${change.id} "${short(change.text, 140)}" (${where})`;
+}
+
 /**
- * The questions large mode asks per change item (design §7.6): one combined existence, reuse and common-logic
- * question about the mechanism the item adds, naming its new exported symbols (the unexported ones are counted), and
- * one missing-test question listing every new or modified function of the item that no test in the pull request
- * covers. An item that adds no symbol gets no combined question.
+ * The questions large mode asks per high-level change (design §7.6), where a change is one capability of the briefing:
+ * the existence, reuse and common-logic question (asked for every change, about what the change adds), and the
+ * missing-test question, which lists the new or modified functions in the cited files that no test in the pull request
+ * covers. The answerer works out which code belongs to the change from its cites and the areas.
  */
-function itemQuestions(items: readonly ViewItem[], byItem: ReadonlyMap<string, readonly SymbolDef[]>, groundwork: Groundwork): RequiredQuestion[] {
+function changeQuestions(changes: readonly ViewItem[], groundwork: Groundwork): RequiredQuestion[] {
   const out: RequiredQuestion[] = [];
   const named = (syms: readonly SymbolDef[]): string => `${syms.slice(0, MAX_NAMED).map((s) => `${s.qualified} (${s.path}:${s.startLine})`).join(", ")}${syms.length > MAX_NAMED ? `, and ${syms.length - MAX_NAMED} more` : ""}`;
-  for (const item of items) {
-    const syms = byItem.get(item.id) ?? [];
-    const added = syms.filter((s) => s.change === "new");
-    const what = short(item.text);
-    if (added.length > 0) {
-      const exported = added.filter((s) => s.exported);
-      const adds = `It adds: ${exported.length > 0 ? named(exported) : "no exported symbol"}${added.length > exported.length ? `${exported.length > 0 ? ", and " : "; "}${added.length - exported.length} unexported symbol(s)` : ""}.`;
-      out.push({
-        key: `${COMBINED_TYPE}:item:${item.id}`,
-        type: COMBINED_TYPE,
-        item: item.id,
-        text: `For the mechanism this change adds (${what}): (1) does the codebase already have the same or an equivalent of it; (2) could an existing internal package or an already-declared third-party library do what it does; (3) does it duplicate logic elsewhere, in the base or in the pull request, that could become shared code? Answer all three, each with its own evidence. ${adds}`,
-      });
-    }
-    const uncovered = syms.filter((s) => (groundwork.testMap.get(s.id) ?? []).length === 0 && s.kind !== "type" && s.kind !== "interface");
-    if (uncovered.length > 0) {
-      out.push({ key: `missing-test:item:${item.id}`, type: "missing-test", item: item.id, text: `Which tests cover these new or modified functions of this change (${what})? The test map found none in the pull request for: ${named(uncovered)}.` });
-    }
+  for (const change of changes) {
+    const what = describeChange(change);
+    const paths = citedPaths(change);
+    out.push({
+      key: `${REUSE_TYPE}:item:${change.id}`,
+      type: REUSE_TYPE,
+      item: change.id,
+      text: `For the new functions and features of this change, ${what}: does the codebase already have the same or an equivalent of what it adds, could an existing internal package or an already-declared third-party library do it, and does it duplicate common logic elsewhere, in the base or in the pull request, that could become shared code? Answer all three in one statement.`,
+    });
+    const uncovered = groundwork.symbols.filter((s) => paths.has(s.path) && (groundwork.testMap.get(s.id) ?? []).length === 0 && s.kind !== "type" && s.kind !== "interface");
+    out.push({ key: `missing-test:item:${change.id}`, type: "missing-test", item: change.id, text: `Which tests cover this change, ${what}?${uncovered.length > 0 ? ` The test map found none in the pull request for: ${named(uncovered)}.` : ""}` });
   }
   return out;
 }
@@ -194,28 +194,24 @@ export function requiredQuestions(inp: QuestionInputs, stated: ReadonlyMap<strin
   const { view, groundwork } = inp;
   const out: RequiredQuestion[] = [];
   const items = view.items;
-  for (const item of changeItems(view)) {
+  for (const item of changeItems(view, inp.large === true)) {
     if (stated.get(item.id)?.status === "stated") continue;
     out.push({ key: `purpose:${item.id}`, type: "purpose", item: item.id, text: `What is the purpose of this change (${short(item.text)})? Nothing in the pull request's text, commit messages or linked issue states it.` });
   }
   const large = inp.large === true;
-  const byItem = new Map<string, SymbolDef[]>();
   for (const sym of groundwork.symbols) {
     const item = itemOfSymbol(sym, items);
     if (item === undefined) continue;
-    byItem.set(item, [...(byItem.get(item) ?? []), sym]);
     const q = `${sym.qualified} (${sym.path}:${sym.startLine})`;
-    // In large mode nothing is asked per symbol: the item's questions name its new exported symbols.
+    // In large mode nothing is asked per symbol: the high-level change's questions cover its code.
     if (sym.change === "new" && !large) {
-      out.push({ key: `existing-equivalent:${sym.id}`, type: "existing-equivalent", item, symbol: sym.id, text: `Does the codebase already have the same or an equivalent of ${q}?` });
-      out.push({ key: `reuse-library:${sym.id}`, type: "reuse-library", item, symbol: sym.id, text: `Could an existing internal package or an already-declared third-party library do what ${q} does?` });
-      out.push({ key: `common-logic:${sym.id}`, type: "common-logic", item, symbol: sym.id, text: `Does ${q} duplicate logic elsewhere, in the base or in the pull request, that could become shared code?` });
+      out.push({ key: `${REUSE_TYPE}:${sym.id}`, type: REUSE_TYPE, item, symbol: sym.id, text: `Does the codebase already have the same or an equivalent of ${q}, could an existing internal package or an already-declared third-party library do what it does, and does it duplicate logic elsewhere, in the base or in the pull request, that could become shared code? Answer all three in one statement.` });
     }
     if (!large && (groundwork.testMap.get(sym.id) ?? []).length === 0 && sym.kind !== "type" && sym.kind !== "interface") {
       out.push({ key: `missing-test:${sym.id}`, type: "missing-test", item, symbol: sym.id, text: `Which test covers ${q}? The test map found none in the pull request.` });
     }
   }
-  if (large) out.push(...itemQuestions(items, byItem, groundwork));
+  if (large) out.push(...changeQuestions(view.changes ?? [], groundwork));
   // Large mode is a high-level review (design §7.6): the measurements still show every function, but no per-function question is asked.
   for (const r of large ? [] : view.records) {
     if (r.test) continue;
@@ -250,10 +246,10 @@ export function requiredQuestions(inp: QuestionInputs, stated: ReadonlyMap<strin
 }
 
 /** The purposes the questioner recorded as stated, each kept only when its quote lies in the pinned text. */
-export function statedPurposes(output: QuestionerOutput | undefined, view: ReportView, pinned: readonly PinnedText[]): { stated: Map<string, PurposeRecord>; rejected: string[] } {
+export function statedPurposes(output: QuestionerOutput | undefined, view: ReportView, pinned: readonly PinnedText[], large = false): { stated: Map<string, PurposeRecord>; rejected: string[] } {
   const stated = new Map<string, PurposeRecord>();
   const rejected: string[] = [];
-  const known = new Set(changeItems(view).map((i) => i.id));
+  const known = new Set(changeItems(view, large).map((i) => i.id));
   for (const p of output?.purposes ?? []) {
     if (!known.has(p.item)) {
       rejected.push(`${p.item} is not a change item`);
@@ -271,7 +267,7 @@ export function statedPurposes(output: QuestionerOutput | undefined, view: Repor
 /** Every deterministic problem with a questioner result; empty when it passes. */
 export function questionerProblems(output: QuestionerOutput, view: ReportView, groundwork: Groundwork, required: readonly RequiredQuestion[]): string[] {
   const problems: string[] = [];
-  const items = new Set(view.items.map((i) => i.id));
+  const items = new Set(questionItems(view).map((i) => i.id));
   const symbols = new Set(groundwork.symbols.map((s) => s.id));
   const keys = new Set(required.map((r) => r.key));
   const seen = new Set<string>();
@@ -295,7 +291,7 @@ export function questionerProblems(output: QuestionerOutput, view: ReportView, g
   });
   if (added > MAX_ADDED_QUESTIONS) problems.push(`${added} questions added, more than ${MAX_ADDED_QUESTIONS}`);
   output.purposes.forEach((p, i) => {
-    if (!view.items.some((x) => x.id === p.item)) problems.push(`purpose ${i + 1}: ${JSON.stringify(p.item)} is not a report item id`);
+    if (!questionItems(view).some((x) => x.id === p.item)) problems.push(`purpose ${i + 1}: ${JSON.stringify(p.item)} is not a report item id`);
   });
   return problems;
 }
