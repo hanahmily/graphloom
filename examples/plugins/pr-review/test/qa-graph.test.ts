@@ -27,11 +27,11 @@ const commandIds = (jobs: JobSpec[]): string[] => jobs.flatMap((j) => ((j.input 
 const qaJobs = (sim: Simulation): JobSpec[] => sim.jobs.filter((j) => j.stageId === "questions" || j.stageId === "answers");
 const BASE_TREE = "/work/tree/.graphloom/review/base";
 
-describe("every scenario settles Fetch, Report, Questions and Answers and stops final at report ready", () => {
+describe("every scenario settles Fetch, Report, Questions and Answers and stops final at answers accepted", () => {
   for (const name of Object.keys(rehearsal(BANYANDB).scenarios)) {
     it(name, () => {
       const sim = simulate({ scenarioName: name });
-      expect(stopOf(sim), JSON.stringify(sim.final)).toMatchObject({ reason: "report ready", retryable: false });
+      expect(stopOf(sim), JSON.stringify(sim.final)).toMatchObject({ reason: "answers accepted", retryable: false });
       expect(sim.receipts.filter((r) => r.valid).map((r) => r.stageId)).toEqual(["fetch", "fetch", "fetch", "report", "report", "report", "questions", "answers", "answers"]);
       const qa = qaOf(sim);
       expect(qa.schema).toBe("pr-qa-v1");
@@ -238,7 +238,7 @@ describe("answer-no-library-with-whole-repo-search", () => {
     expect(assignmentOf(answerers[1]!)).toMatch(/source available here, so a "none found" answer is "partially answered"/);
     expect(answerers[1]).toMatchObject({ continueFrom: expect.any(String) });
     expect(answerers[0]!.continueFrom).toBeUndefined();
-    expect(stopOf(s2)).toMatchObject({ reason: "report ready" });
+    expect(stopOf(s2)).toMatchObject({ reason: "answers accepted" });
   });
 });
 
@@ -282,7 +282,7 @@ describe("answer-checker-contradicts", () => {
       v.note = "the cited file does not define Jitter";
     });
     const s2 = simulate({ scenario: stubborn });
-    expect(stopOf(s2)).toMatchObject({ reason: "report ready" });
+    expect(stopOf(s2)).toMatchObject({ reason: "answers accepted" });
     expect(jobsOf(s2, "Answer the questions")).toHaveLength(2);
     const q = qOf(s2, "existing-reuse-common")[0]!;
     expect(q.answer).toMatchObject({ status: "needs author", check: { verdict: "downgraded", note: "the cited file does not define Jitter" } });
@@ -372,7 +372,7 @@ describe("complex-function", () => {
     const text = assignmentOf(answerers[1]!);
     expect(text).toMatch(/Q4 split "ParseTTL": the name already exists in the package pkg\/schema/);
     expect(text).toMatch(/Q4 split "ParseTTLCheckRange": lines \d+-99 are not inside ParseTTL \(6-35\)/);
-    expect(stopOf(s2)).toMatchObject({ reason: "report ready" });
+    expect(stopOf(s2)).toMatchObject({ reason: "answers accepted" });
   });
 
   it("sends back a name the base already defines in the package: the names check sees what the answerer's own searches might miss", () => {
@@ -425,7 +425,7 @@ describe("the ledger (design 9.1)", () => {
       s.commands!["ledger-prior"] = { exitCode: 0, stdout: JSON.stringify({ schema: "graphloom-pr-ledger-v1", heads: [{ sha: "e".repeat(40), reported: true, reviewed: false }] }) };
     });
     const s2 = simulate({ scenario: withPrior });
-    expect(stopOf(s2)).toMatchObject({ reason: "report ready" });
+    expect(stopOf(s2)).toMatchObject({ reason: "answers accepted" });
     expect(s2.jobs.some((j) => j.instruction.startsWith("Read the prior ledger"))).toBe(true);
     const job = s2.jobs.find((j) => j.instruction.startsWith("Advance the pull"))!;
     const argv = (job.input as { commands: Array<{ argv: string[] }> }).commands[0]!.argv;

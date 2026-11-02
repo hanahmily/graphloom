@@ -7,19 +7,20 @@ export const GRAPH_ID = "pr-review";
 /**
  * The stage list is fixed per plugin version (design-pr-review-graph.md §5,
  * §18): 0.1 declares Fetch, Report, Questions and Answers; 0.18 adds Review
- * and Draft. Checks and Publish arrive with later versions.
+ * and Draft; 0.21 adds the round-1 gate (Round 1) and Publish, and removes
+ * every human touchpoint. Checks arrive with a later version.
  */
-export const GRAPH_VERSION = "0.20.0";
-
-/** The operator decision that would continue into the review layer (design §11). */
-export const REVIEW_LAYER_APPROVAL = "review-layer";
+export const GRAPH_VERSION = "0.21.0";
 
 export const FETCH_STAGE = "fetch";
 export const REPORT_STAGE = "report";
 export const QUESTIONS_STAGE = "questions";
 export const ANSWERS_STAGE = "answers";
+/** The round-1 gate (design §9.4): the issues of the report and the Q&A, decided by plugin code. */
+export const ROUND1_STAGE = "round1";
 export const REVIEW_STAGE = "review";
 export const DRAFT_STAGE = "draft";
+export const PUBLISH_STAGE = "publish";
 
 export const REQUIREMENT_SNAPSHOT = "pr-snapshot";
 export const REQUIREMENT_CHECKED_OUT = "head-checked-out";
@@ -32,6 +33,8 @@ export const REQUIREMENT_ANSWERS = "answers-complete";
 export const REQUIREMENT_GROUNDED = "answers-grounded";
 export const REQUIREMENT_CODE_REVIEW = "code-review";
 export const REQUIREMENT_DRAFT = "draft-composed";
+export const REQUIREMENT_ROUND1 = "round1-gated";
+export const REQUIREMENT_PUBLISHED = "review-published";
 
 export const CODING_AGENT: ExecutorPin = { id: "graphloom.coding-agent/run", version: "1" };
 export const GET_PULL: ExecutorPin = { id: "graphloom.github/get-pull", version: "1" };
@@ -40,6 +43,10 @@ export const LIST_PULL_COMMITS: ExecutorPin = { id: "graphloom.github/list-pull-
 export const LIST_PULL_REVIEWS: ExecutorPin = { id: "graphloom.github/list-pull-reviews", version: "1" };
 export const LIST_PULL_REVIEW_COMMENTS: ExecutorPin = { id: "graphloom.github/list-pull-review-comments", version: "1" };
 export const LIST_REVIEW_THREADS: ExecutorPin = { id: "graphloom.github/list-review-threads", version: "1" };
+/** The one write the graph makes: a single `COMMENT` review (design §8.5). */
+export const CREATE_PULL_REVIEW: ExecutorPin = { id: "graphloom.github/create-pull-review", version: "1" };
+/** The login the credential authenticates as: who a review of this graph is authored by. */
+export const GET_VIEWER: ExecutorPin = { id: "graphloom.github/get-viewer", version: "1" };
 export const LIST_CHECK_RUNS: ExecutorPin = { id: "graphloom.github/list-check-runs", version: "1" };
 
 /** Deterministic corrections of the reporter's result before the supervisor (design §6.4). */
@@ -95,6 +102,8 @@ export const COMMAND = {
   treeQuote: "tree-quote",
   /** The review layer's scope and base-session record (design §8.1), and the aspects' own (`review-aspect-<aspect>`). */
   reviewScope: "review-scope",
+  /** The advance of the ledger ref with the published review's ids (design §9.1), after the review was posted. */
+  ledgerPublished: "ledger-published",
 } as const;
 
 /**
@@ -113,6 +122,8 @@ export const PART_BASE = {
   necessityJson: "necessity-json",
   ledgerJson: "ledger-json",
   ledgerMd: "ledger-md",
+  /** The patch the Publish stage records in the ledger, as a part set (design §6.6): it can be far past one argument. */
+  publishPatch: "publish-patch",
   /** The rule file of an aspect: `review-rules-<aspect>` (design §8.1). */
   reviewRules: "review-rules",
   /** The draft (design §10.1) and the report files rewritten with the Review section. */
@@ -154,6 +165,7 @@ export const QA_JSON = `${REVIEW_DIR}/qa.json`;
 export const NECESSITY_JSON = `${REVIEW_DIR}/necessity.json`;
 /** The ledger blobs of a multi-part ledger write, which the `ledger-write` command reads (ignored like the rest of `.graphloom/review/`). */
 export const LEDGER_JSON_FILE = `${REVIEW_DIR}/ledger/ledger.json`;
+export const PUBLISH_PATCH_FILE = `${REVIEW_DIR}/ledger/publish-patch.json`;
 export const LEDGER_MD_FILE = `${REVIEW_DIR}/ledger/ledger.md`;
 
 /** `refs/graphloom/pr-review/<owner>/<repo>/<N>/ledger`: the per-PR ledger (design §9.1). */

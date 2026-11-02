@@ -133,14 +133,15 @@ the marker and log are, and that watch reports only changes.
 
 ## 6. A run that stops for a decision
 
-A graph may stop, final, with a result for you to read before anything
-continues (pr-review stops with `report ready` once the report, the questions
-and the answers are written). Read what the stop names, then decide:
+A graph may declare decisions for you as data and stop, final, with a result for
+you to read before anything continues (`graphloom inspect` names them; pr-review
+declares none: it posts its review and ends without waiting). Read what the stop
+names, then decide:
 
 ```sh
 graphloom session list <stateDir>
 graphloom session open <stateDir> --stage answers
-graphloom resume <stateDir> --decline review-layer --reason "the report is enough"
+graphloom resume <stateDir> --decline <approval-id> --reason "the report is enough"
 ```
 
 - `session open` forks a recorded Claude Code or Codex session in your own
@@ -151,5 +152,5 @@ graphloom resume <stateDir> --decline review-layer --reason "the report is enoug
   stopped run; only the user decides, so never run either without being told
   which. A version that cannot act on an approval refuses it and says why.
   An approval that declares inputs takes `--input <name>=<value>` with
-  `--approve`, for example `graphloom resume <stateDir> --approve review-layer
-  --input areas=A3,A17`; ask the user for the values, never guess them.
+  `--approve`, for example `graphloom resume <stateDir> --approve <approval-id>
+  --input <name>=<value>`; ask the user for the values, never guess them.

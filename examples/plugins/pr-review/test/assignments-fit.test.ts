@@ -25,6 +25,8 @@ import { recordedScope } from "../src/reviewdraft.js";
 import { REHEARSAL_REQUEST } from "../src/rehearsal.js";
 
 const CONFIG = { limits: HUGE_LIMITS };
+/** What the briefing of the huge pull request cites, so what its default review scope is (areas and files). */
+const HUGE_SCOPE_FILES = HUGE_FILES_PER_AREA;
 
 /** The run's agent jobs, with what each was for. */
 const agentJobs = (sim: Simulation): JobSpec[] => sim.jobs.filter((j) => j.kind === "agent");
@@ -44,7 +46,7 @@ describe("every agent assignment fits the executor's bound on a pull request at 
   });
 
   it("runs through Report, N1, Questions and Answers", () => {
-    expect(sim.final.action.type === "stop" ? sim.final.action.stop : sim.final.action).toMatchObject({ reason: "report ready" });
+    expect(sim.final.action.type === "stop" ? sim.final.action.stop : sim.final.action).toMatchObject({ reason: "answers accepted" });
     const schemas = new Set(agentJobs(sim).map((j) => j.resultSchema));
     for (const s of ["change-report-v1", "claim-check-v1", "diagrams-v1", "necessity-v1", "questions-v1", "answers-v1", "answer-check-v1"]) expect(schemas.has(s)).toBe(true);
   });
@@ -282,10 +284,10 @@ describe("a repair keeps every problem and every statement it is given", () => {
 });
 
 describe("a review pass on a few areas of a pull request at the scale of #1445 fits the executor's bound", () => {
-  // The reviewers review the areas A3, A17 and A18 (nine files each) the operator picked; their assignments carry the seed,
-  // the rule groups and the file list, none of which may push an assignment past the bound.
+  // Round 1 raises nothing on this pull request's Q&A, so the same run goes on into the review layer over the areas the briefing
+  // cites; their assignments carry the rule groups and the file list, none of which may push an assignment past the bound.
   const { scenario, headFiles } = hugeRehearsal({ ...BANYANDB, ...CONFIG });
-  const total = 3 * HUGE_FILES_PER_AREA;
+  const total = HUGE_SCOPE_FILES;
   const path = hugePath(3, 1);
   const finding = { path, start_line: 2, end_line: 3, severity: "P1", content: "The function returns y times the module number, which is zero for a module that was never numbered." };
   const picked = {
@@ -296,26 +298,16 @@ describe("a review pass on a few areas of a pull request at the scale of #1445 f
       [VERIFY_SCHEMA_NAME]: [verifyReply([{ finding: "F1", verdict: "confirmed", witness: `${path}:3` }])] as never,
     },
   };
-  const seed = [{ ref: "ev-approval", kind: "other" as const, generation: 1, payload: { type: "operator-approval", approvalId: "review-layer", decision: "approve", files: [], inputs: { areas: "A3,A17,A18" }, operator: "t", at: "2026-10-30T10:00:00.000Z", generation: 1 } }];
-  // A conversation of the longest the summary allows seeds every reviewer.
-  const conversation = {
-    ref: "ev-conv",
-    kind: "other" as const,
-    generation: 1,
-    payload: { type: "operator-conversation", stageId: "answers", baseSession: "claude-a", rootSession: "claude-a", forkSession: "claude-c", harness: "claude-code", startedAt: "2026-10-30T09:00:00.000Z", endedAt: "2026-10-30T10:00:00.000Z", transcript: { sha256: "x", bytes: 1 }, contextTokens: 90_000, turns: Array.from({ length: 80 }, (_, i) => ({ operator: `Maintainer message ${i}: ${"the ttl rule applies to every group. ".repeat(12)}`, answer: "ok ".repeat(600) })) },
-  };
 
-  it("runs the review of the three areas through the Draft stage and records the scope", async () => {
-    const sim = await simulateYielding({ scenario: picked, config: CONFIG, files: headFiles, request: REHEARSAL_REQUEST.replace("Report on", "Review on"), seed: [...seed, conversation], maxSteps: 2_800, budgets: { agentInvocations: 400, jobs: 2_000, decisions: 4_000, corrections: 40 } }, 10);
-    expect(sim.final.action.type === "stop" ? sim.final.action.stop : sim.final.action, JSON.stringify(sim.final).slice(0, 500)).toMatchObject({ reason: "draft ready" });
+  it("runs round 1, the review and the draft, and publishes, and records the scope", async () => {
+    const sim = await simulateYielding({ scenario: picked, config: CONFIG, files: headFiles, request: REHEARSAL_REQUEST.replace("Report on", "Review on"), through: "end", maxSteps: 3_000, budgets: { agentInvocations: 400, jobs: 2_000, decisions: 4_000, corrections: 40 } }, 10);
+    expect(sim.final.action.type === "stop" ? sim.final.action.stop : sim.final.action, JSON.stringify(sim.final).slice(0, 500)).toMatchObject({ reason: "complete" });
     const scope = recordedScope(sim.evidence);
-    expect(scope.state === "read" && [scope.value.source, scope.value.areas.map((a) => a.id), scope.value.files.length]).toEqual(["operator", ["A3", "A17", "A18"], total]);
+    expect(scope.state === "read" && [scope.value.source, scope.value.areas.length, scope.value.files.length]).toEqual(["default", 1, total]);
     const reviewJobs = sim.jobs.filter((j) => j.stageId === "review" && j.kind === "agent");
-    expect(reviewJobs.length).toBeGreaterThanOrEqual(5);
+    expect(reviewJobs.length).toBeGreaterThanOrEqual(4);
     const sizes = reviewJobs.map((j) => assignmentOf(j).length);
     expect(Math.max(...sizes)).toBeLessThanOrEqual(ASSIGNMENT_BUDGET_CHARS);
-    // The seed is in every reviewer's assignment: inline or as a file the plugin wrote first.
-    for (const j of reviewJobs.filter((x) => x.resultSchema === REVIEW_SCHEMA_NAME)) expect(assignmentOf(j)).toMatch(/Maintainer message 79|review-conversation-[0-9a-f]{8}\.md/);
     // Every file an assignment names was written by a command before the job.
     const written = new Set<string>();
     for (const j of sim.jobs) {

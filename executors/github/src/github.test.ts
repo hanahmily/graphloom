@@ -634,7 +634,7 @@ describe("read executors declare their input shape", () => {
   const reads = executors.filter((e) => e.effect === "read") as ExecutorDefinition[];
 
   it("declares a shape, with an example its predicate accepts, for every read", () => {
-    expect(reads).toHaveLength(14);
+    expect(reads).toHaveLength(15);
     for (const def of reads) {
       expect(def.inputShape?.schema, def.id).toBeDefined();
       expect(def.inputSchema!(def.inputShape!.example), def.id).toBe(true);

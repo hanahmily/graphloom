@@ -5,7 +5,7 @@ import type { PrepareTaskInput, PrepareTaskReply, TaskPlanStep } from "@graphloo
 import { GRAPH_ID } from "./constants.js";
 import { parseProfile, ProfileError } from "./profile.js";
 
-const USAGE = "graphloom task new pr-review <owner/repo#N | https://github.com/owner/repo/pull/N> --profile <name|path> [--base <branch>] [--review] [--all-questions] [--repo <clone>]";
+const USAGE = "graphloom task new pr-review <owner/repo#N | https://github.com/owner/repo/pull/N> --profile <name|path> [--base <branch>] [--all-questions] [--repo <clone>]";
 const NAME = "[A-Za-z0-9_.-]{1,100}";
 
 /** The pull request an argument names: `owner/repo#N` or its URL. */
@@ -35,13 +35,12 @@ export function prepareTask(input: PrepareTaskInput): PrepareTaskReply {
 
   let pull: ReturnType<typeof parsePullArgument>;
   let base = profile.baseBranch;
-  let review = false;
   let allQuestions = false;
   const positional: string[] = [];
   for (let i = 0; i < input.args.length; i += 1) {
     const arg = input.args[i]!;
     if (arg === "--review") {
-      review = true;
+      // Accepted and ignored since 0.21: every run reviews its head (design §2); earlier invocations keep working.
     } else if (arg === "--all-questions") {
       allQuestions = true;
     } else if (arg === "--base" || arg.startsWith("--base=")) {
@@ -83,8 +82,8 @@ export function prepareTask(input: PrepareTaskInput): PrepareTaskReply {
     {
       kind: "writeTask",
       path: `reviews/${repo}-${number}/task.yaml`,
-      fields: { base: "${mergeBase}", request: `${review ? "Review" : "Report"} on ${owner}/${repo}#${number} at \${headSha}${allQuestions ? ", asking every question" : ""}.` },
+      fields: { base: "${mergeBase}", request: `Review on ${owner}/${repo}#${number} at \${headSha}${allQuestions ? ", asking every question" : ""}.` },
     },
   ];
-  return { summary: `${review ? "review" : "report-only review"} of ${owner}/${repo}#${number} against ${base}${allQuestions ? ", asking every question even if the change is judged unnecessary" : ""}`, steps };
+  return { summary: `review of ${owner}/${repo}#${number} against ${base}${allQuestions ? ", asking every question even if the change is judged unnecessary" : ""}`, steps };
 }

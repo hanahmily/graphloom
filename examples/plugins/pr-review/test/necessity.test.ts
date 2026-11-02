@@ -113,17 +113,12 @@ describe("necessity-unnecessary: a #1443-like change that breaks the write path 
   const sim = simulate({ scenarioName: "necessity-unnecessary" });
   const qa = qaOf(sim);
 
-  it("stops report ready with every receipt valid, asking no question and giving no answer but N1's", () => {
-    expect(stopOf(sim)).toMatchObject({ reason: "report ready", retryable: false });
+  it("stops answers accepted with every receipt valid, asking no question and giving no answer but N1's", () => {
+    expect(stopOf(sim)).toMatchObject({ reason: "answers accepted", retryable: false });
     expect(sim.receipts.filter((r) => r.valid)).toHaveLength(9);
     expect(agents(sim)).toEqual(["necessity-v1", "answer-check-v1"]);
     expect(qa.questions.map((q) => q.id)).toEqual(["N1"]);
     expect(qa.purposes).toEqual([]);
-  });
-
-  it("points the operator at the session that holds N1's answer: the Questions stage after a skip, the Answers stage otherwise", () => {
-    expect(stopOf(sim)!.blocker).toContain("graphloom session open <run> --stage questions");
-    expect(stopOf(simulate({ scenarioName: "necessity-necessary" }))!.blocker).toContain("graphloom session open <run> --stage answers");
   });
 
   it("records N1 with its conclusion, the checker's support, and the skip", () => {
@@ -233,7 +228,7 @@ describe("necessity-disputed: the checker refutes the unnecessary conclusion twi
   const qa = qaOf(sim);
 
   it("asks the answerer for one correction, checks again, and then asks every question", () => {
-    expect(stopOf(sim)).toMatchObject({ reason: "report ready" });
+    expect(stopOf(sim)).toMatchObject({ reason: "answers accepted" });
     expect(agents(sim)).toEqual(["necessity-v1", "answer-check-v1", "necessity-revision-v1", "answer-check-v1", "questions-v1", "answers-v1", "answer-check-v1"]);
     const revision = qaJobs(sim).find((j) => j.resultSchema === "necessity-revision-v1")!;
     expect(revision.continueFrom).toBeDefined();
@@ -305,7 +300,7 @@ describe("the operator override: task new --all-questions asks every question an
   });
 
   it("asks every question even though N1 is unnecessary and supported, and records the override", () => {
-    expect(stopOf(sim)).toMatchObject({ reason: "report ready" });
+    expect(stopOf(sim)).toMatchObject({ reason: "answers accepted" });
     expect(agents(sim)).toEqual(["necessity-v1", "answer-check-v1", "questions-v1", "answers-v1", "answer-check-v1"]);
     const qa = qaOf(sim);
     expect(qa.necessity).toMatchObject({ conclusion: "unnecessary", skipped: false, decision: { action: "ask-all", override: true } });

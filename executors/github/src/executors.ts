@@ -346,6 +346,25 @@ export const getPull = defineExecutor<NumberInput, JobOutput>({
 });
 
 /**
+ * The login the credential authenticates as (`GET /user`): what a graph compares a review's author to, to tell its own
+ * post from one somebody else made. Takes the repository like every read, which it does not use.
+ */
+export const getViewer = defineExecutor<RepoInput, JobOutput>({
+  id: "graphloom.github/get-viewer",
+  version: GITHUB_EXECUTOR_VERSION,
+  effect: "read",
+  capabilities: ["network:github"],
+  ...readShape([], {}, {}),
+  inputSchema: (v): v is RepoInput => isRepoInput(v),
+  async execute(input, ctx) {
+    return runRead(ctx, "get-viewer", { owner: input.owner, repo: input.repo }, async (client) => {
+      const res = await githubRequest<{ login?: string }>(client, "GET", "/user");
+      return { summary: `authenticated as ${res.data.login ?? "unknown"}`, github: { item: { login: res.data.login ?? null }, rateLimit: res.rateLimit } };
+    });
+  },
+});
+
+/**
  * One text file at a ref, whole, with its blob sha. A path that is not a
  * readable text file is an answer, not a failed read: the item says
  * `found: false` and why, so the caller can name the problem.
@@ -1404,6 +1423,7 @@ export const executors = [
   listPulls,
   getIssue,
   getPull,
+  getViewer,
   getFile,
   listIssueComments,
   listLabels,

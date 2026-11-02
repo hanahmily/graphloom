@@ -438,8 +438,8 @@ describe("coverage-measured (through the graph)", () => {
     expect(sim.receipts.filter((r) => r.requirementId === "measurements" || r.requirementId === "change-report").every((r) => r.valid)).toBe(true);
   });
 
-  it("asks complexity-coverage for the measured CRAP, with the measured numbers, and stops at report ready", () => {
-    expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "report ready" } });
+  it("asks complexity-coverage for the measured CRAP, with the measured numbers, and stops at answers accepted", () => {
+    expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "answers accepted" } });
     const qa = JSON.parse(sim.qa!.json) as { questions: Array<{ type: string; text: string; answer?: { answer: string } }> };
     const q = qa.questions.find((x) => x.type === "complexity-coverage")!;
     expect(q.text).toMatch(/Complexity 12, measured coverage 8\/20, CRAP 43\.1\./);
@@ -475,7 +475,7 @@ describe("the sandbox-unavailable and coverage-off runs", () => {
     for (const config of [{}, { metrics: { generated: [], coverage: false, mutation: { enabled: false } } }]) {
       const sim = simulate({ scenarioName: "sandbox-unavailable", config });
       expect(sim.jobs.filter((j) => j.confinement?.kind === "docker" || j.checkout !== undefined)).toEqual([]);
-      expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "report ready" } });
+      expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "answers accepted" } });
     }
   });
 

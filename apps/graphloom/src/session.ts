@@ -150,7 +150,7 @@ const GITHUB_TOKEN_NAMES = ["GITHUB_TOKEN", "GH_TOKEN", "GITHUB_PAT", "GH_ENTERP
 /** The environment the opened agent gets: the harness's basics and `passEnv`, never a GitHub token. */
 function agentEnv(setup: SessionSetup, config: RunnerConfig | undefined, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const kept = minimalEnv(env, setup.passEnv);
-  for (const name of [...GITHUB_TOKEN_NAMES, ...(config?.github?.tokenEnv !== undefined ? [config.github.tokenEnv] : [])]) delete kept[name];
+  for (const name of [...GITHUB_TOKEN_NAMES, ...(config?.github?.tokenEnv !== undefined ? [config.github.tokenEnv] : []), ...(config?.github?.writeTokenEnv !== undefined ? [config.github.writeTokenEnv] : [])]) delete kept[name];
   if (setup.harness === "claude-code") kept.CLAUDE_CONFIG_DIR = setup.store;
   else kept.CODEX_HOME = setup.store;
   return kept;

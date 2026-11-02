@@ -362,6 +362,29 @@ const COMPLEX_PULL: Pull = {
   doc: TTL_DOC,
 };
 
+/**
+ * A Q&A with nothing for round 1 to raise on the `COMPLEX_PULL` change: its purpose is stated, no declared dependency lacks a
+ * source (so "none found" is a plain answer), and the missing-test and complexity-coverage questions are answered by a cited test.
+ */
+const CLEAN_ROUND1: QaSpec = {
+  base: { manifests: { "go.mod": "module github.com/apache/skywalking-banyandb\n\ngo 1.24.0\n" } },
+  purposes: [{ section: "features", source: "body", quote: "which parses a retention such as 7d" }],
+  answer: (q, _sym, _record, dflt) =>
+    q.type === "missing-test" || q.type === "complexity-coverage"
+      ? { ...dflt, answer: "pkg/schema/ttl_test.go exercises ParseTTL with a table of units and ranges.", status: "answered", none_found: false, citations: [{ path: "pkg/schema/ttl_test.go", tree: "base", start: 1, end: 1, quote: "package schema" }], proposal: { kind: "none", splits: [], testFile: "", testName: "", cases: [], assertion: "" } }
+      : dflt,
+};
+
+/** The same for the `LARGE_PULL` change: both high-level changes (W1, W2) have their purpose stated in the body, and their missing-test questions a cited test. */
+const CLEAN_LARGE: QaSpec = {
+  base: { manifests: { "go.mod": "module github.com/apache/skywalking-banyandb\n\ngo 1.24.0\n" } },
+  purposes: [
+    { section: "highlevel", item: "W1", source: "body", quote: "Adds the alpha helpers" },
+    { section: "highlevel", item: "W2", source: "body", quote: "a beta helper that uses them" },
+  ],
+  answer: CLEAN_ROUND1.answer!,
+};
+
 /** What `go.sh` reports for `pkg/schema/ttl.go` when its tests run 8 of ParseTTL's 20 statements (lines 6 to 35). */
 const TTL_COVERAGE_REPORT = [
   "graphloom-coverage-v1 go",
@@ -1085,7 +1108,15 @@ export function hugeRehearsal(config: unknown): { scenario: RehearsalScenario; h
     commits: HUGE_COMMITS,
     diff: hugeDiff(),
     doc: hugeStaticDocs().all,
-    qa: { base: { hits: hugeHits() }, answer: (_q, _sym, _record, dflt) => ({ ...dflt, answer: `${dflt.answer} ${"The searches and the cited lines show it. ".repeat(60)}`.slice(0, 1_900) }) },
+    // A Q&A round 1 raises nothing on (the purposes are stated by the title, no dependency lacks a source, a test is cited), so the run goes on into the review layer.
+    qa: {
+      base: { hits: hugeHits(), manifests: { "go.mod": "module github.com/apache/skywalking-banyandb\n\ngo 1.24.0\n" } },
+      purposes: ["W1", "W2", "W3", "W4", "W5"].map((item) => ({ section: "highlevel", item, source: "title" as const, quote: HUGE_TITLE })),
+      answer: (q, sym, record, dflt) => {
+        const a = CLEAN_ROUND1.answer!(q, sym, record, dflt);
+        return { ...a, answer: `${a.answer} ${"The searches and the cited lines show it. ".repeat(60)}`.slice(0, 1_900) };
+      },
+    },
   };
   const headFiles = hugeHeadFiles();
   const built = build(profile, pull, { report: hugeReport, features: hugeFeatures, headFiles }).scenario;
@@ -1096,8 +1127,8 @@ export function hugeRehearsal(config: unknown): { scenario: RehearsalScenario; h
 
 /** The scenarios, for the profile the run is described with (design §16). */
 /**
- * A scenario with the review layer's replies added (design §16, `review-layer`): it still ends at `report ready`, and the
- * replies are used once the operator approves the review layer (or the request is in Review mode).
+ * A scenario with the review layer's replies added (design §16, `review-layer`): the replies are used when round 1 finds no issue
+ * and the same run goes on into the review layer.
  */
 function withReview(scenario: RehearsalScenario, script: ReviewScript): RehearsalScenario {
   const parts = reviewScenarioParts(script);
@@ -1124,6 +1155,8 @@ export function rehearsal(config: unknown): GraphRehearsal {
       injection: build(profile, REPORT_PULL, { toolId: "static-go-1", body: `${REPORT_PULL.body}\n\n${INJECTION}`, notes: [`The pull request body addresses automated reviewers: "${INJECTION}"`] }).scenario,
       // Run with `LARGE_LIMITS` (design §16): the pull request is large, partitioned into three areas plus the generated file; one high-level reporter job and one claim check report it, and each batch of questions is its own job.
       "large-pull-request": build(profile, LARGE_PULL, { toolId: "static-go-1" }).scenario,
+      // The same, with a Q&A round 1 raises nothing on: the run goes on into the review layer, over the areas the briefing cites.
+      "large-review-layer": build(profile, LARGE_PULL, { toolId: "static-go-1", qa: CLEAN_LARGE }).scenario,
       // A new function with 12 decision points and nesting 4: its Measurements row, a split-function proposal and a complexity-coverage entry.
       "complex-function": build(profile, COMPLEX_PULL, { toolId: "static-go-1" }).scenario,
       // No sandbox exists in this version; the static metrics run under bwrap with no network, coverage and mutation are not run.
@@ -1175,6 +1208,8 @@ export function rehearsal(config: unknown): GraphRehearsal {
       "necessity-necessary": build(profile, SYNC_PULL, { toolId: "static-go-1" }).scenario,
       // The repository has a principles skill at the pinned base; two of its principles apply to the change and N1 judges both as preserved, the checker supporting them.
       "necessity-principles": build(profile, SYNC_PULL, { toolId: "static-go-1", qa: { ...SYNC_PULL.qa, necessity: { principles: { text: PRINCIPLES_FILE } } } }).scenario,
+      // The same, with a Q&A round 1 raises nothing on (the missing-test question is answered by a cited test): the run goes on into the review layer, whose reviewers are given the principles.
+      "necessity-principles-clean": build(profile, SYNC_PULL, { toolId: "static-go-1", qa: { ...SYNC_PULL.qa, necessity: { principles: { text: PRINCIPLES_FILE } }, answer: CLEAN_ROUND1.answer! } }).scenario,
       // N1 says the change breaks offline-idempotent and the checker supports it: necessary becomes questionable, naming the principle, and every question is asked.
       "necessity-principle-broken": build(profile, SYNC_PULL, { toolId: "static-go-1", qa: { ...SYNC_PULL.qa, necessity: { principles: { text: PRINCIPLES_FILE, verdicts: { "offline-idempotent": "breaks" } } } } }).scenario,
       // The same break, which the checker does not support: recorded with both statements, the conclusion stays necessary.
@@ -1190,7 +1225,8 @@ export function rehearsal(config: unknown): GraphRehearsal {
       // A pull request of 1000 data files: report.json and review.html are past one write command, so each is written in parts (design §6.6).
       "large-artifacts": build(profile, ARTIFACTS_PULL, {}).scenario,
       // The review layer (design §8): three aspect reviewers over one Go file; a confirmed P1, a refuted P2 (the checker's dismissal), a confirmed non-behavioral P2, and the draft.
-      "review-layer": withReview(build(profile, COMPLEX_PULL, { toolId: "static-go-1" }).scenario, { total: 1, path: "pkg/schema/ttl.go" }),
+      // Round 1 finds no issue (the purpose is stated, no dependency lacks a source, every answer is plain and cites a covering test), so the same run continues into the review layer and publishes round 2.
+      "review-layer": withReview(build(profile, COMPLEX_PULL, { toolId: "static-go-1", qa: CLEAN_ROUND1 }).scenario, { total: 1, path: "pkg/schema/ttl.go" }),
     },
   };
 }

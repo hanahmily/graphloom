@@ -389,7 +389,7 @@ describe("the diagram job in the graph", () => {
     const sim = simulate({ scenarioName: "diagram-corrected" });
 
     it("draws, checks, sends the problems back to the same session once, and checks the correction", () => {
-      expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "report ready" } });
+      expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "answers accepted" } });
       const jobs = diagramJobs(sim);
       expect(jobs).toHaveLength(2);
       expect(jobs[0]).toMatchObject({ jobId: "diagrammer", stageId: "report", purpose: "diagnostic", readOnly: true });
@@ -419,7 +419,7 @@ describe("the diagram job in the graph", () => {
     const sim = simulate({ scenarioName: "diagram-fallback" });
 
     it("goes on: the plugin draws the diagram, and review.html says the skill's drawing failed its checks and why", () => {
-      expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "report ready" } });
+      expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "answers accepted" } });
       expect(diagramJobs(sim)).toHaveLength(2);
       const { doc } = reportOf(sim);
       const drawn = doc!.diagrams!.features.F1!;
@@ -441,7 +441,7 @@ describe("the diagram job in the graph", () => {
     const sim = simulate({ scenarioName: "diagram-skill-check-fails" });
 
     it("sends the skill's findings back, then runs the checks on the correction, and the state diagrams are the skill's", () => {
-      expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "report ready" } });
+      expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "answers accepted" } });
       const jobs = diagramJobs(sim);
       expect(jobs).toHaveLength(2);
       expect((jobs[1]!.input as { assignment: string }).assignment).toMatch(/the skill's checks failed: .*self_check\.py: finding/);
@@ -521,7 +521,7 @@ describe("the diagram job in the graph", () => {
 
   it("draws in large mode too, once, after the claim check, and draws the same on the same report", () => {
     const sim = simulate({ scenario: scenarioWith("large-pull-request", () => undefined, { limits: LARGE_LIMITS }), config: { limits: LARGE_LIMITS }, maxSteps: 250 });
-    expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "report ready" } });
+    expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "answers accepted" } });
     expect(diagramJobs(sim)).toHaveLength(1);
     const order = sim.jobs.filter((j) => j.stageId === "report" && j.kind === "agent").map((j) => j.resultSchema);
     expect(order.at(-2)).toBe("claim-check-v1");
@@ -544,15 +544,6 @@ describe("the diagram job in the graph", () => {
     expect(diagramJobs(sim)).toHaveLength(0);
     expect(checkJobs(sim)).toHaveLength(0);
     expect(reportOf(sim).doc!.diagrams).toBeUndefined();
-  });
-});
-
-describe("the stop message", () => {
-  it("names review.html first, and review.md as its plain-text copy for agents and session open", () => {
-    const sim = simulate({ scenarioName: "report" });
-    const stop = sim.final.action.type === "stop" ? sim.final.action.stop : undefined;
-    expect(stop!.blocker).toMatch(/^the report is the briefing \.graphloom\/review\/review\.html, with the appendix \.graphloom\/review\/review-appendix\.html; review\.md beside them is the plain-text copy of both for agents and graphloom session open/);
-    expect(stop!.blocker!.indexOf("review.html")).toBeLessThan(stop!.blocker!.indexOf("review.md"));
   });
 });
 

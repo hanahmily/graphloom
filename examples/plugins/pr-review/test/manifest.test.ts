@@ -58,7 +58,7 @@ describe("graphloom.manifest.json", () => {
   });
 
   it("has a rehearsal entry whose scenarios the graph can describe", () => {
-    expect(Object.keys(rehearsal(BANYANDB).scenarios)).toEqual(["happy", "report", "report-corrections", "injection", "large-pull-request", "complex-function", "sandbox-unavailable", "answer-finds-existing-helper", "answer-no-library-with-whole-repo-search", "answer-checker-contradicts", "needs-author-purpose", "purpose-stated", "missing-test", "coverage-measured", "crap-upper-bound", "necessity-unnecessary", "necessity-disputed", "necessity-necessary", "necessity-principles", "necessity-principle-broken", "necessity-principle-unsupported", "state-lifecycle", "feature-data-flow", "diagram-corrected", "diagram-skill-check-fails", "diagram-fallback", "large-artifacts", "review-layer"]);
+    expect(Object.keys(rehearsal(BANYANDB).scenarios)).toEqual(["happy", "report", "report-corrections", "injection", "large-pull-request", "large-review-layer", "complex-function", "sandbox-unavailable", "answer-finds-existing-helper", "answer-no-library-with-whole-repo-search", "answer-checker-contradicts", "needs-author-purpose", "purpose-stated", "missing-test", "coverage-measured", "crap-upper-bound", "necessity-unnecessary", "necessity-disputed", "necessity-necessary", "necessity-principles", "necessity-principles-clean", "necessity-principle-broken", "necessity-principle-unsupported", "state-lifecycle", "feature-data-flow", "diagram-corrected", "diagram-skill-check-fails", "diagram-fallback", "large-artifacts", "review-layer"]);
     expect(Object.keys(rehearsal({ not: "a profile" }).scenarios)).toEqual([]);
   });
 });

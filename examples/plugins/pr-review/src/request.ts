@@ -4,7 +4,7 @@
 import type { Profile } from "./profile.js";
 
 export interface PullRequest {
-  /** `report`: stop after Answers for the operator's decision; `review`: continue into the review layer without pausing (design §2). */
+  /** The request's prefix. Since 0.21 both route alike (every run reviews its head and ends, design §2); `Report` is kept so earlier tasks still parse. */
   mode: "report" | "review";
   owner: string;
   repo: string;
@@ -19,7 +19,7 @@ export interface PullRequest {
  * The pull request the task's request names (design §3.1): `Report on
  * owner/repo#N at <40-hex>.` with the repository the profile's `project`, or
  * the pull request's URL in place of `owner/repo#N`; `Review on …` is the same
- * request in Review mode. Anything else is an incompatible task with the reason returned.
+ * request (the one `graphloom task new` writes). Anything else is an incompatible task with the reason returned.
  */
 export function requestedPull(request: string, profile: Pick<Profile, "project">): PullRequest | { problem: string } {
   const text = request.trim();

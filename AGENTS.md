@@ -49,12 +49,15 @@ an approval a graph declared as data. Tests of these use stub `claude`/`codex`
 binaries and a temporary `HOME`, never the real login; the one live check of
 Claude Code's fork is opt-in (`GRAPHLOOM_LIVE_CLAUDE_FORK=1`).
 
-The proposed `pr-review` graph (a neutral change report, questions and their
-answers on an incoming pull request first, the first question being whether the
-change is necessary, which an unnecessary answer ends; an optional review layer
-drafts findings, published only on operator approval) follows the
+The proposed `pr-review` graph (no human in a run: one run reviews one head in two
+rounds. Round 1 is a neutral change report, questions and their answers on an
+incoming pull request, the first question being whether the change is necessary;
+issues in it are posted and end the run. Otherwise round 2, three aspect reviewers
+with verified findings, runs in the same run; either way the run posts one `COMMENT`
+review whose first line is the verdict) follows the
 [PR-review design](docs/design-pr-review-graph.md); its shared review machinery
-is vendored source, not a dependency.
+is vendored source, not a dependency. Its one write, the review, needs the runner
+config's `github.writeTokenEnv`; the plugin never sees the token.
 The plugin also vendors the third-party diagram-design agent skill
 (`examples/plugins/pr-review/vendor/diagram-design`, MIT, unmodified, with its
 `LICENSE` and a `VENDORED.md` naming source and commit; design

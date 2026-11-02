@@ -275,7 +275,7 @@ describe("a large pull request whose artifacts pass one write command", () => {
   const ids = (prefix: string): string[] => sim.jobs.flatMap((j) => (j.input as { commands?: Array<{ id: string }> }).commands?.map((c) => c.id) ?? []).filter((id) => id.startsWith(prefix));
 
   it("completes: report.json and the appendix are written in parts, no write fails for size, and every requirement is met", () => {
-    expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "report ready" } });
+    expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "answers accepted" } });
     expect(sim.receipts.every((r) => r.valid)).toBe(true);
     expect(ids("report-json-p").length).toBeGreaterThanOrEqual(2);
     expect(ids("review-appendix-html-p").length).toBeGreaterThanOrEqual(2);

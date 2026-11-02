@@ -5,10 +5,11 @@ import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { loadRunState } from "@graphloom/controller";
 import { GITHUB_API_URL_ENV } from "@graphloom/executor-github";
 import { startFakeGitHub, type FakeGitHub } from "@graphloom/executor-github/testing";
 import { createScope, createTaskWorkspace, exampleBundle, execFileAsync, goVersion, repoRoot } from "@graphloom/testkit";
-import { check, rehearse, REHEARSAL_GITHUB_TOKEN_ENV } from "../src/rehearsal.js";
+import { check, rehearseStopAt, REHEARSAL_GITHUB_TOKEN_ENV } from "../src/rehearsal.js";
 import { RUNNER_CONFIG_ENV } from "../src/runner-config.js";
 import { fakeRunnerConfig, writeFakeCodingAgents } from "./fixtures/fake-coding-agents.js";
 
@@ -78,13 +79,15 @@ describe.skipIf(GO === undefined)("graphloom check and rehearse on pr-review wit
     expect(report.supervisor).toMatchObject({ status: "selected", harness: "pi", source: "plugin" });
   }, 60_000);
 
+  // The offline stand-in never writes to GitHub (rehearsal design §4.6), so these runs stop once Round 1 is decided: after it the graph
+  // would publish its review, which is the one write the graph makes. The publish flow is covered by the plugin's own tests.
   for (const scenario of ["happy", "report", "report-corrections", "injection", "complex-function", "sandbox-unavailable", "answer-finds-existing-helper", "answer-no-library-with-whole-repo-search", "answer-checker-contradicts", "needs-author-purpose", "purpose-stated", "missing-test", "crap-upper-bound", "state-lifecycle", "necessity-unnecessary", "necessity-disputed", "necessity-necessary"]) {
-    it(`reaches ready for the ${scenario} scenario: Fetch, Report, Questions and Answers accepted, then the run stops final at "report ready"`, async () => {
+    it(`reaches Round 1 for the ${scenario} scenario: Fetch, Report, Questions and Answers accepted, then Round 1 decided`, async () => {
       const env = await ready();
-      const report = await rehearse(env.taskPath, { scenario, offline: true, commands: "stub" });
-      expect(report.verdict, JSON.stringify({ blocker: report.blocker, convergence: report.convergence, boundaries: report.boundaries })).toBe("ready");
-      expect(report.convergence.actual.receipts.sort()).toEqual(["answers", "fetch", "questions", "report"]);
-      expect(report.convergence.actual.stopReason).toBe("report ready");
+      const stopped = await rehearseStopAt(env.taskPath, "round1", { scenario, offline: true, commands: "stub" });
+      expect(stopped.ok, JSON.stringify(stopped)).toBe(true);
+      const state = await loadRunState(stopped.stateDir);
+      expect([...new Set(state.receipts.filter((r) => r.valid).map((r) => r.stageId))].sort()).toEqual(["answers", "fetch", "questions", "report", "round1"]);
       // Offline: the fake GitHub was never asked.
       expect(github!.requests).toEqual([]);
     }, 180_000);

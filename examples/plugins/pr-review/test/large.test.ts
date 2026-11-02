@@ -46,7 +46,7 @@ describe("a large pull request, reported at a high level (design §6.9)", () => 
   const sim = run();
 
   it("runs to the end: every receipt valid, one report", () => {
-    expect(stopOf(sim)).toMatchObject({ reason: "report ready" });
+    expect(stopOf(sim)).toMatchObject({ reason: "answers accepted" });
     expect(sim.receipts.every((r) => r.valid)).toBe(true);
     expect(sim.receipts.map((r) => r.stageId).filter((s, i, a) => a.indexOf(s) === i)).toEqual(["fetch", "report", "questions", "answers"]);
   });
@@ -138,7 +138,7 @@ describe("a large pull request, reported at a high level (design §6.9)", () => 
     expect(other).toContain("api/gen/types.pb.go changed (+5 −0 lines); generated code, not summarised");
     expect(other).toContain("assets/logo.png changed (+1 −0 lines); patch not provided by GitHub");
     expect(r.omitted).toEqual(["assets/logo.png"]);
-    expect(stopOf(sim)!.reason).toBe("report ready");
+    expect(stopOf(sim)!.reason).toBe("answers accepted");
   });
 
   it("lists the areas in the briefing, with the reporter's label for each and the command that opens the reporter's session", () => {
@@ -220,7 +220,7 @@ describe("a large pull request, reported at a high level (design §6.9)", () => 
 
   it("keeps the questions a standard run asks, per symbol, when the pull request is small", () => {
     const standard = simulate({ scenario: scenarioWith("large-pull-request", () => undefined, {}), config: {}, maxSteps: 250 });
-    expect(stopOf(standard)!.reason).toBe("report ready");
+    expect(stopOf(standard)!.reason).toBe("answers accepted");
     const q = qa(standard);
     expect(q.mode).toBe("standard");
     // One existence/reuse/common-logic question for each new symbol, not three.
@@ -409,7 +409,7 @@ describe("the budget pre-check before the reporter job (design §6.9)", () => {
   it("completes a large simulated run end to end within the plugin's default budgets", () => {
     const defaults = definitionFor(profileOf(LARGE)).defaultBudgets!;
     const sim = run(undefined, LARGE, { budgets: { agentInvocations: defaults.agentInvocations!, jobs: defaults.jobs!, decisions: defaults.decisions! } });
-    expect(stopOf(sim)).toMatchObject({ reason: "report ready" });
+    expect(stopOf(sim)).toMatchObject({ reason: "answers accepted" });
     expect(sim.receipts.every((r) => r.valid)).toBe(true);
     expect(sim.jobs.filter((j) => j.kind === "agent").length).toBeLessThanOrEqual(defaults.agentInvocations!);
     expect(sim.jobs.length).toBeLessThanOrEqual(defaults.jobs!);
@@ -440,11 +440,11 @@ describe("the limits (design §6.9)", () => {
 
   it("goes large, not refused, over maxFiles or maxPatchBytes, and refuses only over the hard caps", () => {
     const over = simulate({ config: { limits: { maxFiles: 3 } }, maxSteps: 250 });
-    expect(stopOf(over)?.reason).toBe("report ready");
+    expect(stopOf(over)?.reason).toBe("answers accepted");
     expect(assignmentOf(over.jobs.find((j) => j.resultSchema === "change-report-v1")!)).toContain("describe the pull request at a high level");
     expect(report(over).modeReasons).toEqual([{ limit: "maxFiles", value: 5, max: 3 }]);
     const bytes = simulate({ config: { limits: { maxPatchBytes: 100 } }, maxSteps: 250 });
-    expect(stopOf(bytes)?.reason).toBe("report ready");
+    expect(stopOf(bytes)?.reason).toBe("answers accepted");
     expect(report(bytes).modeReasons).toEqual([{ limit: "maxPatchBytes", value: expect.any(Number), max: 100 }]);
     expect(stopOf(simulate({ config: { limits: { maxFiles: 3, hardMaxFiles: 4 } } }))!.blocker).toMatch(/5 files, past the profile's limits.hardMaxFiles of 4/);
     expect(stopOf(simulate({ config: { limits: { maxPatchBytes: 50, hardMaxPatchBytes: 50 } } }))!.blocker).toMatch(/patches are \d+ bytes, past the profile's limits.hardMaxPatchBytes of 50/);
@@ -452,7 +452,7 @@ describe("the limits (design §6.9)", () => {
 
   it("goes large for the questions alone over maxNewSymbols, keeping the standard report", () => {
     const sim = simulate({ scenario: scenarioWith("large-pull-request", () => undefined, { limits: { maxNewSymbols: 3 } }), config: { limits: { maxNewSymbols: 3 } }, maxSteps: 250 });
-    expect(stopOf(sim)!.reason).toBe("report ready");
+    expect(stopOf(sim)!.reason).toBe("answers accepted");
     expect(report(sim).mode).toBe("standard");
     expect(agents(sim, "change-report-v1").map((j) => j.jobId)).toEqual(["reporter"]);
     const q = qa(sim);
@@ -626,7 +626,7 @@ describe("recording an answered batch", () => {
       b1.output.answers.reverse();
       s.results["answers-v1"] = [b1 as never];
     });
-    expect(stopOf(sim)).toMatchObject({ reason: "report ready" });
+    expect(stopOf(sim)).toMatchObject({ reason: "answers accepted" });
     expect(sim.receipts.every((r) => r.valid)).toBe(true);
   });
 
@@ -644,7 +644,7 @@ describe("recording an answered batch", () => {
       s.results["answer-check-v1"] = [checks[0]!, round as never, round as never];
       s.commands!["cite-b1-1"] = { exitCode: 0, stdout: "1 ok\nchecked 1\n" };
     });
-    expect(stopOf(sim)).toMatchObject({ reason: "report ready" });
+    expect(stopOf(sim)).toMatchObject({ reason: "answers accepted" });
     expect(sim.receipts.every((r) => r.valid)).toBe(true);
     const q = qa(sim).questions.find((x: { type: string }) => x.type === "missing-test");
     expect(q.answer.status).toBe("needs author");
@@ -699,7 +699,7 @@ describe("the item limit and the roles of large mode", () => {
   it("falls back to the answerer's harness, model and effort when no batch-answerer is named", () => {
     const harnesses = { reporter: { harness: "claude-code", model: "opus", effort: "high" }, "report-checker": "codex", questioner: "codex", answerer: { harness: "claude-code", model: "haiku", effort: "low" }, "answer-checker": "codex" };
     const fallback = run(undefined, { ...LARGE, harnesses });
-    expect(stopOf(fallback)).toMatchObject({ reason: "report ready" });
+    expect(stopOf(fallback)).toMatchObject({ reason: "answers accepted" });
     const batches = agents(fallback, "answers-v1");
     expect(batches.length).toBeGreaterThan(0);
     for (const j of batches) {

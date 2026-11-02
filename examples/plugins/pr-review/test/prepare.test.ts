@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { validateTaskPlan, type PrepareTaskInput } from "@graphloom/sdk";
-import { approvalDecision, approvalDeclarations, definitionFor, parsePullArgument, parseProfile, prepareTask } from "../src/index.js";
+import { definitionFor, parsePullArgument, parseProfile, prepareTask } from "../src/index.js";
 
 const banyandb = JSON.parse(readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "profiles", "banyandb.json"), "utf8")) as unknown;
 
@@ -24,21 +24,21 @@ describe("prepareTask", () => {
     for (const arg of ["apache/skywalking-banyandb#1234", "https://github.com/apache/skywalking-banyandb/pull/1234"]) {
       const plan = prepareTask(input([arg]));
       expect(plan).toEqual({
-        summary: "report-only review of apache/skywalking-banyandb#1234 against main",
+        summary: "review of apache/skywalking-banyandb#1234 against main",
         steps: [
           { kind: "fetch", remote: "origin", refspec: "refs/pull/1234/head", intoRef: `${R}/head` },
           { kind: "fetch", remote: "origin", refspec: "refs/heads/main", intoRef: `${R}/base` },
           { kind: "resolve", name: "headSha", revParse: `${R}/head` },
           { kind: "updateRef", from: "${headSha}", to: `${R}/heads/\${headSha}` },
           { kind: "resolve", name: "mergeBase", mergeBase: [`${R}/head`, `${R}/base`] },
-          { kind: "writeTask", path: "reviews/skywalking-banyandb-1234/task.yaml", fields: { base: "${mergeBase}", request: "Report on apache/skywalking-banyandb#1234 at ${headSha}." } },
+          { kind: "writeTask", path: "reviews/skywalking-banyandb-1234/task.yaml", fields: { base: "${mergeBase}", request: "Review on apache/skywalking-banyandb#1234 at ${headSha}." } },
         ],
       });
       expect(() => validateTaskPlan(plan, "pr-review")).not.toThrow();
     }
   });
 
-  it("falls back to the project's URL without a matching remote, honors --base and --review, and the profile's baseBranch", () => {
+  it("falls back to the project's URL without a matching remote, honors --base, accepts the redundant --review, and the profile's baseBranch", () => {
     const plan = prepareTask(input(["apache/skywalking-banyandb#7", "--base", "release-0.9", "--review"], { repo: { remotes: [{ name: "fork", url: "https://github.com/me/skywalking-banyandb.git" }], head: "b".repeat(40) } })) as { summary: string; steps: Array<Record<string, unknown>> };
     expect(plan.steps[0]).toMatchObject({ remote: "https://github.com/apache/skywalking-banyandb.git" });
     expect(plan.steps[1]).toMatchObject({ refspec: "refs/heads/release-0.9" });
@@ -50,13 +50,13 @@ describe("prepareTask", () => {
 
   it("writes --all-questions into the request, which asks every follow-up question even when N1 judges the change unnecessary (design 7.5), and validates", () => {
     const plan = prepareTask(input(["apache/skywalking-banyandb#7", "--all-questions"])) as { summary: string; steps: Array<Record<string, unknown>> };
-    expect(plan.steps[5]).toMatchObject({ fields: { request: "Report on apache/skywalking-banyandb#7 at ${headSha}, asking every question." } });
-    expect(plan.summary).toBe("report-only review of apache/skywalking-banyandb#7 against main, asking every question even if the change is judged unnecessary");
+    expect(plan.steps[5]).toMatchObject({ fields: { request: "Review on apache/skywalking-banyandb#7 at ${headSha}, asking every question." } });
+    expect(plan.summary).toBe("review of apache/skywalking-banyandb#7 against main, asking every question even if the change is judged unnecessary");
     expect(() => validateTaskPlan(plan as never, "pr-review")).not.toThrow();
     const both = prepareTask(input(["apache/skywalking-banyandb#7", "--review", "--all-questions"])) as { steps: Array<Record<string, unknown>> };
     expect(both.steps[5]).toMatchObject({ fields: { request: "Review on apache/skywalking-banyandb#7 at ${headSha}, asking every question." } });
     const plain = prepareTask(input(["apache/skywalking-banyandb#7"])) as { steps: Array<Record<string, unknown>> };
-    expect(plain.steps[5]).toMatchObject({ fields: { request: "Report on apache/skywalking-banyandb#7 at ${headSha}." } });
+    expect(plain.steps[5]).toMatchObject({ fields: { request: "Review on apache/skywalking-banyandb#7 at ${headSha}." } });
   });
 
   it("matches a remote's URL literally: a dot in the repository name is not a wildcard", () => {
@@ -80,20 +80,10 @@ describe("prepareTask", () => {
   });
 });
 
-describe("approvals", () => {
-  it("declares review-layer, with its areas input, in the pinned definition", () => {
-    const declared = definitionFor(parseProfile(banyandb)).approvals;
-    expect(declared).toEqual(approvalDeclarations());
-    expect(declared).toEqual([{ id: "review-layer", stageId: "review", description: expect.stringContaining("review layer"), inputs: [{ name: "areas", description: expect.stringContaining("A3,A17"), pattern: "A[0-9]+(,A[0-9]+)*" }] }]);
-    expect(declared![0]).not.toHaveProperty("unavailable");
-  });
-
-  it("reads the latest decision on an approval from operator-approval evidence", () => {
-    const record = (decision: string, approvalId = "review-layer") => ({ ref: `e-${decision}`, kind: "other" as const, payload: { type: "operator-approval", approvalId, decision } });
-    expect(approvalDecision([], "review-layer")).toBeUndefined();
-    expect(approvalDecision([record("decline", "publish")], "review-layer")).toBeUndefined();
-    expect(approvalDecision([record("decline")], "review-layer")).toBe("decline");
-    expect(approvalDecision([record("decline"), record("approve")], "review-layer")).toBe("approve");
-    expect(approvalDecision([{ ref: "x", kind: "other", payload: { type: "other", approvalId: "review-layer", decision: "decline" } }], "review-layer")).toBeUndefined();
+describe("no human in the flow", () => {
+  it("declares no approval: the pinned definition has none, and the stages end with Publish", () => {
+    const definition = definitionFor(parseProfile(banyandb));
+    expect(definition.approvals).toBeUndefined();
+    expect(definition.stages.map((s) => s.id)).toEqual(["fetch", "report", "questions", "answers", "round1", "review", "draft", "publish"]);
   });
 });

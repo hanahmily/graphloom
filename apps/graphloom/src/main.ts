@@ -853,7 +853,9 @@ with its own timeoutMs (default 4h).
 "harnesses": ["claude-code", "pi", "codex"] lets a job choose any of them with
 input.harness. Command jobs run as you in the job's workspace ("command":
 { "timeoutMs": ... } bounds one job). "github": { "tokenEnv": "GITHUB_TOKEN" }
-serves read-only GitHub executors with the token from that variable.
+serves read-only GitHub executors with the token from that variable;
+"writeTokenEnv" names a variable whose token also allows the write executors
+(pr-review posts its review with it); the graph never sees the token.
 
 Supervisor: run and resume use a supervisor on Pi, Claude Code, or Codex when an
 operator config exists at $GRAPHLOOM_SUPERVISOR_CONFIG or

@@ -65,8 +65,12 @@ export interface RunnerConfig {
   /** Largest operator-conversation transcript `session open` stores (bytes); beyond it the evidence says `transcript: omitted`. Default 32 MiB. */
   maxConversationBytes?: number;
   pi?: Omit<PiBindingOptions, "apiKey">;
-  /** Serve the read-only GitHub executors; the token comes from the named environment variable. */
-  github?: { tokenEnv?: string; baseUrl?: string };
+  /**
+   * Serve the GitHub executors; the token comes from the named environment variable. Reads only, unless `writeTokenEnv` names a
+   * variable that is set: then that token is the one the executors get and the write executors (comments, reviews, pull
+   * requests, labels) are allowed too. A graph asks for a write by name; it never sees either token.
+   */
+  github?: { tokenEnv?: string; writeTokenEnv?: string; baseUrl?: string };
   /** Settings for command jobs, which run as the user in the job's workspace. */
   command?: { timeoutMs?: number };
   /** Shell command run once when a run leaves `running`; `run --on-stop` and `resume --on-stop` override it. */
@@ -196,12 +200,16 @@ export function parseRunnerConfig(value: unknown, source = "runner config"): Run
   }
   if (obj.github !== undefined) {
     const nested = `${source}: github`;
-    const g = settings(obj.github, nested, ["tokenEnv", "baseUrl"]);
+    const g = settings(obj.github, nested, ["tokenEnv", "writeTokenEnv", "baseUrl"]);
     if (g.tokenEnv !== undefined && (typeof g.tokenEnv !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(g.tokenEnv))) {
       throw new Error(`${source}: github.tokenEnv must name an environment variable`);
     }
+    if (g.writeTokenEnv !== undefined && (typeof g.writeTokenEnv !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(g.writeTokenEnv))) {
+      throw new Error(`${source}: github.writeTokenEnv must name an environment variable`);
+    }
     config.github = {
       ...(g.tokenEnv !== undefined ? { tokenEnv: g.tokenEnv } : {}),
+      ...(g.writeTokenEnv !== undefined ? { writeTokenEnv: g.writeTokenEnv } : {}),
       ...(g.baseUrl !== undefined ? { baseUrl: nonempty(g.baseUrl, `${nested}.baseUrl`) } : {}),
     };
   }

@@ -6,17 +6,45 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { validateResultShape, type EvidenceRecord, type GraphDecision, type JobSpec, type Receipt, type RehearsalScenario, type RunView } from "@graphloom/sdk";
 import { advancePullRequest, definitionFor } from "../src/graph.js";
-import { CODING_AGENT } from "../src/constants.js";
+import { CODING_AGENT, CREATE_PULL_REVIEW, GET_VIEWER, LIST_PULL_REVIEWS, LIST_PULL_REVIEW_COMMENTS, PUBLISH_STAGE } from "../src/constants.js";
 import { parseProfile, type Profile } from "../src/profile.js";
 import { REHEARSAL_HEAD_FILES, REHEARSAL_REQUEST, rehearsal } from "../src/rehearsal.js";
 import { validatorById } from "../src/validators.js";
 import { writtenQa, writtenReport } from "../src/write.js";
 
+/** The login the fake GitHub's credential authenticates as. */
+export const FAKE_LOGIN = "graphloom-bot";
+
+/** The reason the default simulation ends with: Fetch, Report, Questions and Answers are accepted, and round 1 is next. */
+export const ANSWERED = "answers accepted";
+
 export const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const BANYANDB: Record<string, unknown> = JSON.parse(readFileSync(path.join(root, "profiles", "banyandb.json"), "utf8"));
 export const profileOf = (over: Record<string, unknown> = {}): Profile => parseProfile({ ...BANYANDB, ...over });
 
+/** One review the fake GitHub holds: what `list-pull-reviews` shows of it, and the comments it carries. */
+export interface FakeReview {
+  id: number;
+  body: string;
+  commitId: string;
+  /** The author; the credential's own login when absent. */
+  user?: string;
+  state: string;
+  url: string;
+  comments: Array<{ id: number; path: string; line: number; body: string }>;
+}
+
+/** What the simulation's fake GitHub saw during the Publish stage. */
+export interface FakeGithub {
+  /** Every input a `create-pull-review` job carried, in order. */
+  creates: Array<Record<string, unknown>>;
+  /** The reviews the pull request holds: seeded ones, and the ones the creates posted. */
+  reviews: FakeReview[];
+}
+
 export interface Simulation {
+  /** The Publish stage's fake GitHub. */
+  github: FakeGithub;
   decisions: GraphDecision[];
   jobs: JobSpec[];
   evidence: EvidenceRecord[];
@@ -36,6 +64,19 @@ interface Options {
   /** Replace the files the worktree holds, by path (the stubbed checkout writes none). */
   files?: Record<string, string>;
   maxSteps?: number;
+  /**
+   * How far to run: `answers` (the default) ends the simulation when the graph is about to decide round 1, after Answers
+   * were accepted (what most tests of Fetch, Report, Questions and Answers look at); `end` runs every stage.
+   */
+  through?: "answers" | "end";
+  /** How many pages the Publish stage's read of the reviews takes (the pages after the first start at the cursor the previous one gave). */
+  reviewPages?: number;
+  /** How many whole reads of a review's comments show none of them (a read that lags the post); every later read shows them. */
+  hideComments?: number;
+  /** Reviews of the pull request that are already on GitHub when the run starts. */
+  reviews?: FakeReview[];
+  /** What the Publish stage's `create-pull-review` does: `post` (the default); `lost` fails without posting; `posted-then-failed` posts and then reports an ambiguous failure. A list gives one outcome per attempt. */
+  create?: Array<"post" | "lost" | "posted-then-failed">;
   /** Evidence the run already holds when the graph first runs: an operator's approval, a recorded conversation. */
   seed?: EvidenceRecord[];
   /** Agent sessions the run already holds (a conversation's row), before any job settles. */
@@ -104,12 +145,22 @@ function* simulationSteps(options: Options = {}): Generator<undefined, Simulatio
     cursors.set(`${kind}:${key}`, i + 1);
     return list[i];
   };
+  const github: FakeGithub = { creates: [], reviews: [...(options.reviews ?? [])] };
+  let nextReviewId = 7000;
+  let commentReads = 0;
+  let nextCommentId = 9000;
   let written: Simulation["written"];
   let qa: Simulation["qa"];
   let lastWork: string | undefined;
   let digest = "d0";
   for (let step = 0; step < (options.maxSteps ?? 60); step += 1) {
     yield;
+    // Through Answers only: the stages up to Answers are accepted, and the run would decide round 1 next.
+    if ((options.through ?? "answers") === "answers" && ["fetch", "report", "questions", "answers"].every((id) => definition.stages.find((st) => st.id === id)!.requirementIds.every((r) => receipts.some((x) => x.stageId === id && x.requirementId === r && x.valid)))) {
+      const stop: GraphDecision = { action: { type: "stop", stop: { reason: ANSWERED, blocker: "Fetch, Report, Questions and Answers are accepted", retryable: false } }, reason: "the simulation ends after Answers" };
+      decisions.push(stop);
+      return { decisions, jobs, evidence, receipts, final: stop, github, ...(written !== undefined ? { written } : {}), ...(qa !== undefined ? { qa } : {}) };
+    }
     const view: RunView = {
       runId: "rehearsal-sim",
       task: { request: options.request ?? REHEARSAL_REQUEST },
@@ -133,7 +184,7 @@ function* simulationSteps(options: Options = {}): Generator<undefined, Simulatio
     }
     decisions.push(decision);
     const action = decision.action;
-    if (action.type === "stop" || action.type === "supervise") return { decisions, jobs, evidence, receipts, final: decision, ...(written !== undefined ? { written } : {}), ...(qa !== undefined ? { qa } : {}) };
+    if (action.type === "stop" || action.type === "supervise") return { decisions, jobs, evidence, receipts, final: decision, github, ...(written !== undefined ? { written } : {}), ...(qa !== undefined ? { qa } : {}) };
     if (action.type === "observe") {
       for (const p of action.observe.paths ?? []) {
         const bytes = files[p];
@@ -169,7 +220,35 @@ function* simulationSteps(options: Options = {}): Generator<undefined, Simulatio
       // A job that changes the worktree changes the workspace digest, and its own evidence carries the new one.
       digest = "d1";
     }
-    if (job.kind === "command" && job.executor !== undefined) {
+    if (job.kind === "command" && job.executor !== undefined && job.stageId === PUBLISH_STAGE) {
+      // The Publish stage's GitHub: the reviews of the pull request, the one write, and the comments of a review.
+      const page = { complete: true, nextCursor: null, startCursor: "1" };
+      let out: Record<string, unknown>;
+      if (job.executor.id === GET_VIEWER.id) {
+        out = { item: { login: FAKE_LOGIN } };
+      } else if (job.executor.id === LIST_PULL_REVIEWS.id) {
+        const pages = options.reviewPages ?? 1;
+        const at = Number((job.input as { cursor?: string }).cursor ?? "1");
+        const last = at >= pages;
+        const mine = github.reviews.filter((_, i) => i % pages === at - 1);
+        out = { items: mine.map((r) => ({ id: r.id, user: r.user ?? FAKE_LOGIN, state: r.state, body: r.body.slice(0, 4000), bodyTruncated: false, commitId: r.commitId, submittedAt: null, url: r.url })), page: last ? { complete: true, nextCursor: null, startCursor: String(at) } : { complete: false, nextCursor: String(at + 1), startCursor: String(at) } };
+      } else if (job.executor.id === LIST_PULL_REVIEW_COMMENTS.id) {
+        commentReads += 1;
+        out = { items: commentReads <= (options.hideComments ?? 0) ? [] : github.reviews.flatMap((r) => r.comments.map((c) => ({ id: c.id, reviewId: r.id, path: c.path, line: c.line, side: "RIGHT", body: c.body.slice(0, 4000), bodyTruncated: false }))), page };
+      } else if (job.executor.id === CREATE_PULL_REVIEW.id) {
+        const input = job.input as Record<string, unknown>;
+        github.creates.push(input);
+        const how = options.create?.[Math.min(github.creates.length - 1, (options.create?.length ?? 1) - 1)] ?? "post";
+        const marker = `<!-- graphloom-op: rehearsal-sim/${String(input.idempotencyKey)} -->`;
+        if (how !== "lost") {
+          const id = (nextReviewId += 1);
+          github.reviews.push({ id, body: `${String(input.body)}\n\n${marker}`, commitId: String(input.commitId), state: "COMMENTED", url: `https://github.com/o/r/pull/1#pullrequestreview-${id}`, comments: ((input.comments ?? []) as Array<{ path: string; line: number; body: string }>).map((c) => ({ id: (nextCommentId += 1), path: c.path, line: c.line, body: c.body })) });
+        }
+        const last = github.reviews.at(-1)!;
+        out = how === "post" ? { outcome: "created", review: { id: last.id, state: last.state, url: last.url, commitId: last.commitId, author: "graphloom-bot" } } : { outcome: "ambiguous" };
+      } else throw new Error(`the publish stage dispatched ${job.executor.id}`);
+      evidence.push({ ref: `e${(n += 1)}`, kind: "other", candidateDigest: digest, payload: { producer, github: out } });
+    } else if (job.kind === "command" && job.executor !== undefined) {
       const read = next("reads", job.executor.id);
       evidence.push({ ref: `e${(n += 1)}`, kind: "other", candidateDigest: digest, payload: { producer, github: read } });
     } else if (job.kind === "command") {

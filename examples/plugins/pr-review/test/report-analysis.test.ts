@@ -288,8 +288,8 @@ describe("the state-lifecycle scenario: a #1443-like change is one analysed item
   };
   const items = json.sections.flatMap((s) => s.items.map((i) => ({ section: s.id, ...i })));
 
-  it("reaches report ready, with the checker judging every claim, the lifecycle entries and the behavior rows included", () => {
-    expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "report ready" } });
+  it("reaches answers accepted, with the checker judging every claim, the lifecycle entries and the behavior rows included", () => {
+    expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "answers accepted" } });
     const check = assignmentOf(jobsOf(sim, "Check the report's")[0]!);
     for (const id of ["purpose", "overview", "R1 ", "R1.s1 ", "R1.s1.t1 ", "R1.s1.r1 ", "R1.s2 ", "R1.s2.t3 ", "R1.b1 ", "R1.b3 "]) expect(check).toContain(`\n${id}`);
     expect(json.removedParts).toEqual([]);
@@ -362,7 +362,7 @@ describe("the state-lifecycle scenario: a #1443-like change is one analysed item
     expect(kept.behavior).toHaveLength(3);
     expect(written.removedParts).toEqual([{ id: "R1.s2.t2", kind: "state", item: "R1", label: "firstErr", reason: "unsupported: the unsupported-type path sets firstErr unconditionally" }]);
     expect(out.written!.markdown).toContain("Removed by the claim check: the lifecycle of `firstErr`");
-    expect(out.final.action).toMatchObject({ type: "stop", stop: { reason: "report ready" } });
+    expect(out.final.action).toMatchObject({ type: "stop", stop: { reason: "answers accepted" } });
   });
 
   it("asks the reporter for the analysis: one item per conceptual change, lifecycle, before/after, and the state the scan found", () => {

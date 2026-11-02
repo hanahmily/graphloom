@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import type { EvidenceRecord, ExecutorPin } from "@graphloom/sdk";
-import { GET_PULL, LIST_CHECK_RUNS, LIST_PULL_COMMITS, LIST_PULL_FILES, LIST_PULL_REVIEWS, LIST_PULL_REVIEW_COMMENTS, LIST_REVIEW_THREADS } from "./constants.js";
+import { GET_PULL, PUBLISH_STAGE, LIST_CHECK_RUNS, LIST_PULL_COMMITS, LIST_PULL_FILES, LIST_PULL_REVIEWS, LIST_PULL_REVIEW_COMMENTS, LIST_REVIEW_THREADS } from "./constants.js";
 import { partitionAreas, type Partition } from "./areas.js";
 import { isObject, producer } from "./evidence.js";
 import { hardCapProblem, reportMode, type ReviewMode } from "./mode.js";
@@ -140,7 +140,10 @@ export type SnapshotState =
  * whole snapshot, or why this pull request cannot be reported (head moved,
  * past a profile limit, touches `.graphloom/`).
  */
-export function snapshotState(evidence: readonly EvidenceRecord[], pr: PullRequest, limits: Limits, excludeRoots: readonly string[] = []): SnapshotState {
+export function snapshotState(allEvidence: readonly EvidenceRecord[], pr: PullRequest, limits: Limits, excludeRoots: readonly string[] = []): SnapshotState {
+  // The Publish stage reads the pull request's reviews and comments again, page by page, as its own flow: those pages are not Fetch's
+  // complete chain and must never replace it (a pull request with over a thousand reviews would otherwise look unread).
+  const evidence = allEvidence.filter((e) => producer(e)?.stageId !== PUBLISH_STAGE);
   const results = new Map<string, ReadResult>();
   for (const spec of READS) {
     const r = readResult(evidence, spec);
