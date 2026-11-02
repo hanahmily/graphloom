@@ -3,13 +3,14 @@
 
 import type { EnvironmentCommand, JobSpec } from "@graphloom/sdk";
 import { describe, expect, it } from "vitest";
+import { recordedQa } from "../src/parts.js";
 import { assignmentProblem, ASSIGNMENT_BUDGET_CHARS, ASSIGNMENT_MARGIN_CHARS, fitLines, MAX_ASSIGNMENT_CHARS, shrinkToFit } from "../src/fit.js";
 import { diagramSpecs, MAX_DIAGRAM_DATA_CHARS } from "../src/diagrams.js";
 import type { Fact } from "../src/detectors.js";
 import type { ClaimTarget } from "../src/claims.js";
 import { planChecker, planReporter, pullText } from "../src/prompts.js";
+import type { Answer } from "../src/answers.js";
 import { planAnswerChecker, planAnswerer, planNecessity, planNecessityChecker } from "../src/qaprompts.js";
-import { withParts } from "../src/answers.js";
 import { reporterSections } from "../src/template.js";
 import type { Question } from "../src/questions.js";
 import type { Groundwork } from "../src/groundwork.js";
@@ -48,6 +49,15 @@ describe("every agent assignment fits the executor's bound on a pull request at 
     for (const s of ["change-report-v1", "claim-check-v1", "diagrams-v1", "necessity-v1", "questions-v1", "answers-v1", "answer-check-v1"]) expect(schemas.has(s)).toBe(true);
   });
 
+  it("asks per high-level change, so the questions stay at about sixteen however many areas and symbols there are", () => {
+    const written = recordedQa(sim.evidence);
+    if (written.state !== "read") throw new Error("qa.json was not written whole");
+    const qa = JSON.parse(written.value.json) as { questions: Array<{ id: string; item: string }> };
+    expect(qa.questions.length).toBeLessThanOrEqual(16);
+    expect(qa.questions[0]!.id).toBe("N1");
+    for (const q of qa.questions.slice(1)) expect(q.item).toMatch(/^W[1-5]$/);
+  });
+
   it("dispatches every agent job with an assignment within the bound", () => {
     const sizes = agentJobs(sim).map((j) => ({ what: `${j.stageId}/${j.resultSchema}${j.jobId !== undefined ? `/${j.jobId}` : ""}`, chars: assignmentOf(j).length }));
     const over = sizes.filter((s) => s.chars > MAX_ASSIGNMENT_CHARS);
@@ -74,7 +84,7 @@ describe("every agent assignment fits the executor's bound on a pull request at 
     }
     // The report's files and each kind of file the plugin writes for an agent are named by some job.
     const names = [...referenced].map((p) => p.slice(p.lastIndexOf("/") + 1));
-    for (const stem of ["review.md", "report.json", "groundwork-", "claims-", "required-questions-", "answers-"]) expect(names.some((n) => n.startsWith(stem)), `no job names a ${stem} file`).toBe(true);
+    for (const stem of ["review.md", "report.json", "groundwork-", "claims-"]) expect(names.some((n) => n.startsWith(stem)), `no job names a ${stem} file`).toBe(true);
   });
 });
 
@@ -154,27 +164,25 @@ describe("a job that would not fit points to a file the plugin writes first", ()
   });
 
   it("gives the answerer a file of the questions it cannot list, with every id there", () => {
-    const questions: Question[] = Array.from({ length: 900 }, (_, i) => ({ id: `Q${i + 1}`, type: "existing-equivalent", item: "R1", text: `Is there an equivalent of function number ${i + 1} that the base already has?`, origin: "required", key: `k${i}` }));
+    const questions: Question[] = Array.from({ length: 900 }, (_, i) => ({ id: `Q${i + 1}`, type: "existing-reuse-common", item: "R1", text: `Is there an equivalent of function number ${i + 1} that the base already has?`, origin: "required", key: `k${i}` }));
     const groundwork = { symbols: [], searches: new Map(), candidates: [], prSimilar: [], inventory: { dependencies: [], packages: [], truncated: [] }, testMap: new Map(), notes: [] } as unknown as Groundwork;
     const plan = planAnswerer({ pr: PR, snapshot: pull, view: { items: [], records: [] }, groundwork, questions, kind: "first", feedback: [], mountedDirs: [], reviewDir: DIR });
     expect(plan.text.length).toBeLessThanOrEqual(ASSIGNMENT_BUDGET_CHARS);
     const spill = plan.spills.find((x) => x.name.startsWith("questions-"))!;
     expect(plan.text).toContain(`${DIR}/${spill.name}`);
-    expect(spill.text).toContain("Q900 [existing-equivalent]");
+    expect(spill.text).toContain("Q900 [existing-reuse-common]");
     expect(plan.text).toContain("Questions (900):");
   });
 
-  it("gives the answer checker a batch of 15 combined questions, each answered in three full parts, within the bound, the answers as a file", () => {
-    const questions: Question[] = Array.from({ length: 15 }, (_, i) => ({ id: `Q${i + 1}`, type: "existing-reuse-common", item: `R${i + 1}`, text: `For the mechanism this change adds (item ${i + 1}): (1) an equivalent; (2) a library; (3) common logic? ${"It adds: pkg.Name (pkg/name.go:10), ".repeat(12)}`, origin: "required", key: `k${i}` }));
+  it("gives the answer checker a batch of 15 existence/reuse/common-logic questions, each answered with full evidence, within the bound, the answers as a file", () => {
+    const questions: Question[] = Array.from({ length: 15 }, (_, i) => ({ id: `Q${i + 1}`, type: "existing-reuse-common", item: `W${i + 1}`, text: `For the new functions and features of this change, W${i + 1} "the capability" (pkg/name.go:10): is there an equivalent, a library, common logic? ${"It cites pkg.Name (pkg/name.go:10), ".repeat(12)}`, origin: "required", key: `k${i}` }));
     const search = (n: number) => ({ pattern: `pattern-${n}-${"x".repeat(150)}`, tree: "base" as const, paths: [], ignoreCase: false as const, hits: 0 });
-    const part = (name: "existing-equivalent" | "reuse-library" | "common-logic") => ({ part: name, answer: "No equivalent was found; the searches show none. ".repeat(30), status: "answered" as const, none_found: true, citations: Array.from({ length: 12 }, (_, k) => ({ path: `pkg/file${k}.go`, tree: "base" as const, start: 1, end: 9, quote: "q".repeat(300) })), searches: Array.from({ length: 12 }, (_, k) => search(k)), inventory: [] });
-    const answers = new Map(questions.map((q) => [q.id, withParts({ question: q.id, answer: "summary ".repeat(40), status: "answered", none_found: false, citations: [], searches: [], inventory: [], metrics: [], proposal: { kind: "none", splits: [], testFile: "", testName: "", cases: [], assertion: "" }, parts: (["existing-equivalent", "reuse-library", "common-logic"] as const).map(part) })] as const));
+    const answers = new Map(questions.map((q) => [q.id, { question: q.id, answer: "No equivalent was found; the searches show none. ".repeat(30), status: "answered" as const, none_found: true, citations: Array.from({ length: 12 }, (_, k) => ({ path: `pkg/file${k}.go`, tree: "base" as const, start: 1, end: 9, quote: "q".repeat(300) })), searches: Array.from({ length: 12 }, (_, k) => search(k)), inventory: [], metrics: [], proposal: { kind: "none" as const, splits: [], testFile: "", testName: "", cases: [], assertion: "" } }] as [string, Answer]));
     const groundwork = { symbols: [], searches: new Map(), candidates: [], prSimilar: [], inventory: { dependencies: [], packages: [], truncated: [] }, testMap: new Map(), notes: [] } as unknown as Groundwork;
     const plan = planAnswerChecker({ pr: PR, snapshot: pull, groundwork, questions, answers, retry: false, mountedDirs: [], reviewDir: DIR });
     expect(plan.text.length).toBeLessThanOrEqual(ASSIGNMENT_BUDGET_CHARS);
     const spill = plan.spills.find((x) => x.name.startsWith("answers-"))!;
     expect(plan.text).toContain(`${DIR}/${spill.name}`);
-    expect(spill.text).toContain("PART reuse-library");
     expect(spill.text).toContain("Q15 [existing-reuse-common]");
     const asked = planAnswerer({ pr: PR, snapshot: pull, view: { items: [], records: [] }, groundwork, questions, kind: "first", feedback: [], mountedDirs: [], reviewDir: DIR });
     expect(asked.text.length).toBeLessThanOrEqual(ASSIGNMENT_BUDGET_CHARS);

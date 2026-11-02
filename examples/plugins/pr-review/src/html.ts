@@ -28,6 +28,7 @@ import { SEVERITIES, type Finding } from "./review.js";
 import type { MetricsRecord } from "./metrics/record.js";
 import { isTestPath } from "./metrics/record.js";
 import { searchWhere, type MeasuredSearch } from "./searches.js";
+import { VISUAL_CSS, visualHeader, visualSections, type VisualLinks } from "./visual.js";
 
 // ---- the documents it renders ----
 
@@ -179,7 +180,7 @@ function findingHtml(f: Finding, d: Draft, g: Github, full: boolean): string {
     f.notes.length > 0 ? `<p class="muted">${esc(f.notes.join("; "))}.</p>` : "",
     full && f.suggestion.trim() !== "" ? `<p>Suggestion:</p><pre><code>${esc(f.suggestion)}</code></pre>` : "",
   ].join("");
-  return details(summary, body, isBlocking(f), "qa");
+  return details(summary, body, isBlocking(f), "qa", full ? `f-${f.id}` : "");
 }
 
 /** The Review part of the briefing: the findings by severity with counts, each collapsed except the blocking ones. */
@@ -302,7 +303,7 @@ function overviewHtml(r: ReportDoc): string {
 }
 
 function whatsNewHtml(b: FinalBriefing, g: Github): string {
-  return b.whatsNew.length === 0 ? para("None stated.") : `<ul class="plain new">${b.whatsNew.map((w) => `<li>${esc(w.text)} ${citesHtml(w.cites, g)}</li>`).join("")}</ul>`;
+  return b.whatsNew.length === 0 ? para("None stated.") : `<ul class="plain new">${b.whatsNew.map((w, n) => `<li id="W${n + 1}"><span class="rid">W${n + 1}</span> ${esc(w.text)} ${citesHtml(w.cites, g)}</li>`).join("")}</ul>`;
 }
 
 function scopeHtml(sc: Scope): string {
@@ -564,7 +565,8 @@ function qaHtml(r: ReportDoc, qa: QaDoc | undefined, g: Github): string {
   if (qa.necessity?.skipped === true) return details("<h2>Q&amp;A</h2>", para(`${NECESSITY_ID} is answered above, under Necessity.`) + para(qa.necessity.note ?? SKIPPED_NOTE), true, "sec");
   const asked = qa.questions.filter((q) => q.id !== NECESSITY_ID);
   const count = (s: string): number => asked.filter((q) => q.answer?.status === s).length;
-  const items = new Map(r.sections.flatMap((s) => s.items).map((i) => [i.id, i] as const));
+  // The items the questions are about: the report's, and in a large report the high-level changes (W1…, the briefing's bullets).
+  const items = new Map([...r.sections.flatMap((s) => s.items).map((i) => [i.id, i] as const), ...r.briefing.whatsNew.map((w, n) => [`W${n + 1}`, w] as const)]);
   const groups = new Map<string, typeof asked>();
   for (const q of asked) groups.set(q.item, [...(groups.get(q.item) ?? []), q]);
   const body = [
@@ -640,13 +642,13 @@ ul.new li{margin:4px 0}ul.open li{margin:8px 0}.foot{margin:18px 0 0;font-size:1
 @media (max-width:700px){main{padding:10px 8px}.card{min-width:100px}}
 `;
 
-function page(i: HtmlInput, g: Github, nav: string, parts: string[]): string {
+function page(i: HtmlInput, g: Github, nav: string, parts: string[], header?: string): string {
   const r = i.report;
   return [
     "<!doctype html>",
-    `<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${esc(`${r.pull.owner}/${r.pull.repo}#${r.pull.number}: ${r.pull.title}`)}</title><style>${CSS}</style></head>`,
+    `<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${esc(`${r.pull.owner}/${r.pull.repo}#${r.pull.number}: ${r.pull.title}`)}</title><style>${CSS}${VISUAL_CSS}</style></head>`,
     `<body><main>`,
-    headerHtml(i, g, nav),
+    header ?? headerHtml(i, g, nav),
     ...parts,
     `</main></body></html>`,
     "",
@@ -655,29 +657,37 @@ function page(i: HtmlInput, g: Github, nav: string, parts: string[]): string {
 
 const githubOf = (r: ReportDoc): Github => ({ owner: r.pull.owner, repo: r.pull.repo, head: r.pull.head, base: r.pull.base, number: r.pull.number });
 
-/** The whole `review.html` (design §6.11): the briefing, one page, then a link to the appendix. */
+/** The links of the visual report: the pull request, its commits, and the appendix. */
+function visualLinks(r: ReportDoc, g: Github): VisualLinks {
+  return { pull: pullHref(g), head: commitHref(r.pull.head, g), ...(r.pull.base !== undefined ? { base: commitHref(r.pull.base, g) } : {}), appendix: APPENDIX_HREF };
+}
+
+/**
+ * The whole `review.html` (design §6.11): the report as diagrams and visual elements only, in order: the header strip,
+ * the verdict and scope tiles, the data-flow diagrams, the risk map and the question status grid. Labels, numbers and
+ * badges are the only text; the rest is in tooltips and in the appendix.
+ */
 export function renderReviewHtml(i: HtmlInput): string {
   const r = i.report;
   const g = githubOf(r);
-  return page(i, g, `<a href="${APPENDIX_HREF}">appendix</a>`, [
-    briefingHtml(i, g),
-    featuresHtml(r, g),
-    checkHtml(r.briefing, g),
-    reviewHtml(i.review, g),
-    hotspotsHtml(r, g),
-    areasHtml(r),
-    openQuestionsHtml(i),
-    `<p class="foot"><a href="${APPENDIX_HREF}">Appendix: every change item, the full measurements, the claim check's removals, and the whole Q&amp;A</a></p>`,
-  ]);
+  const l = visualLinks(r, g);
+  return page(i, g, "", visualSections(i, l), visualHeader(r, l));
 }
 
-/** The whole `review-appendix.html` (design §6.11): everything the briefing leaves out. */
+/** The whole `review-appendix.html` (design §6.11): everything `review.html` shows as a picture, in text, and the rest. */
 export function renderAppendixHtml(i: HtmlInput): string {
   const r = i.report;
   const g = githubOf(r);
   const c: Ctx = { g, files: r.files, diagrams: 0, drawn: r.diagrams };
   return page(i, g, `<a href="${REVIEW_HREF}">briefing</a>`, [
     `<p class="foot"><a href="${REVIEW_HREF}">Back to the briefing</a></p>`,
+    briefingHtml(i, g),
+    featuresHtml(r, g),
+    checkHtml(r.briefing, g),
+    hotspotsHtml(r, g),
+    areasHtml(r),
+    openQuestionsHtml(i),
+    reviewHtml(i.review, g),
     details("<h2>Summary</h2>", overviewHtml(r), true, "sec"),
     necessityHtml(i.necessity, g),
     changeMapHtml(r),

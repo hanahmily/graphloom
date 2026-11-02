@@ -407,7 +407,7 @@ describe("the diagram job in the graph", () => {
       const { doc } = reportOf(sim);
       expect(doc!.diagrams!.features.F1).toMatchObject({ via: "diagram-design" });
       const html = htmlOf(sim);
-      const flow = html.slice(html.indexOf("<h2>Data flow per new feature</h2>"), html.indexOf("<h2>What you need to check</h2>"));
+      const flow = html.slice(html.indexOf("<h2>Data flow</h2>"), html.indexOf("<h2>Risk map</h2>"));
       expect(flow).toMatch(/<div class="scroll"><svg class="dd" role="img" aria-labelledby="dd1-title dd1-desc"/);
       expect(flow).not.toContain("drawn by the plugin");
       expect(flow).toContain("Nightly retention sweep");
@@ -426,8 +426,11 @@ describe("the diagram job in the graph", () => {
       expect(drawn).toMatchObject({ via: "plugin" });
       expect((drawn as { note: string }).note).toMatch(/^drawn by the plugin: the diagram-design drawing failed its checks \(.*<script/);
       const html = htmlOf(sim);
-      const section = html.slice(html.indexOf("<h2>Data flow per new feature</h2>"), html.indexOf("<h2>What you need to check</h2>"));
-      expect(section).toMatch(/<p>drawn by the plugin: the diagram-design drawing failed its checks \(/);
+      const section = html.slice(html.indexOf("<h2>Data flow</h2>"), html.indexOf("<h2>Risk map</h2>"));
+      // The note is a tooltip of the caption, and a paragraph in the appendix.
+      expect(section).toMatch(/<div class="cap" title="[^"]*\(drawn by the plugin: the diagram-design drawing failed its checks \(/);
+      expect(section).not.toContain("<p>");
+      expect(appendixOf(sim)).toMatch(/<p>drawn by the plugin: the diagram-design drawing failed its checks \(/);
       expect(section).toContain("<svg");
       expect(section).not.toContain('class="dd"');
       expect(section).toContain("Nightly sweep");
@@ -449,7 +452,9 @@ describe("the diagram job in the graph", () => {
       const html = appendixOf(sim);
       expect((html.match(/<svg class="dd"/g) ?? []).length).toBe(2);
       expect(html).not.toContain("drawn by the plugin");
-      expect(htmlOf(sim)).not.toMatch(/<svg/);
+      // review.html has no drawing of a feature: its only SVGs are the scope bar and the risk map.
+      expect(htmlOf(sim)).not.toMatch(/<svg class="dd"/);
+      expect(htmlOf(sim).slice(htmlOf(sim).indexOf("<h2>Data flow</h2>"), htmlOf(sim).indexOf("<h2>Risk map</h2>"))).not.toContain("<svg");
     });
 
     it("confines the check job: a read-only job with no network, the plugin's directory read-only, and the skill's own scripts on a scratch file", () => {
@@ -528,7 +533,8 @@ describe("the diagram job in the graph", () => {
   });
 
   it("counts the diagram job in large mode's budget pre-check", () => {
-    expect(largeNeeds(10)).toMatchObject({ agentInvocations: 15, jobs: 66 });
+    // The questions are asked per high-level change (at most five), so the estimate does not grow with the areas.
+    expect(largeNeeds(10)).toMatchObject({ agentInvocations: 9, jobs: 51 });
     // One area: 7 agent invocations before the diagrams (the reporter and its checker, questioner, N1's two, one batch's two), 2 more for them; 46 jobs before (the files the agents read among them), 4 more.
     expect(largeNeeds(1)).toMatchObject({ agentInvocations: 9, jobs: 51 });
   });

@@ -225,7 +225,7 @@ describe("the briefing as text", () => {
   const r = assembleBriefing(valid({ check: { ...emptyBriefing().check, surfaces: [{ text: "Adds the retention_days flag.", cites: [at("pkg/a.go", 11, 12)] }] } }), new Map()).briefing;
 
   it("lists what is new, one bullet each with its cites", () => {
-    expect(whatsNewLines(r)).toEqual(["## What's new", "- Adds a retention policy. — pkg/a.go:11-12", ""]);
+    expect(whatsNewLines(r)).toEqual(["## What's new", "- **W1** Adds a retention policy. — pkg/a.go:11-12", ""]);
   });
 
   it("lists each feature's stages and flows with their cites", () => {
