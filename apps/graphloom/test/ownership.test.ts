@@ -69,7 +69,7 @@ interface Inspect {
 describe("run ownership across installed versions (no Node on PATH)", () => {
   it("records, dispatches, upgrades, prunes, and refuses per the design", async () => {
     const sb = await makeSandbox(base);
-    for (const v of ["0.1.0", "0.1.1", "0.2.0"]) await sb.publish(v, { populate: realCli, release: { stateFormat: 1 } });
+    for (const v of ["0.1.0", "0.1.1", "0.2.0"]) await sb.publish(v, { populate: realCli, release: { stateFormat: 2 } });
     const install = sb.installer(["--version", "0.1.0"]);
     expect(install.status, install.stderr).toBe(0);
     const v010 = path.join(sb.ghome, "versions", "0.1.0");
@@ -120,7 +120,7 @@ describe("run ownership across installed versions (no Node on PATH)", () => {
     const movedB = json<Inspect>(sb.graphloom(["inspect", b.stateDir], quiet), "inspect B");
     expect(movedB.install).toEqual({ version: "0.2.0", root: path.join(sb.ghome, "versions", "0.2.0") });
     expect(movedB.installHistory).toEqual([expect.objectContaining({ from: { version: "0.1.0", root: v010 }, to: movedB.install })]);
-    expect(movedB.stateFormat).toBe(1);
+    expect(movedB.stateFormat).toBe(2);
     expect(movedB.executorTransitions.length).toBeGreaterThan(0);
     for (const t of movedB.executorTransitions) {
       expect(t.fromSource?.startsWith(v010)).toBe(true);
