@@ -10,7 +10,17 @@ import { GRAPH_BUDGET_KEYS, PROTOCOL_VERSION, SUPERVISOR_HARNESSES, type GraphAc
  * of advance() input well before any run is actually pathological. This stays
  * a sanity bound against a runaway/looping plugin, not a tight protocol limit.
  */
-const MAX_WIRE_BYTES = 16_000_000;
+const DEFAULT_MAX_WIRE_BYTES = 64_000_000;
+
+/**
+ * The bound on one wire message: 64 MB by default (a large review's RunView passed 16 MB of evidence), or
+ * GRAPHLOOM_MAX_WIRE_BYTES when it is set to a positive integer.
+ */
+export function maxWireBytes(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.GRAPHLOOM_MAX_WIRE_BYTES;
+  const n = raw === undefined || raw.trim() === "" ? Number.NaN : Number(raw);
+  return Number.isSafeInteger(n) && n > 0 ? n : DEFAULT_MAX_WIRE_BYTES;
+}
 const VALIDATION_STATUSES = new Set(["passed", "failed", "inconclusive"]);
 
 export class WireValidationError extends Error {
@@ -23,7 +33,7 @@ export class WireValidationError extends Error {
   }
 }
 
-export function parseJsonBounded(raw: string, maxBytes = MAX_WIRE_BYTES): unknown {
+export function parseJsonBounded(raw: string, maxBytes = maxWireBytes()): unknown {
   if (Buffer.byteLength(raw, "utf8") > maxBytes) {
     throw new WireValidationError("oversized", `payload exceeds ${maxBytes} bytes`);
   }

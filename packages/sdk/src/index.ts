@@ -186,6 +186,7 @@ export {
   MAX_APPROVAL_FILE_BYTES,
   assertValidationInput,
   assertValidationResult,
+  maxWireBytes,
   parseJsonBounded,
 } from "./validate.js";
 
