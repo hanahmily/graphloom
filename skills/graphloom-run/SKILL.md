@@ -150,3 +150,6 @@ graphloom resume <stateDir> --decline review-layer --reason "the report is enoug
 - `--decline <id>` and `--approve <id>` record your decision as evidence on the
   stopped run; only the user decides, so never run either without being told
   which. A version that cannot act on an approval refuses it and says why.
+  An approval that declares inputs takes `--input <name>=<value>` with
+  `--approve`, for example `graphloom resume <stateDir> --approve review-layer
+  --input areas=A3,A17`; ask the user for the values, never guess them.

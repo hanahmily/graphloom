@@ -1737,3 +1737,45 @@ to be in `graphloom --help`.
   (`--repo`, `--profile`, `--out`, `--dry-run`, `--force`, each also as
   `--flag=value`), or follows `--`; so `--base main` and `--review` reach
   pr-review untouched.
+
+## 17. Operator approvals and their inputs
+
+A graph declares the decisions it asks the operator for, as data
+(`GraphDefinition.approvals`); the operator answers with
+`graphloom resume <run> --approve <id>` or `--decline <id> [--reason <text>]`,
+which records an `operator-approval` evidence record under the run lock and
+lifts a final stop that waited for it. The controller never reads what an
+approval means; the graph's `advance` does
+([pr-review §11](design-pr-review-graph.md#11-approvals)).
+
+**Inputs.** An approval may declare named values the operator gives with it:
+
+```ts
+{ id: "review-layer", stageId: "review",
+  inputs: [{ name: "areas", description: "…", pattern: "A[0-9]+(,A[0-9]+)*" }] }
+```
+
+```text
+graphloom resume <run> --approve review-layer --input areas=A3,A17,A18
+```
+
+- `--input <name>=<value>` is repeated for each value and splits at the first
+  `=`; a name given twice, or a value with no name, is refused by the CLI,
+  and so is `--input` without `--approve`.
+- `ApprovalInputDeclaration` has `name` (`[a-z][a-z0-9-]{0,31}`, unique in
+  the approval; at most 8 inputs), an optional one-line `description` and an
+  optional `pattern`, a regular expression (at most 500 characters) that the
+  whole value must match (the controller anchors it). `assertGraphDefinition`
+  checks the shape and that the pattern compiles.
+- Before anything changes, `approvalRefusal` refuses an input the approval
+  does not declare (naming those it does), a value over
+  `MAX_APPROVAL_INPUT_CHARS` (2,000) or with a control character, a value that
+  does not match its pattern, and any input on a `--decline`. A refused resume
+  records nothing.
+- The accepted values are recorded with the decision, as
+  `inputs: { <name>: <value> }` in the `operator-approval` payload (absent when
+  none were given). The record is run evidence like any other, so
+  `RunView.evidence` shows it to the graph; the latest approve of an approval
+  wins, so the operator corrects an input by approving again.
+- `graphloom --help` names `--input`; the `graphloom-run` skill tells an agent to
+  ask the user for the values.

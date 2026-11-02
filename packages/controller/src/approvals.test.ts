@@ -66,6 +66,30 @@ describe("approval decisions", () => {
     expect(declined.evidence.at(-1)!.payload).toMatchObject({ decision: "decline", reason: "not today", files: [], operator: "operator" });
   });
 
+  it("records the operator inputs an approval declares, checked against the declaration, and refuses the rest", async () => {
+    const state = await stateWith([
+      { id: "review-layer", inputs: [{ name: "areas", pattern: "A[0-9]+(,A[0-9]+)*" }, { name: "note" }] },
+      { id: "publish" },
+    ]);
+    const ask = (over: Partial<Parameters<typeof approvalRefusal>[1]>) => approvalRefusal(state, { approvalId: "review-layer", decision: "approve", ...over });
+    expect(ask({ inputs: { areas: "A3,A17" } })).toBeUndefined();
+    expect(ask({ inputs: { areas: "A3,A17", note: "anything at all" } })).toBeUndefined();
+    expect(ask({ inputs: { areas: "3,17" } })).toMatch(/input areas is "3,17", which does not match the declared pattern/);
+    expect(ask({ inputs: { areas: "A3,A17\nA1" } })).toMatch(/control character/);
+    expect(ask({ inputs: { areas: "A3 " } })).toMatch(/does not match/);
+    expect(ask({ inputs: { areas: "A1".repeat(1_100) } })).toMatch(/more than 2000/);
+    expect(ask({ inputs: { colour: "red" } })).toBe('approval "review-layer" declares no input "colour"; it declares areas, note');
+    expect(ask({ approvalId: "publish", inputs: { areas: "A1" } })).toBe('approval "publish" declares no inputs');
+    expect(ask({ decision: "decline", inputs: { areas: "A1" } })).toMatch(/a decline takes no input/);
+    expect(ask({ inputs: {} })).toBeUndefined();
+
+    const next = await applyApproval(state, { approvalId: "review-layer", decision: "approve", operator: "m", inputs: { areas: "A3,A17" } });
+    expect(next.evidence.at(-1)!.payload as OperatorApprovalPayload).toMatchObject({ type: "operator-approval", decision: "approve", inputs: { areas: "A3,A17" } });
+    // Without an input, the payload carries none.
+    const none = await applyApproval(state, { approvalId: "review-layer", decision: "approve" });
+    expect(none.evidence.at(-1)!.payload).not.toHaveProperty("inputs");
+  });
+
   it("refuses a declared file that is missing, not a regular file, a link out of the worktree, or past 256 KiB together", async () => {
     const state = await stateWith([{ id: "p", files: ["a.md"] }]);
     await expect(applyApproval(state, { approvalId: "p", decision: "approve" })).rejects.toThrow(/does not exist/);

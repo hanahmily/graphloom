@@ -118,6 +118,24 @@ export interface ApprovalDeclaration {
    * and `--decline` still records.
    */
   unavailable?: string;
+  /**
+   * Named values the operator may give with `--approve <id> --input
+   * <name>=<value>`, as data. The controller checks each against its
+   * declaration (declared name, `pattern`, `MAX_APPROVAL_INPUT_CHARS`), records
+   * the values in the `operator-approval` evidence and never reads what one
+   * means; the graph's `advance` does.
+   */
+  inputs?: ApprovalInputDeclaration[];
+}
+
+/** One operator input of an approval (`ApprovalDeclaration.inputs`). */
+export interface ApprovalInputDeclaration {
+  /** The name `--input` gives: `[a-z][a-z0-9-]{0,31}`, unique within the approval. */
+  name: string;
+  /** One line telling the operator what the value is. */
+  description?: string;
+  /** A regular expression the whole value must match (the controller anchors it); absent, any value of up to `MAX_APPROVAL_INPUT_CHARS`. */
+  pattern?: string;
 }
 
 /** The supervisor harnesses a graph may name (docs/design-supervisor-harnesses.md §7.1). */
@@ -452,6 +470,10 @@ export interface AgentSessionView {
   dispatchKey: string;
   executorId: string;
   status: "ok" | "failed" | "conflict";
+  /** The harness's own id of the session (`claude-<uuid>`, `codex-<uuid>`), which an `operator-conversation` evidence record names as its `forkSession`. */
+  sessionRef?: string;
+  /** When the session's last turn settled (ISO 8601); a conversation's `endedAt`. */
+  settledAt?: string;
   /** Operation this session continued, when it was not fresh. */
   continuedFrom?: string;
   /** The harness that ran the session (`claude-code`, `codex`, `pi`). */

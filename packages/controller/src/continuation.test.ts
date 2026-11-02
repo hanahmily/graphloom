@@ -266,6 +266,8 @@ describe("continuing an agent session on reentry (#53)", () => {
         dispatchKey: `work:${AGENT}`,
         executorId: AGENT,
         status: "ok",
+        sessionRef: "s-1",
+        settledAt: expect.any(String),
       },
     ]);
     const state = await loadRunState(report.stateDir);

@@ -44,7 +44,7 @@ hook for a task plan and runs it with Git hooks and user configuration off
 `graphloom session list|open` forks a recorded Claude Code or Codex session in
 the operator's terminal and records the conversation
 ([§15](docs/design-typescript-core.md#15-opening-a-recorded-agent-session));
-`graphloom resume <run> --approve|--decline <id>` records an operator decision on
+`graphloom resume <run> --approve <id> [--input name=value ...]|--decline <id>` records an operator decision on
 an approval a graph declared as data. Tests of these use stub `claude`/`codex`
 binaries and a temporary `HOME`, never the real login; the one live check of
 Claude Code's fork is opt-in (`GRAPHLOOM_LIVE_CLAUDE_FORK=1`).
