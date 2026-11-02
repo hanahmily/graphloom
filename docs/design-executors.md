@@ -145,7 +145,7 @@ described below, but not effects elsewhere on the machine.
 `@graphloom/executor-github` (`executors/github`) is the first built-in package:
 
 - Reads (effect `read`): `graphloom.github/list-issues`, `list-pulls`,
-  `get-issue`, `get-pull`, `get-file`, `list-issue-comments`, `list-labels`, and
+  `get-issue`, `get-pull`, `get-viewer` (the authenticated login), `get-file`, `list-issue-comments`, `list-labels`, and
   `list-milestones`. The pull request snapshot reads are `list-pull-files`
   (status, previous path of a rename, counts, patch, and `patchOmitted` when
   GitHub dropped a patch for size), `list-pull-commits`, `list-pull-reviews`,

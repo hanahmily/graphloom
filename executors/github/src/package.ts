@@ -14,6 +14,7 @@ export const GITHUB_EXECUTOR_IDS = [
   "graphloom.github/list-pulls",
   "graphloom.github/get-issue",
   "graphloom.github/get-pull",
+  "graphloom.github/get-viewer",
   "graphloom.github/get-file",
   "graphloom.github/list-issue-comments",
   "graphloom.github/list-labels",

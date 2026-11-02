@@ -143,7 +143,7 @@ export const round1Gated: Validator = profiled((input, profile) => {
   const a = analyze(input.evidence, profile, pr);
   if (a.state === "pending") return inconclusive(a.reason);
   if (a.state === "incompatible") return failed(a.problem);
-  const computed = round1Computed(input.evidence, a.analysis, pr);
+  const computed = round1Computed(input.evidence, a.analysis, pr, profile);
   if (computed.state === "pending") return inconclusive(computed.reason);
   const rec = recordedRound1(input.evidence);
   if (rec.state === "none") return inconclusive("round 1 has not been recorded");

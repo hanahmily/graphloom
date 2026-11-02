@@ -238,6 +238,11 @@ export async function startFakeGitHub(
       return;
     }
 
+    if (url.pathname === "/user" && method === "GET") {
+      send(res, 200, { login: FAKE_VIEWER });
+      return;
+    }
+
     const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
     // /repos/:owner/:repo/...
     if (parts[0] !== "repos" || parts.length < 4) {

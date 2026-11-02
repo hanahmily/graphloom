@@ -45,6 +45,8 @@ export const LIST_PULL_REVIEW_COMMENTS: ExecutorPin = { id: "graphloom.github/li
 export const LIST_REVIEW_THREADS: ExecutorPin = { id: "graphloom.github/list-review-threads", version: "1" };
 /** The one write the graph makes: a single `COMMENT` review (design §8.5). */
 export const CREATE_PULL_REVIEW: ExecutorPin = { id: "graphloom.github/create-pull-review", version: "1" };
+/** The login the credential authenticates as: who a review of this graph is authored by. */
+export const GET_VIEWER: ExecutorPin = { id: "graphloom.github/get-viewer", version: "1" };
 export const LIST_CHECK_RUNS: ExecutorPin = { id: "graphloom.github/list-check-runs", version: "1" };
 
 /** Deterministic corrections of the reporter's result before the supervisor (design §6.4). */

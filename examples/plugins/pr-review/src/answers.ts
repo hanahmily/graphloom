@@ -332,7 +332,8 @@ function splitProblems(p: Proposal, at: string, fn: ReturnType<typeof functionOf
   return out;
 }
 
-function isTestPath(packs: readonly FullPack[], path: string): boolean {
+/** Whether `path` is a test file by the effective language packs' own convention (`testFiles` globs), as answer validation judges a cited test. */
+export function isTestPath(packs: readonly FullPack[], path: string): boolean {
   const pack = packOf(packs, path);
   return pack !== undefined && pack.testFiles.length > 0 && matchesGeneratedGlob(pack.testFiles, path);
 }

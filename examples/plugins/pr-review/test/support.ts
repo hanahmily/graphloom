@@ -6,11 +6,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { validateResultShape, type EvidenceRecord, type GraphDecision, type JobSpec, type Receipt, type RehearsalScenario, type RunView } from "@graphloom/sdk";
 import { advancePullRequest, definitionFor } from "../src/graph.js";
-import { CODING_AGENT, CREATE_PULL_REVIEW, LIST_PULL_REVIEWS, LIST_PULL_REVIEW_COMMENTS, PUBLISH_STAGE } from "../src/constants.js";
+import { CODING_AGENT, CREATE_PULL_REVIEW, GET_VIEWER, LIST_PULL_REVIEWS, LIST_PULL_REVIEW_COMMENTS, PUBLISH_STAGE } from "../src/constants.js";
 import { parseProfile, type Profile } from "../src/profile.js";
 import { REHEARSAL_HEAD_FILES, REHEARSAL_REQUEST, rehearsal } from "../src/rehearsal.js";
 import { validatorById } from "../src/validators.js";
 import { writtenQa, writtenReport } from "../src/write.js";
+
+/** The login the fake GitHub's credential authenticates as. */
+export const FAKE_LOGIN = "graphloom-bot";
 
 /** The reason the default simulation ends with: Fetch, Report, Questions and Answers are accepted, and round 1 is next. */
 export const ANSWERED = "answers accepted";
@@ -24,6 +27,8 @@ export interface FakeReview {
   id: number;
   body: string;
   commitId: string;
+  /** The author; the credential's own login when absent. */
+  user?: string;
   state: string;
   url: string;
   comments: Array<{ id: number; path: string; line: number; body: string }>;
@@ -64,6 +69,8 @@ interface Options {
    * were accepted (what most tests of Fetch, Report, Questions and Answers look at); `end` runs every stage.
    */
   through?: "answers" | "end";
+  /** How many pages the Publish stage's read of the reviews takes (the pages after the first start at the cursor the previous one gave). */
+  reviewPages?: number;
   /** Reviews of the pull request that are already on GitHub when the run starts. */
   reviews?: FakeReview[];
   /** What the Publish stage's `create-pull-review` does: `post` (the default); `lost` fails without posting; `posted-then-failed` posts and then reports an ambiguous failure. A list gives one outcome per attempt. */
@@ -214,8 +221,14 @@ function* simulationSteps(options: Options = {}): Generator<undefined, Simulatio
       // The Publish stage's GitHub: the reviews of the pull request, the one write, and the comments of a review.
       const page = { complete: true, nextCursor: null, startCursor: "1" };
       let out: Record<string, unknown>;
-      if (job.executor.id === LIST_PULL_REVIEWS.id) {
-        out = { items: github.reviews.map((r) => ({ id: r.id, user: "graphloom-bot", state: r.state, body: r.body.slice(0, 4000), bodyTruncated: false, commitId: r.commitId, submittedAt: null, url: r.url })), page };
+      if (job.executor.id === GET_VIEWER.id) {
+        out = { item: { login: FAKE_LOGIN } };
+      } else if (job.executor.id === LIST_PULL_REVIEWS.id) {
+        const pages = options.reviewPages ?? 1;
+        const at = Number((job.input as { cursor?: string }).cursor ?? "1");
+        const last = at >= pages;
+        const mine = github.reviews.filter((_, i) => i % pages === at - 1);
+        out = { items: mine.map((r) => ({ id: r.id, user: r.user ?? FAKE_LOGIN, state: r.state, body: r.body.slice(0, 4000), bodyTruncated: false, commitId: r.commitId, submittedAt: null, url: r.url })), page: last ? { complete: true, nextCursor: null, startCursor: String(at) } : { complete: false, nextCursor: String(at + 1), startCursor: String(at) } };
       } else if (job.executor.id === LIST_PULL_REVIEW_COMMENTS.id) {
         out = { items: github.reviews.flatMap((r) => r.comments.map((c) => ({ id: c.id, reviewId: r.id, path: c.path, line: c.line, side: "RIGHT", body: c.body.slice(0, 4000), bodyTruncated: false }))), page };
       } else if (job.executor.id === CREATE_PULL_REVIEW.id) {

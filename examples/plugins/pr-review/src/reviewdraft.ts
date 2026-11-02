@@ -13,6 +13,8 @@ import { DRAFT_JSON, DRAFT_MD, PART_BASE, REVIEW_APPENDIX_HTML, REVIEW_HTML, REV
 import { composeDraft, draftJson, draftMarkdown, qaInputFrom, withReview, type Draft, type ItemCites } from "./draft.js";
 import { htmlPagesFrom, parseReportDoc } from "./html.js";
 import { partCommands, readParts, recordedNecessityJson, recordedQa, recordedRecord, recordedReport, type Written } from "./parts.js";
+import { effectivePacks } from "./packs.js";
+import type { Profile } from "./profile.js";
 import type { PullRequest } from "./request.js";
 import { aspectRecordId, parseAspectRecord, type AspectRecord } from "./review.js";
 import { parseScopeRecord, SCOPE_RECORD_ID, type ScopeRecord } from "./reviewscope.js";
@@ -36,14 +38,14 @@ export const recordedScope = (evidence: readonly EvidenceRecord[]): Recorded<Sco
 export const recordedRound1 = (evidence: readonly EvidenceRecord[]): Recorded<Round1Record> => decoded(recordedRecord(evidence, ROUND1_RECORD_ID, ROUND1_DIR), ROUND1_RECORD_ID, parseRound1Record);
 
 /** The round-1 issues recomputed from the recorded `necessity.json` and `qa.json` and the report's cites: what the record must hold. */
-export function round1Computed(evidence: readonly EvidenceRecord[], analysis: Analysis, pr: PullRequest): { state: "ready"; record: Round1Record } | { state: "pending"; reason: string } {
+export function round1Computed(evidence: readonly EvidenceRecord[], analysis: Analysis, pr: PullRequest, profile: Pick<Profile, "symbols">): { state: "ready"; record: Round1Record } | { state: "pending"; reason: string } {
   const qa = recordedQa(evidence);
   if (qa.state !== "read") return { state: "pending", reason: "qa.json was not written" };
   const report = recordedReport(evidence);
   if (report.state !== "read") return { state: "pending", reason: "report.json was not written" };
   const necessity = recordedNecessityJson(evidence);
   if (necessity.state === "failed") return { state: "pending", reason: `necessity.json does not read back: ${necessity.reason}` };
-  const record = round1Record({ head: pr.head, necessity: necessity.state === "read" ? necessity.value : undefined, qa: qa.value.json, files: analysis.snapshot.files, itemCites: itemCitesOf(report.value.json) });
+  const record = round1Record({ head: pr.head, necessity: necessity.state === "read" ? necessity.value : undefined, qa: qa.value.json, files: analysis.snapshot.files, itemCites: itemCitesOf(report.value.json), packs: effectivePacks(profile) });
   return record === undefined ? { state: "pending", reason: "qa.json is not a Q&A file" } : { state: "ready", record };
 }
 

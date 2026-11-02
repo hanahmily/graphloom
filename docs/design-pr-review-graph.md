@@ -2353,14 +2353,19 @@ head and the event is always `COMMENT`.
      side) is an inline comment, at most 50; the others are in the body;
    - each item ends with its marker, `<!-- graphloom-finding: N1 -->`,
      `Q3` or `F3`, and the body's second line is
-     `<!-- graphloom-review: <head sha> -->`, which marks the head. Bodies are cut so
+     `<!-- graphloom-review: <head sha> <nonce> -->`, which marks the head and this run
+     (the nonce is the operation id of the stage's viewer read, so a stranger cannot know it). Bodies are cut so
      that each marker is read back whole (a read cuts a body at 4,000
      characters) and the input fits an executor's 256,000 bytes.
 2. **Reconcile before posting** (core design: reconcile ambiguous effects before
-   retrying). The stage reads the pull request's reviews
-   (`list-pull-reviews`) and looks for a review of this head that carries the
-   head marker. Found, from an earlier attempt of this run or of an earlier
-   run on the same head: nothing is posted and that review is the one. Not
+   retrying). The stage first reads who the credential is (`graphloom.github/get-viewer`,
+   `GET /user`), then the pull request's reviews (`list-pull-reviews`, paged by
+   its own cursor flow, apart from Fetch's snapshot), and looks for a review of
+   this head that this run posted: authored by that login, in state `COMMENTED`, and
+   carrying the head marker with this run's nonce. The marker alone proves nothing (the head
+   sha is public), so a review by anyone else, in another state or from another
+   run is ignored. Found, from an earlier attempt of this run: nothing is posted and
+   that review is the one (a later run on the same head posts its own). Not
    found: it posts with the idempotency key `publish-<head12>-r<round>`, which
    the executor also reconciles by its own marker. An attempt that failed or
    whose outcome is unknown is followed by a fresh read of the reviews before
@@ -2497,8 +2502,9 @@ reviews one head.
      common logic (an `existing-reuse-common` answer that did not find "none"),
      even when it is fully answered;
    - every `missing-test` question whose answer finds no covering test (it
-     says none was found, or cites no test file, `*_test.go`, `*.test.*`,
-     `*.spec.*` or a `test(s)/` directory), even when it is fully answered.
+     says none was found, or cites no test file by the effective language
+     packs' `testFiles` convention, the one answer validation uses), even when it
+     is fully answered.
 2. **Issues: post and end.** With issues, Review and Draft pass on that, Publish
    posts them as one `COMMENT` review whose first line is
    `Changes requested: <n> open`, and the run ends. An issue with a diff anchor

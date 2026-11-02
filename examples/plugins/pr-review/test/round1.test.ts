@@ -5,10 +5,12 @@ import { describe, expect, it } from "vitest";
 import type { FinalAnswer } from "../src/answers.js";
 import { defaultNecessity } from "../src/rehearsal-qa.js";
 import { necessityAnswer, necessityJson, type Necessity, type PrincipleVerdict } from "../src/necessity.js";
-import { isTestLikePath, parseRound1Record, round1Json, round1Record, ROUND1_SCHEMA } from "../src/round1.js";
+import { effectivePacks } from "../src/packs.js";
+import { parseRound1Record, round1Json, round1Record, ROUND1_SCHEMA } from "../src/round1.js";
 import type { PullFile } from "../src/snapshot.js";
 import { parsePatch } from "../src/patch.js";
 
+const PACKS = effectivePacks({ symbols: [] });
 const PATCH = "@@ -0,0 +1,4 @@\n+package schema\n+\n+func ParseTTL() {}\n+// end";
 const file = (path: string, patch: string | null = PATCH): PullFile => ({ path, status: "added", previousPath: null, additions: 4, deletions: 0, patch, patchOmitted: patch === null, parsed: parsePatch(patch) });
 const FILES = [file("pkg/schema/ttl.go")];
@@ -32,7 +34,7 @@ interface Q {
 const qa = (questions: Q[], symbols: Array<{ id: string; path: string; startLine: number }> = [{ id: "S1", path: "pkg/schema/ttl.go", startLine: 3 }]): string =>
   JSON.stringify({ schema: "pr-qa-v1", symbols, questions: questions.map((q) => ({ item: "R1", text: `question ${q.id}`, ...q, answer: q.answer !== undefined ? { answer: "the answer", none_found: false, citations: [], ...q.answer } : undefined })) });
 
-const run = (questions: Q[], n: string | undefined = necessity("necessary"), files: readonly PullFile[] = FILES) => round1Record({ head: "h".repeat(40), necessity: n, qa: qa(questions), files, itemCites: { R1: { path: "pkg/schema/ttl.go", start: 3, end: 3 } } })!;
+const run = (questions: Q[], n: string | undefined = necessity("necessary"), files: readonly PullFile[] = FILES) => round1Record({ head: "h".repeat(40), necessity: n, qa: qa(questions), files, itemCites: { R1: { path: "pkg/schema/ttl.go", start: 3, end: 3 } }, packs: PACKS })!;
 const ids = (r: ReturnType<typeof run>): string[] => r.issues.map((i) => i.id);
 const TEST_CITE = [{ path: "pkg/schema/ttl_test.go", start: 1, end: 9, tree: "base" }];
 
@@ -70,7 +72,7 @@ describe("round 1's issues, computed from necessity.json and qa.json", () => {
   });
 
   it("treat a run with no necessity.json as N1 needing the author", () => {
-    expect(round1Record({ head: "h", necessity: undefined, qa: qa([]), files: FILES, itemCites: {} })!.issues[0]).toMatchObject({ id: "N1", status: "needs author" });
+    expect(round1Record({ head: "h", necessity: undefined, qa: qa([]), files: FILES, itemCites: {}, packs: PACKS })!.issues[0]).toMatchObject({ id: "N1", status: "needs author" });
   });
 
   it("include every question whose answer needs the author, and every partially answered one", () => {
@@ -101,15 +103,21 @@ describe("round 1's issues, computed from necessity.json and qa.json", () => {
     expect(r.issues.map((i) => [i.id, i.kinds])).toEqual([["Q1", ["missing-test"]], ["Q2", ["missing-test"]], ["Q4", ["needs-author", "missing-test"]]]);
   });
 
-  it("recognize test files of the languages the plugin reads", () => {
-    for (const p of ["pkg/a_test.go", "src/a.test.ts", "src/a.spec.tsx", "web/tests/a.ts", "src/__tests__/a.ts"]) expect(isTestLikePath(p), p).toBe(true);
-    for (const p of ["pkg/a.go", "src/latest.ts", "docs/contest.md"]) expect(isTestLikePath(p), p).toBe(false);
+  it("judge a cited test by the effective packs' own convention, so a configured test path is not a false blocking issue", () => {
+    const cited = (path: string) => [{ id: "Q1", type: "missing-test", symbol: "S1", answer: { status: "answered", citations: [{ path, start: 1, end: 9, tree: "base" }] } }] as Q[];
+    const issuesFor = (path: string, packs = PACKS) => round1Record({ head: "h", necessity: necessity("necessary"), qa: qa(cited(path)), files: FILES, itemCites: {}, packs })!.issues;
+    for (const p of ["pkg/a_test.go", "src/a.test.ts", "src/a.spec.tsx"]) expect(issuesFor(p), p).toEqual([]);
+    expect(issuesFor("pkg/a.go")).toHaveLength(1);
+    // A project that keeps its tests under check/ declares it in its profile's symbol pack; the default packs know nothing of it.
+    const custom = effectivePacks({ symbols: [{ language: "go", globs: ["**/*.go"], testFiles: ["**/check/**"] }] as never });
+    expect(issuesFor("pkg/check/ttl.go", custom)).toEqual([]);
+    expect(issuesFor("pkg/check/ttl.go")).toHaveLength(1);
   });
 
   it("anchor an issue inside a hunk of the file's patch, and send one outside it, or in a file without a patch, to the review body", () => {
     const inside = run([{ id: "Q1", type: "purpose", symbol: "S1", answer: { status: "needs author" } }]);
     expect(inside.issues[0]).toMatchObject({ path: "pkg/schema/ttl.go", line: 3, anchored: true });
-    const outside = round1Record({ head: "h", necessity: necessity("necessary"), qa: qa([{ id: "Q1", type: "purpose", symbol: "S1", answer: { status: "needs author" } }], [{ id: "S1", path: "pkg/schema/ttl.go", startLine: 40 }]), files: FILES, itemCites: {} })!;
+    const outside = round1Record({ head: "h", necessity: necessity("necessary"), qa: qa([{ id: "Q1", type: "purpose", symbol: "S1", answer: { status: "needs author" } }], [{ id: "S1", path: "pkg/schema/ttl.go", startLine: 40 }]), files: FILES, itemCites: {}, packs: PACKS })!;
     expect(outside.issues[0]).toMatchObject({ line: 40, anchored: false });
     const noPatch = run([{ id: "Q1", type: "purpose", symbol: "S1", answer: { status: "needs author" } }], necessity("necessary"), [file("pkg/schema/ttl.go", null)]);
     expect(noPatch.issues[0]).toMatchObject({ anchored: false });
@@ -123,7 +131,7 @@ describe("round 1's issues, computed from necessity.json and qa.json", () => {
     expect(r.issues[0]!.body).not.toContain(".graphloom/");
     expect(parseRound1Record(round1Json(r))).toEqual(r);
     expect(parseRound1Record("{}")).toBeUndefined();
-    expect(round1Record({ head: "h", necessity: undefined, qa: "not json", files: [], itemCites: {} })).toBeUndefined();
+    expect(round1Record({ head: "h", necessity: undefined, qa: "not json", files: [], itemCites: {}, packs: PACKS })).toBeUndefined();
   });
 
   it("skip N1's own question in the Q&A list (it is judged from necessity.json) and a question that was never answered", () => {

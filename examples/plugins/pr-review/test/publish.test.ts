@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import type { EvidenceRecord } from "@graphloom/sdk";
 import { afterAll, describe, expect, it } from "vitest";
 import type { Draft, DraftEntry } from "../src/draft.js";
-import { commentIds, createInput, findPosted, findingMarker, ledgerPatch, ledgerPublishedCommand, planReview, publishFlow, publishPlan, reviewMarker, verdictLine, MAX_INLINE_COMMENTS, MAX_REVIEW_BODY } from "../src/publish.js";
+import { commentIds, createInput, findPosted, findingMarker, ledgerPatch, ledgerPublishedCommand, planReview, publishFlow, publishPlan, reviewMarker, viewerOf, verdictLine, MAX_INLINE_COMMENTS, MAX_REVIEW_BODY } from "../src/publish.js";
 import { analyze, evidencePull } from "../src/analysis.js";
 import { REHEARSAL_HEAD } from "../src/rehearsal.js";
 import { pinnedBase } from "../src/commands.js";
@@ -20,6 +20,7 @@ import { BANYANDB, candidateEvidence, profileOf, simulate, type FakeReview, type
 
 const sh = promisify(execFile);
 const HEAD = REHEARSAL_HEAD;
+const NONCE = "op42";
 const PULL = { owner: "apache", repo: "skywalking-banyandb", number: 7, head: HEAD };
 
 const issue = (id: string, over: Partial<Round1Issue> = {}): Round1Issue => ({ id, kinds: ["needs-author"], status: "needs author", body: `**needs the author** (${id}). Why?`, anchored: false, ...over });
@@ -29,10 +30,10 @@ const draft = (comments: DraftEntry[], summary = "Reviewed the whole pull reques
 
 describe("the review the Publish stage posts", () => {
   it("is one COMMENT review at the pinned head, never APPROVE or REQUEST_CHANGES, with the verdict as the first line", () => {
-    const plan = planReview({ pull: PULL, head: HEAD, round1: round1([issue("N1"), issue("Q3")]) });
+    const plan = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([issue("N1"), issue("Q3")]) });
     expect(plan).toMatchObject({ round: 1, verdict: "changes-requested", open: 2, firstLine: "Changes requested: 2 open" });
     expect(plan.body.split("\n")[0]).toBe("Changes requested: 2 open");
-    expect(plan.body.split("\n")[1]).toBe(reviewMarker(HEAD));
+    expect(plan.body.split("\n")[1]).toBe(reviewMarker(HEAD, NONCE));
     const input = createInput(PULL, plan);
     expect(input).toMatchObject({ owner: "apache", repo: "skywalking-banyandb", number: 7, event: "COMMENT", commitId: HEAD, idempotencyKey: `publish-${HEAD.slice(0, 12)}-r1` });
     expect(JSON.stringify(input)).not.toMatch(/APPROVE|REQUEST_CHANGES/);
@@ -41,20 +42,20 @@ describe("the review the Publish stage posts", () => {
   it("says Review passed only when round 1 has no open issue and round 2 no open postable finding", () => {
     expect(verdictLine(0)).toBe("Review passed");
     expect(verdictLine(3)).toBe("Changes requested: 3 open");
-    const passed = planReview({ pull: PULL, head: HEAD, round1: round1([]), draft: draft([]) });
+    const passed = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([]), draft: draft([]) });
     expect(passed).toMatchObject({ round: 2, verdict: "passed", open: 0, firstLine: "Review passed", comments: [] });
     expect(passed.body).toContain("Round 1 (design and architecture, from the change report and its questions): no open issue.");
     expect(passed.body).toContain("Round 2 (details, functionality, algorithms): no open finding.");
     // Round 1's open issues decide the verdict, whatever a draft would say; a draft is not even read.
-    expect(planReview({ pull: PULL, head: HEAD, round1: round1([issue("Q1")]), draft: draft([]) })).toMatchObject({ round: 1, verdict: "changes-requested", open: 1 });
+    expect(planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([issue("Q1")]), draft: draft([]) })).toMatchObject({ round: 1, verdict: "changes-requested", open: 1 });
     // Round 2's postable findings are the draft's finding comments: a question it carries is round 1's, never posted twice.
-    const open = planReview({ pull: PULL, head: HEAD, round1: round1([]), draft: draft([entry("F3"), entry("Q9", { kind: "question", aspects: [] })]) });
+    const open = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([]), draft: draft([entry("F3"), entry("Q9", { kind: "question", aspects: [] })]) });
     expect(open).toMatchObject({ round: 2, verdict: "changes-requested", open: 1, firstLine: "Changes requested: 1 open" });
     expect(open.items.map((i) => i.id)).toEqual(["F3"]);
   });
 
   it("makes an anchored item an inline comment and puts the others in the body, each ending with its marker", () => {
-    const plan = planReview({ pull: PULL, head: HEAD, round1: round1([issue("N1", { path: "pkg/a.go", line: 4, anchored: true }), issue("Q3", { path: "pkg/a.go", line: 90, anchored: false }), issue("Q4")]) });
+    const plan = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([issue("N1", { path: "pkg/a.go", line: 4, anchored: true }), issue("Q3", { path: "pkg/a.go", line: 90, anchored: false }), issue("Q4")]) });
     expect(plan.comments).toEqual([{ path: "pkg/a.go", line: 4, side: "RIGHT", body: expect.stringMatching(/<!-- graphloom-finding: N1 -->$/) }]);
     expect(plan.items.map((i) => [i.id, i.inline])).toEqual([["N1", true], ["Q3", false], ["Q4", false]]);
     expect(plan.body).toContain(`(Q3). Why?\n\n${findingMarker("Q3")}`);
@@ -65,7 +66,7 @@ describe("the review the Publish stage posts", () => {
   });
 
   it("labels a round-2 finding with its severity and aspects, keeps a suggestion for its exact RIGHT range, and marks it F<n>", () => {
-    const plan = planReview({ pull: PULL, head: HEAD, round1: round1([]), draft: draft([entry("F3", { suggestion: "return err", startLine: 10, line: 12, aspects: ["correctness", "security"], severity: "P1", proof: { state: "proven" } }), entry("F4", { anchored: false, line: 400 })]) });
+    const plan = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([]), draft: draft([entry("F3", { suggestion: "return err", startLine: 10, line: 12, aspects: ["correctness", "security"], severity: "P1", proof: { state: "proven" } }), entry("F4", { anchored: false, line: 400 })]) });
     expect(plan.comments).toHaveLength(1);
     expect(plan.comments[0]).toMatchObject({ path: "pkg/a.go", startLine: 10, line: 12, side: "RIGHT" });
     expect(plan.comments[0]!.body).toBe(`**[P1] major** · correctness, security\n\nThe loop drops the error.\n\n\`\`\`suggestion\nreturn err\n\`\`\`\n\n${findingMarker("F3")}`);
@@ -74,26 +75,33 @@ describe("the review the Publish stage posts", () => {
 
   it("keeps every item's marker readable (a read cuts a body at 4,000 characters), and every comment inside what a review carries", () => {
     const long = entry("F1", { body: "x".repeat(20_000), suggestion: "y".repeat(5_000) });
-    const plan = planReview({ pull: PULL, head: HEAD, round1: round1([]), draft: draft([long]) });
+    const plan = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([]), draft: draft([long]) });
     expect(plan.comments[0]!.body.length).toBeLessThan(4_000);
     expect(plan.comments[0]!.body).not.toContain("```suggestion");
     expect(plan.comments[0]!.body.endsWith(findingMarker("F1"))).toBe(true);
-    const many = planReview({ pull: PULL, head: HEAD, round1: round1([]), draft: draft(Array.from({ length: 80 }, (_, i) => entry(`F${i + 1}`, { line: i + 1 }))) });
+    const many = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([]), draft: draft(Array.from({ length: 80 }, (_, i) => entry(`F${i + 1}`, { line: i + 1 }))) });
     expect(many.comments).toHaveLength(MAX_INLINE_COMMENTS);
     expect(many.items.filter((i) => !i.inline)).toHaveLength(30);
     expect(many.body.length).toBeLessThanOrEqual(MAX_REVIEW_BODY);
-    const huge = planReview({ pull: PULL, head: HEAD, round1: round1(Array.from({ length: 60 }, (_, i) => issue(`Q${i + 1}`, { body: "z".repeat(3_000) }))) });
+    const huge = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1(Array.from({ length: 60 }, (_, i) => issue(`Q${i + 1}`, { body: "z".repeat(3_000) }))) });
     expect(huge.body.length).toBeLessThanOrEqual(MAX_REVIEW_BODY);
     expect(huge.body).toMatch(/more items? did not fit this body: /);
     expect(huge.firstLine).toBe("Changes requested: 60 open");
   });
 
-  it("finds a review of this head by its marker, and the ids of a review's comments by theirs", () => {
-    const marked = { id: 41, commitId: HEAD, body: `Review passed\n${reviewMarker(HEAD)}\n\nx`, url: "https://github.com/o/r/pull/7#pullrequestreview-41" };
-    expect(findPosted([marked], HEAD)).toEqual({ id: 41, url: marked.url });
-    expect(findPosted([{ ...marked, commitId: "b".repeat(40) }], HEAD)).toBeUndefined();
-    expect(findPosted([{ ...marked, body: "Review passed" }], HEAD)).toBeUndefined();
-    expect(findPosted([{ ...marked, body: `x\n${reviewMarker("c".repeat(40))}` }], HEAD)).toBeUndefined();
+  it("finds a review of this head only when this credential's login authored it, as COMMENTED, with this run's marker", () => {
+    const marked = { id: 41, commitId: HEAD, user: "graphloom-bot", state: "COMMENTED", body: `Review passed\n${reviewMarker(HEAD, NONCE)}\n\nx`, url: "https://github.com/o/r/pull/7#pullrequestreview-41" };
+    const find = (r: object, nonce = NONCE) => findPosted([{ ...marked, ...r }], HEAD, nonce, "graphloom-bot");
+    expect(find({})).toEqual({ id: 41, url: marked.url });
+    expect(find({ commitId: "b".repeat(40) })).toBeUndefined();
+    expect(find({ body: "Review passed" })).toBeUndefined();
+    expect(find({ body: `x\n${reviewMarker("c".repeat(40), NONCE)}` })).toBeUndefined();
+    // The marker is public once posted and the head sha always was: a review by anybody else is not ours.
+    expect(find({ user: "mallory" })).toBeUndefined();
+    expect(find({ state: "APPROVED" })).toBeUndefined();
+    expect(find({ state: "PENDING" })).toBeUndefined();
+    // Another run's review of the same head is not this run's.
+    expect(find({}, "op7")).toBeUndefined();
     const comments = [{ id: 5, reviewId: 41, body: `a ${findingMarker("N1")}` }, { id: 6, reviewId: 42, body: `a ${findingMarker("Q3")}` }, { id: 7, reviewId: 41, body: `b ${findingMarker("Q4")}` }, { id: 8, reviewId: 41, body: "no marker" }];
     expect([...commentIds(comments, 41)]).toEqual([["N1", 5], ["Q4", 7]]);
   });
@@ -101,6 +109,8 @@ describe("the review the Publish stage posts", () => {
 
 /** A clean round-1 scenario's run, whole, and the scenario with issues, with the fake GitHub's view of it. */
 const clean = (over: Parameters<typeof simulate>[0] = {}): Simulation => simulate({ scenarioName: "review-layer", maxSteps: 600, through: "end", ...over });
+/** This run's nonce (the viewer read's operation id): the same in a second simulation of the same scenario, which is how a test seeds a review "of this run". */
+const nonceOf = (s: Simulation): string => viewerOf(s.evidence)!.nonce;
 const issues = (over: Parameters<typeof simulate>[0] = {}): Simulation => simulate({ scenarioName: "complex-function", maxSteps: 600, through: "end", ...over });
 const stopOf = (s: Simulation) => (s.final.action.type === "stop" ? s.final.action.stop : undefined);
 const publishJobs = (s: Simulation) => s.jobs.filter((j) => j.stageId === "publish").map((j) => j.executor?.id ?? ((j.input as { commands?: Array<{ id: string }> }).commands ?? []).map((c) => c.id).join(","));
@@ -132,7 +142,7 @@ describe("the gate after Answers: issues publish round 1 and end the run, none c
   });
 
   it("reads the reviews before posting, posts, reads the comments back, then records the ids in the ledger", () => {
-    expect(publishJobs(sim)).toEqual(["graphloom.github/list-pull-reviews", "graphloom.github/create-pull-review", "graphloom.github/list-pull-review-comments", "ledger-published"]);
+    expect(publishJobs(sim)).toEqual(["graphloom.github/get-viewer", "graphloom.github/list-pull-reviews", "graphloom.github/create-pull-review", "graphloom.github/list-pull-review-comments", "ledger-published"]);
     const reads = sim.jobs.filter((j) => j.stageId === "publish" && j.executor !== undefined && j.executor.id !== "graphloom.github/create-pull-review");
     for (const j of reads) expect(j.readOnly).toBe(true);
     const write = sim.jobs.find((j) => j.executor?.id === "graphloom.github/create-pull-review")!;
@@ -167,21 +177,29 @@ describe("the gate after Answers: issues publish round 1 and end the run, none c
 });
 
 describe("publishing is idempotent across retries and runs: the reviews are read before anything is posted", () => {
-  const marked = (over: Partial<FakeReview> = {}): FakeReview => ({ id: 99, body: `Changes requested: 1 open\n${reviewMarker(HEAD)}\n\nearlier`, commitId: HEAD, state: "COMMENTED", url: "https://github.com/apache/skywalking-banyandb/pull/7#pullrequestreview-99", comments: [{ id: 990, path: "pkg/schema/ttl.go", line: 1, body: `earlier ${findingMarker("Q1")}` }], ...over });
+  const marked = (nonce: string, over: Partial<FakeReview> = {}): FakeReview => ({ id: 99, body: `Changes requested: 1 open\n${reviewMarker(HEAD, nonce)}\n\nearlier`, commitId: HEAD, state: "COMMENTED", url: "https://github.com/apache/skywalking-banyandb/pull/7#pullrequestreview-99", comments: [{ id: 990, path: "pkg/schema/ttl.go", line: 1, body: `earlier ${findingMarker("Q1")}` }], ...over });
 
   it("posts nothing when a review of this head already carries the marker, and records that review", () => {
-    const sim = issues({ reviews: [marked()] });
+    const sim = issues({ reviews: [marked(nonceOf(issues()))] });
     expect(sim.github.creates).toEqual([]);
     expect(sim.github.reviews).toHaveLength(1);
     expect(stopOf(sim)).toMatchObject({ reason: "complete" });
     expect(ledgerPatchOf(sim).reviewId).toBe(99);
-    expect(publishJobs(sim)).toEqual(["graphloom.github/list-pull-reviews", "graphloom.github/list-pull-review-comments", "ledger-published"]);
+    expect(publishJobs(sim)).toEqual(["graphloom.github/get-viewer", "graphloom.github/list-pull-reviews", "graphloom.github/list-pull-review-comments", "ledger-published"]);
   });
 
   it("posts when the review there is of another head, or carries no marker of this graph", () => {
-    const sim = issues({ reviews: [marked({ commitId: "b".repeat(40), id: 98 }), marked({ body: "Looks good to me", id: 97 })] });
+    const sim = issues({ reviews: [marked(nonceOf(issues()), { commitId: "b".repeat(40), id: 98 }), marked(nonceOf(issues()), { body: "Looks good to me", id: 97 })] });
     expect(sim.github.creates).toHaveLength(1);
     expect(sim.github.reviews).toHaveLength(3);
+  });
+
+  it("ignores a review that forges the marker: by another author, not COMMENTED, or from another run, and posts its own", () => {
+    const n = nonceOf(issues());
+    const sim = issues({ reviews: [marked(n, { id: 90, user: "mallory" }), marked(n, { id: 91, state: "APPROVED" }), marked("op1", { id: 92 })] });
+    expect(sim.github.creates).toHaveLength(1);
+    expect(sim.github.reviews).toHaveLength(4);
+    expect([90, 91, 92]).not.toContain(ledgerPatchOf(sim).reviewId);
   });
 
   it("reconciles an attempt whose outcome is unknown: the reviews are read again, the review that reached GitHub is found, and nothing is posted twice", () => {
@@ -189,7 +207,7 @@ describe("publishing is idempotent across retries and runs: the reviews are read
     expect(sim.github.creates).toHaveLength(1);
     expect(sim.github.reviews).toHaveLength(1);
     expect(stopOf(sim)).toMatchObject({ reason: "complete" });
-    expect(publishJobs(sim).slice(0, 4)).toEqual(["graphloom.github/list-pull-reviews", "graphloom.github/create-pull-review", "graphloom.github/list-pull-reviews", "graphloom.github/list-pull-review-comments"]);
+    expect(publishJobs(sim).slice(0, 5)).toEqual(["graphloom.github/get-viewer", "graphloom.github/list-pull-reviews", "graphloom.github/create-pull-review", "graphloom.github/list-pull-reviews", "graphloom.github/list-pull-review-comments"]);
     expect(ledgerPatchOf(sim).reviewId).toBe(sim.github.reviews[0]!.id);
   });
 
@@ -267,7 +285,7 @@ describe("the ledger advance that records the published review, against a real r
     await git(dir, "update-ref", REF, first);
     return { dir, first };
   }
-  const patchOf = (over: Partial<ReturnType<typeof ledgerPatch>> = {}) => ({ ...ledgerPatch({ head: HEAD }, planReview({ pull: PULL, head: HEAD, round1: round1([issue("Q1", { path: "pkg/a.go", line: 4, anchored: true }), issue("N1")]) }), { reviewId: 4242, url: "https://github.com/o/r/pull/7#pullrequestreview-4242", how: "created" }, new Map([["Q1", 777]])), ...over });
+  const patchOf = (over: Partial<ReturnType<typeof ledgerPatch>> = {}) => ({ ...ledgerPatch({ head: HEAD }, planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([issue("Q1", { path: "pkg/a.go", line: 4, anchored: true }), issue("N1")]) }), { reviewId: 4242, url: "https://github.com/o/r/pull/7#pullrequestreview-4242", how: "created" }, new Map([["Q1", 777]])), ...over });
   const run = async (dir: string, patch: ReturnType<typeof ledgerPatch>) => {
     const c = ledgerPublishedCommand(PULL, patch, process.execPath);
     return sh(c.argv[0]!, c.argv.slice(1), { cwd: dir, env });
@@ -319,5 +337,28 @@ describe("the ledger advance that records the published review, against a real r
     await git(dir, "update-ref", "-d", REF);
     await expect(run(dir, patchOf())).rejects.toBeTruthy();
     await expect(git(dir, "rev-parse", "--verify", REF)).rejects.toBeTruthy();
+  });
+});
+
+describe("the Publish stage's paginated reads are its own flow", () => {
+  it("do not replace Fetch's complete chain in the pull request snapshot, even when its last page is incomplete", () => {
+    const sim = issues();
+    const evidence = candidateEvidence(sim.evidence, "d1");
+    const pull = evidencePull(evidence, profileOf())!;
+    const before = analyze(evidence, profileOf(), pull);
+    expect(before.state).toBe("ready");
+    const producerOf = (e: EvidenceRecord) => (e.payload as { producer?: { stageId?: string } }).producer;
+    const incomplete: EvidenceRecord = { ref: "e-publish-page", kind: "other", candidateDigest: "d1", payload: { producer: { operationId: "opx", stageId: "publish", purpose: "diagnostic", readOnly: true, kind: "command", executorId: "graphloom.github/list-pull-reviews" }, github: { items: [{ id: 1 }], page: { complete: false, nextCursor: "2", startCursor: "1" } } } };
+    expect(producerOf(incomplete)!.stageId).toBe("publish");
+    const after = analyze([...evidence, incomplete], profileOf(), pull);
+    expect(after.state).toBe("ready");
+    // Still the whole of Fetch's reviews, not the page that Publish has read so far.
+    expect(after.state === "ready" && after.analysis.snapshot.reviews).toEqual(before.state === "ready" ? before.analysis.snapshot.reviews : []);
+  });
+
+  it("let the stage ask for the next cursor of a long list of reviews", () => {
+    const sim = issues({ reviewPages: 3 });
+    expect(sim.jobs.filter((j) => j.executor?.id === "graphloom.github/list-pull-reviews" && j.stageId === "publish")).toHaveLength(3);
+    expect(stopOf(sim)).toMatchObject({ reason: "complete" });
   });
 });

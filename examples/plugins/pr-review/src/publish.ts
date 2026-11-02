@@ -13,7 +13,7 @@
  * The posted review's id and its comments' ids are recorded in the ledger (`reviewId`, `github` on each item).
  */
 import type { EnvironmentCommand, EvidenceRecord } from "@graphloom/sdk";
-import { COMMAND, CREATE_PULL_REVIEW, PUBLISH_STAGE, ledgerRef } from "./constants.js";
+import { COMMAND, CREATE_PULL_REVIEW, GET_VIEWER, PUBLISH_STAGE, ledgerRef } from "./constants.js";
 import { severityLabel, type Draft, type DraftEntry } from "./draft.js";
 import { commandRuns, isObject, producer, succeeded, type CommandRun } from "./evidence.js";
 import type { Analysis } from "./analysis.js";
@@ -35,7 +35,8 @@ const MAX_ITEM_TEXT = 1_800;
 const MAX_ITEM_BODY = 3_800;
 
 export const findingMarker = (id: string): string => `<!-- graphloom-finding: ${id} -->`;
-export const reviewMarker = (head: string): string => `<!-- graphloom-review: ${head} -->`;
+/** The marker of this run's review of `head`: the head and a nonce of the run (its viewer read's operation), which a stranger cannot know. */
+export const reviewMarker = (head: string, nonce: string): string => `<!-- graphloom-review: ${head} ${nonce} -->`;
 const MARKER = /<!-- graphloom-finding: ([A-Z][0-9]+) -->/;
 
 export interface PublishItem {
@@ -86,7 +87,7 @@ function findingBody(e: DraftEntry): string {
  * that are findings). The verdict is `Review passed` only when round 1 has no open issue and round 2 no open postable finding.
  * Inline comments are the items with a diff anchor, up to what one review carries; the rest are in the body.
  */
-export function planReview(i: { pull: Pick<PullRequest, "owner" | "repo" | "number">; head: string; round1: Round1Record; draft?: Draft | undefined }): ReviewPlan {
+export function planReview(i: { pull: Pick<PullRequest, "owner" | "repo" | "number">; head: string; nonce: string; round1: Round1Record; draft?: Draft | undefined }): ReviewPlan {
   const issues = i.round1.issues;
   const round: 1 | 2 = issues.length > 0 || i.draft === undefined ? 1 : 2;
   const items: PublishItem[] =
@@ -108,7 +109,7 @@ export function planReview(i: { pull: Pick<PullRequest, "owner" | "repo" | "numb
   const round1Line = issues.length > 0 ? `Round 1 (design and architecture, from the change report and its questions): ${issues.length} issue${issues.length === 1 ? "" : "s"} to resolve. The detailed review (round 2) runs after they are fixed.` : "Round 1 (design and architecture, from the change report and its questions): no open issue.";
   const round2Line = round === 2 ? `Round 2 (details, functionality, algorithms): ${i.draft !== undefined && open > 0 ? `${open} open finding${open === 1 ? "" : "s"}.` : "no open finding."}${i.draft !== undefined && i.draft.summary !== "" ? ` ${oneLine(i.draft.summary)}` : ""}` : undefined;
   const sections = [
-    `${firstLine}\n${reviewMarker(i.head)}`,
+    `${firstLine}\n${reviewMarker(i.head, i.nonce)}`,
     [round1Line, ...(round2Line !== undefined ? [round2Line] : [])].join("\n\n"),
     ...(inline > 0 ? [`${inline} item${inline === 1 ? " is" : "s are"} commented on the diff.`] : []),
   ];
@@ -137,11 +138,14 @@ const spec = (key: ReadSpec["key"]): ReadSpec => READS.find((r) => r.key === key
 export const REVIEWS_READ = spec("reviews");
 export const COMMENTS_READ = spec("reviewComments");
 
-/** A review of this head that carries this graph's marker of it. */
-export function findPosted(items: readonly unknown[], head: string): { id: number; url: string | null } | undefined {
+/**
+ * A review of this head that this run posted: authored by the login the credential authenticates as, in state COMMENTED, and carrying
+ * this run's marker. The marker alone proves nothing (the head sha is public), so a review by anyone else is ignored.
+ */
+export function findPosted(items: readonly unknown[], head: string, nonce: string, login: string): { id: number; url: string | null } | undefined {
   for (const r of items) {
-    if (!isObject(r) || typeof r.id !== "number" || r.commitId !== head) continue;
-    if (typeof r.body === "string" && r.body.includes(reviewMarker(head))) return { id: r.id, url: typeof r.url === "string" ? r.url : null };
+    if (!isObject(r) || typeof r.id !== "number" || r.commitId !== head || r.user !== login || r.state !== "COMMENTED") continue;
+    if (typeof r.body === "string" && r.body.includes(reviewMarker(head, nonce))) return { id: r.id, url: typeof r.url === "string" ? r.url : null };
   }
   return undefined;
 }
@@ -191,7 +195,21 @@ export function ledgerPatch(pr: Pick<PullRequest, "head">, plan: ReviewPlan, pos
 
 export const MAX_CREATE_ATTEMPTS = 3;
 
+/** Who the credential is and this run's nonce, from the viewer read the stage made first (`get-viewer`; its operation id is the nonce). */
+export function viewerOf(evidence: readonly EvidenceRecord[]): { login: string; nonce: string } | undefined {
+  for (let i = evidence.length - 1; i >= 0; i -= 1) {
+    const e = evidence[i]!;
+    const p = producer(e);
+    if (p?.stageId !== PUBLISH_STAGE || p.executorId !== GET_VIEWER.id) continue;
+    const g = isObject(e.payload) && isObject(e.payload.github) ? e.payload.github : {};
+    const item = isObject(g.item) ? g.item : {};
+    if (typeof item.login === "string" && item.login !== "") return { login: item.login, nonce: p.operationId.replace(/[^A-Za-z0-9._:-]/g, "_") };
+  }
+  return undefined;
+}
+
 export type PublishFlow =
+  | { state: "viewer"; why: string }
   | { state: "reviews"; cursor?: string; why: string }
   | { state: "create"; why: string }
   | { state: "comments"; reviewId: number; cursor?: string; why: string }
@@ -208,6 +226,8 @@ const at = (evidence: readonly EvidenceRecord[], ref: string): number => evidenc
  */
 export function publishFlow(evidence: readonly EvidenceRecord[], plan: ReviewPlan, pr: Pick<PullRequest, "head">): PublishFlow {
   const mine = evidence.filter((e) => producer(e)?.stageId === PUBLISH_STAGE);
+  const viewer = viewerOf(evidence);
+  if (viewer === undefined) return { state: "viewer", why: "read who the credential authenticates as, so only a review this graph authored is taken for its own" };
   const reviews = readResult(mine, REVIEWS_READ);
   const creates = mine.filter((e) => producer(e)?.executorId === CREATE_PULL_REVIEW.id);
   const lastCreate = creates.at(-1);
@@ -228,7 +248,7 @@ export function publishFlow(evidence: readonly EvidenceRecord[], plan: ReviewPla
       return { state: "reviews", why: "the attempt to post the review did not complete: read the reviews again, so a review that reached GitHub is found and not posted twice" };
     }
   } else {
-    const found = findPosted(reviews.items, pr.head);
+    const found = findPosted(reviews.items, pr.head, viewer.nonce, viewer.login);
     if (found !== undefined) posted = { reviewId: found.id, url: found.url, how: "found" };
   }
   if (posted === undefined) {
@@ -294,9 +314,10 @@ export function publishPlan(evidence: readonly EvidenceRecord[], analysis: Analy
   const round1 = recordedRound1(evidence);
   if (round1.state === "none") return { state: "pending", reason: "round 1 was not recorded" };
   if (round1.state === "failed") return round1;
-  if (round1.value.issues.length > 0) return { state: "ready", round1: round1.value, plan: planReview({ pull: pr, head: pr.head, round1: round1.value }) };
+  const nonce = viewerOf(evidence)?.nonce ?? "pending";
+  if (round1.value.issues.length > 0) return { state: "ready", round1: round1.value, plan: planReview({ pull: pr, head: pr.head, nonce, round1: round1.value }) };
   const w = draftWrites(evidence, analysis, pr, base);
   if (w.state === "pending") return { state: "pending", reason: `the draft cannot be composed: ${w.reason}` };
   if (w.state === "failed") return w;
-  return { state: "ready", round1: round1.value, plan: planReview({ pull: pr, head: pr.head, round1: round1.value, draft: w.writes.draft }) };
+  return { state: "ready", round1: round1.value, plan: planReview({ pull: pr, head: pr.head, nonce, round1: round1.value, draft: w.writes.draft }) };
 }

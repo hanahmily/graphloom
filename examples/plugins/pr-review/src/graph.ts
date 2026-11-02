@@ -50,6 +50,7 @@ import {
   REPORT_STAGE,
   REQUIREMENT_ANSWERS,
   CREATE_PULL_REVIEW,
+  GET_VIEWER,
   PUBLISH_STAGE,
   REQUIREMENT_PUBLISHED,
   REQUIREMENT_ROUND1,
@@ -1201,7 +1202,7 @@ function round1Stage(ctx: Context, view: RunView): GraphDecision {
   const { profile, pr } = ctx;
   const a = analyze(view.evidence, profile, pr);
   if (a.state !== "ready") return supervise({ reason: a.state === "pending" ? `the round-1 stage lost the pull request snapshot: ${a.reason}` : a.problem }, "escalate a missing snapshot");
-  const computed = round1Computed(view.evidence, a.analysis, pr);
+  const computed = round1Computed(view.evidence, a.analysis, pr, profile);
   if (computed.state === "pending") return supervise({ reason: `round 1 cannot be decided: ${computed.reason}` }, "escalate a missing Q&A artifact");
   const rec = recordedRound1(view.evidence);
   if (rec.state === "failed") return supervise({ reason: `the round-1 record does not read back: ${rec.reason}`, evidenceRefs: rec.refs }, "escalate an unreadable round-1 record");
@@ -1237,6 +1238,8 @@ function publishStage(ctx: Context, view: RunView): GraphDecision {
   switch (flow.state) {
     case "supervise":
       return supervise({ reason: flow.reason, evidenceRefs: flow.refs }, "hand the unresolved publication to the supervisor");
+    case "viewer":
+      return withPrivate(dispatch({ stageId: PUBLISH_STAGE, kind: "command", purpose: "diagnostic", readOnly: true, instruction: "Read who the GitHub credential authenticates as", executor: GET_VIEWER, input: base }, flow.why));
     case "reviews":
       return withPrivate(dispatch(githubJob(REVIEWS_READ, { ...base, perPage: 100, maxPages: 10, ...(flow.cursor !== undefined ? { cursor: flow.cursor } : {}) }, PUBLISH_STAGE), flow.why));
     case "comments":

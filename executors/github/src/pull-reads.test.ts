@@ -97,6 +97,15 @@ describe("graphloom.github/get-pull", () => {
   });
 });
 
+describe("graphloom.github/get-viewer", () => {
+  it("returns the login the credential authenticates as", async () => {
+    const server = await fake();
+    const result = await run(server, "get-viewer", { owner: "acme", repo: "app" });
+    expect(result.status).toBe("ok");
+    expect(github(result).item).toEqual({ login: "graphloom-bot" });
+  });
+});
+
 describe("graphloom.github/list-pull-files", () => {
   it("lists path, status, previous path, counts and patch, flagging a patch GitHub omitted", async () => {
     const server = await fake();

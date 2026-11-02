@@ -9,7 +9,9 @@
  * issue blocks round 2, so the run publishes round 1 and ends; none lets the same run continue into the review layer.
  * The computation is a pure function over the two artifacts, recorded once as `round1.json`; the validator recomputes it.
  */
+import { isTestPath } from "./answers.js";
 import { anchored, scrub, type ItemCites } from "./draft.js";
+import type { FullPack } from "./packs.js";
 import { effectiveConclusion, brokenNote, parseNecessityRecord, NECESSITY_ID } from "./necessity.js";
 import type { PullFile } from "./snapshot.js";
 
@@ -54,10 +56,6 @@ const oneLine = (s: string): string => s.replace(/\s+/g, " ").trim();
 const clip = (s: string, n: number): string => (s.length <= n ? s : `${s.slice(0, n - 1)}…`);
 const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
-
-/** A path that names a test file in any language the plugin reads. */
-const TEST_PATH = /(_test\.go|\.test\.[cm]?[jt]sx?|\.spec\.[cm]?[jt]sx?|(^|\/)(tests?|__tests__)\/)/;
-export const isTestLikePath = (p: string): boolean => TEST_PATH.test(p);
 
 interface QaQuestion {
   id: string;
@@ -104,6 +102,8 @@ export interface Round1Input {
   files: readonly PullFile[];
   /** The first head cite of each change item of the report, which anchors a question that names no symbol. */
   itemCites: ItemCites;
+  /** The effective language packs: a cited path is a test by their `testFiles` convention, as answer validation judges it. */
+  packs: readonly FullPack[];
 }
 
 /**
@@ -136,7 +136,7 @@ export function round1Record(i: Round1Input): Round1Record | undefined {
     if (a.status === "needs author") kinds.push("needs-author");
     if (a.status === "partially answered") kinds.push("partial");
     if (q.type === "existing-reuse-common" && !a.none_found) kinds.push("existing");
-    if (q.type === "missing-test" && (a.none_found || !a.citations.some((c) => c.tree !== "dependency" && isTestLikePath(c.path)))) kinds.push("missing-test");
+    if (q.type === "missing-test" && (a.none_found || !a.citations.some((c) => c.tree !== "dependency" && isTestPath(i.packs, c.path)))) kinds.push("missing-test");
     if (kinds.length === 0) continue;
     const sym = q.symbol !== undefined ? qa.symbols.find((s) => s.id === q.symbol) : undefined;
     const cite = i.itemCites[q.item];
