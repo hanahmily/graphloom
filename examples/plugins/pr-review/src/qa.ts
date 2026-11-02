@@ -101,7 +101,7 @@ const PART_LABELS: Record<string, string> = { "existing-equivalent": "Existing e
 
 /** A combined answer's three labelled parts (design §7.6), each with its own status, text, evidence and checker verdict. */
 function partLines(a: FinalAnswer): string[] {
-  return (a.parts ?? []).flatMap((p) => [`  - **${PART_LABELS[p.part] ?? p.part} — ${p.status}${p.none_found ? ", none found" : ""}.** ${oneLine(p.answer)}`, `    ${evidenceLine({ ...a, ...p, metrics: [] } as FinalAnswer).trim()}`]);
+  return (a.parts ?? []).flatMap((p) => [`  - **${PART_LABELS[p.part] ?? p.part} — ${p.status}${p.none_found ? ", none found" : ""}.** ${oneLine(p.answer)}`, `    ${evidenceLine({ ...a, ...p, metrics: [] } as FinalAnswer).trim()}`, ...((p.history ?? []).length > 1 ? [`    Statements before the ${p.check.verdict === "downgraded" ? "downgrade" : "correction"}: ${(p.history ?? []).map((h, n) => `${n === 0 ? "first" : "corrected"} (${h.status}): "${short(oneLine(h.answer), 160)}"`).join("; ")}.`] : [])]);
 }
 
 function questionLines(q: Question, a: FinalAnswer | undefined): string[] {

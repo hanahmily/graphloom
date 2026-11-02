@@ -8,6 +8,7 @@
 import { describe, expect, it } from "vitest";
 import { ANSWERS_SCHEMA, answerProblems, assemble, parseAnswers, readAnswerCheck, unmeasuredAbsences, verificationPlan, weakestStatus, withParts, type Answer, type AnswerContext, type AnswerPart, type FinalAnswer } from "../src/answers.js";
 import { htmlPagesFrom } from "../src/html.js";
+import { renderQa } from "../src/qa.js";
 import { COMBINED_PARTS, COMBINED_TYPE, type CombinedPart, type Question } from "../src/questions.js";
 import { LARGE_LIMITS } from "../src/rehearsal.js";
 import { scenarioWith, simulate } from "./support.js";
@@ -155,6 +156,41 @@ describe("the checker's verdict on a combined answer", () => {
     const supported = assemble([question], current, current, read(verdictOf([partVerdict("existing-equivalent", "supported"), partVerdict("reuse-library", "partial"), partVerdict("common-logic", "supported")])), false)[0]!;
     expect(supported.status).toBe("partially answered");
     expect(supported.check.verdict).toBe("partial");
+  });
+});
+
+describe("a revised combined answer keeps each part's earlier statement", () => {
+  const first = withParts(wire([none("existing-equivalent", { answer: "FIRST: nothing like it exists" }), none("reuse-library", { status: "partially answered" }), none("common-logic")]));
+  const second = withParts(wire([none("existing-equivalent", { answer: "SECOND: still nothing" }), none("reuse-library", { status: "partially answered" }), none("common-logic")]));
+  const verdicts = (existing: string) => ({ verdicts: [{ question: "Q1", verdict: "supported", note: "", searches: [], principles: [], parts: COMBINED_PARTS.map((part) => ({ part, verdict: part === "existing-equivalent" ? existing : "supported", note: `${part} note`, searches: [search("own")] })) }] });
+  const reading = readAnswerCheck(verdicts("unsupported"), [question], new Map([["Q1", second]])) as Exclude<ReturnType<typeof readAnswerCheck>, { problems: string[] }>;
+  const [final] = assemble([question], new Map([["Q1", second]]), new Map([["Q1", first]]), reading, true) as [FinalAnswer];
+
+  it("records the answerer's first and corrected statement of every revised part, beside the downgrade", () => {
+    expect(final.status).toBe("needs author");
+    const part = final.parts![0]!;
+    expect(part).toMatchObject({ part: "existing-equivalent", status: "needs author", check: { verdict: "downgraded", note: "existing-equivalent note" } });
+    expect(part.history).toEqual([{ answer: "FIRST: nothing like it exists", status: "answered" }, { answer: "SECOND: still nothing", status: "answered" }]);
+    // A question not revised has no part history.
+    const plain = assemble([question], new Map([["Q1", second]]), new Map([["Q1", second]]), reading, false)[0]!;
+    expect(plain.parts![0]!.history).toBeUndefined();
+  });
+
+  it("shows them in qa.json, review.md and review-appendix.html, and in the open question of review.html", () => {
+    const qa = JSON.parse(JSON.stringify({ question: final })) as { question: FinalAnswer };
+    expect(qa.question.parts![0]!.history).toHaveLength(2);
+    const md = renderQa({ pr: { owner: "o", repo: "r", number: 1, head: "h" }, view: { items: [{ id: "R1", text: "t" }], records: [] }, groundwork: { symbols: [], inventory: { dependencies: [], packages: [], truncated: [] }, notes: [] }, purposes: [], questions: [question], answers: [final] } as unknown as Parameters<typeof renderQa>[0]);
+    expect(md).toContain("Statements before the downgrade: first (answered): \"FIRST: nothing like it exists\"; corrected (answered): \"SECOND: still nothing\"");
+    // The HTML pages, from a large run's qa.json with the question's answer replaced by the downgraded one.
+    const config = { limits: LARGE_LIMITS };
+    const sim = simulate({ scenario: scenarioWith("large-pull-request", () => undefined, config), config, maxSteps: 250 });
+    const doc = JSON.parse(sim.qa!.json) as { questions: Array<{ type: string; answer?: unknown }> };
+    doc.questions.find((q) => q.type === COMBINED_TYPE)!.answer = JSON.parse(JSON.stringify(final));
+    const pages = htmlPagesFrom(sim.written!.json, JSON.stringify(doc))!;
+    expect(pages.appendix).toContain("Statements before the downgrade");
+    expect(pages.appendix).toContain("FIRST: nothing like it exists");
+    expect(pages.review).toContain("Downgraded; first said (answered)");
+    expect(pages.review).toContain("FIRST: nothing like it exists");
   });
 });
 

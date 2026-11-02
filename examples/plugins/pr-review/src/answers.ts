@@ -781,6 +781,8 @@ export function readAnswerCheck(output: unknown, questions: readonly Question[],
 export interface FinalPart extends AnswerPart {
   searches: MeasuredSearch[];
   check: { verdict: AnswerVerdict | "downgraded"; note: string; searches: MeasuredSearch[] };
+  /** The answerer's statements of this part, oldest first, when the answer was revised: the first and the corrected one (design §7.3). */
+  history?: Array<{ answer: string; status: AnswerStatus }>;
 }
 
 /** One answer as the Q&A holds it: the answerer's, with the checker's verdict, and both statements when it was downgraded. */
@@ -938,7 +940,10 @@ export function assemble(questions: readonly Question[], current: ReadonlyMap<st
         : a.parts.map((p) => {
             const c = partChecks.find((x) => x.part === p.part);
             const unsupported = c?.verdict === "unsupported";
-            return { ...p, status: unsupported ? "needs author" : p.status, searches: measured(p.searches), check: { verdict: unsupported ? "downgraded" : (c?.verdict ?? "supported"), note: c?.note ?? "", searches: measured(c?.searches ?? []) } };
+            // The part's earlier statement is kept beside the corrected one, so a downgrade can be compared with what was said first.
+            const earlier = revised && first !== undefined && first !== a ? first.parts?.find((x) => x.part === p.part) : undefined;
+            const partHistory = earlier !== undefined ? { history: [{ answer: earlier.answer, status: earlier.status }, { answer: p.answer, status: p.status }] } : {};
+            return { ...p, ...partHistory, status: unsupported ? "needs author" : p.status, searches: measured(p.searches), check: { verdict: unsupported ? "downgraded" : (c?.verdict ?? "supported"), note: c?.note ?? "", searches: measured(c?.searches ?? []) } };
           });
     const { parts: _wire, ...rest } = a;
     const mine = { ...rest, searches: measured(a.searches), notes, ...(parts !== undefined ? { parts, status: weakestStatus(parts.map((p) => p.status)) } : {}) };

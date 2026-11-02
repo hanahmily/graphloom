@@ -1368,7 +1368,11 @@ The checker's verdict for the question carries a judgment for each part, with th
 searches of its own that a part saying none found needs (the question's own
 `searches` stay empty), and the question's verdict is the weakest of the parts'.
 A part still unsupported after the one revision is `needs author` with both
-statements kept, and the question is `needs author` with it. The citations of
+statements kept, and the question is `needs author` with it. Each part of a
+revised answer records the answerer's first and corrected statement of that part
+(`history`), shown beside the part's verdict in `qa.json`, `review.md`,
+`review-appendix.html` and, for a downgraded part, the open question of
+`review.html`; the question's own `history` keeps the one-line summaries. The citations of
 every part are verified and its searches re-run like any answer's, and a part's
 absence rests on its own measured searches. `qa.json` records the parts with
 their verdicts; `review.md`, the open questions of `review.html` and

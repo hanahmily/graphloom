@@ -59,6 +59,8 @@ interface QaPart {
   searches?: MeasuredSearch[];
   inventory?: Array<{ name: string; version: string }>;
   check?: { verdict: string; note: string; searches?: MeasuredSearch[] };
+  /** The part's earlier statement and its corrected one, when the answer was revised. */
+  history?: Array<{ answer: string; status: string }>;
 }
 
 interface QaAnswer {
@@ -346,7 +348,7 @@ function openQuestionsHtml(i: HtmlInput): string {
   const sel = openQuestions(qa.questions, { id: NECESSITY_ID, conclusion: n1 });
   const rows = sel.open.map((q) => {
     const status = q.answer?.status ?? "not answered";
-    return `<li><a href="${APPENDIX_HREF}#q-${esc(q.id)}"><strong>${esc(q.id)}</strong></a> <span class="muted">[${esc(q.type)}]</span> ${badge(STATUS_CLASS[status] ?? "grey", status)} ${esc(clip(q.text, 200))}${q.answer !== undefined ? ` <div class="muted">${esc(clip(q.answer.answer, 240))}</div>${(q.answer.parts ?? []).length > 0 ? `<ul class="plain">${(q.answer.parts ?? []).map((p) => `<li>${esc(PART_TITLES[p.part] ?? p.part)} ${badge(STATUS_CLASS[p.status] ?? "grey", p.status)} <span class="muted">${esc(clip(p.answer, 200))}</span></li>`).join("")}</ul>` : ""}` : ""}</li>`;
+    return `<li><a href="${APPENDIX_HREF}#q-${esc(q.id)}"><strong>${esc(q.id)}</strong></a> <span class="muted">[${esc(q.type)}]</span> ${badge(STATUS_CLASS[status] ?? "grey", status)} ${esc(clip(q.text, 200))}${q.answer !== undefined ? ` <div class="muted">${esc(clip(q.answer.answer, 240))}</div>${(q.answer.parts ?? []).length > 0 ? `<ul class="plain">${(q.answer.parts ?? []).map((p) => `<li>${esc(PART_TITLES[p.part] ?? p.part)} ${badge(STATUS_CLASS[p.status] ?? "grey", p.status)} <span class="muted">${esc(clip(p.answer, 200))}</span>${p.check?.verdict === "downgraded" && (p.history ?? []).length > 1 ? ` <div class="muted">Downgraded; first said (${esc(p.history![0]!.status)}): “${esc(clip(p.history![0]!.answer, 200))}”</div>` : ""}</li>`).join("")}</ul>` : ""}` : ""}</li>`;
   });
   const body = [
     sel.open.length === 0 ? para("No question needs a person.") : `<ul class="plain open">${rows.join("")}</ul>`,
@@ -503,7 +505,14 @@ function evidenceHtml(a: Pick<QaPart, "citations" | "searches" | "inventory" | "
 
 /** A combined answer's three parts, each with its status, text and evidence (design §7.6). */
 function partsHtml(parts: readonly QaPart[], g: Github): string {
-  return `<div class="parts">${parts.map((p) => `<div class="part"><p><strong>${esc(PART_TITLES[p.part] ?? p.part)}</strong> ${badge(STATUS_CLASS[p.status] ?? "grey", p.status)}${p.none_found === true ? ' <span class="muted">none found</span>' : ""}</p><p>${esc(p.answer)}</p>${evidenceHtml(p, g)}</div>`).join("")}</div>`;
+  return `<div class="parts">${parts.map((p) => `<div class="part"><p><strong>${esc(PART_TITLES[p.part] ?? p.part)}</strong> ${badge(STATUS_CLASS[p.status] ?? "grey", p.status)}${p.none_found === true ? ' <span class="muted">none found</span>' : ""}</p><p>${esc(p.answer)}</p>${evidenceHtml(p, g)}${partHistoryHtml(p)}</div>`).join("")}</div>`;
+}
+
+/** A revised part's statements, oldest first, so a downgrade can be compared with what the answerer said first. */
+function partHistoryHtml(p: QaPart): string {
+  if ((p.history ?? []).length <= 1) return "";
+  const what = p.check?.verdict === "downgraded" ? "downgrade" : "correction";
+  return `<p class="muted">Statements before the ${what}: ${(p.history ?? []).map((h, n) => `${n === 0 ? "first" : "corrected"} (${esc(h.status)}): “${esc(clip(h.answer, 160))}”`).join("; ")}.</p>`;
 }
 
 function answerHtml(a: QaAnswer, g: Github): string {
