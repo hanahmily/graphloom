@@ -7,6 +7,13 @@ description: Start a GraphLoom run. Writes task.yaml (graph, repo, config profil
 
 ## Hard rules
 
+- **Start and monitor; never fix.** Your job is to start the run and report its
+  progress. When it stops, for any reason, summarize why (the stop reason, its
+  blocker and any question it asks, quoted) and ask the user what to do next.
+  Do nothing more: no `graphloom resume`, no change to the environment, the
+  task or the repository, no new run, no answer to a question the run asks, and
+  no reading of GraphLoom's or the target repository's source to work around
+  the stop. The user decides every next step.
 - Ask before anything outward-facing (push, pull request, issue creation,
   release). Starting a run is local, but confirm the task with the user first:
   a live run spends real model calls against its budgets.

@@ -1,6 +1,6 @@
 ---
 name: graphloom-watch
-description: Periodic progress check of a running GraphLoom run. Arms graphloom wait --until progress (a background command in Claude Code, a foreground loop in Codex and opencode), and on each wake snapshots graphloom stats --json and inspect, diffs against the previous snapshot in a watch file, and reports only the deltas - stage and attempt, stages accepted, budget use against limits, new supervisor episodes with one-line reasons, waiting states such as a quota pause with its reset time. Flags a stall, any budget over 80%, a repeated identical failure, or a run waiting for a human; hands a stopped run to graphloom-triage. Never resumes a run or changes a budget. Use after graphloom-run, or when the user asks how a run is doing.
+description: Periodic progress check of a running GraphLoom run. Arms graphloom wait --until progress (a background command in Claude Code, a foreground loop in Codex and opencode), and on each wake snapshots graphloom stats --json and inspect, diffs against the previous snapshot in a watch file, and reports only the deltas - stage and attempt, stages accepted, budget use against limits, new supervisor episodes with one-line reasons, waiting states such as a quota pause with its reset time. Flags a stall, any budget over 80%, a repeated identical failure, or a run waiting for a human; on a stop, summarizes why and asks the user what to do next. Never diagnoses, fixes or resumes a run, answers its questions, or changes a budget. Use after graphloom-run, or when the user asks how a run is doing.
 ---
 
 # Watch a GraphLoom run
@@ -12,8 +12,9 @@ records it in `.graphloom-watch/run`. Below, `<run>` is that reference and
 ## Hard rules
 
 - **Watch only.** Never `graphloom resume`, `graphloom stop`, `graphloom
-  switch-model`, or change a budget. A stop goes to graphloom-triage; the user
-  decides.
+  switch-model`, or change a budget. When the run stops, summarize why and ask
+  the user what to do; do not diagnose, fix, resume or answer the run's
+  questions on your own. The user decides, and may ask for graphloom-triage.
 - Ask before anything outward-facing (push, pull request, issue creation,
   release).
 - Never print or ask for a token or secret; do not dump environment variables.
@@ -104,5 +105,8 @@ marker file is the push signal in every agent: check
 
 When `summary.status` is not `running`, a `run_stopped` event arrives, the
 marker file exists, or wait exits 3: stop arming. Report status, stop reason,
-retryable or final, and hand over to the graphloom-triage skill (for
-`succeeded`, to graphloom-deliver). Do not resume.
+retryable or final, the blocker, and any question the stop asks, quoted
+verbatim from `graphloom inspect`. Then ask the user what to do next and end
+your turn. Do not resume, do not start graphloom-triage or graphloom-deliver
+yourself, and do not answer the run's questions: offer them as next steps
+(triage for a stop the user wants diagnosed, deliver for `succeeded`).
