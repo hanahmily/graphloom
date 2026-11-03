@@ -1,6 +1,6 @@
 ---
 name: graphloom-triage
-description: Diagnose a stopped GraphLoom run before anything else. Reads graphloom inspect, graphloom stats, the stop reason and class, the cited evidence, supervisor episodes and remedies; finds the cause first; only then proposes how to resume (--reconciled after reconciling ambiguous effects, --update-executors or --update-plugin, --upgrade, --supervisor) and confirms with the user before resuming. Never resets or raises budgets reflexively; when the cause is a GraphLoom or plugin bug, fixes the real bug instead of routing around the stuck run. Use when a run stopped, failed, or its controller died.
+description: Diagnose a stopped GraphLoom run before anything else. Reads graphloom inspect, graphloom stats, the stop reason and class, the cited evidence, supervisor episodes and remedies; finds the cause first; only then proposes how to resume (--reconciled after reconciling ambiguous effects, --update-executors or --update-plugin, --upgrade, --supervisor) and confirms with the user before resuming. Never resets or raises budgets reflexively; when the cause is a GraphLoom or plugin bug, fixes the real bug instead of routing around the stuck run. Never answers a question the run asks the user, and changes nothing without a yes. Use when the user asks why a run stopped, failed, or its controller died.
 ---
 
 # Triage a stopped run
@@ -9,6 +9,17 @@ Diagnose first. A resume is a decision the user makes once the cause is known.
 
 ## Hard rules
 
+- **Only when the user asks.** Triage runs when the user asks why a run
+  stopped; graphloom-run and graphloom-watch never start it on their own.
+- **A question the run asks is the user's.** A stop that asks for a decision
+  (a graph's own stop such as `needs maintainer decision`, or a declared
+  approval) is answered by the user. Quote the question; never answer it,
+  never encode an answer in a new task or request, and never resume the run to
+  get past it.
+- **Diagnose; change nothing.** Read state and evidence, then report the cause
+  and the resume or fix you propose. Do not change the environment (`PATH`,
+  tool versions, config files), the task, the repository or the run until the
+  user says yes to that exact change.
 - **Cause before cure.** Do not run `graphloom resume` until you can say, with
   evidence, why the run stopped and why the chosen resume addresses it. Then
   ask the user and resume only on a yes.

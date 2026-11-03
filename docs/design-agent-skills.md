@@ -21,7 +21,7 @@ repository holds them in top-level [`skills/`](../skills):
 | `graphloom-issue` | Shapes a requirement into an issue one run handles well: one deliverable PR, acceptance criteria, context documents (issue-fix `issues.context`), split or merged to size; the private-tracker option (`pullRequest.reference`) |
 | `graphloom-run` | Writes `task.yaml`, `graphloom check`, starts the run in the background with an `--on-stop` marker file, hands off to watch |
 | `graphloom-watch` | One progress check: arms `graphloom wait --until progress` (a background command in Claude Code; a foreground loop in Codex and opencode, which have no background-command notifications), diffs `stats --json`/`inspect` against the previous snapshot, reports deltas and flags (stall, budget > 80%, repeated failure, waiting for a human) |
-| `graphloom-triage` | A stopped run: diagnose the cause from `inspect`, `stats` and evidence first, then choose the resume form with the user |
+| `graphloom-triage` | A stopped run the user asks about: diagnose the cause from `inspect`, `stats` and evidence first, then choose the resume form with the user |
 | `graphloom-deliver` | Verifies the delivered branch (commit message, PR body, required sections, the repository's checks on a clean copy), then pushes or opens the PR only with explicit approval |
 
 `graphloom-run` prepares the task with `graphloom task new`
@@ -35,9 +35,13 @@ changed in the same change as the CLI, so the drift test (§4) keeps passing.
 request, issue creation, release). Never print or ask for a token or secret.
 Read run state only through `inspect`, `stats` and `wait`; never edit
 `state.json`. Name only real CLI commands and flags (§4 tests this).
-Watch never resumes a run or changes a budget; triage diagnoses before it
-proposes a resume and never raises a budget reflexively; a GraphLoom or plugin
-bug is fixed, not routed around.
+Run and watch start and monitor a run and never fix it: on any stop they
+summarize why (the stop reason, its blocker and any question it asks, quoted)
+and ask the user what to do next, without resuming, changing the environment,
+task or repository, or answering the run's questions. Triage runs only when the
+user asks; it diagnoses before it proposes a resume, changes nothing without the
+user's yes, never answers a question the run asks the user, and never raises a
+budget reflexively; a GraphLoom or plugin bug is fixed, not routed around.
 
 **Finding a background run.** `graphloom run` prints
 `graphloom: run <runId> started; state <stateDir>` on stderr as soon as intake
