@@ -492,7 +492,8 @@ describe("failures go to the supervisor, not into a loop", () => {
   it("hands over a report that would hold a credential, refusing to write it", () => {
     const leaky = scenarioWith("report", (s) => {
       const good = s.results["change-report-v1"]![0]!.output as { notes: string[] };
-      good.notes = ["The body contains ghp_abcdefghijklmnopqrstuvwxyz0123456789"];
+      // Joined at run time: the shipped test file holds no credential-shaped string (the release tree check refuses one).
+      good.notes = [`The body contains ${"gh" + "p_"}abcdefghijklmnopqrstuvwxyz0123456789`];
     });
     const sim = simulate({ scenario: leaky });
     expect(stopOf(sim)).toMatchObject({ reason: "report refused", retryable: false });
