@@ -346,6 +346,26 @@ describe("the release tree content checks (§2.3, §6 step 6)", () => {
   });
 });
 
+describe("the shipped source holds no credential-shaped string (§2.3, §6 step 6)", () => {
+  it("finds none in the tracked files a release copies from source, so a fixture fails here and not at release time", async () => {
+    const { CREDENTIAL_PATTERNS, DIST_ONLY, EXCLUDED } = (await import(path.join(repoRoot, "scripts", "release", "check-tree.mjs"))) as { CREDENTIAL_PATTERNS: { name: string; re: RegExp }[]; DIST_ONLY: string[]; EXCLUDED: string[] };
+    const skipped = [...EXCLUDED, ...DIST_ONLY].map((p) => `${p}/`);
+    const files = spawnSync("git", ["ls-files", "-z"], { cwd: repoRoot, encoding: "utf8" }).stdout.split("\0").filter((f) => f !== "" && !skipped.some((p) => f.startsWith(p)));
+    expect(files.length).toBeGreaterThan(100);
+    const found: string[] = [];
+    for (const f of files) {
+      const bytes = await readFile(path.join(repoRoot, f)).catch(() => undefined);
+      if (bytes === undefined || bytes.subarray(0, 8000).includes(0)) continue;
+      const text = bytes.toString("utf8");
+      for (const { name, re } of CREDENTIAL_PATTERNS) {
+        // The tree check's own exemption: a vendor's documented placeholder, such as AWS's AKIAIOSFODNN7EXAMPLE.
+        if ([...text.matchAll(new RegExp(re.source, "g"))].some((m) => !/EXAMPLE$/i.test(m[0]))) found.push(`${name}: ${f}`);
+      }
+    }
+    expect(found).toEqual([]);
+  });
+});
+
 describe("pruning node_modules for the release platform (§6 step 6)", () => {
   const modules = (root: string, ...rel: string[]) => path.join(root, "node_modules", ...rel);
   const exists = (p: string) => readFile(path.join(p, "package.json")).then(() => true, () => false);

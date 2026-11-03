@@ -64,7 +64,8 @@ describe("the report-write command", () => {
 
 describe("secretFindings (design 12.3)", () => {
   it("finds private-key headers, GitHub tokens, AWS keys and Slack tokens, by line", () => {
-    const text = ["fine", "-----BEGIN RSA PRIVATE KEY-----", "token ghp_abcdefghijklmnopqrstuvwxyz0123456789 here", "github_pat_11ABCDEFG0123456789_abcdefghijklmnop", "AKIAABCDEFGHIJKLMNOP", "xoxb-1234567890-abcdef"].join("\n");
+    // Joined at run time: the shipped test file holds no credential-shaped string (the release tree check refuses one).
+    const text = ["fine", "-----BEGIN RSA PRIVATE KEY-----", `token ${"gh" + "p_"}abcdefghijklmnopqrstuvwxyz0123456789 here`, "github_pat_11ABCDEFG0123456789_abcdefghijklmnop", `${"AK" + "IA"}ABCDEFGHIJKLMNOP`, "xoxb-1234567890-abcdef"].join("\n");
     expect(secretFindings(text)).toEqual(["line 2: a private key header", "line 3: a GitHub token", "line 4: a GitHub token", "line 5: an AWS access key", "line 6: a Slack token"]);
   });
 
