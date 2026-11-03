@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { randomBytes } from "node:crypto";
-import { cp, mkdir, rm } from "node:fs/promises";
+import { constants, copyFile, mkdir, readdir, readlink, rm, symlink } from "node:fs/promises";
 import path from "node:path";
 import type { ConfinementSpec } from "@graphloom/sdk";
 import { newEvidenceRef } from "./admit.js";
@@ -218,6 +218,22 @@ export interface ConversationCapture {
 export type ConversationOutcome = { recorded: true; recordId: string; evidenceRef: string } | { recorded: false; reason: string };
 
 /**
+ * Copies a staged tree into an existing directory: directories are merged (created when absent), a file or link that
+ * already exists is an error, so a conversation never overwrites a saved session. `fs.cp` with `errorOnExist` cannot do
+ * this: from Node 24.22 it refuses the existing top directory itself.
+ */
+export async function mergeInto(from: string, to: string): Promise<void> {
+  await mkdir(to, { recursive: true, mode: 0o700 });
+  for (const entry of await readdir(from, { withFileTypes: true })) {
+    const src = path.join(from, entry.name);
+    const dst = path.join(to, entry.name);
+    if (entry.isDirectory()) await mergeInto(src, dst);
+    else if (entry.isSymbolicLink()) await symlink(await readlink(src), dst);
+    else if (entry.isFile()) await copyFile(src, dst, constants.COPYFILE_EXCL);
+  }
+}
+
+/**
  * Record an operator conversation: only now and only for the write, under the run lock, and only into a run
  * that has stopped (a running controller holds its own copy of the state and would overwrite this write) and
  * has not finished (its saved sessions are gone). Otherwise nothing is recorded and the reason says why.
@@ -245,7 +261,7 @@ export async function recordConversation(stateDir: string, capture: Conversation
     const dir = conversationsDir(stateDir);
     if (capture.stagedDir !== undefined) {
       await mkdir(dir, { recursive: true, mode: 0o700 });
-      await cp(capture.stagedDir, dir, { recursive: true, errorOnExist: true, force: false });
+      await mergeInto(capture.stagedDir, dir);
     }
     const harness = parent.harness ?? harnessOfSessionRef(capture.sessionRef);
     const record: AgentSessionRecord = {
