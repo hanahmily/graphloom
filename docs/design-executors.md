@@ -128,8 +128,10 @@ processes, worker threads, native addons, and WASI are denied. The runner
 refuses to start built-in packages on a Node release without a stable
 permission model (below 22.13) rather than run them unconfined.
 
-Node's permission model has no network scope, so the host does not restrict
-where a built-in package connects. Built-in packages are first-party code that
+The host does not restrict where a built-in package connects. Node's
+permission model had no network scope before Node 25; from Node 25 it denies
+network unless `--allow-net` is given, so the runner passes `--allow-net` to a
+Node that knows the flag (`sandboxNodeArgs`, `packages/runner/src/sandbox.ts`). Built-in packages are first-party code that
 contacts only its configured API URL. Untrusted executors that need egress
 limits require an OS-level sandbox, which this runner does not provide.
 

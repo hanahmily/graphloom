@@ -21,14 +21,24 @@ export function assertSandboxSupported(version: string = process.versions.node):
 /**
  * Node flags that confine an executor process to reading its own code and
  * dependencies. Writes, child processes, worker threads, native addons, and
- * WASI stay denied because the permission model grants none of them by default.
+ * WASI stay denied because the permission model grants none of them by default;
+ * network stays allowed, as it was before the model had a network scope.
  */
 export function sandboxNodeArgs(modules: readonly string[], extraReadPaths: readonly string[] = []): string[] {
   const readable = new Set<string>();
   const seen = new Set<string>();
   for (const file of modules) addPackageClosure(packageRootOf(file), readable, seen);
   for (const p of extraReadPaths) readable.add(path.resolve(p));
-  return ["--permission", ...[...readable].sort().map((p) => `--allow-fs-read=${p}`)];
+  return ["--permission", ...[...readable].sort().map((p) => `--allow-fs-read=${p}`), ...netArgs()];
+}
+
+/**
+ * The permission model had no network scope before Node 25; from then on it denies network unless `--allow-net` is
+ * given. The host does not restrict where a built-in package connects (docs/design-executors.md), so a Node that
+ * knows the flag gets it, and an older one, which would refuse an unknown flag, does not.
+ */
+export function netArgs(flags: ReadonlySet<string> = process.allowedNodeEnvironmentFlags): string[] {
+  return flags.has("--allow-net") ? ["--allow-net"] : [];
 }
 
 /**
