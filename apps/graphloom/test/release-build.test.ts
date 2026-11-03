@@ -120,9 +120,9 @@ describe("fetching the pinned Node (§2.7)", () => {
     expect(script("fetch-node.mjs", ["--pin", m.pin, "--dest", path.join(m.dir, "dest")]).stderr).toContain("exact x.y.z Node version");
   });
 
-  it("pins an exact Node 24 release with a SHA-256 in release/node.json", async () => {
+  it("pins an exact Node 26 release with a SHA-256 in release/node.json", async () => {
     const pin = JSON.parse(await readFile(path.join(repoRoot, "release", "node.json"), "utf8")) as { version: string; sha256: string; platform: string };
-    expect(pin.version).toMatch(/^24\.\d+\.\d+$/);
+    expect(pin.version).toMatch(/^26\.\d+\.\d+$/);
     expect(pin.sha256).toMatch(/^[0-9a-f]{64}$/);
     expect(pin.platform).toBe("linux-x64");
   });

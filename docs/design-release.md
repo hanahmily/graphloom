@@ -278,7 +278,8 @@ The release runs without a host Node. The host still needs the tools in §4.4.
 
 - **Pin.** `release/node.json` records the exact Node version and the SHA-256 of
   `node-v<version>-linux-x64.tar.xz`. The pinned line is the newest Node LTS
-  major that the gate passes on; the first is Node 24. A Node bump is a
+  major that the gate passes on; the first was Node 24, and the pin is now
+  Node 26. A Node bump is a
   reviewed commit. The person bumping it checks the digest against nodejs.org's
   `SHASUMS256.txt` and that file's signature by a Node release key.
 - **Fetch.** `release.sh` downloads the tarball from
@@ -312,8 +313,9 @@ The release runs without a host Node. The host still needs the tools in §4.4.
   target repository's own toolchain, which each graph's environment checks
   verify.
 - **R1 as implemented.**
-  - `release/node.json` pins Node `24.22.1`, the newest Node 24 LTS on
-    2026-10-26, with `version`, `platform`, `sha256`, and a `verified` record.
+  - `release/node.json` pins Node `26.13.0`, the newest Node LTS on
+    2026-11-03 (Node 26 became LTS on 2026-10-28; R1 pinned `24.22.1`), with
+    `version`, `platform`, `sha256`, and a `verified` record.
     The record names the `SHASUMS256.txt` that the digest was checked
     against, and the release key whose signature on it was verified with
     `gpgv` against the `nodejs/release-keys` keyring.
