@@ -1,10 +1,10 @@
 {
-  "version": "24.22.1",
+  "version": "26.13.0",
   "platform": "linux-x64",
-  "sha256": "6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6",
+  "sha256": "d28a96af6c38596f6d9d97c0ee531c13d238d757742387d1928de822d959e997",
   "verified": {
-    "shasums": "https://nodejs.org/dist/v24.22.1/SHASUMS256.txt",
-    "signature": "SHASUMS256.txt.sig, good signature by 5BE8A3F6C8A5C01D106C0AD820B1A390B168D356 (Antoine du Hamel)",
+    "shasums": "https://nodejs.org/dist/v26.13.0/SHASUMS256.txt",
+    "signature": "SHASUMS256.txt.sig, good signature by C82FA3AE1CBEDC6BE46B9360C43CEC45C17AB93C (Richard Lau)",
     "keyring": "nodejs/release-keys gpg-only-active-keys/pubring.kbx"
   }
 }
