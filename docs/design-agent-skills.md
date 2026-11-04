@@ -19,10 +19,10 @@ repository holds them in top-level [`skills/`](../skills):
 |---|---|
 | `graphloom-setup` | `graphloom doctor`, explains each warn/fail, runs the `fix:` commands with the user's consent, then `graphloom setup`; supervisor routes per vendor |
 | `graphloom-issue` | Shapes a requirement into an issue one run handles well: one deliverable PR, acceptance criteria, context documents (issue-fix `issues.context`), split or merged to size; the private-tracker option (`pullRequest.reference`) |
-| `graphloom-run` | Writes `task.yaml`, `graphloom check`, starts the run in the background with an `--on-stop` marker file, hands off to watch |
+| `graphloom-run` | Refuses a request with unfilled placeholders, checks the checkout against the upstream default branch (asks before using a fresh base), writes `task.yaml`, `graphloom check`, starts the run in the background with an `--on-stop` marker file and the repository's pinned toolchain on `PATH`, hands off to watch |
 | `graphloom-watch` | One progress check: arms `graphloom wait --until progress` (a background command in Claude Code; a foreground loop in Codex and opencode, which have no background-command notifications), diffs `stats --json`/`inspect` against the previous snapshot, reports deltas and flags (stall, budget > 80%, repeated failure, waiting for a human) |
 | `graphloom-triage` | A stopped run the user asks about: diagnose the cause from `inspect`, `stats` and evidence first, then choose the resume form with the user |
-| `graphloom-deliver` | Verifies the delivered branch (commit message, PR body, required sections, the repository's checks on a clean copy), then pushes or opens the PR only with explicit approval |
+| `graphloom-deliver` | Verifies the delivered branch (commit message, PR body, required sections), rebases onto a newer upstream base only on the user's yes, then runs the repository's checks once on a clean copy of the tree to push (helper files kept outside it), then pushes or opens the PR only with explicit approval |
 
 `graphloom-run` prepares the task with `graphloom task new`
 ([core §16](design-typescript-core.md#16-preparing-a-task-graphloom-task-new))
