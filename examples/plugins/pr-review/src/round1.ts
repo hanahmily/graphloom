@@ -12,7 +12,7 @@
 import { isTestPath } from "./answers.js";
 import { anchored, scrub, type ItemCites } from "./draft.js";
 import type { FullPack } from "./packs.js";
-import { effectiveConclusion, brokenNote, parseNecessityRecord, NECESSITY_ID } from "./necessity.js";
+import { effectiveConclusion, brokenNote, parseNecessityRecord, NECESSITY_ID, ROUNDS_SKIP_REASON } from "./necessity.js";
 import type { PriorItem } from "./prior.js";
 import type { PullFile } from "./snapshot.js";
 
@@ -65,7 +65,12 @@ export interface Round1Record {
   issues: Round1Issue[];
   /** The issues earlier heads left open, each judged on this head; absent for a run with none. */
   prior?: Round1Prior[];
+  /** Why round 1 did not run (`rounds: review-only`, design §3.2): it records no issue, and earlier round-1 items are left as they were. */
+  skipped?: string;
 }
+
+/** Round 1 of a `review-only` run: skipped by the operator's choice, so no issue (and round 2 runs in the same run). */
+export const round1Skipped = (head: string): Round1Record => ({ schema: ROUND1_SCHEMA, head, necessity: "skipped", issues: [], skipped: ROUNDS_SKIP_REASON });
 
 const oneLine = (s: string): string => s.replace(/\s+/g, " ").trim();
 const clip = (s: string, n: number): string => (s.length <= n ? s : `${s.slice(0, n - 1)}…`);

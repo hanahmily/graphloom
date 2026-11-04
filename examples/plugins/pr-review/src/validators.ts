@@ -12,9 +12,9 @@ import { measurementState, type MeasurementState } from "./measurements.js";
 import { reportJson, reviewMarkdown } from "./output.js";
 import { parseProfile, ProfileError, type Profile } from "./profile.js";
 import type { PullRequest } from "./request.js";
-import { afterNecessity, answerContext, batchedAnswers, answerWrites, necessityFlow, qaContext, questionSet, questionerFlow, recordedNecessity, type QaContext } from "./qaflow.js";
+import { afterNecessity, answerContext, batchedAnswers, answerWrites, necessityFlow, qaContext, questionSet, questionerFlow, recordedNecessity, skippedWrites, type AnswerWrites, type QaContext } from "./qaflow.js";
 import { answersFlow, type FinalAnswer } from "./answers.js";
-import { admissibleDecision, effectiveConclusion, necessityJson, NECESSITY_ID, type NecessityRecord } from "./necessity.js";
+import { admissibleDecision, effectiveConclusion, necessityJson, NECESSITY_ID, ROUNDS_SKIP_REASON, roundsSkipJson, type NecessityRecord } from "./necessity.js";
 import { describeReasons, isLarge } from "./mode.js";
 import { requiredQuestions, statedPurposes } from "./questions.js";
 import { principlesRecord } from "./principles.js";
@@ -249,7 +249,26 @@ function necessityOutcome(evidence: readonly EvidenceRecord[], ctx: QaContext): 
 
 const isOutcomeFailure = (o: { record: NecessityRecord } | ValidationResult): o is ValidationResult => "status" in o;
 
+/** `rounds: review-only` (design §3.2): the recorded skip of Questions (N1 included), the only thing the stage records. */
+function skippedQuestions(input: ValidationInput, profile: Profile): ValidationResult {
+  const c = context(input, profile);
+  if (isResult(c)) return c;
+  const w = recordedNecessityJson(input.evidence);
+  if (w.state === "none") return inconclusive(`the skip of the Questions stage (${ROUNDS_SKIP_REASON}) is not recorded`);
+  if (w.state === "failed") return failed(`necessity.json was not written whole: ${w.reason}`);
+  if (w.value !== roundsSkipJson()) return failed(`necessity.json is not the recorded skip the profile's rounds (review-only) calls for`);
+  return passed(`the operator chose ${ROUNDS_SKIP_REASON}: the necessity question N1 and every other question were skipped, and necessity.json records the skip with that reason`);
+}
+
+/** Whether necessity.json holds the rounds skip: admissible only when the profile says review-only. */
+const roundsSkipRecorded = (evidence: readonly EvidenceRecord[]): boolean => {
+  const w = recordedNecessityJson(evidence);
+  return w.state === "read" && w.value === roundsSkipJson();
+};
+
 export const questionsComplete: Validator = profiled((input, profile) => {
+  if (profile.rounds === "review-only") return skippedQuestions(input, profile);
+  if (roundsSkipRecorded(input.evidence)) return failed("necessity.json records a rounds skip, but the profile's rounds is both: the skip is admissible only with rounds: review-only");
   const start = qaStart(input, profile);
   if (isFailure(start)) return start;
   // N1, the necessity question, is asked first (design §7.5); a confirmed unnecessary conclusion is the only question.
@@ -308,7 +327,19 @@ function answersState(input: ValidationInput, profile: Profile): AnswersState | 
   return { start, set, record: rec.record, final: [rec.record.final, ...flow.final] };
 }
 
+/** `rounds: review-only` (design §3.2): the Answers stage records the skipped Q&A and advances the ledger with no question. */
+function skippedAnswers(input: ValidationInput, profile: Profile): ValidationResult {
+  const c = context(input, profile);
+  if (isResult(c)) return c;
+  const base = pinnedBase(input.evidence);
+  const w = skippedWrites(input.evidence, c.analysis, c.pr, base);
+  const files = writtenAnswerFiles(input, w, c.pr, base);
+  if (files !== undefined) return files;
+  return passed(`the operator chose ${ROUNDS_SKIP_REASON}: ${QA_JSON} and ${REVIEW_MD} say the Q&A was skipped by the operator's choice (no question, no answer), review.html and review-appendix.html say so too, and the ledger was advanced with no question, keeping the earlier heads' questions and posted items as they were`);
+}
+
 export const answersComplete: Validator = profiled((input, profile) => {
+  if (profile.rounds === "review-only") return skippedAnswers(input, profile);
   const st = answersState(input, profile);
   if ("status" in st) return st;
   const { start, set, record } = st;
@@ -316,6 +347,13 @@ export const answersComplete: Validator = profiled((input, profile) => {
   if (st.final === undefined) return inconclusive(`the answers are not finished (${st.pending ?? "pending"})`);
   const final = st.final;
   const w = answerWrites(input.evidence, start.ctx, set, final, record);
+  const problem = writtenAnswerFiles(input, w, start.pr, start.ctx.base);
+  if (problem !== undefined) return problem;
+  return answersPassed(final, set, record, w);
+});
+
+/** The files of the Answers stage as the evidence holds them against what it recomputes (qa.json, review.md, both HTML pages, the ledger write); undefined when they agree. */
+function writtenAnswerFiles(input: ValidationInput, w: AnswerWrites, pr: PullRequest, base: string | undefined): ValidationResult | undefined {
   if (w.qa === undefined || w.texts === undefined) return failed(w.problem ?? "the Q&A cannot be written");
   // qa.json and the whole review.md as the evidence holds them: one command, or parts reconstructed and checked against their digest (design §6.6).
   const q = recordedQa(input.evidence);
@@ -326,13 +364,13 @@ export const answersComplete: Validator = profiled((input, profile) => {
   if (h.state === "none") return inconclusive("review.html has not been written whole with the answers");
   if (h.state === "failed") return failed(`review.html was not written whole: ${h.reason}`);
   if (h.value !== w.texts.html) return failed("review.html is not what the evidence recomputes from report.json, qa.json and necessity.json");
-  const inert = writtenHtmlProblems(h.value, start.pr, start.ctx.base);
+  const inert = writtenHtmlProblems(h.value, pr, base);
   if (inert.length > 0) return failed(`review.html is not self-contained and inert: ${inert.slice(0, 3).join("; ")}`);
   const ap = recordedAppendix(input.evidence, true);
   if (ap.state === "none") return inconclusive("review-appendix.html has not been written whole with the answers");
   if (ap.state === "failed") return failed(`review-appendix.html was not written whole: ${ap.reason}`);
   if (ap.value !== w.texts.appendix) return failed("review-appendix.html is not what the evidence recomputes from report.json, qa.json and necessity.json");
-  const inertAppendix = writtenHtmlProblems(ap.value, start.pr, start.ctx.base);
+  const inertAppendix = writtenHtmlProblems(ap.value, pr, base);
   if (inertAppendix.length > 0) return failed(`review-appendix.html is not self-contained and inert: ${inertAppendix.slice(0, 3).join("; ")}`);
   if (w.ledger === undefined || w.old === undefined) return w.problem !== undefined ? failed(w.problem) : inconclusive("the ledger value Fetch read is not in the evidence");
   const lw = commandRuns(input.evidence, COMMAND.ledgerWrite).at(-1);
@@ -346,15 +384,27 @@ export const answersComplete: Validator = profiled((input, profile) => {
     if (lj.state !== "read" || lm.state !== "read") return failed(`the ledger files were not written whole: ${lj.state === "failed" ? lj.reason : lm.state === "failed" ? lm.reason : "no recorded parts"}`);
     if (sha256(lj.value) !== writtenLedger(lw.command.argv)?.files?.json || sha256(lm.value) !== writtenLedger(lw.command.argv)?.files?.markdown) return failed("the ledger write commits files other than the parts the evidence holds");
   }
+  return undefined;
+}
+
+function answersPassed(final: FinalAnswer[], set: ReturnType<typeof questionSet>, record: NecessityRecord, w: AnswerWrites): ValidationResult {
   const rest = final.filter((a) => a.question !== NECESSITY_ID);
   const by = (status: string): number => rest.filter((a) => a.status === status).length;
   const n1 = `N1 (${effectiveConclusion(record.final)}) is answered first with its three parts and evidence${set.skipped ? ", and the remaining questions are recorded as skipped" : ""}`;
   return passed(
-    `${n1}; ${rest.length} further question(s) answered (${by("answered")} answered, ${by("partially answered")} partially answered, ${by("needs author")} needs author), each with evidence; every citation resolves in the tree it names, every cited number equals its record, every proposal lies inside its function with names new to the package; ${QA_JSON} and ${REVIEW_MD} are written as recomputed; the ledger ref advanced by compare-and-swap from ${w.old === "absent" ? "absent" : w.old.slice(0, 12)}`,
+    `${n1}; ${rest.length} further question(s) answered (${by("answered")} answered, ${by("partially answered")} partially answered, ${by("needs author")} needs author), each with evidence; every citation resolves in the tree it names, every cited number equals its record, every proposal lies inside its function with names new to the package; ${QA_JSON} and ${REVIEW_MD} are written as recomputed; the ledger ref advanced by compare-and-swap from ${w.old === undefined || w.old === "absent" ? "absent" : w.old.slice(0, 12)}`,
   );
-});
+}
 
 export const answersGrounded: Validator = profiled((input, profile) => {
+  if (profile.rounds === "review-only") {
+    const c = context(input, profile);
+    if (isResult(c)) return c;
+    if (recordedNecessityJson(input.evidence).state === "none") return inconclusive("the skip of the Questions stage is not recorded");
+    if (!roundsSkipRecorded(input.evidence)) return failed("necessity.json is not the recorded skip the profile's rounds (review-only) calls for");
+    return passed(`the operator chose ${ROUNDS_SKIP_REASON}: no answer was given, so none needed an independent check`);
+  }
+  if (roundsSkipRecorded(input.evidence)) return failed("necessity.json records a rounds skip, but the profile's rounds is both: the skip is admissible only with rounds: review-only");
   const st = answersState(input, profile);
   if ("status" in st) return st;
   if (st.failure !== undefined) return failed(st.failure);

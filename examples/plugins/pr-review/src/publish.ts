@@ -122,6 +122,8 @@ export interface ClosedFinding {
 
 export interface ReviewPlan {
   round: 1 | 2;
+  /** Round 1 was skipped by the operator's choice (`rounds: review-only`, design §3.2): the ledger records the head's round 1 as skipped, not clean. */
+  round1Skipped?: true;
   verdict: "passed" | "changes-requested";
   /** The items still open: round 1's issues when it found any, else round 2's postable findings. */
   open: number;
@@ -216,7 +218,7 @@ export function planReview(i: {
   const verdict = open === 0 ? "passed" : "changes-requested";
   const firstLine = verdictLine(open);
   const rest = items.filter((x) => !x.inline);
-  const round1Line = issues.length > 0 ? `Round 1 (design and architecture, from the change report and its questions): ${issues.length} issue${issues.length === 1 ? "" : "s"} to resolve. The detailed review (round 2) runs after they are fixed.` : "Round 1 (design and architecture, from the change report and its questions): no open issue.";
+  const round1Line = i.round1.skipped !== undefined ? `Round 1 (design and architecture, from the change report and its questions) was skipped by the operator's choice (${i.round1.skipped}): no question was asked, and earlier round-1 items, if any, were not re-checked and are not counted here.` : issues.length > 0 ? `Round 1 (design and architecture, from the change report and its questions): ${issues.length} issue${issues.length === 1 ? "" : "s"} to resolve. The detailed review (round 2) runs after they are fixed.` : "Round 1 (design and architecture, from the change report and its questions): no open issue.";
   const round2Line = round === 2 ? `Round 2 (details, functionality, algorithms): ${i.draft !== undefined && open > 0 ? `${open} open finding${open === 1 ? "" : "s"}.` : "no open finding."}${i.draft !== undefined && i.draft.summary !== "" ? ` ${oneLine(i.draft.summary)}` : ""}` : undefined;
   const sections = [
     `${firstLine}\n${reviewMarker(i.head, i.nonce)}`,
@@ -258,7 +260,7 @@ export function planReview(i: {
   }
   const body = [...sections, ...pending.map((x) => x.body)].join("\n\n");
   const comments = items.filter((x) => x.inline).map((x) => ({ path: x.path!, line: x.line!, side: x.side, ...(x.startLine !== undefined && x.startLine < x.line! ? { startLine: x.startLine } : {}), body: x.body }));
-  return { round, verdict, open, body, comments, items, firstLine, priors, closed: [...(i.closed ?? [])], ...(problem !== undefined ? { problem } : {}) };
+  return { round, ...(i.round1.skipped !== undefined ? { round1Skipped: true as const } : {}), verdict, open, body, comments, items, firstLine, priors, closed: [...(i.closed ?? [])], ...(problem !== undefined ? { problem } : {}) };
 }
 
 /** What the ledger keeps of an item an earlier head posted, which a repost carries on unchanged. */
@@ -335,6 +337,7 @@ export interface LedgerPatch {
   schema: typeof PUBLISH_SCHEMA;
   head: string;
   round: 1 | 2;
+  round1Skipped?: true;
   verdict: ReviewPlan["verdict"];
   open: number;
   reviewId: number;
@@ -351,6 +354,7 @@ export function ledgerPatch(pr: Pick<PullRequest, "head">, plan: ReviewPlan, pos
     schema: PUBLISH_SCHEMA,
     head: pr.head,
     round: plan.round,
+    ...(plan.round1Skipped === true ? { round1Skipped: true as const } : {}),
     verdict: plan.verdict,
     open: plan.open,
     reviewId: posted.reviewId,
@@ -457,7 +461,7 @@ const MERGE = String.raw`let s="";process.stdin.setEncoding("utf8");process.stdi
 const v=JSON.parse(s);const p=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
 const heads=Array.isArray(v.heads)?v.heads:[];const h=heads.find((x)=>x.sha===p.head);
 if(h&&h.reviewId===p.reviewId){process.stdout.write("SAME");return}
-if(h){h.reviewId=p.reviewId;h.reviewed=p.round===2;h.round1=p.round===1?"issues":"clean";h.verdict=p.verdict;h.open=p.open;if(p.url)h.reviewUrl=p.url}
+if(h){h.reviewId=p.reviewId;h.reviewed=p.round===2;h.round1=p.round===1?"issues":p.round1Skipped?"skipped":"clean";h.verdict=p.verdict;h.open=p.open;if(p.url)h.reviewUrl=p.url}
 const gh=(it)=>({head:p.head,reviewId:p.reviewId,commentId:it.commentId,inline:it.inline});
 const findings=Array.isArray(v.findings)?v.findings:[];
 const qa=Array.isArray(v.qa)?v.qa:[];

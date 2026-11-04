@@ -103,18 +103,18 @@ import { secretFindings } from "./secrets.js";
 import { readInput, snapshotState, type PullFile, type ReadSpec } from "./snapshot.js";
 import { CLAIM_CHECK_SCHEMA_NAME } from "./claims.js";
 import { diagramsOf, outputsOf, validatorById, writtenHtmlProblems } from "./validators.js";
-import { appendixWriteCommands, htmlWriteCommands, partCommands, recordCommands, recordedNecessityJson, reportWriteCommands } from "./parts.js";
+import { appendixWriteCommands, htmlWriteCommands, necessityWriteCommands, partCommands, recordCommands, recordedNecessityJson, reportWriteCommands } from "./parts.js";
 import { ANSWER_CHECK_REFERENCES, ANSWER_CHECK_SCHEMA, ANSWER_CHECK_SCHEMA_NAME, ANSWERS_REFERENCES, ANSWERS_REVISION_SCHEMA_NAME, ANSWERS_SCHEMA, ANSWERS_SCHEMA_NAME, answersFlow } from "./answers.js";
 import { baseDirIn } from "./basetree.js";
 import { sourceDirs } from "./inventory.js";
 import { ledgerRead, oldValue, priorState, writtenLedger } from "./ledger.js";
 import { QUESTIONS_REFERENCES, QUESTIONS_SCHEMA, QUESTIONS_SCHEMA_NAME, requiredQuestions, type Question } from "./questions.js";
 import { CLAIM_CHECK_REFERENCES } from "./claims.js";
-import { necessityQuestion, NECESSITY_ID, NECESSITY_REFERENCES, NECESSITY_REVISION_SCHEMA_NAME, NECESSITY_SCHEMA, NECESSITY_SCHEMA_NAME, parseNecessityRecord, type NecessityRecord } from "./necessity.js";
+import { necessityQuestion, NECESSITY_ID, NECESSITY_REFERENCES, NECESSITY_REVISION_SCHEMA_NAME, NECESSITY_SCHEMA, NECESSITY_SCHEMA_NAME, parseNecessityRecord, ROUNDS_SKIP_REASON, roundsSkipJson, type NecessityRecord } from "./necessity.js";
 import { principlesContext, principlesReadCommand, principlesReading, type Principle, type PrinciplesContext } from "./principles.js";
 import { planAnswerChecker, planAnswerer, planNecessity, planNecessityChecker, planQuestioner } from "./qaprompts.js";
 import { questionItems } from "./reportview.js";
-import { afterNecessity, answerBatches, answerContext, batchedAnswers, batchRecordId, batchRecordJson, answerWrites, necessityFlow, necessityRecordCommands, necessityRecordOf, qaContext, qaOutputs, questionSet, questionerFlow, recordedNecessity, type QaContext } from "./qaflow.js";
+import { afterNecessity, answerBatches, answerContext, batchedAnswers, batchRecordId, batchRecordJson, answerWrites, necessityFlow, necessityRecordCommands, necessityRecordOf, qaContext, qaOutputs, questionSet, questionerFlow, recordedNecessity, skippedWrites, type AnswerWrites, type QaContext } from "./qaflow.js";
 
 export { GRAPH_ID, GRAPH_VERSION };
 
@@ -152,6 +152,22 @@ function generatedChecks(profile: Profile): EnvironmentCommand[] {
 }
 
 /** The graph definition for a profile. The stage list is fixed per plugin version, whatever the profile says. */
+/** What a requirement says more when the profile's `rounds` is `review-only` (design §3.2): the stages keep their identity and pass on a recorded skip. */
+function roundsNote(profile: Profile, which: "questions" | "answers" | "grounded" | "round1"): string {
+  if (profile.rounds !== "review-only") return "";
+  const why = `With the profile's rounds set to review-only (the operator's choice) this requirement passes on a recorded skip with the reason "${ROUNDS_SKIP_REASON}": `;
+  switch (which) {
+    case "questions":
+      return ` ${why}neither N1 nor any other question is asked, and necessity.json records the skip.`;
+    case "answers":
+      return ` ${why}no answer is given; qa.json, review.md, review.html and review-appendix.html say the Q&A was skipped by the operator's choice, and the ledger advances with no question.`;
+    case "grounded":
+      return ` ${why}there is no answer to check.`;
+    case "round1":
+      return ` ${why}round 1 records zero issues and its skip, so round 2 runs in the same run.`;
+  }
+}
+
 export function definitionFor(profile: Profile): GraphDefinition {
   const checker = harnessName(profile.roles["report-checker"]);
   const requirements: Requirement[] = [
@@ -187,17 +203,17 @@ export function definitionFor(profile: Profile): GraphDefinition {
     },
     {
       id: REQUIREMENT_QUESTIONS,
-      statement: `The necessity question N1 was asked first, before every other question: is the problem real on the base (the claimed problem quoted from the pull request's text, the base behavior traced through the base code with path:line citations, a failing test on the base optional and not available in this version), does the fix fit the system's design (the repository's design and architecture documents${profile.questions.designDocs.length > 0 ? ` (${profile.questions.designDocs.join(", ")})` : ""} and code comments searched, the design statement and the changed lines cited, and whether the change preserves or breaks them said)${principlesText(profile)}, and is there a simpler or existing way; it concludes necessary, questionable, unnecessary or needs author, in one line. An independent ${harnessName(profile.roles["answer-checker"])} answer checker verified each cited design statement, each trace step${profile.questions.principles !== undefined ? ", each principle verdict" : ""} and the conclusion, with searches of its own, and N1's checked answer and the decision it led to${profile.questions.principles !== undefined ? " (with the principles file's path, ref, commit and the verdicts)" : ""} are recorded in necessity.json. When N1 concludes unnecessary and the checker supports it, and the operator did not ask for every question, no other question is asked and the skip is recorded (only N1 is required). Otherwise every required question was asked: purpose for each change item whose purpose the pull request's text does not state (a stated purpose is recorded with a quote that matches that text instead), existing-reuse-common for each new symbol (one question: does the codebase already have the same or an equivalent, can an existing internal package or declared library do it, is there common logic that could be shared), missing-test for each new or modified symbol the test map finds no covering test for, split-function for each changed function with complexity of ${LIMITS.complexity} or more or nesting over ${LIMITS.nesting}, complexity-coverage for each function with measured coverage and CRAP of ${LIMITS.crap} or more or with unknown coverage and complexity of ${LIMITS.complexity} or more (an upper-bound CRAP alone asks nothing), and weak-test for each surviving mutant (none in this version: mutation testing arrives later). The groundwork behind them (symbols from the language packs, whole-repository searches over the pinned base commit, similarity, the dependency inventory, the test map) was read by read-only commands, and every changed function has a measurement record. In large mode (the report is large, or the pull request adds more than ${profile.limits.maxNewSymbols} new symbols; it is refused past ${profile.limits.hardMaxNewSymbols}) the questions are the high-level set, recorded in qa.json: purpose for each high-level change whose purpose the pull request's text does not state, and for each high-level change (one for each capability of the briefing's whatsNew, 3 to 5, ids W1 to W5, each with its cites, whatever the number of files, areas or report items) the one existing-reuse-common question (does the codebase already have the same or an equivalent of what it adds, can an existing library do it, is there common logic) and missing-test (which tests cover it, listing the new or modified functions in the cited files that the test map finds no covering test for); split-function, complexity-coverage, weak-test, the per-symbol questions and the per-function missing-test are not asked, while the measurements still show every function, the over-limit ones visible in the table.`,
+      statement: `The necessity question N1 was asked first, before every other question: is the problem real on the base (the claimed problem quoted from the pull request's text, the base behavior traced through the base code with path:line citations, a failing test on the base optional and not available in this version), does the fix fit the system's design (the repository's design and architecture documents${profile.questions.designDocs.length > 0 ? ` (${profile.questions.designDocs.join(", ")})` : ""} and code comments searched, the design statement and the changed lines cited, and whether the change preserves or breaks them said)${principlesText(profile)}, and is there a simpler or existing way; it concludes necessary, questionable, unnecessary or needs author, in one line. An independent ${harnessName(profile.roles["answer-checker"])} answer checker verified each cited design statement, each trace step${profile.questions.principles !== undefined ? ", each principle verdict" : ""} and the conclusion, with searches of its own, and N1's checked answer and the decision it led to${profile.questions.principles !== undefined ? " (with the principles file's path, ref, commit and the verdicts)" : ""} are recorded in necessity.json. When N1 concludes unnecessary and the checker supports it, and the operator did not ask for every question, no other question is asked and the skip is recorded (only N1 is required). Otherwise every required question was asked: purpose for each change item whose purpose the pull request's text does not state (a stated purpose is recorded with a quote that matches that text instead), existing-reuse-common for each new symbol (one question: does the codebase already have the same or an equivalent, can an existing internal package or declared library do it, is there common logic that could be shared), missing-test for each new or modified symbol the test map finds no covering test for, split-function for each changed function with complexity of ${LIMITS.complexity} or more or nesting over ${LIMITS.nesting}, complexity-coverage for each function with measured coverage and CRAP of ${LIMITS.crap} or more or with unknown coverage and complexity of ${LIMITS.complexity} or more (an upper-bound CRAP alone asks nothing), and weak-test for each surviving mutant (none in this version: mutation testing arrives later). The groundwork behind them (symbols from the language packs, whole-repository searches over the pinned base commit, similarity, the dependency inventory, the test map) was read by read-only commands, and every changed function has a measurement record. In large mode (the report is large, or the pull request adds more than ${profile.limits.maxNewSymbols} new symbols; it is refused past ${profile.limits.hardMaxNewSymbols}) the questions are the high-level set, recorded in qa.json: purpose for each high-level change whose purpose the pull request's text does not state, and for each high-level change (one for each capability of the briefing's whatsNew, 3 to 5, ids W1 to W5, each with its cites, whatever the number of files, areas or report items) the one existing-reuse-common question (does the codebase already have the same or an equivalent of what it adds, can an existing library do it, is there common logic) and missing-test (which tests cover it, listing the new or modified functions in the cited files that the test map finds no covering test for); split-function, complexity-coverage, weak-test, the per-symbol questions and the per-function missing-test are not asked, while the measurements still show every function, the over-limit ones visible in the table.${roundsNote(profile, "questions")}`,
       evidenceSchema: QUESTIONS_SCHEMA_NAME,
     },
     {
       id: REQUIREMENT_ANSWERS,
-      statement: `N1 has its recorded answer first (when it is the only question, because it concluded unnecessary and the checker supports it, the Q&A says the remaining questions were skipped). Every other question has an answer from the ${harnessName(profile.roles.answerer)} answerer with evidence (citations that resolve in the tree they name, the searches run with their results, inventory entries) and a status of answered, partially answered or needs author. Every "none found" answer lists its whole-repository searches. The existing-reuse-common answer is one statement with one status and its evidence, addressing all three concerns (already exists, reusable library, common logic), and the checker judges it as a whole. Every cited metric equals its measurement record. Every proposal's line ranges lie inside its function and its names are new to the package. ${QA_JSON}, ${REVIEW_MD}, ${REVIEW_HTML} and ${REVIEW_APPENDIX_HTML} (rendered from report.json, qa.json and necessity.json, with the same inert check) are written, each by one command or as a bounded multi-part write that the validators reconstruct and check against its digest, and the pull request's ledger ref was advanced by compare-and-swap from the value Fetch read with this head's report.json and qa.json (a ledger.json or ledger.md too large for the one ledger command is first written as a part set the write reads). In large mode the ${harnessName(profile.roles["batch-answerer"])} batch-answerer (the answerer role unless the profile names a batch-answerer; N1 keeps the answerer in every mode) answers the questions in batches of at most ${QUESTION_BATCH_SIZE} (the questions of a few change items per job), continuing its own session from one batch to the next; each answered batch passes the same deterministic checks and citation verification as the standard answers and is recorded as evidence (answers-record-<n>) that recomputes; ${QA_JSON} and ${REVIEW_MD} are written once, after the last batch.`,
+      statement: `N1 has its recorded answer first (when it is the only question, because it concluded unnecessary and the checker supports it, the Q&A says the remaining questions were skipped). Every other question has an answer from the ${harnessName(profile.roles.answerer)} answerer with evidence (citations that resolve in the tree they name, the searches run with their results, inventory entries) and a status of answered, partially answered or needs author. Every "none found" answer lists its whole-repository searches. The existing-reuse-common answer is one statement with one status and its evidence, addressing all three concerns (already exists, reusable library, common logic), and the checker judges it as a whole. Every cited metric equals its measurement record. Every proposal's line ranges lie inside its function and its names are new to the package. ${QA_JSON}, ${REVIEW_MD}, ${REVIEW_HTML} and ${REVIEW_APPENDIX_HTML} (rendered from report.json, qa.json and necessity.json, with the same inert check) are written, each by one command or as a bounded multi-part write that the validators reconstruct and check against its digest, and the pull request's ledger ref was advanced by compare-and-swap from the value Fetch read with this head's report.json and qa.json (a ledger.json or ledger.md too large for the one ledger command is first written as a part set the write reads). In large mode the ${harnessName(profile.roles["batch-answerer"])} batch-answerer (the answerer role unless the profile names a batch-answerer; N1 keeps the answerer in every mode) answers the questions in batches of at most ${QUESTION_BATCH_SIZE} (the questions of a few change items per job), continuing its own session from one batch to the next; each answered batch passes the same deterministic checks and citation verification as the standard answers and is recorded as evidence (answers-record-<n>) that recomputes; ${QA_JSON} and ${REVIEW_MD} are written once, after the last batch.${roundsNote(profile, "answers")}`,
       evidenceSchema: ANSWERS_SCHEMA_NAME,
     },
     {
       id: REQUIREMENT_GROUNDED,
-      statement: `An independent ${harnessName(profile.roles["answer-checker"])} answer checker, on a harness other than the answerer's (and the batch-answerer's), re-checked every cited equivalent, library, duplicate and covering test, and every "none found" claim (each part of a combined answer separately) with searches of its own, against the trees, and had verified N1's cited design statements, trace steps${profile.questions.principles !== undefined ? ", principle verdicts" : ""} and conclusion. Every answer left is supported or partial; an answer still unsupported after one correction is needs author, with both statements recorded (for N1, its conclusion becomes questionable and every question is asked). In large mode each batch of answers is checked by its own answer checker job in a fresh session, with the same correction and downgrade rules.`,
+      statement: `An independent ${harnessName(profile.roles["answer-checker"])} answer checker, on a harness other than the answerer's (and the batch-answerer's), re-checked every cited equivalent, library, duplicate and covering test, and every "none found" claim (each part of a combined answer separately) with searches of its own, against the trees, and had verified N1's cited design statements, trace steps${profile.questions.principles !== undefined ? ", principle verdicts" : ""} and conclusion. Every answer left is supported or partial; an answer still unsupported after one correction is needs author, with both statements recorded (for N1, its conclusion becomes questionable and every question is asked). In large mode each batch of answers is checked by its own answer checker job in a fresh session, with the same correction and downgrade rules.${roundsNote(profile, "grounded")}`,
       evidenceSchema: ANSWER_CHECK_SCHEMA_NAME,
     },
     {
@@ -212,7 +228,7 @@ export function definitionFor(profile: Profile): GraphDefinition {
     },
     {
       id: REQUIREMENT_ROUND1,
-      statement: `Round 1 (the report and the Q&A: the architecture and design level) is decided by plugin code from necessity.json and qa.json, with no model and no human, and recorded in round1/round1.json (pr-review-round1-v1). Its issues are: N1's conclusion when it is not necessary (questionable, unnecessary or needs author, a design principle the checker supports as broken included); every question whose answer needs the author; every partially answered question; every answer that found an existing equivalent, a reusable library or common logic (an existing-reuse-common answer that did not find "none"), even when it is fully answered; and every missing-test question whose answer cites no covering test, even when it is fully answered. Each issue carries its id (N1 or Q<n>), its kinds, the answer's status, its text and, where its place lies inside a hunk of the file's patch at the head, that anchor. Any issue blocks round 2: the run then publishes round 1 and ends (Review and Draft pass on that). With none, the same run continues into the review layer. The record recomputes from the recorded Q&A and necessity files and must equal what was written.`,
+      statement: `Round 1 (the report and the Q&A: the architecture and design level) is decided by plugin code from necessity.json and qa.json, with no model and no human, and recorded in round1/round1.json (pr-review-round1-v1). Its issues are: N1's conclusion when it is not necessary (questionable, unnecessary or needs author, a design principle the checker supports as broken included); every question whose answer needs the author; every partially answered question; every answer that found an existing equivalent, a reusable library or common logic (an existing-reuse-common answer that did not find "none"), even when it is fully answered; and every missing-test question whose answer cites no covering test, even when it is fully answered. Each issue carries its id (N1 or Q<n>), its kinds, the answer's status, its text and, where its place lies inside a hunk of the file's patch at the head, that anchor. Any issue blocks round 2: the run then publishes round 1 and ends (Review and Draft pass on that). With none, the same run continues into the review layer. The record recomputes from the recorded Q&A and necessity files and must equal what was written.${roundsNote(profile, "round1")}`,
       evidenceSchema: "round1-v1",
     },
     {
@@ -360,7 +376,7 @@ function finished(ctx: Context, view: RunView): GraphDecision {
   const posted = a.state === "ready" ? postedReview(view, ctx, a.analysis) : undefined;
   const link = posted?.url !== null && posted?.url !== undefined ? ` (${posted.url})` : "";
   const blocker = issues > 0 ? `round 1: changes requested: ${issues} issue${issues === 1 ? "" : "s"} open on ${where}; the review is posted${link}, and round 2 (the aspect reviewers) runs on a later head, once they are fixed` : `${posted?.verdict === "changes-requested" ? `round 2: changes requested: ${posted.open} open` : "review passed"} on ${where}; the review is posted${link}`;
-  return withPrivate(stop({ reason: "complete", blocker, retryable: false }, issues > 0 ? "round 1 found issues: the review is posted and the run ends" : "both rounds ran: the review is posted and the run ends"));
+  return withPrivate(stop({ reason: "complete", blocker, retryable: false }, issues > 0 ? "round 1 found issues: the review is posted and the run ends" : ctx.profile.rounds === "review-only" ? "round 2 ran (round 1 skipped by the operator: rounds: review-only): the review is posted and the run ends" : "both rounds ran: the review is posted and the run ends"));
 }
 
 interface Context {
@@ -851,8 +867,17 @@ function groundworkDecision(step: Extract<ReturnType<typeof qaContext>, { state:
   }
 }
 
+/** `rounds: review-only` (design §3.2): Questions, N1 included, passes on a recorded skip; no groundwork is read and no agent runs. */
+function skipQuestions(ctx: Context, view: RunView): GraphDecision {
+  const next = nextWrite(view, necessityWriteCommands(roundsSkipJson()), { failed: "recording the skip of the Questions stage failed", settle: "the recorded skip keeps differing from the one the evidence recomputes" });
+  if (next === undefined) return validateStage(ctx, view, QUESTIONS_STAGE);
+  if ("decision" in next) return next.decision;
+  return withPrivate(dispatch(commandJob(QUESTIONS_STAGE, writeInstruction(next.command, `Record that the necessity question and the other questions are skipped (${ROUNDS_SKIP_REASON}) in ${NECESSITY_JSON}`), { commands: [next.command] }), `record the operator's choice (${ROUNDS_SKIP_REASON}): Questions, N1 included, is skipped`));
+}
+
 function questions(ctx: Context, view: RunView): GraphDecision {
   const { profile, pr } = ctx;
+  if (profile.rounds === "review-only") return skipQuestions(ctx, view);
   const c = qaContext(view.evidence, profile, pr, retryOf(view));
   if (c.state === "pending") return supervise({ reason: `the Questions stage lost what it reads: ${c.reason}` }, "escalate a missing report or snapshot");
   if (c.state === "groundwork") return groundworkDecision(c.step, QUESTIONS_STAGE);
@@ -928,6 +953,13 @@ const sameArgv = (a: readonly string[], b: readonly string[]): boolean => a.leng
 
 function answers(ctx: Context, view: RunView): GraphDecision {
   const { profile, pr } = ctx;
+  if (profile.rounds === "review-only") {
+    // The skipped Q&A is written from the report and the snapshot alone: qa.json, review.md, the HTML pages and the ledger.
+    const a = analyze(view.evidence, profile, pr);
+    if (a.state !== "ready") return supervise({ reason: a.state === "pending" ? `the Answers stage lost the pull request snapshot: ${a.reason}` : a.problem }, "escalate a missing snapshot");
+    const base = pinnedBase(view.evidence);
+    return writeAnswerFiles(ctx, view, skippedWrites(view.evidence, a.analysis, pr, base), base);
+  }
   const c = qaContext(view.evidence, profile, pr, retryOf(view));
   if (c.state === "pending") return supervise({ reason: `the Answers stage lost what it reads: ${c.reason}` }, "escalate a missing report or snapshot");
   if (c.state === "groundwork") return supervise({ reason: `the Answers stage lost the groundwork the questions rest on (${c.step.state})` }, "escalate a missing groundwork");
@@ -1011,22 +1043,26 @@ function answerStep(ctx: Context, view: RunView, c: QaContext, rest: readonly Qu
 
 /** After the answers: write qa.json and review.md, advance the ledger by compare-and-swap, then validate the stage. */
 function writeAnswers(ctx: Context, view: RunView, c: QaContext, set: ReturnType<typeof questionSet>, final: Parameters<typeof qaOutputs>[2], necessity: NecessityRecord): GraphDecision {
-  const w = answerWrites(view.evidence, c, set, final, necessity);
+  return writeAnswerFiles(ctx, view, answerWrites(view.evidence, c, set, final, necessity), c.base);
+}
+
+/** The Answers stage's writes: qa.json, the whole review.md and the two HTML pages, then the ledger. */
+function writeAnswerFiles(ctx: Context, view: RunView, w: AnswerWrites, base: string | undefined): GraphDecision {
   if (w.qa === undefined || w.texts === undefined) return stop({ reason: "incompatible task", blocker: w.problem ?? "the Q&A cannot be written", retryable: false }, "stop: the Q&A cannot be written");
   // qa.json, the whole review.md and review.html: each one command when it fits, else a bounded multi-part write (design §6.6).
   const next = nextWrite(view, w.qa, { failed: "writing the Q&A failed", settle: "the written Q&A keeps differing from the one the evidence recomputes" });
-  if (next === undefined) return recordLedger(ctx, view, c, w);
+  if (next === undefined) return recordLedger(ctx, view, w);
   if ("decision" in next) return next.decision;
   const secrets = [...secretFindings(w.texts.json), ...secretFindings(w.texts.markdown), ...secretFindings(w.texts.html), ...secretFindings(w.texts.appendix)];
   if (secrets.length > 0) {
     return stop({ reason: "report refused", blocker: `the Q&A would hold what looks like a credential (${[...new Set(secrets)].slice(0, 3).join("; ")}); it was not written`, retryable: false }, "refuse to write a Q&A that holds a secret");
   }
-  const inert = [...writtenHtmlProblems(w.texts.html, ctx.pr, c.base), ...writtenHtmlProblems(w.texts.appendix, ctx.pr, c.base)];
+  const inert = [...writtenHtmlProblems(w.texts.html, ctx.pr, base), ...writtenHtmlProblems(w.texts.appendix, ctx.pr, base)];
   if (inert.length > 0) return supervise({ reason: `review.html or review-appendix.html would not be self-contained and inert: ${inert.slice(0, 3).join("; ")}` }, "escalate a report file that fails its own inertness check");
   return withPrivate(dispatch(commandJob(ANSWERS_STAGE, writeInstruction(next.command, `Write ${QA_JSON} and ${REVIEW_MD}`), { commands: [next.command] }), "write qa.json, the whole review.md (Briefing, Appendix) and the HTML briefing review.html with its appendix review-appendix.html"));
 }
 
-function recordLedger(ctx: Context, view: RunView, c: QaContext, w: ReturnType<typeof answerWrites>): GraphDecision {
+function recordLedger(ctx: Context, view: RunView, w: AnswerWrites): GraphDecision {
   const read = ledgerRead(view.evidence);
   const lw = commandState(view, COMMAND.ledgerWrite);
   if (read === undefined || w.old === undefined) return supervise({ reason: w.problem ?? "the ledger value Fetch read is not in the evidence" }, "escalate a missing ledger read");
@@ -1041,7 +1077,7 @@ function recordLedger(ctx: Context, view: RunView, c: QaContext, w: ReturnType<t
     // After the operator's resume: read the ledger again first, since the value the write swapped from was stale.
     const at = (r: string): number => view.evidence.findIndex((e) => e.ref === r);
     if (at(read.run.record.ref) < at(lw.run.record.ref)) {
-      return withPrivate(dispatch(commandJob(ANSWERS_STAGE, "Read the pull request's ledger ref again", { commands: [ledgerReadCommand(c.pr.owner, c.pr.repo, c.pr.number)], env: { ...GIT_ENV } }), "read the ledger ref again: it moved since Fetch read it"));
+      return withPrivate(dispatch(commandJob(ANSWERS_STAGE, "Read the pull request's ledger ref again", { commands: [ledgerReadCommand(ctx.pr.owner, ctx.pr.repo, ctx.pr.number)], env: { ...GIT_ENV } }), "read the ledger ref again: it moved since Fetch read it"));
     }
   }
   const lr = commandState(view, COMMAND.ledger);

@@ -72,6 +72,8 @@ export interface QaDoc {
   mode?: string;
   modeReasons?: ModeReason[];
   necessity?: { skipped?: boolean; note?: string };
+  /** The operator chose `rounds: review-only` (design §3.2): no question was asked or answered, and the pages say so. */
+  roundsSkipped?: { reason: string; note: string };
   questions: Array<{ id: string; type: string; item: string; symbol?: string; function?: string; text: string; origin: string; answer?: QaAnswer }>;
 }
 
@@ -234,7 +236,8 @@ function headerHtml(i: HtmlInput, g: Github, nav: string): string {
 
 // ---- necessity ----
 
-function necessityHtml(n: NecessityRecord | undefined, g: Github): string {
+function necessityHtml(n: NecessityRecord | undefined, g: Github, skipped?: QaDoc["roundsSkipped"]): string {
+  if (n === undefined && skipped !== undefined) return details(`<h2>Necessity</h2> ${badge("grey", "skipped")}`, para(skipped.note), true, "sec");
   if (n === undefined) return details(`<h2>Necessity</h2> ${badge("grey", "pending")}`, para("N1, the necessity question, is asked after the report; this file is rewritten when it is answered."), false, "sec");
   const a = n.final;
   const nec = a.necessity!;
@@ -319,6 +322,10 @@ function verdictHtml(i: HtmlInput): string {
   const principles = n?.final.necessity?.principles ?? [];
   const asked = (i.qa?.questions ?? []).filter((q) => q.id !== NECESSITY_ID);
   const need = needAuthor(asked);
+  const skipped = i.qa?.roundsSkipped;
+  if (skipped !== undefined) {
+    return [`<div class="verdict">`, `<div><span class="label">N1: is it necessary?</span> ${badge("grey", "skipped")}</div>`, `<div><span class="label">Questions and answers</span> ${badge("grey", "skipped")} <span class="muted">by the operator's choice (${esc(skipped.reason)})</span></div>`, `</div>`].join("");
+  }
   return [
     `<div class="verdict">`,
     `<div><span class="label">N1: is it necessary?</span> ${conclusion === undefined ? badge("grey", "pending") : badge(CONCLUSION_CLASS[conclusion] ?? "grey", conclusion)}</div>`,
@@ -390,6 +397,7 @@ function areasHtml(r: ReportDoc): string {
 function openQuestionsHtml(i: HtmlInput): string {
   const qa = i.qa;
   if (qa === undefined) return details(`<h2>Open questions</h2> ${badge("grey", "pending")}`, para("The Questions and Answers stages follow the report; this file is rewritten when the answers are checked."), true, "sec");
+  if (qa.roundsSkipped !== undefined) return details(`<h2>Open questions</h2> ${badge("grey", "skipped")}`, para(qa.roundsSkipped.note), true, "sec");
   const n1 = i.necessity !== undefined ? effectiveConclusion(i.necessity.final) : undefined;
   const sel = openQuestions(qa.questions, { id: NECESSITY_ID, conclusion: n1 });
   const rows = sel.open.map((q) => {
@@ -562,6 +570,7 @@ function answerHtml(a: QaAnswer, g: Github): string {
 
 function qaHtml(r: ReportDoc, qa: QaDoc | undefined, g: Github): string {
   if (qa === undefined) return details(`<h2>Q&amp;A</h2> ${badge("grey", "pending")}`, para("The Questions and Answers stages follow the report; this file is rewritten when the answers are checked."), false, "sec");
+  if (qa.roundsSkipped !== undefined) return details(`<h2>Q&amp;A</h2> ${badge("grey", "skipped")}`, para(qa.roundsSkipped.note), true, "sec");
   if (qa.necessity?.skipped === true) return details("<h2>Q&amp;A</h2>", para(`${NECESSITY_ID} is answered above, under Necessity.`) + para(qa.necessity.note ?? SKIPPED_NOTE), true, "sec");
   const asked = qa.questions.filter((q) => q.id !== NECESSITY_ID);
   const count = (s: string): number => asked.filter((q) => q.answer?.status === s).length;
@@ -689,7 +698,7 @@ export function renderAppendixHtml(i: HtmlInput): string {
     openQuestionsHtml(i),
     reviewHtml(i.review, g),
     details("<h2>Summary</h2>", overviewHtml(r), true, "sec"),
-    necessityHtml(i.necessity, g),
+    necessityHtml(i.necessity, g, i.qa?.roundsSkipped),
     changeMapHtml(r),
     itemsHtml(r, c),
     measurementsHtml(r),

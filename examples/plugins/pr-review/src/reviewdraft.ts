@@ -13,13 +13,14 @@ import { DRAFT_JSON, DRAFT_MD, PART_BASE, REVIEW_APPENDIX_HTML, REVIEW_HTML, REV
 import { composeDraft, draftJson, draftMarkdown, qaInputFrom, withReview, type Draft, type ItemCites } from "./draft.js";
 import { htmlPagesFrom, parseReportDoc } from "./html.js";
 import { partCommands, readParts, recordedNecessityJson, recordedQa, recordedRecord, recordedReport, type Written } from "./parts.js";
+import { ROUNDS_SKIP_NOTE } from "./necessity.js";
 import { effectivePacks } from "./packs.js";
 import { registryFromEvidence } from "./prior.js";
 import type { Profile } from "./profile.js";
 import type { PullRequest } from "./request.js";
 import { aspectRecordId, parseAspectRecord, type AspectRecord } from "./review.js";
 import { parseScopeRecord, SCOPE_RECORD_ID, type ScopeRecord } from "./reviewscope.js";
-import { parseRound1Record, round1Record, ROUND1_DIR, ROUND1_RECORD_ID, type Round1Record } from "./round1.js";
+import { parseRound1Record, round1Record, round1Skipped, ROUND1_DIR, ROUND1_RECORD_ID, type Round1Record } from "./round1.js";
 
 const RECORD_DIR = "review";
 
@@ -39,11 +40,13 @@ export const recordedScope = (evidence: readonly EvidenceRecord[]): Recorded<Sco
 export const recordedRound1 = (evidence: readonly EvidenceRecord[]): Recorded<Round1Record> => decoded(recordedRecord(evidence, ROUND1_RECORD_ID, ROUND1_DIR), ROUND1_RECORD_ID, parseRound1Record);
 
 /** The round-1 issues recomputed from the recorded `necessity.json` and `qa.json` and the report's cites: what the record must hold. */
-export function round1Computed(evidence: readonly EvidenceRecord[], analysis: Analysis, pr: PullRequest, profile: Pick<Profile, "symbols">): { state: "ready"; record: Round1Record } | { state: "pending"; reason: string } {
+export function round1Computed(evidence: readonly EvidenceRecord[], analysis: Analysis, pr: PullRequest, profile: Pick<Profile, "symbols" | "rounds">): { state: "ready"; record: Round1Record } | { state: "pending"; reason: string } {
   const qa = recordedQa(evidence);
   if (qa.state !== "read") return { state: "pending", reason: "qa.json was not written" };
   const report = recordedReport(evidence);
   if (report.state !== "read") return { state: "pending", reason: "report.json was not written" };
+  // `rounds: review-only` (design §3.2): round 1 is skipped by the operator's choice, so it records no issue and round 2 runs in this run.
+  if (profile.rounds === "review-only") return { state: "ready", record: round1Skipped(pr.head) };
   const necessity = recordedNecessityJson(evidence);
   if (necessity.state === "failed") return { state: "pending", reason: `necessity.json does not read back: ${necessity.reason}` };
   const record = round1Record({ head: pr.head, necessity: necessity.state === "read" ? necessity.value : undefined, qa: qa.value.json, files: analysis.snapshot.files, itemCites: itemCitesOf(report.value.json), packs: effectivePacks(profile), prior: registryFromEvidence(evidence).items });
@@ -134,8 +137,9 @@ export function draftWrites(evidence: readonly EvidenceRecord[], analysis: Analy
   const necessity = recordedNecessityJson(evidence);
   let n1: string | undefined;
   try {
-    const conclusion = (JSON.parse(qa.value.json) as { necessity?: { conclusion?: string } }).necessity?.conclusion;
-    if (conclusion !== undefined) n1 = `N1, the necessity question, concluded ${conclusion}.`;
+    const parsed = JSON.parse(qa.value.json) as { necessity?: { conclusion?: string }; roundsSkipped?: { note?: string } };
+    if (parsed.necessity?.conclusion !== undefined) n1 = `N1, the necessity question, concluded ${parsed.necessity.conclusion}.`;
+    else if (parsed.roundsSkipped !== undefined) n1 = ROUNDS_SKIP_NOTE;
   } catch {
     n1 = undefined;
   }

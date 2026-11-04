@@ -1,6 +1,6 @@
 {
   "name": "@graphloom/plugin-pr-review",
-  "version": "0.22.0",
+  "version": "0.23.0",
   "private": true,
   "description": "pr-review graph plugin: a neutral, cited change report on an incoming pull request, with grounded questions and answers (Fetch, Report, Questions, Answers), a round-1 gate, the aspect review (Review, Draft) and one posted review (Publish)",
   "license": "Apache-2.0",

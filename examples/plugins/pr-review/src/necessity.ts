@@ -34,6 +34,14 @@ export const NECESSITY_TEXT =
 /** What review.md says in place of the questions a confirmed `unnecessary` conclusion skipped. */
 export const SKIPPED_NOTE = "Remaining questions skipped: the change was judged unnecessary (see N1).";
 export const NECESSITY_JSON_SCHEMA = "pr-necessity-v1";
+/** Why Questions, Answers and Round 1 passed on a skip when the profile says `rounds: review-only` (design §3.2, version 0.23). */
+export const ROUNDS_SKIP_REASON = "rounds: review-only";
+/** What qa.json, review.md and review.html say in place of the Q&A when the operator chose `review-only`. */
+export const ROUNDS_SKIP_NOTE = `Questions and Answers (N1 included) and round 1 were skipped by the operator's choice (${ROUNDS_SKIP_REASON}): none was asked or answered, and the review is round 2 only.`;
+
+/** `necessity.json` of a `review-only` run: N1 was not asked, and the decision records the operator's skip. It holds no answer. */
+export const roundsSkipJson = (): string =>
+  JSON.stringify({ schema: NECESSITY_JSON_SCHEMA, question: { id: "N1", text: NECESSITY_TEXT }, conclusion: "not asked", decision: { action: "skip", reason: ROUNDS_SKIP_REASON, by: "operator" }, note: ROUNDS_SKIP_NOTE });
 /** The contract's reference path of the principle ids. */
 export const NECESSITY_REFERENCES = ["principles[].id"];
 

@@ -14,7 +14,7 @@ import { pinnedBase } from "./commands.js";
 import { isLarge, questionsMode, type ReviewMode } from "./mode.js";
 import { COMMAND, QUESTION_BATCH_SIZE, REVIEW_DIR } from "./constants.js";
 import { commandRuns, succeeded, type CommandRun } from "./evidence.js";
-import { necessityDecision, necessityJson, necessityQuestion, parseNecessityRecord, type NecessityRecord } from "./necessity.js";
+import { necessityDecision, necessityJson, necessityQuestion, parseNecessityRecord, roundsSkipJson, type NecessityRecord } from "./necessity.js";
 import { principlesContext, principlesReading, principlesRecord, type PrinciplesContext } from "./principles.js";
 import { continueIds, questionKeys, registryFromEvidence, type PriorRegistry } from "./prior.js";
 import { ledgerJson, ledgerMarkdown, ledgerRead, ledgerWriteCommands, oldValue, priorState, type PriorLedger } from "./ledger.js";
@@ -25,7 +25,7 @@ import { necessityWriteCommand, writtenRecord } from "./write.js";
 import { groundworkState, type Groundwork, type GroundworkState } from "./groundwork.js";
 import { effectivePacks } from "./packs.js";
 import type { Profile } from "./profile.js";
-import { briefingQa, qaJson, renderNecessity, renderQa, type QaInput } from "./qa.js";
+import { briefingQa, qaJson, renderNecessity, renderQa, skippedQa, type QaInput } from "./qa.js";
 import { finalQuestions, itemOfSymbol, pinnedTexts, questionerProblems, questionsFlow, requiredQuestions, statedPurposes, type PinnedText, type PurposeRecord, type Question, type QuestionerOutput, type QuestionsFlow } from "./questions.js";
 import { changeItems, reportView, type ReportView } from "./reportview.js";
 import type { PullRequest } from "./request.js";
@@ -188,25 +188,38 @@ export interface AnswerWrites {
 /** The writes the Answers stage makes, recomputed from the evidence: what `qa-write` and `ledger-write` must carry. */
 export function answerWrites(evidence: readonly EvidenceRecord[], ctx: QaContext, set: QuestionSet, final: FinalAnswer[], necessity?: NecessityRecord): AnswerWrites {
   const out = qaOutputs(ctx, set, final, necessity);
+  return finishWrites(evidence, { pr: ctx.pr, base: ctx.base, analysis: ctx.analysis }, out, necessity !== undefined ? necessityJson(necessity) : undefined, { questions: set.questions, answers: final, purposes: set.purposes });
+}
+
+/**
+ * The writes of the Answers stage of a `review-only` run (design §3.2): the skipped Q&A in `qa.json`, `review.md` and the two HTML pages, and
+ * the ledger advanced with no question (the earlier heads' questions and posted items are carried as they were).
+ */
+export function skippedWrites(evidence: readonly EvidenceRecord[], analysis: Analysis, pr: PullRequest, base: string | undefined): AnswerWrites {
+  const out = skippedQa(pr, base, analysis.snapshot.mode);
+  return finishWrites(evidence, { pr, base, analysis }, out, roundsSkipJson(), { questions: [], answers: [], purposes: [] });
+}
+
+function finishWrites(evidence: readonly EvidenceRecord[], at: { pr: PullRequest; base: string | undefined; analysis: Analysis }, out: { json: string; markdown: string; verdict: string; open: string; necessity?: string }, necessityText: string | undefined, qa: { questions: readonly Question[]; answers: readonly FinalAnswer[]; purposes: readonly PurposeRecord[] }): AnswerWrites {
   const report = recordedReport(evidence);
   if (report.state !== "read") return { problem: report.state === "failed" ? `the report was not written whole: ${report.reason}` : "the report was not written" };
   const markdown = withQa(report.value.markdown, { markdown: out.markdown, verdict: out.verdict, open: out.open }, out.necessity);
   // review.html and review-appendix.html are rendered from report.json as written, qa.json and necessity.json (design §6.11).
-  const pages = htmlPagesFrom(report.value.json, out.json, necessity !== undefined ? necessityJson(necessity) : undefined);
+  const pages = htmlPagesFrom(report.value.json, out.json, necessityText);
   if (pages === undefined) return { problem: "review.html cannot be rendered: report.json is not a change report" };
   const html = pages.review;
   const appendix = pages.appendix;
   const texts = { json: out.json, markdown, html, appendix };
-  const qa = [...qaWriteCommands(out.json, markdown), ...htmlWriteCommands(html, true), ...appendixWriteCommands(appendix, true)];
+  const written = [...qaWriteCommands(out.json, markdown), ...htmlWriteCommands(html, true), ...appendixWriteCommands(appendix, true)];
   const read = ledgerRead(evidence);
-  if (read === undefined) return { qa, texts, problem: "the ledger value Fetch read is not in the evidence" };
+  if (read === undefined) return { qa: written, texts, problem: "the ledger value Fetch read is not in the evidence" };
   const old = oldValue(read.ledger);
   const prior = priorState(evidence, old);
-  if (prior.state === "missing") return { qa, texts, old, prior, problem: "the prior ledger's ledger.json has not been read" };
-  if (prior.state === "unreadable") return { qa, texts, old, prior, problem: `the prior ledger's ledger.json cannot be read (${prior.reason}); the ledger is not overwritten` };
-  const input = { pr: ctx.pr, base: ctx.base, files: ctx.analysis.snapshot.files.length, commits: ctx.analysis.snapshot.commits.length, facts: ctx.analysis.facts.length, questions: set.questions, answers: final, purposes: set.purposes };
-  const ledger = ledgerWriteCommands(ctx.pr, old, ledgerJson(input, prior.state === "read" ? prior.value : undefined), ledgerMarkdown(input));
-  return { qa, texts, ledgerParts: ledger.parts, ledger: ledger.write, old, prior };
+  if (prior.state === "missing") return { qa: written, texts, old, prior, problem: "the prior ledger's ledger.json has not been read" };
+  if (prior.state === "unreadable") return { qa: written, texts, old, prior, problem: `the prior ledger's ledger.json cannot be read (${prior.reason}); the ledger is not overwritten` };
+  const input = { pr: at.pr, base: at.base, files: at.analysis.snapshot.files.length, commits: at.analysis.snapshot.commits.length, facts: at.analysis.facts.length, questions: qa.questions, answers: qa.answers, purposes: qa.purposes };
+  const ledger = ledgerWriteCommands(at.pr, old, ledgerJson(input, prior.state === "read" ? prior.value : undefined), ledgerMarkdown(input));
+  return { qa: written, texts, ledgerParts: ledger.parts, ledger: ledger.write, old, prior };
 }
 
 // ---- large mode: the answers in batches (design §7.6) ----

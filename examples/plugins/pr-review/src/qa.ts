@@ -11,7 +11,7 @@
  */
 import type { FinalAnswer } from "./answers.js";
 import type { Groundwork } from "./groundwork.js";
-import { brokenNote, effectiveConclusion, NECESSITY_ID, SKIPPED_NOTE, supportedBreaks, type NecessityRecord } from "./necessity.js";
+import { brokenNote, effectiveConclusion, NECESSITY_ID, ROUNDS_SKIP_NOTE, ROUNDS_SKIP_REASON, SKIPPED_NOTE, supportedBreaks, type NecessityRecord } from "./necessity.js";
 import { describeReasons, type ReviewMode } from "./mode.js";
 import type { PurposeRecord, Question } from "./questions.js";
 import { needAuthor, openQuestions } from "./scope.js";
@@ -40,6 +40,28 @@ export interface QaInput {
   mode?: ReviewMode;
   /** Large mode: how many batches of questions the answerer worked through. */
   batches?: number;
+}
+
+/**
+ * The Q&A of a `review-only` run (design §3.2): none was asked or answered, and every file says it was skipped by the operator's choice,
+ * so an empty list is never read as "nothing to ask". `qa.json` keeps the schema the readers expect, with no question.
+ */
+export function skippedQa(pr: PullRequest, base: string | undefined, mode: ReviewMode): { json: string; markdown: string; verdict: string; open: string } {
+  const json = JSON.stringify({
+    schema: QA_FILE_SCHEMA,
+    mode: mode.mode,
+    pull: { owner: pr.owner, repo: pr.repo, number: pr.number, head: pr.head, ...(base !== undefined ? { base } : {}) },
+    roundsSkipped: { reason: ROUNDS_SKIP_REASON, note: ROUNDS_SKIP_NOTE },
+    symbols: [],
+    purposes: [],
+    inventory: { dependencies: [], packages: 0, truncated: false },
+    weakTest: WEAK_TEST_NOTE,
+    questions: [],
+  });
+  const markdown = ["# Q&A", ROUNDS_SKIP_NOTE, ""].join("\n");
+  const verdict = [`- N1, is it necessary: not asked (skipped by the operator's choice, ${ROUNDS_SKIP_REASON})`, "- Principles touched: not assessed (skipped)", "- Questions that need the author: none asked (skipped)", ""].join("\n");
+  const open = [`Questions and answers were skipped by the operator's choice (${ROUNDS_SKIP_REASON}); none was asked.`, ""].join("\n");
+  return { json, markdown, verdict, open };
 }
 
 const oneLine = (s: string): string => s.replace(/\s*\n\s*/g, " ").trim();
