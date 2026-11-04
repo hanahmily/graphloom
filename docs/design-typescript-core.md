@@ -830,16 +830,30 @@ controller never learns a plugin's reason strings. On resume:
 A stop's class is visible as `stopRetryable` in `run`/`resume` reports and
 `inspect`. What a final stop depends on is recorded when the run stops
 (`stopMark`): the plugin and executors, the active version, the workspace
-change, the budgets, and the GraphLoom build that ran it (product version and
-commit, `hostBuild`, passed by the CLI on `run` and `resume`). A fix to
+change, the budgets, the effects the runner granted each executor
+(`executorGrants`, by executor id), and the GraphLoom build that ran it
+(product version and commit, `hostBuild`, passed by the CLI on `run` and `resume`). A fix to
 GraphLoom itself, such as its runner's confinement, is therefore a change: a
 resume on a different build runs the run again and records "GraphLoom changed
 from X to Y" as the remedy. A mark from before builds were recorded counts as an
-unrecorded build. A run that stopped before stop marks existed has none and is
+unrecorded build. The grants are read from the runner on every `run` and
+`resume` (`ExecutorDescriptor.effect` and `effectGranted`, which the controller
+does not interpret); a resume whose grants differ from the stop's runs the run
+again and records "the operator changed executor grants: <executor> now grants
+write" (or "no longer grants"), so an operator who grants an effect a final stop
+was waiting for does not also have to change something else. A mark from before
+grants were recorded counts as unknown, so the first grant-aware resume may run
+again, as for the build. A run that stopped before stop marks existed has none and is
 retried, as before. A class and mark belong to the stop reason they were recorded
 for: a resume sets them aside, so a new stop it records (a preflight `pin
 mismatch`) is classified on its own, and restores them only when it holds the
 original final stop.
+
+The runner's grants are also on the run view for graphs: `RunView.executors[]` carries, for
+each pinned executor, its declared `effect` and `effectGranted` next to its input
+shape. A plugin that owns an effectful step reads it to stop cleanly, with a
+final stop that names what the operator must grant, instead of dispatching a job
+the runner refuses and handing the refusal to the supervisor.
 
 On every resume that runs, the controller fills `RunView.resume`:
 `{ generation, at, pluginUpdated, previousStopReason, previousStopRetryable }`,

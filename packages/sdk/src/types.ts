@@ -458,7 +458,17 @@ export interface RepairAuthorityView {
 
 export interface ExecutorView {
   id: string;
-  inputShape: ExecutorInputShape;
+  /** The declared input shape; absent for an executor that declares none. */
+  inputShape?: ExecutorInputShape;
+  /**
+   * The effect the executor declares and whether the operator's grants allow
+   * it now (the runner refuses its jobs when not). Declared data the controller
+   * does not interpret: a plugin checks it before it dispatches an executor
+   * whose effect may be withheld, instead of learning of the refusal from a
+   * failed job. Both absent when the runner does not report them.
+   */
+  effect?: import("./executor.js").ExecutorEffect;
+  effectGranted?: boolean;
 }
 
 export interface AgentSessionView {

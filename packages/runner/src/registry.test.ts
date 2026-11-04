@@ -860,9 +860,33 @@ describe("executor pins and run-local copies", () => {
         source: credentialFixture,
         isolation: "unrestricted",
         builtin: false,
+        effect: "read",
+        effectGranted: true,
       },
-      expect.objectContaining({ id: "acme.inproc/noop", source: "in-process", isolation: "in-process" }),
+      expect.objectContaining({ id: "acme.inproc/noop", source: "in-process", isolation: "in-process", effect: "read", effectGranted: true }),
     ]);
+  });
+
+  it("reports each executor's declared effect and whether the operator's grants allow it", async () => {
+    const withheld = createChildExecutorRunner({
+      entryModule: credentialFixture,
+      executorIds: ["acme.cred/echo", "acme.cred/post"],
+      fallback: createScriptedRunner({ jobs: [] }),
+      workerModule,
+      env: {},
+      allowedEffects: ["read"],
+    });
+    const grants = (await withheld.describeExecutors!()).map((d) => [d.id, d.effect, d.effectGranted]);
+    expect(grants).toEqual([["acme.cred/echo", "read", true], ["acme.cred/post", "write", false]]);
+    const granted = createChildExecutorRunner({
+      entryModule: credentialFixture,
+      executorIds: ["acme.cred/post"],
+      fallback: createScriptedRunner({ jobs: [] }),
+      workerModule,
+      env: {},
+      allowedEffects: ["read", "write"],
+    });
+    expect((await granted.describeExecutors!()).map((d) => d.effectGranted)).toEqual([true]);
   });
 
   it("runs only the pinned bytes and serves a run-local copy under its own digest", async () => {

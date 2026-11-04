@@ -77,6 +77,8 @@ interface Options {
   reviews?: FakeReview[];
   /** What the Publish stage's `create-pull-review` does: `post` (the default); `lost` fails without posting; `posted-then-failed` posts and then reports an ambiguous failure. A list gives one outcome per attempt. */
   create?: Array<"post" | "lost" | "posted-then-failed">;
+  /** The executors the run view declares (what the controller reports of the runner's grants); absent: none, as for a runner that reports nothing. */
+  executors?: RunView["executors"];
   /** Evidence the run already holds when the graph first runs: an operator's approval, a recorded conversation. */
   seed?: EvidenceRecord[];
   /** Agent sessions the run already holds (a conversation's row), before any job settles. */
@@ -176,6 +178,7 @@ function* simulationSteps(options: Options = {}): Generator<undefined, Simulatio
       candidateDigest: digest,
       config,
       agentSessions: sessions,
+      ...(options.executors !== undefined ? { executors: options.executors } : {}),
     };
     const decision = advancePullRequest(view);
     if (options.shadow !== undefined && step % options.shadow.every === 0) {

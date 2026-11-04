@@ -276,6 +276,18 @@ function digestMismatch(pin: ExecutorPin, serving: string): string | undefined {
   return `executor ${pin.id} digest ${serving.slice(0, 12)} does not match pinned ${pin.digest.slice(0, 12)}`;
 }
 
+/** What a descriptor says of an executor's declared effect: the effect and whether the operator's grants allow it (no grant list: all are allowed). */
+function declaredAttributes(
+  declared: { inputShape?: ExecutorInputShape; effect: ExecutorEffect },
+  allowed: readonly ExecutorEffect[] | undefined,
+): Pick<ExecutorDescriptor, "inputShape" | "effect" | "effectGranted"> {
+  return {
+    effect: declared.effect,
+    effectGranted: allowed === undefined || allowed.includes(declared.effect),
+    ...(declared.inputShape !== undefined ? { inputShape: declared.inputShape } : {}),
+  };
+}
+
 async function describeFallback(fallback: Runner, served: { has(id: string): boolean }): Promise<ExecutorDescriptor[]> {
   return ((await fallback.describeExecutors?.()) ?? []).filter((d) => !served.has(d.id));
 }
@@ -323,6 +335,9 @@ export function createTrustedInProcessRunner(
           source: "in-process",
           isolation: "in-process" as const,
           builtin: options.builtin === true,
+          effect: def.effect,
+          // An in-process registry has no grant to withhold: whatever it serves runs.
+          effectGranted: true,
           ...(inputShape !== undefined ? { inputShape } : {}),
         };
       });
@@ -522,8 +537,8 @@ export function createChildExecutorRunner(
 
   // Declared input shapes by the digest of the code that declares them: the module is
   // loaded in an executor process once per digest, and a failed read is retried later.
-  const shapeCache = new Map<string, Map<string, ExecutorInputShape>>();
-  const declaredShapes = async (digest: string): Promise<Map<string, ExecutorInputShape>> => {
+  const shapeCache = new Map<string, Map<string, { inputShape?: ExecutorInputShape; effect: ExecutorEffect }>>();
+  const declaredShapes = async (digest: string): Promise<Map<string, { inputShape?: ExecutorInputShape; effect: ExecutorEffect }>> => {
     const known = shapeCache.get(digest);
     if (known !== undefined) return known;
     try {
@@ -535,10 +550,10 @@ export function createChildExecutorRunner(
         env: options.env ?? process.env,
         ...(extraCa ? { readPaths: [extraCa] } : {}),
       });
-      const shapes = new Map<string, ExecutorInputShape>();
+      const shapes = new Map<string, { inputShape?: ExecutorInputShape; effect: ExecutorEffect }>();
       for (const d of described) {
         const shape = boundedInputShape(d.inputShape);
-        if (shape !== undefined) shapes.set(d.id, shape);
+        shapes.set(d.id, { effect: d.effect, ...(shape !== undefined ? { inputShape: shape } : {}) });
       }
       shapeCache.set(digest, shapes);
       return shapes;
@@ -564,7 +579,7 @@ export function createChildExecutorRunner(
         ...(sourceRoot !== undefined ? { entryModule } : {}),
         isolation: options.sandbox === true ? "sandbox" : "unrestricted",
         builtin: options.builtin === true,
-        ...(shapes.has(id) ? { inputShape: shapes.get(id)! } : {}),
+        ...(shapes.has(id) ? declaredAttributes(shapes.get(id)!, options.allowedEffects) : {}),
       }));
       return [...own, ...(await describeFallback(options.fallback, served))];
     },

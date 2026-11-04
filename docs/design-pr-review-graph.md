@@ -2432,9 +2432,23 @@ head and the event is always `COMMENT`.
    `report.json` is) and the command reads the file, so a ledger another run advanced since is built upon and a review
    the ledger already holds is a no-op.
 
-A write refused for lack of a binding (`github.writeTokenEnv` unset) fails the
-job and the run stops at Publish, with its report and review layer done; set
-the variable and resume.
+**Posting is the operator's to enable (since 0.23.1).** Without `github.writeTokenEnv`
+the runner does not grant the `write` effect to `create-pull-review`. The stage reads
+that from the run view (`executors[].effectGranted`, declared data the controller
+does not interpret) before it dispatches anything, and ends the run with
+`posting not enabled`: "draft ready; posting is not enabled (set the runner config's
+`github.writeTokenEnv` and resume to post)", naming the draft (`.graphloom/review/draft.md`)
+and the report (`.graphloom/review/review.html`) in the run's worktree. When round 1 found issues, Review and
+Draft never ran, so there is no draft: the blocker then reads "round 1 found <n> issues; posting is not enabled
+(...)" and names the report and the round-1 record (`.graphloom/review/round1/round1.json`) instead. Everything before
+Publish stays accepted, nothing is read from or written to GitHub, and no supervisor episode runs.
+The clean stop relies on the runner reporting its grants (every built-in runner does); a runner that
+reports none leaves the write to the controller's normal refusal and recovery. The stop is
+**final** (`retryable: false`): a plain resume would only repeat it, and the controller keeps
+a final stop held until something it depends on changes. Granting the effect is such a change
+([core design §8](design-typescript-core.md#8-version-transitions-and-crash-recovery)): the stop mark records
+the effects granted to each executor, so `resume` after setting the variable runs the run
+again, and Publish posts. A failure recorded before that resume predates it and does not count.
 
 ## 9. Incremental re-review
 
@@ -3526,6 +3540,14 @@ What 0.11 does, where this document leaves it open:
   as before, so their size is bounded by what one command carries; a report or
   Q&A that does not fit still stops the run "incompatible task" and says so.
   (0.12 lifts this: [§6.6](#66-output), multi-part writes.)
+
+### Version 0.23.1: Publish ends cleanly when posting is not enabled
+
+A live run without `github.writeTokenEnv` dispatched the review's write anyway; the runner refused it
+(`effect write is not granted`), the graph handed that to the supervisor, which ran two episodes on the same
+trigger before it asked the operator for the grant. Publish now reads the executor's grant from the run view
+and stops with the draft ready and no supervisor episode ([§8.5](#85-publish)); the stop is final and a
+resume after the grant runs again. No step, name, order or outcome changes.
 
 ### Version 0.23: review with round 2 directly (`rounds`)
 

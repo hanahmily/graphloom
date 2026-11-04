@@ -292,6 +292,15 @@ describe("configured CLI runner", () => {
     const described = await withGitHub.describeExecutors!();
     expect(described.map((e) => e.id)).toEqual(expect.arrayContaining(["graphloom.github/get-issue", "graphloom.github/list-issue-comments"]));
     expect(JSON.stringify(described)).not.toContain("t0ken");
+    // The write executor is declared, and withheld: only a set writeTokenEnv grants the write effect.
+    const grant = (list: typeof described) => list.find((e) => e.id === "graphloom.github/create-pull-review");
+    expect(grant(described)).toMatchObject({ effect: "write", effectGranted: false });
+    expect(grant(described)).not.toHaveProperty("token");
+    const writable = createCliRunner(parseRunnerConfig({ ...base, github: { tokenEnv: "GL_TEST_GITHUB_TOKEN", writeTokenEnv: "GL_TEST_GITHUB_WRITE" } }), { GL_TEST_GITHUB_TOKEN: "t0ken", GL_TEST_GITHUB_WRITE: "w1te" });
+    expect(grant(await writable.describeExecutors!())).toMatchObject({ effect: "write", effectGranted: true });
+    // An unset write variable grants nothing.
+    const unset = createCliRunner(parseRunnerConfig({ ...base, github: { tokenEnv: "GL_TEST_GITHUB_TOKEN", writeTokenEnv: "GL_TEST_GITHUB_WRITE" } }), { GL_TEST_GITHUB_TOKEN: "t0ken" });
+    expect(grant(await unset.describeExecutors!())).toMatchObject({ effectGranted: false });
   });
 
   it("tells command jobs where the enabled harnesses' agents and logins are", async () => {

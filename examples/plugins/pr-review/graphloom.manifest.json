@@ -1,6 +1,6 @@
 {
   "graphId": "pr-review",
-  "version": "0.23.0",
+  "version": "0.23.1",
   "sdkProtocol": 1,
   "taskConfig": "required",
   "entryPoints": {
@@ -16,10 +16,10 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "f79eab229612c42b3057bd807242e576bb3ada657d8743794929167b623c212a",
+    "sourceTree": "670ed4a24dcda2c8f012013dc36a025cf30f049349d7a4ab5e70894baab52d7c",
     "packageLock": "6ba71af10b9d0d39ffa547982c2d11c9bf2f20b5206cae3ee15e0af6a0b7068e",
     "files": {
-      "package.json": "a4c3d3b64cacb97d5ce36558b9fcb970dd906552b291c4bef75d73dcf57dd812",
+      "package.json": "2cdf86d7b80bdc49426e4618778bb2942d443a49701c25900c86cebf7bca6c0c",
       "package-lock.json": "6ba71af10b9d0d39ffa547982c2d11c9bf2f20b5206cae3ee15e0af6a0b7068e",
       "tsconfig.json": "d166142bd5d917d1eb7d3011cf6423c652f30e2989881deec6147a997bf41597",
       "profiles/banyandb.json": "7e40bfe0952a77cad2c33389fca3743202e42888e180b7a27aebed11ff858855",
@@ -63,7 +63,7 @@
       "src/cites.ts": "aac861a7321fb094c1e6a199b1c53c34dddb98df29bc2e9812ca4d4ad6f28725",
       "src/claims.ts": "cf570c0ea188b7858cce87a6e43bcee302b061d595170341b5418758afdb2762",
       "src/commands.ts": "ba0370e065e1b19561785a76b122c62b463bbaad93755a57815ea1e0660b5681",
-      "src/constants.ts": "e1d4cb4cebd9b8a1ebbb1efbbf9846e9098a392c0eef2de1f14ebfaf83fa0e89",
+      "src/constants.ts": "b7f1f20202f13c508257934f4cdd41929921968de8d2529d384876bb53dabac8",
       "src/coverage.ts": "8d5417bc88cb49cb399dc28fa4db61c32da4cea22898c4ff0f9bd6221f81c688",
       "src/detectors.ts": "84a4f0045cc3639c0e4494101341ee4697400c2367c80d838fc8cff609a2f3ba",
       "src/diagrams.ts": "60182fb25157fd4a3e1d25809c59fa8a130b0a8b2789cc1af9d8a33bf1b1755e",
@@ -76,7 +76,7 @@
       "src/fit.ts": "71f7e1484bf1abc6b73441a230a7fad5d268a2164723c23ff09ea87437b07bba",
       "src/flow.ts": "a83792504b417f9554861a954948b7b2eaf7b1cd33dddb7166b2e7222cc3cbb9",
       "src/flowlayout.ts": "18175cd7867230794ee384eeae0719ce29b61cb32004f471d6b9c932013dcc94",
-      "src/graph.ts": "3b80cf97031c74e9da7a25625f66766b97bf25c85aadd2d1e19a7c6e4896e63e",
+      "src/graph.ts": "be38d22d26a474ff82648d2b8594b258e958eb35d031ef54ca64a1f8f188ef67",
       "src/groundwork.ts": "5a12d35f33eee1ef6a136449a48e4dccd1c0e6971a92a01e814d6c5dabfeabd7",
       "src/html.ts": "e816f409d4c361ef52b467f558c699abd565e1f1c8058b3a632c1cb77225088b",
       "src/htmlsvg.ts": "8516c3d13419eab655f9d1ddf4cfb8f386cdd49e6bfd0ffd497b64dfc96b6b70",
@@ -175,7 +175,7 @@
       "test/prepare.test.ts": "5d0b5f94ec27ac499046603b771077bccfcc05fe85c9382449ea6658e91bd917",
       "test/principles.test.ts": "e2dc1d61772987aac8b722997726baa511a7aaa686304feed6e8f8c6a5c71580",
       "test/profile.test.ts": "41eed6a232317dd4e1a52f89cb3827597e7f2b5976cd9e0a3a21a32a411fb3e4",
-      "test/publish.test.ts": "19fa3c07a92d1f036a86ff2dc21e1692da3428844976246369b0f4eca38a53bd",
+      "test/publish.test.ts": "cde95b84cc409bd14295c5e74a09b122d0c4c54d91c8f53786e9f2d92a8952d2",
       "test/qa-git.test.ts": "1f89d938dc72fb7a6d9ddd0c668977b22d0bcab6782af3d0de2b8dc00914c002",
       "test/qa-graph.test.ts": "65a3b3249d96f1fd89cc22e8025a7853866432b9255647da5edbe43aa467d028",
       "test/qa-ids-searches.test.ts": "c6901388c91b774a130dfa4126acf9be37b5e3a3789f4ad4b9878f603396b542",
@@ -193,7 +193,7 @@
       "test/scope.test.ts": "594904c01dde39cf2c3ef211707e9ad853ee79e9840bfbb0e78fe685cbb23611",
       "test/static-batches.test.ts": "d5f9f472c56aec8c3770cc584c1ea3f5cbcec3a67faf095f1e4bc2c4d59a7e7a",
       "test/static-tools.test.ts": "b24836a8eec8cadf70f89f00ee8ef651ebc298bc37456526095e93ab23505545",
-      "test/support.ts": "178bfcc4bbd2373150e8e4e46eaf68b184162f316547eb543bfea7b3a5fe2140",
+      "test/support.ts": "bdc1344dd774f9dbf3f0c58fdb297ce0b9ec06aabe0e23726a04536cfde19ee4",
       "test/symbols.test.ts": "97c763e078f97e2d67089f8b55559842032067d024a0c724a0095a76fad01370",
       "test/tsmetrics.test.ts": "15e64d695be1bc3e92e75bd0b0f03bbc84ff4637e789885db66ff4e34dd907cd",
       "test/validate.test.ts": "5e75eef9e625e98a50452eacf261bde3813eabbec3f1e62ee15c562634e18170",

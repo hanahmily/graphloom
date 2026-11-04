@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
-import type { ExecutorInputShape, ExecutorSession, JobSpec, ToolCallRequest, ToolCallResult } from "@graphloom/sdk";
+import type { ExecutorEffect, ExecutorInputShape, ExecutorSession, JobSpec, ToolCallRequest, ToolCallResult } from "@graphloom/sdk";
 
 /**
  * Controller services for a running job: admitted tool calls become child
@@ -132,6 +132,14 @@ export interface ExecutorDescriptor {
   builtin: boolean;
   /** The executor's declared input shape, passed through as data; absent when it declares none or could not be read. */
   inputShape?: ExecutorInputShape;
+  /** The effect the executor declares; absent when it could not be read. */
+  effect?: ExecutorEffect;
+  /**
+   * Whether the operator's grants allow that effect now: a runner refuses the
+   * executor's jobs when false. Not part of the executor's identity (a grant
+   * can change between resumes, its code cannot).
+   */
+  effectGranted?: boolean;
 }
 
 export interface Runner {

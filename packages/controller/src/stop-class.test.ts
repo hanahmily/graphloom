@@ -21,9 +21,9 @@ import {
   type ScriptedAdvance,
   type Validator,
 } from "@graphloom/sdk";
-import { createScriptedRunner, type JobContext } from "@graphloom/runner";
+import { createScriptedRunner, type JobContext, type Runner } from "@graphloom/runner";
 import { createController, loadRunState, saveRunState } from "./index.js";
-import { changeSinceStop, classifyStop, decideResume, FINAL_STOP_HELD_REMEDY, type StopClassification } from "./stop-class.js";
+import { changeSinceStop, classifyStop, decideResume, FINAL_STOP_HELD_REMEDY, stopMarkOf, type StopClassification } from "./stop-class.js";
 import { NO_PROGRESS_STOP_REASON, STEP_LIMIT_STOP_REASON, type DurableRunState, type StopMark } from "./state.js";
 import { HELLO_VERSION } from "./testing/hello-version.js";
 
@@ -113,6 +113,35 @@ describe("stop classification (§8)", () => {
     const stopped = { status: "stopped", stopReason: "x", stopClass: { by: "supervisor", retryable: false }, stopMark: { ...mark, stopReason: "x" } } as unknown as DurableRunState;
     expect(decideResume(stopped, { pluginUpdated: false, mark: { ...mark, stopReason: "x" } })).toMatchObject({ run: false });
     expect(decideResume(stopped, { pluginUpdated: false, mark: { ...mark, stopReason: "x", hostBuild: "0.0.0-dev+76dddd7" } })).toMatchObject({ run: true, lifted: expect.stringMatching(/GraphLoom changed/) });
+  });
+
+  it("counts a change in the effects the runner grants an executor as a change, so granting one lifts a final stop", () => {
+    const mark: StopMark = { activeVersion: "g@1", manifestDigest: "m", entryDigest: "e", budgets: { agentInvocations: 0, jobs: 3, decisions: 4, corrections: 0 }, executorGrants: { "acme/post": [], "acme/read": ["read"] } };
+    const now = (executorGrants?: Record<string, string[]>): { pluginUpdated: boolean; mark: StopMark } => ({ pluginUpdated: false, mark: { ...mark, ...(executorGrants !== undefined ? { executorGrants } : { executorGrants: undefined }) } as StopMark });
+    // Unchanged: nothing changed.
+    expect(changeSinceStop(mark, now({ "acme/post": [], "acme/read": ["read"] }))).toBeUndefined();
+    // Added.
+    expect(changeSinceStop(mark, now({ "acme/post": ["write"], "acme/read": ["read"] }))).toBe("the operator changed executor grants: acme/post now grants write");
+    // Removed.
+    expect(changeSinceStop(mark, now({ "acme/post": [], "acme/read": [] }))).toBe("the operator changed executor grants: acme/read no longer grants read");
+    // An executor the runner serves only now, with an effect granted.
+    expect(changeSinceStop(mark, now({ "acme/post": [], "acme/read": ["read"], "acme/new": ["write"] }))).toBe("the operator changed executor grants: acme/new now grants write");
+    // A caller that reports no grants changes nothing.
+    expect(changeSinceStop(mark, now())).toBeUndefined();
+    // A mark from before grants were recorded counts as unknown: a resume that reports them may run again.
+    const { executorGrants: _g, ...older } = mark;
+    void _g;
+    expect(changeSinceStop(older, { pluginUpdated: false, mark })).toMatch(/executor grants were not recorded/);
+    expect(changeSinceStop(older, { pluginUpdated: false, mark: older })).toBeUndefined();
+    const stopped = { status: "stopped", stopReason: "x", stopClass: { by: "graph", retryable: false }, stopMark: { ...mark, stopReason: "x" } } as unknown as DurableRunState;
+    expect(decideResume(stopped, { pluginUpdated: false, mark: { ...mark, stopReason: "x" } })).toMatchObject({ run: false });
+    expect(decideResume(stopped, { pluginUpdated: false, mark: { ...mark, stopReason: "x", executorGrants: { ...mark.executorGrants, "acme/post": ["write"] } } })).toMatchObject({ run: true, lifted: "the operator changed executor grants: acme/post now grants write" });
+  });
+
+  it("records each executor's granted effects in the mark: its declared effect when granted, none when withheld", () => {
+    const state = { stopReason: "x", activeVersion: "g@1", intake: { bundle: { manifestDigest: "m", entryDigest: "e" } }, budgets: {}, executorGrants: { "acme/post": { effect: "write", granted: false }, "acme/read": { effect: "read", granted: true } } } as unknown as DurableRunState;
+    expect(stopMarkOf(state, undefined).executorGrants).toEqual({ "acme/post": [], "acme/read": ["read"] });
+    expect(stopMarkOf({ ...state, executorGrants: undefined } as unknown as DurableRunState, undefined).executorGrants).toBeUndefined();
   });
 
   it("retries a final stop recorded before stop marks existed", () => {
@@ -243,6 +272,36 @@ describe("resume after a stop (§8)", () => {
     const state = await loadRunState(done.stateDir);
     expect(state.remedies?.at(-1)?.remedy).toBe("ran the graph again: GraphLoom changed from 0.0.0-dev+967231e to 0.0.0-dev+76dddd7");
     expect(state.hostBuild).toBe("0.0.0-dev+76dddd7");
+  }, 60_000);
+
+  it("runs a final stop again when the operator grants an effect, and holds it while the grants are the same", async () => {
+    const env = await makeEnv();
+    const controller = createController();
+    // A runner that serves one write executor; whether the operator's grants allow it is the test's to change.
+    const runnerWith = (granted: boolean): Runner => ({
+      ...agents(),
+      describeExecutors: async () => [{ id: "acme.cred/post", digest: "d1", source: "in-process", isolation: "in-process" as const, builtin: false, effect: "write" as const, effectGranted: granted }],
+    });
+    const first = graph([stop({ reason: "posting not enabled", blocker: "draft ready; posting is not enabled", retryable: false }, "stop")]);
+    const report = await controller.run({ taskPath: env.taskPath, plugin: first.plugin, validators, runner: runnerWith(false), stateRoot: env.stateRoot, runId: "grants" });
+    expect(report).toMatchObject({ status: "stopped", stopRetryable: false });
+    expect((await loadRunState(report.stateDir)).stopMark).toMatchObject({ executorGrants: { "acme.cred/post": [] } });
+    // The graph sees the grant as data on its view.
+    expect(first.views[0]!.executors).toEqual([{ id: "acme.cred/post", effect: "write", effectGranted: false }]);
+
+    // Still withheld: held, the graph is not asked.
+    const idle = graph([]);
+    const held = await controller.resume({ runRef: report.stateDir, plugin: idle.plugin, validators, runner: runnerWith(false) });
+    expect(held.status).toBe("stopped");
+    expect(idle.views).toEqual([]);
+
+    // The operator granted the write: the graph runs again and sees the grant.
+    const resumed = graph(completes);
+    const done = await controller.resume({ runRef: report.stateDir, plugin: resumed.plugin, validators, runner: runnerWith(true) });
+    expect(done.status, `${done.stopReason}: ${done.blocker}`).toBe("succeeded");
+    expect(resumed.views[0]!.executors).toEqual([{ id: "acme.cred/post", effect: "write", effectGranted: true }]);
+    const state = await loadRunState(done.stateDir);
+    expect(state.remedies?.at(-1)?.remedy).toBe("ran the graph again: the operator changed executor grants: acme.cred/post now grants write");
   }, 60_000);
 
   it("classifies a preflight failure during a resume on its own, so the next resume retries once it is fixed", async () => {

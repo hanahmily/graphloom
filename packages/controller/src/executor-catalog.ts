@@ -16,7 +16,7 @@ import {
   type Runner,
 } from "@graphloom/runner";
 import { newEvidenceRef } from "./admit.js";
-import type { DurableRunState, ExecutorCatalogEntry } from "./state.js";
+import type { DurableRunState, ExecutorCatalogEntry, ExecutorGrant } from "./state.js";
 
 /** Pin every executor the runner serves, with the digest of the code it would run. */
 export async function pinExecutorCatalog(runner: Runner): Promise<ExecutorCatalogEntry[] | undefined> {
@@ -40,11 +40,31 @@ export async function pinExecutorCatalog(runner: Runner): Promise<ExecutorCatalo
   });
 }
 
-/** The declared input shapes of the run's pinned executors, for the supervisor to compose dispatch input against. */
+/** What the runner reports of each executor's declared effect and whether the operator's grants allow it now. */
+export async function currentExecutorGrants(runner: Runner): Promise<Record<string, ExecutorGrant> | undefined> {
+  const described = await runner.describeExecutors?.();
+  if (described === undefined) return undefined;
+  const grants: Record<string, ExecutorGrant> = {};
+  for (const d of described) {
+    if (d.effect === undefined || d.effectGranted === undefined || Object.hasOwn(grants, d.id)) continue;
+    grants[d.id] = { effect: d.effect, granted: d.effectGranted };
+  }
+  return Object.keys(grants).length > 0 ? grants : undefined;
+}
+
+/** The declared input shapes and effect grants of the run's pinned executors, for the supervisor and the graph to read as data. */
 export function executorViews(state: DurableRunState): ExecutorView[] | undefined {
-  const views = (state.executorCatalog ?? []).flatMap((e) =>
-    e.inputShape !== undefined ? [{ id: e.id, inputShape: structuredClone(e.inputShape) }] : [],
-  );
+  const views = (state.executorCatalog ?? []).flatMap((e) => {
+    const grant = state.executorGrants?.[e.id];
+    if (e.inputShape === undefined && grant === undefined) return [];
+    return [
+      {
+        id: e.id,
+        ...(e.inputShape !== undefined ? { inputShape: structuredClone(e.inputShape) } : {}),
+        ...(grant !== undefined ? { effect: grant.effect, effectGranted: grant.granted } : {}),
+      },
+    ];
+  });
   return views.length > 0 ? views : undefined;
 }
 

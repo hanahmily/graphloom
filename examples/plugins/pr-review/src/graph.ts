@@ -1273,6 +1273,29 @@ function postedReview(view: RunView, ctx: Context, analysis: Analysis): { url: s
   return flow.state === "done" ? { url: flow.posted.url, verdict: p.plan.verdict, open: p.plan.open } : undefined;
 }
 
+/** The stop reason of a draft the run is not allowed to post. */
+export const POSTING_NOT_ENABLED = "posting not enabled";
+
+/**
+ * What the stop says, naming only what exists. When round 1 found issues the run ends after Answers' files: the report (`review.html`)
+ * and the round-1 record, and Review and Draft never ran, so there is no draft. Otherwise the draft and the report are written.
+ */
+function postingNotEnabled(round1Issues: number): string {
+  const enable = "set the runner config's github.writeTokenEnv and resume to post";
+  if (round1Issues > 0) {
+    return `round 1 found ${round1Issues} issue${round1Issues === 1 ? "" : "s"}; posting is not enabled (${enable}). The report is ${REVIEW_HTML} and the round-1 record ${REVIEW_DIR}/${ROUND1_DIR}/${ROUND1_RECORD_ID}.json, in the run's worktree`;
+  }
+  return `draft ready; posting is not enabled (${enable}). The draft is ${DRAFT_MD} and the report ${REVIEW_HTML}, in the run's worktree`;
+}
+
+/**
+ * Whether the review's write is withheld. The runner's grants are declared data on the run view (`executors[].effectGranted`);
+ * a runner that reports none leaves the write to the controller's own refusal and recovery.
+ */
+function writeWithheld(view: RunView): boolean {
+  return view.executors?.find((e) => e.id === CREATE_PULL_REVIEW.id)?.effectGranted === false;
+}
+
 /**
  * The Publish stage: read the pull request's reviews, post the one review unless this head already has it, read its comments back,
  * and record the ids in the ledger. The reads are the executors' own (reads of the review and its comments); the one write is
@@ -1289,6 +1312,12 @@ function publishStage(ctx: Context, view: RunView): GraphDecision {
   const secrets = secretFindings(JSON.stringify(createInput(pr, p.plan)));
   if (secrets.length > 0) return stop({ reason: "report refused", blocker: `the review would hold what looks like a credential (${[...new Set(secrets)].slice(0, 3).join("; ")}); it was not posted`, retryable: false }, "refuse to post a review that holds a secret");
   const flow = publishFlow(view.evidence, p.plan, pr);
+  // Posting is the operator's to enable: without the grant the draft is the result, and the run ends here instead of failing the write into the supervisor.
+  if ((flow.state === "viewer" || flow.state === "reviews" || flow.state === "create") && writeWithheld(view)) {
+    const round1 = recordedRound1(view.evidence);
+    const issues = round1.state === "read" ? round1.value.issues.length : 0;
+    return stop({ reason: POSTING_NOT_ENABLED, blocker: postingNotEnabled(issues), retryable: false }, "stop: the review is ready and the runner does not grant its write");
+  }
   const base = { owner: pr.owner, repo: pr.repo, number: pr.number };
   switch (flow.state) {
     case "supervise":
