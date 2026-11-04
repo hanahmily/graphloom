@@ -466,6 +466,21 @@ describe("buildRecoveryPrompt", () => {
     expect(prompt).toContain("repairAuthority.grants.hostRepair");
   });
 
+  it("builds with an executor that declares an effect but no input shape, and shows its grant", () => {
+    const input = sampleInput();
+    input.view.executors = [
+      { id: "acme.cred/post", effect: "write", effectGranted: false },
+      { id: "acme.cred/echo", inputShape: { schema: { type: "object" }, example: {} } as never, effect: "read", effectGranted: true },
+    ];
+    const prompt = buildRecoveryPrompt(input);
+    expect(prompt).toContain('"id": "acme.cred/post"');
+    expect(prompt).toMatch(/"effectGranted": false/);
+    expect(prompt).toContain("executors lists the input shape");
+    // With no shape declared anywhere, the guidance about shapes is not given.
+    input.view.executors = [{ id: "acme.cred/post", effect: "write", effectGranted: false }];
+    expect(buildRecoveryPrompt(input)).not.toContain("executors lists the input shape");
+  });
+
   it("describes the current generation's own evidence by producer and verdict, not just its ref", () => {
     const input = sampleInput();
     input.view.evidence = [review("approved")];

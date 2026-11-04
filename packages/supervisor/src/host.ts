@@ -1196,8 +1196,14 @@ export function buildRecoveryPrompt(
     ...(input.view.executors !== undefined && input.view.executors.length > 0
       ? {
           executors: input.view.executors.slice(0, MAX_PROMPT_LIST).map((e) => {
-            const text = JSON.stringify(e.inputShape);
-            return { id: e.id, inputShape: text.length <= MAX_SHAPE_CHARS ? e.inputShape : clipText(text, MAX_SHAPE_CHARS) };
+            // An executor may declare an effect and its grant without declaring an input shape.
+            const text = e.inputShape !== undefined ? JSON.stringify(e.inputShape) : undefined;
+            return {
+              id: e.id,
+              ...(e.inputShape !== undefined && text !== undefined ? { inputShape: text.length <= MAX_SHAPE_CHARS ? e.inputShape : clipText(text, MAX_SHAPE_CHARS) } : {}),
+              ...(e.effect !== undefined ? { effect: e.effect } : {}),
+              ...(e.effectGranted !== undefined ? { effectGranted: e.effectGranted } : {}),
+            };
           }),
         }
       : {}),
@@ -1254,7 +1260,7 @@ export function buildRecoveryPrompt(
     "repairAuthority shows what the operator granted and whether the graph bundle's code can be patched. An opaque bundle's code cannot be: retry the work or repair its environment instead. Substitute a validator (qualify_repair target validator with requirementId, adding files without editing existing ones) only when validatorSubstitution is granted and that requirement has a readable statement. Otherwise stop, citing the failing validation's evidenceRefs; never invent a replacement criterion.",
     "Environment faults outside the run (a full disk, a missing tool, a broken user-level config or cache) are not yours to repair: the operator owns the machine. Report them to the operator as a blocker (stop, retryable false) with the evidence that shows the fault; do not delete caches, rewrite global configuration (go env -w, git config --global, npm config), or install software to work around them. Jobs you originate run confined to the run's worktree and run-scoped temp and cache directories, and one that would change anything else is refused unless repairAuthority.grants.hostRepair is true, which the operator sets.",
     "reenter starts a new attempt but runs nothing. To have the graph run that attempt's own jobs (its instructions, result schemas and write scopes), return after reentering; dispatch only work the graph would not run itself.",
-    ...(input.view.executors !== undefined && input.view.executors.length > 0
+    ...(input.view.executors?.some((e) => e.inputShape !== undefined)
       ? [
           "executors lists the input shape (a JSON Schema and an example) each listed executor declares. Compose job.input for that executor exactly as its schema says: arrays are plain JSON arrays, never wrapped in an object.",
         ]
