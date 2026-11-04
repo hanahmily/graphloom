@@ -246,6 +246,7 @@ meaning and parser (review-kit, [§14](#14-sharing-code-with-issue-fix)).
 |---|---|
 | `name`, `project` | Names for messages, and the repository whose PRs are read |
 | `baseBranch` | The branch PRs usually target (default `main`), fetched by `task new` unless `--base` names another ([§3.1](#31-task)) |
+| `rounds` | `"both"` (default) or `"review-only"`: which rounds a run does ([§3.2.1](#321-rounds-run-round-2-directly)). Any other value is refused |
 | `environment` | Only `checks` (`git`, the bundled `ocr` via `scripts/ocr-path.sh`, the harness CLIs). **`prepare` and `pinnedFiles` are refused**: preparation would run contributor code in the unconfined worktree. Setup that a coverage run needs (code generation the repository does not commit) is `metrics.sandbox.<language>.setup` instead, which runs inside the Docker sandbox ([§12.2](#122-confinement)) |
 | `report` | The section template, each section's meaning in this repository, and its detectors ([§6.2](#62-profile-mapping), [§6.3](#63-detectors)) |
 | `symbols` | Language packs: file globs, definition patterns, test-file and test-name patterns ([§7.2](#72-deterministic-groundwork)). The plugin ships packs for Go and TypeScript as data, and a profile may add or override them |
@@ -261,6 +262,34 @@ meaning and parser (review-kit, [§14](#14-sharing-code-with-issue-fix)).
 | `harnesses` | each role takes a harness id or `{ harness, model?, effort? }` ([§13.1](#131-roles)): `reporter`, `diagrammer` (optional: the diagram job only; absent, it takes the reporter's harness, model and effort), `questioner`, `answerer` (`claude-code` or `codex` only), `batch-answerer` (optional: the answer batches of large mode only, `claude-code` or `codex`; absent, it takes the answerer's harness, model and effort; N1 keeps the answerer), `report-checker`, `answer-checker`, and `verifier-<aspect>` for `correctness`, `maintainability` and `security`. There is no `reviewer-<aspect>` key: the reviewers run on the answerer's harness, and a profile that names one is refused ([§13.1](#131-roles)) |
 | `supervisor`, `budgets` | As in issue-fix ([§13](#13-agent-roles-supervisor-budgets)) |
 | `limits` | `maxFiles` (150), `maxPatchBytes` (1 MiB), `maxNewSymbols` (200): past one, the pull request is reviewed in large mode ([§6.9](#69-large-pull-requests), [§7.6](#76-questions-in-large-mode)). `hardMaxFiles` (1000), `hardMaxPatchBytes` (8 MiB), `hardMaxNewSymbols` (2000): past one, the run stops "incompatible task" and names the size. `areaMaxBytes` (256 KiB) and `areaMinBytes` (16 KiB) shape the areas. Each is a positive integer; a `max*` may not exceed its hard cap, nor `areaMinBytes` the `areaMaxBytes` |
+
+#### 3.2.1 Rounds: run round 2 directly
+
+`rounds` chooses what a run does before the review layer. `"both"` (the default) is the
+two-round run of [§2](#2-the-run-two-rounds-and-no-human) and [§9.4](#94-rounds). `"review-only"` is
+the maintainer's choice to review a pull request with round 2 directly: **the report, then round 2.**
+Fetch and Report run as always (the reviewers are seeded with `review.md`, and large mode takes the
+review scope from the briefing), the Q&A (Questions, Answers, N1 included) and the round-1 gate are skipped, and
+Review, Draft and Publish run as usual.
+
+- **Where it lives.** A profile key, so the controller pins it with the rest of the task's config and the
+  validators (which see only the config, not the request) can tell a permitted skip from a missing answer. An operator sets it
+  for one run without touching a shipped profile by copying the profile beside the task, or into
+  `<out>/profiles/`, adding `"rounds": "review-only"` and naming it:
+  `graphloom task new pr-review <owner/repo#N> --profile ./banyandb-review-only.json` (or `--profile banyandb-review-only`).
+  No CLI flag was added: `task new` stays plugin-agnostic and the choice is pinned with the profile.
+- **The step set is fixed** ([principles](../AGENTS.md)). Questions, Answers and Round 1 still exist and pass on a recorded skip
+  with the reason `rounds: review-only`: Questions records `necessity.json` with `decision: { action: "skip",
+  reason: "rounds: review-only", by: "operator" }` and no answer; Answers writes `qa.json` (`roundsSkipped`, no question), `review.md`,
+  `review.html` and `review-appendix.html`, each saying the Q&A was skipped by the operator's choice (never an empty-looking
+  Q&A), and advances the ledger with no question; `answers-grounded` has nothing to check; Round 1 records zero issues and
+  `skipped: "rounds: review-only"`, so Review is entered in the same run. The validators accept the skip only when the profile says
+  `review-only`, and a default run refuses a skip record.
+- **Publish** is as in 0.22 (round 2's verdict, always a `COMMENT`). The body says round 1 was skipped by the operator's choice, and the
+  ledger records the head's round 1 as `skipped`, not `clean`.
+- **Re-review continuity** ([§9](#9-incremental-re-review)). Earlier round-1 items are left as they were: not re-checked and not counted in
+  this verdict (a `Review passed` here does not say they were fixed), not listed, not posted again. The ledger carries
+  their questions, ids and posted items unchanged, so a later `both` run re-checks them.
 
 ### 3.3 Credentials
 
@@ -3497,6 +3526,15 @@ What 0.11 does, where this document leaves it open:
   as before, so their size is bounded by what one command carries; a report or
   Q&A that does not fit still stops the run "incompatible task" and says so.
   (0.12 lifts this: [§6.6](#66-output), multi-part writes.)
+
+### Version 0.23: review with round 2 directly (`rounds`)
+
+The maintainer's decision: a pull request can be reviewed with round 2 directly, per task. New profile key `rounds`
+(`"both"`, the default and today's behaviour, or `"review-only"`; [§3.2.1](#321-rounds-run-round-2-directly)).
+With `review-only` the run does the report, skips Questions, Answers (N1 included) and the round-1 gate on a recorded skip
+(`rounds: review-only`), and runs Review, Draft and Publish in the same run. The step set, names, order and required outcomes are unchanged.
+`qa.json`, `review.md`, `review.html`, the round-1 record and the posted review all say the Q&A and round 1 were skipped by the operator's
+choice; earlier round-1 items are left as they were. An unknown value of `rounds` is refused.
 
 ### Version 0.22: fix checking on a later head
 

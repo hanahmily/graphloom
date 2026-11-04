@@ -118,16 +118,20 @@ function verdictSection(i: HtmlInput, l: VisualLinks): string {
   const n = i.necessity;
   const conclusion = n !== undefined ? effectiveConclusion(n.final) : undefined;
   const principles = n?.final.necessity?.principles ?? [];
+  // `rounds: review-only` (design §3.2): the Q&A was skipped by the operator's choice, which is not "pending".
+  const skipped = n === undefined ? i.qa?.roundsSkipped : undefined;
   const n1 = tile(
     conclusion === undefined ? "grey" : (CONCLUSION_TONE[conclusion] ?? "grey"),
-    `<small>${NECESSITY_ID}: is it necessary?</small><strong>${esc(conclusion ?? "pending")}</strong>`,
-    n?.final.necessity !== undefined ? clip(n.final.necessity.rationale, 240) : "N1 is answered after the report",
+    `<small>${NECESSITY_ID}: is it necessary?</small><strong>${esc(conclusion ?? (skipped !== undefined ? "skipped" : "pending"))}</strong>`,
+    n?.final.necessity !== undefined ? clip(n.final.necessity.rationale, 240) : skipped !== undefined ? skipped.note : "N1 is answered after the report",
     appendixAt(l, `q-${NECESSITY_ID}`),
     " big",
   );
   const grid =
     n === undefined
-      ? tile("grey", "pending", "the principles are judged with N1")
+      ? skipped !== undefined
+        ? tile("grey", "skipped", `skipped by the operator's choice (${skipped.reason})`)
+        : tile("grey", "pending", "the principles are judged with N1")
       : principles.length === 0
         ? tile("grey", "none", "no project principle applies to this change")
         : principles.map((p) => tile(VERDICT_TONE[p.verdict] ?? "grey", esc(p.id), `${p.id} ${p.verdict}: ${clip(p.explanation, 200)}`, appendixAt(l, `q-${NECESSITY_ID}`), " sm")).join("");
@@ -333,6 +337,7 @@ function questionsSection(i: HtmlInput, l: VisualLinks): string {
   const qa = i.qa;
   const head = `<section class="vis" id="questions"><h2>Questions</h2>`;
   if (qa === undefined) return `${head}${tile("grey", "pending", "the Questions and Answers stages follow the report")}</section>`;
+  if (qa.roundsSkipped !== undefined) return `${head}${tile("grey", "skipped by the operator&#39;s choice", qa.roundsSkipped.note)}</section>`;
   const tiles: QuestionTile[] = qa.questions.map((q) => ({ id: q.id, type: q.type, item: q.item, text: q.text, status: q.answer?.status ?? "unanswered" }));
   const { n1, groups } = questionGroups(tiles);
   const one = (q: QuestionTile): string => tile(STATUS_TONE[q.status] ?? "grey", `<strong>${esc(q.id)}</strong><small>${esc(TYPE_ABBREVIATIONS[q.type] ?? q.type.slice(0, 5).toUpperCase())}</small>`, `${q.id} [${q.type}] ${q.status}: ${clip(q.text, 200)}`, appendixAt(l, `q-${q.id}`), " q");

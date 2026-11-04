@@ -197,6 +197,10 @@ const EFFORTS: Readonly<Record<string, readonly string[]>> = {
   codex: ["minimal", "low", "medium", "high", "xhigh"],
 };
 
+/** The rounds a run does (design §3.2): every run has the same stages; `review-only` passes Questions, Answers and Round 1 on a recorded skip. */
+export const ROUNDS = ["both", "review-only"] as const;
+export type Rounds = (typeof ROUNDS)[number];
+
 export interface ProfileData {
   name: string;
   description?: string;
@@ -204,6 +208,8 @@ export interface ProfileData {
   project: string;
   /** The branch pull requests are made against, for `graphloom task new` (default `main`); `--base` overrides it. */
   baseBranch?: string;
+  /** Which rounds the run does (design §3.2, version 0.23): `both` (default) or `review-only`. */
+  rounds?: Rounds;
   issues?: { owner: string; repo: string };
   environment: { checks: EnvironmentCommand[] };
   report?: { sections: SectionConfig[] };
@@ -226,6 +232,8 @@ export interface Profile {
   project: string;
   /** The branch pull requests are made against (`task new`); `main` unless the profile names another. */
   baseBranch: string;
+  /** `both`: round 1 (report, Q&A) gates round 2; `review-only`: the report, then round 2, with the Q&A and round 1 skipped by the operator's choice. */
+  rounds: Rounds;
   owner: string;
   repo: string;
   environment: { checks: EnvironmentCommand[] };
@@ -715,12 +723,13 @@ export function parseProfile(config: unknown): Profile {
   for (const key of Object.keys(p)) {
     if (LATER_FIELDS[key] !== undefined) throw new ProfileError(`${key} is not supported in this version: it belongs to ${LATER_FIELDS[key]}`);
   }
-  onlyKeys(p, "", ["name", "description", "project", "baseBranch", "issues", "environment", "report", "symbols", "questions", "metrics", "context", "privateRepos", "harnesses", "supervisor", "budgets", "limits", "agent", "review"]);
+  onlyKeys(p, "", ["name", "description", "project", "baseBranch", "rounds", "issues", "environment", "report", "symbols", "questions", "metrics", "context", "privateRepos", "harnesses", "supervisor", "budgets", "limits", "agent", "review"]);
   need(isString(p.name), "name is required");
   need(typeof p.description === "undefined" || isString(p.description), "description must be text");
   need(typeof p.project === "string" && REPO_NAME.test(p.project), 'project is required, as "owner/name"');
   const [owner, repo] = (p.project as string).split("/") as [string, string];
   need(p.baseBranch === undefined || (typeof p.baseBranch === "string" && BRANCH_NAME.test(p.baseBranch) && !(p.baseBranch as string).includes("..") && !(p.baseBranch as string).endsWith("/") && !(p.baseBranch as string).endsWith(".lock")), "baseBranch must be a branch name");
+  need(p.rounds === undefined || (ROUNDS as readonly unknown[]).includes(p.rounds), `rounds must be ${ROUNDS.map((r) => JSON.stringify(r)).join(" or ")}`);
   if (p.issues !== undefined) {
     need(isObject(p.issues), "issues must be an object");
     onlyKeys(p.issues as Record<string, unknown>, "issues", ["owner", "repo"]);
@@ -786,6 +795,7 @@ export function parseProfile(config: unknown): Profile {
     ...(p.description !== undefined ? { description: p.description as string } : {}),
     project: p.project as string,
     baseBranch: (p.baseBranch as string | undefined) ?? "main",
+    rounds: (p.rounds as Rounds | undefined) ?? "both",
     owner,
     repo,
     environment,
