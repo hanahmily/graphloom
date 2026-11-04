@@ -121,12 +121,18 @@ function episodeTriggers(state: DurableRunState): Array<{ id: string; trigger: s
   return out;
 }
 
-function stageSpendingMost(state: DurableRunState, budget: string): string {
-  if (budget === "agentInvocations") {
-    const top = [...runStats(state).stages].sort((a, b) => b.agentInvocations - a.agentInvocations)[0];
-    if (top !== undefined && top.agentInvocations > 0) return top.stageId;
-  }
-  return state.current?.stageId ?? "-";
+/** The stage that spent most of a budget, where the stats attribute it per stage; undefined when they do not. */
+function stageSpendingMost(state: DurableRunState, budget: string): string | undefined {
+  if (budget !== "agentInvocations" && budget !== "jobs") return undefined;
+  const spent = (s: ReturnType<typeof runStats>["stages"][number]): number => (budget === "jobs" ? s.jobs.total : s.agentInvocations);
+  const top = [...runStats(state).stages].sort((a, b) => spent(b) - spent(a))[0];
+  return top !== undefined && spent(top) > 0 ? top.stageId : undefined;
+}
+
+/** The message as it would be with every body line. */
+function untrimmed(kind: WatchKind, state: DurableRunState, body: string[]): string {
+  const head = `[graphloom watch] ${kind} · run ${state.runId} · ${state.status} · ${stageOf(state)}`;
+  return [head, ...body.flatMap((l) => l.split("\n")), kind === "attention" ? ATTENTION_LINE : RELAY_LINE].join("\n");
 }
 
 /** The message: header, body lines, closing instruction; the body gives way when over the size cap. */
@@ -157,6 +163,8 @@ function moveLines(events: ProgressEvent[]): string[] {
   return lines;
 }
 
+const spender = (stage: string | undefined): string => (stage !== undefined ? `spent mostly in stage ${stage}` : "spent across stages");
+
 /** Most urgent first: the run is gone or stopped, a human is needed, then what is wrong while it runs. */
 function attentionRank(key: string): number {
   const order = ["orphaned", "stop:", "reconcile:", "repeat-", "stall:", "budget:"];
@@ -164,17 +172,32 @@ function attentionRank(key: string): number {
   return i < 0 ? order.length : i;
 }
 
+/** Shortens the longest lines, on character boundaries and ending in "…", until the message fits; a line is cut, never omitted. */
+function shrinkToFit(state: DurableRunState, lines: string[]): string[] {
+  const out = lines.flatMap((l) => l.split("\n"));
+  for (let i = 0; i < 10_000; i++) {
+    const excess = Buffer.byteLength(untrimmed("attention", state, out)) - MESSAGE_BYTES;
+    if (excess <= 0) break;
+    let at = 0;
+    for (let j = 1; j < out.length; j++) if (Buffer.byteLength(out[j]!) > Buffer.byteLength(out[at]!)) at = j;
+    const chars = Array.from(out[at]!.replace(/…$/, ""));
+    let bytes = Buffer.byteLength(chars.join("")) + 3 - Math.max(excess, 8);
+    while (chars.length > 1 && Buffer.byteLength(chars.join("")) > bytes) chars.pop();
+    out[at] = `${chars.join("")}…`;
+  }
+  return out;
+}
+
 /** Groups conditions, in order, into messages that each fit the size cap without trimming any. */
 function packAttention(state: DurableRunState, groups: string[][]): string[][] {
   const packs: string[][] = [];
   const fits = (ls: string[]): boolean => {
-    const message = compose("attention", state, ls);
-    return Buffer.byteLength(message) <= MESSAGE_BYTES && !message.includes("more lines");
+    return Buffer.byteLength(untrimmed("attention", state, ls)) <= MESSAGE_BYTES;
   };
   for (const lines of groups) {
     const last = packs[packs.length - 1];
     if (last !== undefined && fits([...last, ...lines])) last.push(...lines);
-    else packs.push([...lines]);
+    else packs.push(fits(lines) ? [...lines] : shrinkToFit(state, lines));
   }
   return packs;
 }
@@ -256,7 +279,7 @@ export function evaluate(
   }
   for (const b of summary.budgets) {
     if (b.percent === undefined || b.used === undefined || b.granted === undefined || b.used / b.granted <= BUDGET_THRESHOLD) continue;
-    attention.set(`budget:${b.budget}`, [`budget ${b.budget} at ${b.percent}% (${b.used} of ${b.granted}), spent in stage ${stageSpendingMost(state, b.budget)}`]);
+    attention.set(`budget:${b.budget}`, [`budget ${b.budget} at ${b.percent}% (${b.used} of ${b.granted}), ${spender(stageSpendingMost(state, b.budget))}`]);
   }
   for (const [stageId, f] of Object.entries(snap.failures)) {
     if (f.count >= 2) attention.set(`repeat-stage:${stageId}:${f.count}`, [`repeated failure: stage ${stageId} invalidated ${f.count} times with the same requirements (${oneLine(f.sig, 120)})`]);

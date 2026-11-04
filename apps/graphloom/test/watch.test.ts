@@ -259,7 +259,7 @@ describe("attention", () => {
     await b.mutate((s) => ({ ...s, budgets: { ...s.budgets, jobs: 100_000 } }));
     const report = only(await b.watch());
     expect(report.kind).toBe("attention");
-    expect(report.message).toMatch(/budget jobs at 90% \(900000 of 1000000\), spent in stage \S+/);
+    expect(report.message).toMatch(/budget jobs at 90% \(900000 of 1000000\), spent (mostly in stage \S+|across stages)/);
     expect((await b.watch({ timeoutMs: 2 * MIN, heartbeatMs: 60 * MIN })).reports).toEqual([]);
     await b.mutate((s) => ({ ...s, budgets: { ...s.budgets, jobs: 900_000 } }));
     await b.watch({ timeoutMs: 20_000, heartbeatMs: 60 * MIN });
@@ -349,6 +349,39 @@ describe("many attention conditions at once", () => {
     expect(r.reports.length).toBeGreaterThan(1);
     // None is suppressed afterwards.
     expect((await b.watch({ heartbeatMs: 60 * MIN })).reports).toEqual([]);
+  });
+});
+
+describe("attention messages keep what matters", () => {
+  it("a long multibyte blocker is cut on a character boundary by the byte budget, never omitted", async () => {
+    const b = await bed();
+    const question = "你".repeat(400);
+    await b.mutate((s) => ({ ...s, status: "stopped", stopReason: "needs a decision", blocker: question, stateRevision: s.stateRevision + 1 }));
+    const report = only(await b.watch());
+    expect(Buffer.byteLength(report.message)).toBeLessThanOrEqual(1_000);
+    const line = report.message.split("\n").find((l) => l.startsWith("blocker:"))!;
+    expect(line).toMatch(/^blocker: "你{20,}…$/);
+    expect(report.message).not.toContain("\uFFFD");
+    expect(report.message.split("\n").at(-1)).toMatch(/^Report this to the user/);
+    expect(report.message).toContain("stopped: stopped (needs a decision)");
+  });
+
+  it("names the stage that spent a budget, not the stage the run is in; unknown attribution says so", async () => {
+    const b = await bed();
+    const state = await loadRunState(b.stateDir);
+    const { runStats } = await import("../src/stats.js");
+    const byJobs = [...runStats(state).stages].sort((x, y) => y.jobs.total - x.jobs.total);
+    const spender = byJobs[0]!.stageId;
+    const later = byJobs.find((x) => x.stageId !== spender)!.stageId;
+    await b.mutate((s) => ({ ...s, current: { stageId: later, attempt: 1 }, budgets: { ...s.budgets, jobs: 100_000 } }));
+    const report = only(await b.watch());
+    expect(report.message).toContain(`budget jobs at 90% (900000 of 1000000), spent mostly in stage ${spender}`);
+    expect(report.message).not.toContain(`stage ${later}`.replace(/^/, "spent mostly in "));
+    // A budget the stats do not attribute per stage is not pinned on the current stage.
+    const c = await bed();
+    await c.mutate((s) => ({ ...s, budgets: { ...s.budgets, decisions: 100_000 } }));
+    const unknown = only(await c.watch());
+    expect(unknown.message).toMatch(/budget decisions at \d+% \(\d+ of \d+\), spent across stages/);
   });
 });
 
