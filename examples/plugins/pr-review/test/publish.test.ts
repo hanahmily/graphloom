@@ -17,8 +17,7 @@ import { pinnedBase } from "../src/commands.js";
 import { recordedRound1 } from "../src/reviewdraft.js";
 import { ROUND1_SCHEMA, type Round1Issue, type Round1Record } from "../src/round1.js";
 import { reviewPublished, round1Gated } from "../src/reviewvalidators.js";
-import { advancePullRequest } from "../src/graph.js";
-import { BANYANDB, candidateEvidence, profileOf, simulate, viewOf, type FakeReview, type Simulation } from "./support.js";
+import { BANYANDB, candidateEvidence, profileOf, simulate, type FakeReview, type Simulation } from "./support.js";
 
 const sh = promisify(execFile);
 const HEAD = REHEARSAL_HEAD;
@@ -491,18 +490,5 @@ describe("posting is the operator's to enable: without the write grant the run e
 
   it("posts as before when the runner reports nothing of its grants", () => {
     expect(stopOf(issues())).toMatchObject({ reason: "complete" });
-  });
-
-  it("stops the same way, without a supervisor episode, when a runner that reports no grants refuses the write for the effect", () => {
-    const sim = issues({ create: ["not-granted"] });
-    expect(stopOf(sim)).toMatchObject({ reason: "posting not enabled", retryable: false });
-    expect(sim.decisions.some((d) => d.action.type === "supervise")).toBe(false);
-    expect(publishJobs(sim).filter((id) => id === "graphloom.github/create-pull-review")).toHaveLength(1);
-  });
-
-  it("does not hold a failure of an earlier generation against a resume that finds the write granted", () => {
-    const first = issues({ create: ["not-granted"] });
-    const next = advancePullRequest(viewOf(first, { generation: 2, ...granted }));
-    expect(next.action.type).toBe("dispatch");
   });
 });

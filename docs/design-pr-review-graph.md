@@ -2440,8 +2440,8 @@ does not interpret) before it dispatches anything, and ends the run with
 `github.writeTokenEnv` and resume to post)", naming the draft (`.graphloom/review/draft.md`)
 and the report (`.graphloom/review/review.html`) in the run's worktree. Everything before
 Publish stays accepted, nothing is read from or written to GitHub, and no supervisor episode runs.
-As a backstop for a runner that reports no grants, a `create-pull-review` failure of this
-generation that says the effect "is not granted" ends the run the same way. The stop is
+The clean stop relies on the runner reporting its grants (every built-in runner does); a runner that
+reports none leaves the write to the controller's normal refusal and recovery. The stop is
 **final** (`retryable: false`): a plain resume would only repeat it, and the controller keeps
 a final stop held until something it depends on changes. Granting the effect is such a change
 ([core design §8](design-typescript-core.md#8-version-transitions-and-crash-recovery)): the stop mark records

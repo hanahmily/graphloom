@@ -72,7 +72,7 @@ import {
   REVIEW_MD,
 } from "./constants.js";
 import { checkBatch, DIAGRAMMER_JOB, DIAGRAMS_REFERENCES, DIAGRAMS_SCHEMA, DIAGRAMS_SCHEMA_NAME, diagramInputOf, planDiagrams, MAX_DIAGRAM_BYTES, MAX_DIAGRAMS, SKILL_DIR, skillMount } from "./diagrams.js";
-import { commandRuns, describeCommand, environmentOutput, isObject, outputTail, succeeded, validatorEvidence, type CommandRun } from "./evidence.js";
+import { commandRuns, describeCommand, environmentOutput, outputTail, succeeded, validatorEvidence, type CommandRun } from "./evidence.js";
 import { INTERFACE_PATCH_BYTES } from "./digest.js";
 import { LIMITS } from "./metrics/crap.js";
 import { CHANGE_REPORT_SCHEMA, MAX_ITEM_CHARS } from "./report.js";
@@ -1282,18 +1282,11 @@ function postingNotEnabled(): string {
 }
 
 /**
- * Whether the review's write is known to be withheld. The runner's grants are declared data on the run view (`executors[].effectGranted`);
- * a runner that does not report them is caught by the backstop: this resume's own attempt to post failed for the effect not being granted.
- * A failure of an earlier generation predates the resume, which an operator makes after granting, so it does not count.
+ * Whether the review's write is withheld. The runner's grants are declared data on the run view (`executors[].effectGranted`);
+ * a runner that reports none leaves the write to the controller's own refusal and recovery.
  */
 function writeWithheld(view: RunView): boolean {
-  const granted = view.executors?.find((e) => e.id === CREATE_PULL_REVIEW.id)?.effectGranted;
-  if (granted !== undefined) return !granted;
-  return view.evidence.some((e) => {
-    if ((e.generation ?? 0) < view.generation || !isObject(e.payload) || !isObject(e.payload.executorFailure)) return false;
-    const failure = e.payload.executorFailure;
-    return isObject(failure.executor) && failure.executor.id === CREATE_PULL_REVIEW.id && typeof failure.summary === "string" && /effect \S+ is not granted/.test(failure.summary);
-  });
+  return view.executors?.find((e) => e.id === CREATE_PULL_REVIEW.id)?.effectGranted === false;
 }
 
 /**
