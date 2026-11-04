@@ -2438,7 +2438,9 @@ that from the run view (`executors[].effectGranted`, declared data the controlle
 does not interpret) before it dispatches anything, and ends the run with
 `posting not enabled`: "draft ready; posting is not enabled (set the runner config's
 `github.writeTokenEnv` and resume to post)", naming the draft (`.graphloom/review/draft.md`)
-and the report (`.graphloom/review/review.html`) in the run's worktree. Everything before
+and the report (`.graphloom/review/review.html`) in the run's worktree. When round 1 found issues, Review and
+Draft never ran, so there is no draft: the blocker then reads "round 1 found <n> issues; posting is not enabled
+(...)" and names the report and the round-1 record (`.graphloom/review/round1/round1.json`) instead. Everything before
 Publish stays accepted, nothing is read from or written to GitHub, and no supervisor episode runs.
 The clean stop relies on the runner reporting its grants (every built-in runner does); a runner that
 reports none leaves the write to the controller's normal refusal and recovery. The stop is

@@ -16,7 +16,7 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "db9cbe6a2f36e959904bb23efa5b181e5e022f9e92daeaa54808df4d8ae0c291",
+    "sourceTree": "670ed4a24dcda2c8f012013dc36a025cf30f049349d7a4ab5e70894baab52d7c",
     "packageLock": "6ba71af10b9d0d39ffa547982c2d11c9bf2f20b5206cae3ee15e0af6a0b7068e",
     "files": {
       "package.json": "2cdf86d7b80bdc49426e4618778bb2942d443a49701c25900c86cebf7bca6c0c",
@@ -76,7 +76,7 @@
       "src/fit.ts": "71f7e1484bf1abc6b73441a230a7fad5d268a2164723c23ff09ea87437b07bba",
       "src/flow.ts": "a83792504b417f9554861a954948b7b2eaf7b1cd33dddb7166b2e7222cc3cbb9",
       "src/flowlayout.ts": "18175cd7867230794ee384eeae0719ce29b61cb32004f471d6b9c932013dcc94",
-      "src/graph.ts": "a20616a3181582c99bcd6db6a89dbfbbcb8f11806acbcf0c8cd63775f781bd0e",
+      "src/graph.ts": "be38d22d26a474ff82648d2b8594b258e958eb35d031ef54ca64a1f8f188ef67",
       "src/groundwork.ts": "5a12d35f33eee1ef6a136449a48e4dccd1c0e6971a92a01e814d6c5dabfeabd7",
       "src/html.ts": "e816f409d4c361ef52b467f558c699abd565e1f1c8058b3a632c1cb77225088b",
       "src/htmlsvg.ts": "8516c3d13419eab655f9d1ddf4cfb8f386cdd49e6bfd0ffd497b64dfc96b6b70",
@@ -175,7 +175,7 @@
       "test/prepare.test.ts": "5d0b5f94ec27ac499046603b771077bccfcc05fe85c9382449ea6658e91bd917",
       "test/principles.test.ts": "e2dc1d61772987aac8b722997726baa511a7aaa686304feed6e8f8c6a5c71580",
       "test/profile.test.ts": "41eed6a232317dd4e1a52f89cb3827597e7f2b5976cd9e0a3a21a32a411fb3e4",
-      "test/publish.test.ts": "169ad23c0ddb0f159249922a82df9f94ee889ef37318482e55da7d15ff1bf2b3",
+      "test/publish.test.ts": "cde95b84cc409bd14295c5e74a09b122d0c4c54d91c8f53786e9f2d92a8952d2",
       "test/qa-git.test.ts": "1f89d938dc72fb7a6d9ddd0c668977b22d0bcab6782af3d0de2b8dc00914c002",
       "test/qa-graph.test.ts": "65a3b3249d96f1fd89cc22e8025a7853866432b9255647da5edbe43aa467d028",
       "test/qa-ids-searches.test.ts": "c6901388c91b774a130dfa4126acf9be37b5e3a3789f4ad4b9878f603396b542",

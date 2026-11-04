@@ -1276,9 +1276,16 @@ function postedReview(view: RunView, ctx: Context, analysis: Analysis): { url: s
 /** The stop reason of a draft the run is not allowed to post. */
 export const POSTING_NOT_ENABLED = "posting not enabled";
 
-/** What the stop says: where the draft is, and what the operator does to post it. */
-function postingNotEnabled(): string {
-  return `draft ready; posting is not enabled (set the runner config's github.writeTokenEnv and resume to post). The draft is ${DRAFT_MD} and the report ${REVIEW_HTML}, in the run's worktree`;
+/**
+ * What the stop says, naming only what exists. When round 1 found issues the run ends after Answers' files: the report (`review.html`)
+ * and the round-1 record, and Review and Draft never ran, so there is no draft. Otherwise the draft and the report are written.
+ */
+function postingNotEnabled(round1Issues: number): string {
+  const enable = "set the runner config's github.writeTokenEnv and resume to post";
+  if (round1Issues > 0) {
+    return `round 1 found ${round1Issues} issue${round1Issues === 1 ? "" : "s"}; posting is not enabled (${enable}). The report is ${REVIEW_HTML} and the round-1 record ${REVIEW_DIR}/${ROUND1_DIR}/${ROUND1_RECORD_ID}.json, in the run's worktree`;
+  }
+  return `draft ready; posting is not enabled (${enable}). The draft is ${DRAFT_MD} and the report ${REVIEW_HTML}, in the run's worktree`;
 }
 
 /**
@@ -1307,7 +1314,9 @@ function publishStage(ctx: Context, view: RunView): GraphDecision {
   const flow = publishFlow(view.evidence, p.plan, pr);
   // Posting is the operator's to enable: without the grant the draft is the result, and the run ends here instead of failing the write into the supervisor.
   if ((flow.state === "viewer" || flow.state === "reviews" || flow.state === "create") && writeWithheld(view)) {
-    return stop({ reason: POSTING_NOT_ENABLED, blocker: postingNotEnabled(), retryable: false }, "stop: the draft is ready and the runner does not grant the review's write");
+    const round1 = recordedRound1(view.evidence);
+    const issues = round1.state === "read" ? round1.value.issues.length : 0;
+    return stop({ reason: POSTING_NOT_ENABLED, blocker: postingNotEnabled(issues), retryable: false }, "stop: the review is ready and the runner does not grant its write");
   }
   const base = { owner: pr.owner, repo: pr.repo, number: pr.number };
   switch (flow.state) {

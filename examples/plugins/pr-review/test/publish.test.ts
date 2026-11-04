@@ -14,7 +14,7 @@ import { commentIds, createInput, findPosted, findingMarker, ledgerPatch, ledger
 import { analyze, evidencePull } from "../src/analysis.js";
 import { REHEARSAL_HEAD } from "../src/rehearsal.js";
 import { pinnedBase } from "../src/commands.js";
-import { recordedRound1 } from "../src/reviewdraft.js";
+import { recordedRound1, writtenDraftFiles } from "../src/reviewdraft.js";
 import { ROUND1_SCHEMA, type Round1Issue, type Round1Record } from "../src/round1.js";
 import { reviewPublished, round1Gated } from "../src/reviewvalidators.js";
 import { BANYANDB, candidateEvidence, profileOf, simulate, type FakeReview, type Simulation } from "./support.js";
@@ -465,21 +465,39 @@ describe("the Publish stage's paginated reads are its own flow", () => {
   });
 });
 
-describe("posting is the operator's to enable: without the write grant the run ends at Publish with the draft ready", () => {
+describe("posting is the operator's to enable: without the write grant the run ends at Publish with the review ready", () => {
   const withheld = { executors: [{ id: "graphloom.github/create-pull-review", effect: "write" as const, effectGranted: false }] };
   const granted = { executors: [{ id: "graphloom.github/create-pull-review", effect: "write" as const, effectGranted: true }] };
 
   it("stops before it dispatches anything when the run view says the write is withheld, with no supervisor episode", () => {
-    const sim = issues(withheld);
+    const sim = clean(withheld);
     expect(sim.final.action.type).toBe("stop");
     expect(stopOf(sim)).toMatchObject({ reason: "posting not enabled", retryable: false });
     expect(stopOf(sim)!.blocker).toMatch(/^draft ready; posting is not enabled \(set the runner config's github\.writeTokenEnv and resume to post\)\. The draft is \.graphloom\/review\/draft\.md and the report \.graphloom\/review\/review\.html/);
+    // Round 2 path: the files it names exist.
+    const files = writtenDraftFiles(sim.evidence);
+    expect(files.draftMd.state).toBe("read");
+    expect(files.html.state).toBe("read");
     expect(publishJobs(sim)).toEqual([]);
     expect(sim.github.creates).toEqual([]);
     expect(sim.decisions.some((d) => d.action.type === "supervise")).toBe(false);
     // The other work stays: every stage before Publish is accepted.
     expect(sim.receipts.filter((r) => r.valid).map((r) => r.requirementId)).not.toContain("review-published");
     expect(sim.receipts.filter((r) => r.valid).map((r) => r.requirementId)).toContain("round1-gated");
+  });
+
+  it("names what exists when round 1 found issues: there is no draft, the report and the round-1 record are the result", () => {
+    const sim = issues({ executors: withheld.executors });
+    // The complex-function scenario is the round-1 path; the other is the round-2 path.
+    const r1 = recordedRound1(sim.evidence);
+    expect(r1.state === "read" && r1.value.issues.length).toBeGreaterThan(0);
+    const n = (r1 as { value: Round1Record }).value.issues.length;
+    expect(stopOf(sim)).toMatchObject({ reason: "posting not enabled", retryable: false });
+    expect(stopOf(sim)!.blocker).toBe(`round 1 found ${n} issue${n === 1 ? "" : "s"}; posting is not enabled (set the runner config's github.writeTokenEnv and resume to post). The report is .graphloom/review/review.html and the round-1 record .graphloom/review/round1/round1.json, in the run's worktree`);
+    expect(stopOf(sim)!.blocker).not.toContain("draft");
+    expect(readParts(sim.evidence, "review-html-qa", ".graphloom/review/review.html").state).toBe("read");
+    expect(writtenDraftFiles(sim.evidence).draftMd.state).not.toBe("read");
+    expect(sim.jobs.filter((j) => j.stageId === "review" || j.stageId === "draft")).toEqual([]);
   });
 
   it("posts as before when the write is granted", () => {
