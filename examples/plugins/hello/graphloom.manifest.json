@@ -15,7 +15,7 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "a9427dbf126d4fc90ba667c4678d8cd3b1f1f23f769666f2102a30a577526de0",
+    "sourceTree": "fda216b15173ce33576860b6e9d6d07da501616b013cfd62f61e955f1004be73",
     "packageLock": "79329fee592576db0eeafca36576b30a8d534375b6c26c86d2e1cefc907d4e03",
     "files": {
       "package.json": "fef44cb477f12592e1bc878a6c49a9a48207690bc9f7195569bff6b5e812745d",
@@ -26,7 +26,7 @@
       "src/index.ts": "6456247fd0f17a2ecaedf56b58e99e049b2ace9daa52300b31de2edf31587f52",
       "src/rehearsal.ts": "388c503bb9f4ad51b62398467aaaa8e2115d47b87936f80f865ce2d4f3368ff8",
       "src/validators.ts": "092ea807e8154511a038f991e9f13d56a9cb8ea74334e7aaf13d4f529af8c4af",
-      "test/hello.test.ts": "d741f3e354b9daa639e23e49916b2e2b46bc9115cb392da74234cc5c0279d09e"
+      "test/hello.test.ts": "a50abe2aa88b656325128871bfffd355e49fd3972d3b49e8bd26618719a81220"
     }
   },
   "requirements": [
