@@ -1,6 +1,6 @@
 ---
 name: graphloom-run
-description: Start a GraphLoom run. Writes task.yaml (graph, repo, config profile, request), checks it with graphloom check, starts graphloom run in the background with an --on-stop hook that writes a marker file, captures the run id from the start line, and hands the run to the graphloom-watch skill. Never polls the process table. Use when the user wants to run a graph (for example issue-fix on an issue) on a repository.
+description: Start a GraphLoom run. Writes task.yaml (graph, repo, config profile, request), checks it with graphloom check, starts graphloom run in the background with an --on-stop hook that writes a marker file, captures the run id from the start line, and hands the run to the graphloom-watch skill (or, inside a HAPI session, to a detached graphloom watch that messages the session). Never polls the process table. Use when the user wants to run a graph (for example issue-fix on an issue) on a repository.
 ---
 
 # Start a GraphLoom run
@@ -175,11 +175,25 @@ graphloom wait <stateDir> --until progress --timeout 30s --json
 Exit 0 or 2 with `summary.status` `running` is alive; 3 is a controller that
 died (see graphloom-triage).
 
-## 5. Hand over to watch
+## 5. Hand over
 
-Record the state directory in `.graphloom-watch/run` and hand over to the
-graphloom-watch skill. Tell the user: the run id, the stage it is in, where
-the marker and log are, and that watch reports only changes.
+Record the state directory in `.graphloom-watch/run`.
+
+- **Inside a HAPI session** (`HAPI_SESSION_ID` is set): start a detached
+  watcher from the task directory and end your turn, so no tokens are spent
+  while the run works:
+
+  ```sh
+  setsid nohup graphloom watch <stateDir> --until stop --notify 'hapi ping-peer "$HAPI_SESSION_ID" --message-file -' >/dev/null 2>&1 &
+  ```
+
+  Tell the user the run id and that the run is running, and that progress, a
+  15-minute heartbeat and anything needing attention will arrive as messages in
+  this session. Each message starts with `[graphloom watch]` and ends with what
+  to do; graphloom-watch says how to handle it.
+- **Otherwise** hand over to the graphloom-watch skill. Tell the user: the run
+  id, the stage it is in, where the marker and log are, and that watch reports
+  only changes.
 
 ## 6. A run that stops for a decision
 

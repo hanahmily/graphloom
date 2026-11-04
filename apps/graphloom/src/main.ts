@@ -3,7 +3,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 /**
- * GraphLoom CLI: run | inspect | stats | wait | stop | resume | switch-model | delete | version | doctor | setup | skills
+ * GraphLoom CLI: run | inspect | stats | wait | watch | stop | resume | switch-model | delete | version | doctor | setup | skills
  */
 import { existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
@@ -28,6 +28,7 @@ import { isInteractive, runSetup, terminalPrompter } from "./setup.js";
 import { onceStopHook, parseDuration, waitForRun, type StopNotice } from "./notify.js";
 import { formatRunStats, loadRunStats } from "./stats.js";
 import { formatProgress, waitForProgress } from "./progress.js";
+import { formatWatch, watchRun, type WatchReport } from "./watch.js";
 import { formatSkillsStatus, installSkills, parseSkillAgent, removeSkills, skillsStatus, updateSkills, type SkillAgent } from "./skills.js";
 import { formatVersion, installRoot, versionInfo } from "./version.js";
 import { JOB_TIMEOUT_MS, killActiveChildren, runAutoUpdate } from "./auto-update.js";
@@ -263,6 +264,36 @@ async function main(): Promise<void> {
       console.error(`run is recorded as running but ${result.detail}; the controller died without recording a stop. \`graphloom resume\` takes it over.`);
       process.exitCode = 3;
     }
+    return;
+  }
+
+  if (cmd === "watch") {
+    const usage = "watch <stateDir|runId> [--state-root <dir>] [--dir <path>] [--until report|stop] [--timeout <dur>] [--heartbeat <dur>] [--notify <command>] [--json]";
+    const runRef = requireRunRef(args[1], usage);
+    const stateRootFlag = flagValue(args, "--state-root");
+    const until = flagValue(args, "--until") ?? "report";
+    if (until !== "report" && until !== "stop") throw new Error(`--until must be "report" or "stop", not ${JSON.stringify(until)}`);
+    const timeout = flagValue(args, "--timeout");
+    const heartbeat = flagValue(args, "--heartbeat");
+    const notify = flagValue(args, "--notify");
+    if (args.includes("--notify") && (notify === undefined || notify === "")) throw new Error("--notify needs a shell command");
+    const json = args.includes("--json");
+    const show = (r: WatchReport): void => console.log(json ? JSON.stringify(r) : `${r.message}\n`);
+    const result = await watchRun(runRef, {
+      ...(stateRootFlag ? { stateRoot: path.resolve(stateRootFlag) } : {}),
+      dir: flagValue(args, "--dir") ?? ".graphloom-watch",
+      until,
+      ...(timeout !== undefined ? { timeoutMs: parseDuration(timeout) } : {}),
+      ...(heartbeat !== undefined ? { heartbeatMs: parseDuration(heartbeat) } : {}),
+      ...(notify !== undefined ? { notify } : {}),
+      // A detached watch streams each report; a one-shot one prints its result.
+      ...(until === "stop" ? { onReport: show } : {}),
+    });
+    if (until === "report" || result.reports.length === 0) {
+      console.log(json ? JSON.stringify({ outcome: result.outcome, reports: result.reports, summary: result.summary }, null, 2) : formatWatch(result));
+    }
+    if (result.outcome === "timeout") process.exitCode = 2;
+    if (result.outcome === "orphaned") process.exitCode = 3;
     return;
   }
 
@@ -652,6 +683,7 @@ Usage:
   graphloom inspect <stateDir|runId> [--state-root <dir>]
   graphloom stats <stateDir|runId> [--state-root <dir>] [--json]
   graphloom wait <stateDir|runId> [--state-root <dir>] [--until stop|progress] [--since <cursor>] [--timeout <dur>] [--json]
+  graphloom watch <stateDir|runId> [--state-root <dir>] [--dir <path>] [--until report|stop] [--timeout <dur>] [--heartbeat <dur>] [--notify <command>] [--json]
   graphloom stop <stateDir|runId> [--state-root <dir>]
   graphloom resume <stateDir|runId> [--state-root <dir>] [--supervisor <harness> [--reason <text>]] [--upgrade] [--update-plugin] [--update-executors] [--reconciled] [--approve <id> [--input <name>=<value> ...] | --decline <id> [--reason <text>]] [--rehearsal] [--on-stop <command>]
   graphloom switch-model <stateDir|runId> <model> --reason <text> [--state-root <dir>]
@@ -757,6 +789,26 @@ reports only what happened after it, so nothing is reported twice or lost.
 Exit 0: events, or the run is not running. Exit 2: the timeout elapsed with
 nothing to report (--json still prints the unchanged cursor). Exit 3: orphaned,
 as above. Exit 1: an error, such as another run's cursor.
+
+Watch (docs/design-agent-skills.md §2.1) is wait --until progress for an agent
+that should be woken only when there is something to say: it keeps its cursor
+and snapshot in --dir (default .graphloom-watch) and raises three kinds of
+report. move: a stage entered or accepted, a supervisor episode started or
+ended, a quota pause started or ended, a resume (moves within 60 seconds are
+one report). heartbeat: nothing reported for --heartbeat (default 15m) while
+running. attention: the run stopped (reason, retryable or final, blocker), a
+reconciliation waits for a human, no new evidence for 45 minutes outside a
+quota wait, a budget over 80%, a repeated identical failure, or the controller
+died. Each report is a message under 1 KB whose first line is
+"[graphloom watch] <kind> · run <id> · <status> · <stage>#<attempt>". --until
+report (the default) returns at the first report; --until stop keeps reporting
+until the run is no longer running. --notify runs a shell command for each
+report with the message on stdin and GRAPHLOOM_WATCH_KIND, GRAPHLOOM_RUN_ID and
+GRAPHLOOM_STATUS in its environment; its failure is logged to <dir>/watch.log
+and never stops the watch. --json prints { outcome, reports, summary } (one
+report per line with --until stop). Exit 0: a report was printed, or the run
+stopped. Exit 2: --timeout elapsed with nothing to report. Exit 3: the
+controller died with the state still running. Exit 1: an error.
 
 Version prints the product version: an installed release's version and commit
 from its release.json, or <version>-dev+<short sha> in a clone. --json prints
