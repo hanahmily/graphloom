@@ -156,6 +156,15 @@ takes it over. `--until progress` also returns on each meaningful change (a stag
 accepted, a supervisor episode, a quota pause, a budget at 80%) with a cursor for
 the next `--since` ([agent skills](docs/design-agent-skills.md)).
 
+`graphloom watch <stateDir|runId> [--dir <path>] [--until report|stop] [--timeout <dur>]
+[--heartbeat <dur>] [--notify <command>] [--json]` does the watching in code: it
+returns (or, with `--until stop`, keeps going) only to report an important move, a
+15-minute heartbeat, or something needing attention (a stop, a stall, a budget over
+80%, a repeated failure, a dead controller), in a message under 1 KB. `--notify`
+runs a shell command for each report with the message on stdin. Exit 0: a report;
+2: `--timeout` with nothing to report; 3: the controller died
+([agent skills](docs/design-agent-skills.md#21-graphloom-watch)).
+
 ## Agent-host mode (proposed)
 
 An existing coding-agent session can be the primary worker and supervisor, using
@@ -243,7 +252,7 @@ crashes; filesystem and execution scopes require host enforcement.
   GraphLoom from Claude Code, Codex or opencode (setup, issue, run, watch,
   triage, deliver), installed with `graphloom skills install` (`--agent
   opencode` writes `~/.config/opencode/skills`), and `graphloom wait --until
-  progress`.
+  progress` and `graphloom watch`.
 - [Run budgets](docs/budgets.md): what recorded runs used (`graphloom stats`),
   the profile defaults derived from them, budget layers, and what a raised
   budget means.

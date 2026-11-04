@@ -1,112 +1,99 @@
 ---
 name: graphloom-watch
-description: Periodic progress check of a running GraphLoom run. Arms graphloom wait --until progress (a background command in Claude Code, a foreground loop in Codex and opencode), and on each wake snapshots graphloom stats --json and inspect, diffs against the previous snapshot in a watch file, and reports only the deltas - stage and attempt, stages accepted, budget use against limits, new supervisor episodes with one-line reasons, waiting states such as a quota pause with its reset time. Flags a stall, any budget over 80%, a repeated identical failure, or a run waiting for a human; on a stop, summarizes why and asks the user what to do next. Never diagnoses, fixes or resumes a run, answers its questions, or changes a budget. Use after graphloom-run, or when the user asks how a run is doing.
+description: Watch a running GraphLoom run with graphloom watch, which does the watching in code and wakes the agent only for a report - an important move (stage entered or accepted, supervisor episode, quota pause, resume), a 15-minute heartbeat, or something needing attention (a stop, a human needed, a stall, a budget over 80%, a repeated failure, a dead controller). Claude Code runs it as a background command and re-arms; Codex and opencode loop in the foreground and re-arm silently on a timeout. Relays moves and heartbeats in one or two lines; on attention reports and asks the user. Never diagnoses, fixes or resumes a run, answers its questions, or changes a budget. Use after graphloom-run, when a message starting with [graphloom watch] arrives, or when the user asks how a run is doing.
 ---
 
 # Watch a GraphLoom run
 
 Input: the run's state directory (or run id with `--state-root`). graphloom-run
-records it in `.graphloom-watch/run`. Below, `<run>` is that reference and
-`.graphloom-watch/` is the watch directory beside the task.
+records it in `.graphloom-watch/run`. Below, `<run>` is that reference. Run
+every command from the task directory: `graphloom watch` keeps its cursor and
+snapshot in `.graphloom-watch/` beside the task, so nothing is reported twice.
 
 ## Hard rules
 
 - **Watch only.** Never `graphloom resume`, `graphloom stop`, `graphloom
-  switch-model`, or change a budget. When the run stops, summarize why and ask
+  switch-model`, or change a budget. When the run stops, report why and ask
   the user what to do; do not diagnose, fix, resume or answer the run's
   questions on your own. The user decides, and may ask for graphloom-triage.
 - Ask before anything outward-facing (push, pull request, issue creation,
   release).
 - Never print or ask for a token or secret; do not dump environment variables.
-- Read run state only through `graphloom inspect`, `graphloom stats` and
-  `graphloom wait`; never edit `state.json` (nor hand-parse and rewrite it).
+- Read run state only through `graphloom watch` (and, when the user asks for
+  detail, `graphloom inspect` and `graphloom stats`); never edit `state.json`
+  (nor hand-parse and rewrite it).
 - Use only commands and flags `graphloom --help` lists.
 - Never decide liveness with `pgrep`, `ps | grep` or `kill -0`: a `pgrep -f`
   pattern matches its own shell and hid a stop for two hours once. `graphloom
-  wait` reads the durable state and the controller's owner claim; the
-  `--on-stop` marker (`.graphloom-watch/stopped`) is the push signal.
+  watch` reads the durable state and the controller's owner claim.
 
-## 1. Arm the wake-up
+## 1. What `graphloom watch` does
 
-`graphloom wait <run> --until progress` returns when something meaningful
-happens: `stage_entered`, `receipt_accepted`, `receipts_invalidated`,
-`episode_started`, `episode_ended` (with the supervisor's one-line reason),
-`quota_pause` (with `resetAt`), `budget_threshold` (a budget at 80% of the
-run's budget), `run_resumed`, `run_stopped`. With `--json` it prints
-`{ outcome, events, summary, cursor }`. Pass the last `cursor` back with
-`--since` so nothing is reported twice or lost. Exit 0: events or the run is
-not running; 2: timeout, nothing new (the cursor is unchanged); 3: the
-controller died with the state still running; 1: error.
+`graphloom watch <run>` holds the rules; you do not diff snapshots, call
+`graphloom inspect` or `graphloom stats`, or write prose about nothing. It
+returns only when it has a report, each a short message whose first line is
+`[graphloom watch] <kind> · run <id> · <status> · <stage>#<attempt>`:
+
+- `move`: a stage entered (or a new attempt) or accepted, a supervisor
+  episode started or ended, a quota pause started or ended, the run resumed.
+  Moves within a minute arrive as one report.
+- `heartbeat`: nothing reported for 15 minutes while running; status, stage,
+  elapsed time, invocations used, age of the last evidence.
+- `attention`: the run stopped (reason, retryable or final, blocker, and any
+  question it asks, quoted), a reconciliation waits for a human, no new
+  evidence for 45 minutes outside a quota wait, a budget over 80%, a repeated
+  identical failure, or the controller died.
+
+Exit 0: a report was printed. Exit 2: the timeout elapsed, nothing to report.
+Exit 3: the controller died with the state still running (also an attention
+report). Exit 1: an error; show it and stop.
+
+## 2. Arm it
 
 **Claude Code.** Run in the background (the Bash tool's background option);
 you are notified when it exits:
 
 ```sh
-graphloom wait <run> --until progress --since "$(cat .graphloom-watch/cursor 2>/dev/null)" --timeout 20m --json > .graphloom-watch/wake.json
+graphloom watch <run> --until report --json
 ```
 
-On the first arm there is no cursor yet: leave `--since` out. For hands-off
-periodic checks the user can also start `/loop 30m /graphloom-watch <run>`.
+After relaying the report (section 3), re-arm the same command, unless the run
+stopped.
 
 **Codex and opencode.** No background-command notifications: loop in the
-foreground, one wait at a time, reporting after each return (a 10-minute
-timeout keeps each call within the shell tool's limits):
+foreground, one call at a time (a 9-minute timeout keeps each call within the
+shell tool's limits):
 
 ```sh
-graphloom wait <run> --until progress --since "$(cat .graphloom-watch/cursor)" --timeout 10m --json
+graphloom watch <run> --until report --timeout 9m
 ```
 
-On the first arm there is no cursor yet: leave `--since` out. The `--on-stop`
-marker file is the push signal in every agent: check
-`.graphloom-watch/stopped` on every wake.
+Exit 2 means nothing to report: run the command again at once, with no prose,
+no `graphloom inspect` and no `graphloom stats`. Exit 0 is a report: handle it,
+then run it again unless the run stopped.
 
-## 2. On each wake
+**A message from the HAPI watcher.** When graphloom-run started a detached
+watcher (it runs inside a HAPI session), reports arrive as messages beginning
+with `[graphloom watch]`. Do not arm anything; handle the message by its last
+line, as below.
 
-1. Read the wait output (`wake.json`, or the foreground output). Save its
-   `cursor` to `.graphloom-watch/cursor`.
-2. Snapshot the run:
+## 3. On a report
 
-   ```sh
-   graphloom stats <run> --json
-   graphloom inspect <run>
-   ```
+Follow the report's last line.
 
-3. Load the previous snapshot from `.graphloom-watch/snapshot.json` and
-   compare. Keep in the new snapshot: time, status, mode, `current` stage and
-   attempt, stages complete, each budget's `used`/`granted`/`left`, supervisor
-   episode count, the last few episode triggers and reasons (from the wait
-   events), remedy count, evidence record count, and `lastEvidenceAt` (the time
-   the evidence count last went up). Write it back.
-4. Report **only the deltas**, a few lines:
-   - stage / attempt change ("review, attempt 2 (was fix#1)");
-   - stages newly accepted (`receipt_accepted`, stage complete or not);
-   - budget use against limits for budgets that moved ("agentInvocations
-     412/1200, 34%");
-   - each new supervisor episode, with its trigger and one-line outcome;
-   - waiting states: a quota pause with `resetAt` ("waiting for the harness
-     quota until 14:05 UTC; nothing to do"), `summary.waiting` reconcile.
-5. Nothing changed: one quiet line, such as "run 1a2b running, review#1, no
-   change in 20m", then re-arm.
+- `move` or `heartbeat` (it ends "Relay this to the user in one or two
+  lines. Make no tool calls."): say it to the user in one or two lines and make
+  no tool calls. Then re-arm.
+- `attention` (it ends "Report this to the user and ask what to do next. Do
+  not resume, fix, or answer the run's questions."): say plainly what needs
+  attention, quote any blocker or question verbatim, and ask the user what to
+  do next; then end your turn. Do not re-arm after a stop, do not resume, do
+  not start graphloom-triage or graphloom-deliver yourself, and do not answer
+  the run's questions: offer them as next steps (triage for a stop the user
+  wants diagnosed, deliver for `succeeded`). For a stall, a budget over 80% or
+  a repeated failure on a run that is still running, report it, ask, and
+  re-arm only if the user says to keep watching. Never propose raising a
+  budget here; that is a triage decision after diagnosis.
 
-## 3. Flags (say them first, plainly)
-
-- **Stall**: no new evidence for more than 45 minutes while running and not
-  in a quota wait (`summary.waiting`). Suggest the user look; do not act.
-- **Budget > 80%**: any `budget_threshold` event or snapshot ratio over 0.8.
-  State the number and which stage is spending it. Never propose raising it
-  here; that is a triage decision after diagnosis.
-- **Repeated identical failure**: the same stage re-entered with the same
-  invalidated requirements, or consecutive episodes with the same trigger
-  code and message. Name the stage and the repeated failure.
-- **Waiting for a human**: the run stopped, or `summary.waiting.kind` is
-  `reconcile` (a usage limit cut off a job with possible effects).
-
-## 4. Stopped
-
-When `summary.status` is not `running`, a `run_stopped` event arrives, the
-marker file exists, or wait exits 3: stop arming. Report status, stop reason,
-retryable or final, the blocker, and any question the stop asks, quoted
-verbatim from `graphloom inspect`. Then ask the user what to do next and end
-your turn. Do not resume, do not start graphloom-triage or graphloom-deliver
-yourself, and do not answer the run's questions: offer them as next steps
-(triage for a stop the user wants diagnosed, deliver for `succeeded`).
+With `--json` the output is `{ outcome, reports, summary }`; each report's
+`message` is the text above, `kind` is `move`, `heartbeat` or `attention`.

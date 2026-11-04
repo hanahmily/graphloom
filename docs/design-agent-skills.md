@@ -1,12 +1,12 @@
 # Agent skills: driving GraphLoom from a coding agent
 
-Status: implemented (skills, `wait --until progress`, `graphloom skills`).
+Status: implemented (skills, `wait --until progress`, `graphloom watch`, `graphloom skills`).
 
 An operator often drives GraphLoom from an interactive coding agent (Claude
 Code, Codex or opencode) rather than by hand: set the machine up, shape a
 request into an issue, start a run, watch it for hours, diagnose a stop, check
-the delivered branch. This design ships that knowledge as agent skills, adds the one CLI
-feature watching needs (`graphloom wait --until progress`), and distributes the
+the delivered branch. This design ships that knowledge as agent skills, adds the CLI
+features watching needs (`graphloom wait --until progress`, and `graphloom watch` on top of it), and distributes the
 skills with the release.
 
 ## 1. Skills
@@ -19,8 +19,8 @@ repository holds them in top-level [`skills/`](../skills):
 |---|---|
 | `graphloom-setup` | `graphloom doctor`, explains each warn/fail, runs the `fix:` commands with the user's consent, then `graphloom setup`; supervisor routes per vendor |
 | `graphloom-issue` | Shapes a requirement into an issue one run handles well: one deliverable PR, acceptance criteria, context documents (issue-fix `issues.context`), split or merged to size; the private-tracker option (`pullRequest.reference`) |
-| `graphloom-run` | Refuses a request with unfilled placeholders, checks the checkout against the upstream default branch (asks before using a fresh base), writes `task.yaml`, `graphloom check`, starts the run in the background with an `--on-stop` marker file and the repository's pinned toolchain on `PATH`, hands off to watch |
-| `graphloom-watch` | One progress check: arms `graphloom wait --until progress` (a background command in Claude Code; a foreground loop in Codex and opencode, which have no background-command notifications), diffs `stats --json`/`inspect` against the previous snapshot, reports deltas and flags (stall, budget > 80%, repeated failure, waiting for a human) |
+| `graphloom-run` | Refuses a request with unfilled placeholders, checks the checkout against the upstream default branch (asks before using a fresh base), writes `task.yaml`, `graphloom check`, starts the run in the background with an `--on-stop` marker file and the repository's pinned toolchain on `PATH`, hands off to watch (inside a HAPI session, to a detached `graphloom watch` and ends its turn) |
+| `graphloom-watch` | A thin wrapper around `graphloom watch` (§2.1): Claude Code runs it as a background command and re-arms; Codex and opencode, which have no background-command notifications, loop in the foreground with `--timeout 9m` and re-arm silently on exit 2. Relays a move or heartbeat in one or two lines; on attention reports and asks the user; follows the last line of a `[graphloom watch]` message a HAPI watcher sends |
 | `graphloom-triage` | A stopped run the user asks about: diagnose the cause from `inspect`, `stats` and evidence first, then choose the resume form with the user |
 | `graphloom-deliver` | Verifies the delivered branch (commit message, PR body, required sections), rebases onto a newer upstream base only on the user's yes, then runs the repository's checks once on a clean copy of the tree to push (helper files kept outside it), then pushes or opens the PR only with explicit approval |
 
@@ -105,6 +105,67 @@ the stop. The mark compares episode and remedy timestamps written by one
 controller at a time, so two records within the same millisecond, one on each
 side of a look, can merge; budgets at 80% before the first look are part of the
 starting mark, and the watch skill's own `stats` snapshot reports them.
+
+### 2.1 `graphloom watch`
+
+```text
+graphloom watch <stateDir|runId> [--state-root <dir>] [--dir <path>]
+                [--until report|stop] [--timeout <dur>] [--heartbeat <dur>]
+                [--notify <command>] [--json]
+```
+
+Watching with `wait --until progress` left the judgment to the model: each wake
+it pulled `inspect` (about 16 KB) and `stats --json` into context, diffed a
+snapshot and wrote prose, and every wake is a model turn that re-sends the whole
+conversation. `watch` moves that logic into the CLI (`apps/graphloom/src/watch.ts`),
+so the agent is woken only when there is something to report. It reuses the
+progress machinery (the mark in `<dir>/cursor`, default `.graphloom-watch`), keeps
+its own bookkeeping in `<dir>/snapshot.json` (when it last reported, when evidence
+last grew, which conditions it already raised, moves not yet reported), reads state
+only through the same loaders as `wait`, `inspect` and `stats`, and never writes
+`state.json`. It knows no plugin notion.
+
+| Kind | Reported when |
+|---|---|
+| `move` | A stage entered or a new attempt of it; a stage accepted (complete); a supervisor episode started or ended, with its trigger and one-line reason; a quota pause started (with `resetAt`) or ended; the run resumed. Not individual receipts or jobs. Moves within 60 seconds of the first are one report |
+| `heartbeat` | Nothing reported for `--heartbeat` (default 15m) while running: status, stage and attempt, elapsed wall time, `agentInvocations` used of its budget (and any budget that moved), age of the last evidence |
+| `attention` | The run stopped (status, reason, retryable or final, the blocker, and any question it asks quoted); a reconciliation waits for a human; no new evidence for 45 minutes while running and not in a quota wait; a budget over 80% (which, the numbers, the stage spending it); a repeated identical failure (the same stage invalidated again with the same requirements, or consecutive supervisor episodes with the same trigger code and message); the controller died |
+
+Each condition is raised once when it begins to hold and again only after it
+cleared and returned. Evidence records carry no time, so evidence age and the
+stall are measured from when the watch first saw the evidence count grow (from its
+first look when it has seen none). Pending moves are sent before an attention
+report from the same look.
+
+A report is a message under about 1 KB. Its first line is `[graphloom watch] <kind> · run
+<id> · <status> · <stage>#<attempt>`, then a few compact lines, then a closing line
+for the receiving agent: for a move or heartbeat, `Relay this to the user in one or
+two lines. Make no tool calls.`; for attention, `Report this to the user and ask
+what to do next. Do not resume, fix, or answer the run's questions.` The message
+carries the full summary, so no `inspect` or `stats` is needed.
+
+`--until report` (the default) returns at the first report; `--until stop` keeps
+running until the run is no longer running (for a detached watcher with
+`--notify`). `--timeout` returns after that long with a one-line "still running,
+nothing to report". `--json` prints `{ outcome, reports, summary }` (with `--until
+stop`, one report per line as raised). Exit 0: a report was printed, or the run
+stopped; 2: the timeout elapsed with nothing to report; 3: the controller died with
+the state still running (also an attention report); 1: an error, such as a watch
+directory that belongs to another run.
+
+**Notify.** `--notify '<shell command>'` runs the command for each report with the
+message on stdin and `GRAPHLOOM_WATCH_KIND` (`move`, `heartbeat`, `attention`),
+`GRAPHLOOM_RUN_ID` and `GRAPHLOOM_STATUS` in its environment, killed after 60
+seconds. A failing command is logged to `<dir>/watch.log` and does not stop the
+watch. The command is generic shell; the CLI knows no agent host.
+
+**The HAPI watcher.** An agent without background notifications that runs inside a
+HAPI session (`HAPI_SESSION_ID` set) spends nothing while a run works: graphloom-run
+starts, from the task directory,
+`setsid nohup graphloom watch <run> --until stop --notify 'hapi ping-peer
+"$HAPI_SESSION_ID" --message-file -' >/dev/null 2>&1 &` and ends its turn. Each
+report arrives as a message in that session; graphloom-watch tells the agent to
+follow the message's last line.
 
 ## 3. Distribution: `graphloom skills`
 
@@ -203,6 +264,10 @@ opencode was a target are GraphLoom's own copies there and `update`,
   opencode on `PATH` and at `~/.opencode/bin` (stub binaries), adopting
   copies installed with `--dir` at a default location; setup's offer,
   doctor's row, and the duplicate warning.
+- `watch.test.ts`: each move kind and the 60 second batch, the heartbeat, each
+  attention rule, both modes, the timeout, `--notify` (stdin, environment, a failing
+  command logged), and cursor and snapshot persistence, on recorded run state with a
+  fake clock; and the built CLI for the exit codes and output.
 - `progress.test.ts`: each event kind from synthetic state, the cursor and
   `--since`, timeout, stop, a foreign cursor; and an end-to-end scripted run of
   the hello graph watched with `wait --until progress` that reports deltas.
