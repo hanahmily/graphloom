@@ -244,6 +244,12 @@ export interface StopMark {
   budgets: IntakePin["budgets"];
   /** The GraphLoom build that ran the run when it stopped (product version and commit). */
   hostBuild?: string;
+  /**
+   * The effects each executor was granted when the run stopped, by executor id
+   * (an empty list: declared but withheld). Absent on a mark from before grants
+   * were recorded.
+   */
+  executorGrants?: Record<string, string[]>;
 }
 
 /**

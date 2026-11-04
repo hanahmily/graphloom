@@ -86,7 +86,34 @@ export function stopMarkOf(state: DurableRunState, candidateDigest: string | und
     ...(candidateDigest !== undefined ? { candidateDigest } : {}),
     budgets: { ...state.budgets },
     ...(state.hostBuild !== undefined ? { hostBuild: state.hostBuild } : {}),
+    ...(state.executorGrants !== undefined ? { executorGrants: grantedEffects(state.executorGrants) } : {}),
   };
+}
+
+/** The effects each executor is granted: its declared effect when granted, none when withheld. */
+function grantedEffects(grants: NonNullable<DurableRunState["executorGrants"]>): Record<string, string[]> {
+  return Object.fromEntries(Object.entries(grants).map(([id, g]) => [id, g.granted ? [g.effect] : []]));
+}
+
+/**
+ * How the operator's executor grants differ between the stop and now, or
+ * undefined. A mark from before grants were recorded counts as unknown, so the
+ * first grant-aware resume may run again (as for the host build).
+ */
+function grantChange(before: StopMark["executorGrants"], after: StopMark["executorGrants"]): string | undefined {
+  if (after === undefined) return undefined;
+  if (before === undefined) return "executor grants were not recorded when the run stopped";
+  for (const id of Object.keys(after).sort()) {
+    const was = new Set(before[id] ?? []);
+    const added = (after[id] ?? []).filter((effect) => !was.has(effect));
+    if (added.length > 0) return `the operator changed executor grants: ${id} now grants ${added.join(", ")}`;
+  }
+  for (const id of Object.keys(before).sort()) {
+    const is = new Set(after[id] ?? []);
+    const removed = before[id]!.filter((effect) => !is.has(effect));
+    if (removed.length > 0) return `the operator changed executor grants: ${id} no longer grants ${removed.join(", ")}`;
+  }
+  return undefined;
 }
 
 /** What changed since `mark` that a final stop depends on, or undefined when nothing did. */
@@ -103,6 +130,8 @@ export function changeSinceStop(mark: StopMark, now: { pluginUpdated: boolean; e
   if (now.mark.hostBuild !== undefined && now.mark.hostBuild !== mark.hostBuild) {
     return `GraphLoom changed from ${mark.hostBuild ?? "an unrecorded build"} to ${now.mark.hostBuild}`;
   }
+  const grants = grantChange(mark.executorGrants, now.mark.executorGrants);
+  if (grants !== undefined) return grants;
   for (const key of BUDGET_KEYS) {
     const before = mark.budgets[key];
     const after = now.mark.budgets[key];
@@ -112,7 +141,7 @@ export function changeSinceStop(mark: StopMark, now: { pluginUpdated: boolean; e
 }
 
 export const FINAL_STOP_HELD_REMEDY =
-  "kept stopped on the same blocker: nothing the stop depends on (plugin, executors, active version, workspace change, budgets, GraphLoom build) changed since";
+  "kept stopped on the same blocker: nothing the stop depends on (plugin, executors, executor grants, active version, workspace change, budgets, GraphLoom build) changed since";
 
 export type ResumeDecision =
   /** Run again: the stop was retryable, answered by the resume, or something it depends on changed. */
