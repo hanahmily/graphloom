@@ -254,10 +254,7 @@ export function evaluate(
     snap.failures[stageId] = { sig, count: before?.sig === sig ? before.count + 1 : 1 };
   }
   snap.invSeen = (state.receipts ?? []).filter((r) => !r.valid).map((r) => r.id);
-  for (const stage of state.definition?.stages ?? []) {
-    const valid = new Set((state.receipts ?? []).filter((r) => r.valid && r.stageId === stage.id).map((r) => r.requirementId));
-    if (stage.requirementIds.every((id) => valid.has(id))) delete snap.failures[stage.id];
-  }
+  // The history outlives a re-acceptance: invalidated, repaired, then invalidated the same way again is a repeat.
 
   // Attention: conditions that hold now; each is reported when it begins to hold.
   const attention = new Map<string, string[]>();
@@ -437,7 +434,8 @@ export async function watchRun(runRef: string, options: WatchOptions, deps: Watc
     if (ev.orphaned) return result("orphaned");
     if (state.status !== "running") return result("stopped");
     if (options.until === "report" && all.length > 0) return result("report");
-    if (deps.now() >= deadline) return result("timeout");
+    // Exit 2 is for a timeout with nothing reported; a report emitted during the call makes it a report.
+    if (deps.now() >= deadline) return result(all.length > 0 ? "report" : "timeout");
     await deps.sleep(Math.min(pollMs, Math.max(1, deadline - deps.now())));
   }
 }

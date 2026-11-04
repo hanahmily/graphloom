@@ -318,6 +318,46 @@ describe("attention", () => {
   });
 });
 
+async function cliBed(): Promise<{ env: CliEnv; stateDir: string }> {
+  const env = await makeCliEnv(cleanups);
+  const stateDir = path.join(env.dir, "state");
+  await cp(fixture, stateDir, { recursive: true });
+  const s = await loadRunState(stateDir);
+  const { recoveryEpisodeId: _e, recoveryTrigger: _t, quotaHold: _q, ...rest } = s;
+  await saveRunState({ ...rest, stateDir, status: "running", mode: "normal", supervisorEpisodes: [], remedies: [] } as DurableRunState);
+  await claim(stateDir);
+  return { env, stateDir };
+}
+
+describe("repair lifecycle and timeouts", () => {
+  it("a repeated failure is still seen when the stage was repaired and accepted between the two invalidations", async () => {
+    const b = await bed();
+    const review = (await loadRunState(b.stateDir)).receipts.find((x) => x.stageId === "review")!;
+    const receipt = (id: string, valid: boolean) => ({ ...review, id, requirementId: "code-review", valid });
+    await b.mutate((s) => ({ ...s, receipts: s.receipts.map((x) => (x.stageId === "review" ? { ...x, valid: false } : x)) }));
+    await b.watch({ timeoutMs: 20_000, heartbeatMs: 60 * MIN });
+    await b.mutate((s) => ({ ...s, receipts: [...s.receipts, receipt("rcpt-91", false)] }));
+    expect((await b.watch({ timeoutMs: 20_000, heartbeatMs: 60 * MIN })).reports).toEqual([]);
+    // Repaired: a valid replacement is accepted and seen.
+    await b.mutate((s) => ({ ...s, receipts: [...s.receipts, receipt("rcpt-92", true)] }));
+    await b.watch({ timeoutMs: 20_000, heartbeatMs: 60 * MIN });
+    // Invalidated again for the same requirements.
+    await b.mutate((s) => ({ ...s, receipts: s.receipts.map((x) => (x.id === "rcpt-92" ? { ...x, valid: false } : x)).concat(receipt("rcpt-93", false)) }));
+    const r = await b.watch({ timeoutMs: 2 * MIN, heartbeatMs: 60 * MIN });
+    expect(r.reports.map((x) => x.kind)).toContain("attention");
+    expect(r.reports.map((x) => x.message).join("\n")).toContain("repeated failure: stage review invalidated 2 times");
+  });
+
+  it("--until stop with a timeout exits 0 when a report was emitted, 2 only when nothing was", async () => {
+    const { env, stateDir } = await cliBed();
+    const reported = await env.graphloom("watch", stateDir, "--until", "stop", "--heartbeat", "1s", "--timeout", "3s", "--dir", "a");
+    expect(reported.stdout).toMatch(/\[graphloom watch\] heartbeat/);
+    expect(reported.code).toBe(0);
+    const quiet = await env.graphloom("watch", stateDir, "--until", "stop", "--timeout", "1s", "--dir", "b");
+    expect(quiet.code).toBe(2);
+  }, 60_000);
+});
+
 describe("many attention conditions at once", () => {
   it("never drops one: the most urgent come first and the rest follow in further reports, each under 1 KB", async () => {
     const b = await bed();
@@ -472,17 +512,6 @@ describe("--notify", () => {
 });
 
 describe("graphloom watch, the CLI", () => {
-  async function cliBed(): Promise<{ env: CliEnv; stateDir: string }> {
-    const env = await makeCliEnv(cleanups);
-    const stateDir = path.join(env.dir, "state");
-    await cp(fixture, stateDir, { recursive: true });
-    const s = await loadRunState(stateDir);
-    const { recoveryEpisodeId: _e, recoveryTrigger: _t, quotaHold: _q, ...rest } = s;
-    await saveRunState({ ...rest, stateDir, status: "running", mode: "normal", supervisorEpisodes: [], remedies: [] } as DurableRunState);
-    await claim(stateDir);
-    return { env, stateDir };
-  }
-
   it("exit 2 with a one-line message on timeout; --json prints the outcome", async () => {
     const { env, stateDir } = await cliBed();
     const text = await env.graphloom("watch", stateDir, "--timeout", "1s");
