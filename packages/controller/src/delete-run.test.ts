@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createScriptedGraph, dispatch, stop, type GraphDefinition } from "@graphloom/sdk";
 import { createScriptedRunner } from "@graphloom/runner";
 import { createController, loadRunState, saveRunState } from "./index.js";
+import { HELLO_VERSION } from "./testing/hello-version.js";
 
 const execFileAsync = promisify(execFile);
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -19,7 +20,7 @@ const helloBundle = path.join(path.resolve(here, "../../.."), "examples/plugins/
 
 const definition: GraphDefinition = {
   graphId: "hello",
-  version: "0.1.0",
+  version: HELLO_VERSION,
   stages: [
     { id: "write", name: "Write", requirementIds: ["greeting-bytes"] },
     { id: "review", name: "Review", requirementIds: ["independent-review"] },

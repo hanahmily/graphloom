@@ -30,6 +30,7 @@ import {
 } from "@graphloom/supervisor";
 import { liveCaseFile, recordAttempt, recordFinding, refreshCaseFile } from "./case-file.js";
 import { createController, loadRunState, type DurableRunState } from "./index.js";
+import { HELLO_ACTIVE_VERSION, HELLO_VERSION } from "./testing/hello-version.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../../..");
@@ -38,7 +39,7 @@ const GREETING_PATH = "GREETING.txt";
 
 const definition: GraphDefinition = {
   graphId: "hello",
-  version: "0.1.0",
+  version: HELLO_VERSION,
   stages: [
     { id: "write", name: "Write", requirementIds: ["greeting-bytes"] },
     { id: "review", name: "Review", requirementIds: ["independent-review"] },
@@ -140,7 +141,7 @@ const writingRunner = (n: number) =>
 function baseState(over: Partial<DurableRunState> = {}): DurableRunState {
   return {
     generation: 1,
-    activeVersion: "hello@0.1.0",
+    activeVersion: HELLO_ACTIVE_VERSION,
     candidateDigest: "digest-a",
     evidence: [{ ref: "ev-1", kind: "other" }, { ref: "ev-2", kind: "other" }],
     intake: { bundle: { manifestDigest: "manifest-a", entryDigest: "entry-a" } },
@@ -167,7 +168,7 @@ describe("case file (unit)", () => {
         evidence: ["ev-1"],
         since: 1,
         episodeId: "ep-1",
-        dependsOn: { candidateDigest: "digest-a", activeVersion: "hello@0.1.0", pluginDigest: expect.any(String) },
+        dependsOn: { candidateDigest: "digest-a", activeVersion: HELLO_ACTIVE_VERSION, pluginDigest: expect.any(String) },
       },
     ]);
     const refuted = recordFinding(kept.state, { kind: "refuted", text: "the wrapper corrupts arguments", evidence: ["ev-404"] }, "ep-1");
@@ -197,7 +198,7 @@ describe("case file (unit)", () => {
     state = refreshCaseFile({ ...state, activeVersion: "hello@candidate-r1" });
     expect(liveCaseFile(state).facts.map((f) => f.text)).toEqual(["task fact"]);
     // Changing back does not revive a finding made against other code.
-    state = refreshCaseFile({ ...state, candidateDigest: "digest-a", activeVersion: "hello@0.1.0" });
+    state = refreshCaseFile({ ...state, candidateDigest: "digest-a", activeVersion: HELLO_ACTIVE_VERSION });
     expect(liveCaseFile(state).facts.map((f) => f.text)).toEqual(["task fact"]);
   });
 
@@ -340,7 +341,7 @@ describe("case file through the controller", () => {
 
     expect(resumed.stopReason).toBe("done");
     const state = await loadRunState(paused.stateDir);
-    expect(state.activeVersion).toBe("hello@0.1.0");
+    expect(state.activeVersion).toBe(HELLO_ACTIVE_VERSION);
     expect(seen).toEqual([["README.md says repo"]]);
     expect(state.caseFile?.facts.find((f) => f.text === "the graph routes review first")?.stale?.reason).toBe(
       "the pinned plugin bundle was updated",

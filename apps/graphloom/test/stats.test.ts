@@ -11,6 +11,7 @@ import { createScriptedRunner, type JobContext } from "@graphloom/runner";
 import { createController, loadRunState, type DurableRunState } from "@graphloom/controller";
 import { formatRunStats, loadRunStats, runStats } from "../src/stats.js";
 import { execFileAsync, makeCliEnv, repoRoot } from "./cli-env.js";
+import { HELLO_VERSION } from "@graphloom/testkit";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixtures = path.join(here, "fixtures/stats");
@@ -261,7 +262,7 @@ describe("graphloom stats and inspect on a resumed run (#166)", () => {
 
 const helloDefinition: GraphDefinition = {
   graphId: "hello",
-  version: "0.1.0",
+  version: HELLO_VERSION,
   stages: [
     { id: "write", name: "Write", requirementIds: ["greeting-bytes"] },
     { id: "review", name: "Review", requirementIds: ["independent-review"] },

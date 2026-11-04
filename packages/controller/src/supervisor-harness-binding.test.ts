@@ -17,6 +17,7 @@ import { dispatch, observe, returnToNormal, stop, supervise, validate, type Grap
 import { createScriptedRunner } from "@graphloom/runner";
 import { bindingHarness, createPiHarness, createPiSupervisor, type HarnessSession, type PiSupervisorSessionPort } from "@graphloom/supervisor";
 import { createController, loadRunState } from "./index.js";
+import { HELLO_VERSION } from "./testing/hello-version.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../../..");
@@ -27,7 +28,7 @@ const GREETING_PATH = "GREETING.txt";
 /** The hello bundle's pinned definition (as in pi-supervisor.test.ts). */
 const definition: GraphDefinition = {
   graphId: "hello",
-  version: "0.1.0",
+  version: HELLO_VERSION,
   stages: [
     { id: "write", name: "Write", requirementIds: ["greeting-bytes"] },
     { id: "review", name: "Review", requirementIds: ["independent-review"] },

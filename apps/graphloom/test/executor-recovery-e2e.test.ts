@@ -32,6 +32,7 @@ import { createController, loadRunState, saveRunState, type RepairDeps } from "@
 import { createScriptedSupervisor, type ScriptedRecoveryStep, type SupervisorInput } from "@graphloom/supervisor";
 import { githubBinding, githubExecutorPackage } from "@graphloom/executor-github";
 import { startFakeGitHub, type FakeGitHub } from "@graphloom/executor-github/testing";
+import { HELLO_VERSION } from "@graphloom/testkit";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -43,7 +44,7 @@ const WAIT_BUDGET_MS = 15 * 60_000;
 
 const definition: GraphDefinition = {
   graphId: "hello",
-  version: "0.1.0",
+  version: HELLO_VERSION,
   stages: [
     { id: "write", name: "Write", requirementIds: ["greeting-bytes"] },
     { id: "review", name: "Review", requirementIds: ["independent-review"] },

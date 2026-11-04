@@ -15,8 +15,8 @@
   },
   "dependencies": {
     "@graphloom/agent-harness": "0.0.0",
-    "@graphloom/executor-coding-agent": "0.1.0",
-    "@graphloom/executor-command": "0.1.0",
+    "@graphloom/executor-coding-agent": "0.1.1",
+    "@graphloom/executor-command": "0.1.1",
     "@graphloom/executor-github": "0.2.0",
     "@graphloom/controller": "0.0.0",
     "@graphloom/plugin-host": "0.0.0",

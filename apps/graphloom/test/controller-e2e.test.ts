@@ -19,13 +19,14 @@ import { createController, loadRunState } from "@graphloom/controller";
 import { startFakeGitHub, type FakeGitHub } from "@graphloom/executor-github/testing";
 import { createScope, createTaskWorkspace, HELLO_REQUEST } from "@graphloom/testkit";
 import { githubRunner as hostGitHubRunner } from "./github-runner.js";
+import { HELLO_VERSION } from "@graphloom/testkit";
 
 const GREETING = "Hello, GraphLoom!\n";
 const TOKEN = "ghp_controller_e2e_secret";
 
 const definition: GraphDefinition = {
   graphId: "hello",
-  version: "0.1.0",
+  version: HELLO_VERSION,
   stages: [
     { id: "write", name: "Write", requirementIds: ["greeting-bytes"] },
     { id: "review", name: "Review", requirementIds: ["independent-review"] },

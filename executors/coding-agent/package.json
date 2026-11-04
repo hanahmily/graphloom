@@ -1,6 +1,6 @@
 {
   "name": "@graphloom/executor-coding-agent",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Built-in coding-agent executor (graphloom.coding-agent/run): adapts an agent harness to the executor protocol",
   "license": "Apache-2.0",
   "type": "module",

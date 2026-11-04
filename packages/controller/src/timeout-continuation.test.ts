@@ -26,6 +26,7 @@ import { createScriptedRunner, createTrustedInProcessRunner } from "@graphloom/r
 import type { Supervisor, SupervisorInput } from "@graphloom/supervisor";
 import { TIMEOUT_CONTINUATION_NOTE } from "./agent-sessions.js";
 import { createController, loadRunState } from "./index.js";
+import { HELLO_VERSION } from "./testing/hello-version.js";
 
 const execFileAsync = promisify(execFile);
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -37,7 +38,7 @@ const AGENT = "acme.agent/code";
 
 const definition: GraphDefinition = {
   graphId: "hello",
-  version: "0.1.0",
+  version: HELLO_VERSION,
   stages: [
     { id: "write", name: "Write", requirementIds: ["greeting-bytes"] },
     { id: "review", name: "Review", requirementIds: ["independent-review"] },

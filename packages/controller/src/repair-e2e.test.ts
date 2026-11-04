@@ -40,6 +40,7 @@ import {
   loadRunState,
   type RepairDeps,
 } from "./index.js";
+import { HELLO_ACTIVE_VERSION, HELLO_VERSION } from "./testing/hello-version.js";
 
 const execFileAsync = promisify(execFile);
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -51,7 +52,7 @@ const GREETING_PATH = "GREETING.txt";
 
 const definition: GraphDefinition = {
   graphId: "hello",
-  version: "0.1.0",
+  version: HELLO_VERSION,
   stages: [
     { id: "write", name: "Write", requirementIds: ["greeting-bytes"] },
     { id: "review", name: "Review", requirementIds: ["independent-review"] },
@@ -599,7 +600,7 @@ describe("qualified repair + same-run activation (#29)", () => {
     expect(triggers).toEqual(["environment_changed"]);
     expect(report.stopReason).toBe("paused");
     const state = await loadRunState(report.stateDir);
-    expect(state.activeVersion).not.toBe("hello@0.1.0");
+    expect(state.activeVersion).not.toBe(HELLO_ACTIVE_VERSION);
     expect(state.definition.environment).toEqual(repaired.environment);
     expect(state.environmentBlock).toBeUndefined();
     const checks = state.evidence.filter((e) => (e.payload as { environment?: unknown }).environment !== undefined);
@@ -1016,7 +1017,7 @@ describe("qualified repair + same-run activation (#29)", () => {
     expect(report.blocker).toMatch(/^activate_repair base mismatch: repair-\S+: active pin no longer matches candidate base snapshot; it is now `superseded`$/);
     const state = await loadRunState(report.stateDir);
     expect(state.repairCandidates?.[0]?.status).toBe("superseded");
-    expect(state.activeVersion).toBe("hello@0.1.0");
+    expect(state.activeVersion).toBe(HELLO_ACTIVE_VERSION);
     expect(Object.keys(goodValidators)).toEqual(["exact-greeting", "independent-reviewer"]);
   });
 
@@ -1060,7 +1061,7 @@ describe("qualified repair + same-run activation (#29)", () => {
     expect(report.blocker).toContain(`${blocker}; it is now \`superseded\``);
     const state = await loadRunState(report.stateDir);
     expect(state.repairCandidates?.[0]?.status).toBe("superseded");
-    expect(state.activeVersion).toBe("hello@0.1.0");
+    expect(state.activeVersion).toBe(HELLO_ACTIVE_VERSION);
   });
 
   const alwaysPasses: Validator = {
@@ -1127,7 +1128,7 @@ describe("qualified repair + same-run activation (#29)", () => {
     // revision rounds before this settles, appending that to the reason;
     // a preflight rejection (not retried) matches it exactly.
     expect(state.repairCandidates?.[0]?.rejectionReason).toContain(reason);
-    expect(state.activeVersion).toBe("hello@0.1.0");
+    expect(state.activeVersion).toBe(HELLO_ACTIVE_VERSION);
     expect(state.receipts).toEqual([]);
   });
 
@@ -1316,7 +1317,7 @@ describe("qualified repair + same-run activation (#29)", () => {
     });
 
     expect(reconciled?.activationIntent?.status).toBe("aborted");
-    expect(reconciled?.activeVersion).toBe("hello@0.1.0");
+    expect(reconciled?.activeVersion).toBe(HELLO_ACTIVE_VERSION);
     expect(reconciled?.repairCandidates?.map((c) => c.status)).toEqual(["qualified"]);
     expect(resumed.stopReason).toBe("pause");
     const state = await loadRunState(first.stateDir);
@@ -1408,7 +1409,7 @@ describe("qualified repair + same-run activation (#29)", () => {
     const state = await loadRunState(report.stateDir);
     expect(state.activationIntent?.status).toBe("aborted");
     expect(state.repairCandidates?.[0]?.status).toBe("rejected");
-    expect(state.activeVersion).toBe("hello@0.1.0");
+    expect(state.activeVersion).toBe(HELLO_ACTIVE_VERSION);
     expect(state.definition).toEqual(definition);
   });
 
@@ -1706,7 +1707,7 @@ describe("qualified repair + same-run activation (#29)", () => {
         },
         /alters pinned defaultValidators: greeting-bytes/,
       ],
-      ["the graph version", { ...definition, version: "0.2.0" }, /candidate version 0\.2\.0 != pinned 0\.1\.0/],
+      ["the graph version", { ...definition, version: "0.2.0" }, new RegExp(`candidate version 0\\.2\\.0 != pinned ${HELLO_VERSION.replaceAll(".", "\\.")}`)],
       [
         "its steps by adding one",
         withStages([...definition.stages, { id: "deploy", name: "Deploy", requirementIds: ["independent-review"] }]),
@@ -1764,7 +1765,7 @@ describe("qualified repair + same-run activation (#29)", () => {
           "independent-review",
         ]);
         const state = await loadRunState(report.stateDir);
-        expect(state.activeVersion).toBe("hello@0.1.0");
+        expect(state.activeVersion).toBe(HELLO_ACTIVE_VERSION);
         expect(state.definition).toEqual(definition);
         expect(state.intake.bundle.bundlePath).toBe(path.join(env.taskDir, "plugins", "hello"));
         expect(state.budgets.corrections).toBe(7);
@@ -1839,7 +1840,7 @@ describe("qualified repair + same-run activation (#29)", () => {
       expect(state.repairCandidates?.[0]?.status).toBe("rejected");
       expect(state.repairCandidates?.[0]?.rejectionReason).toMatch(reason);
       expect(reviews()).toBe(0);
-      expect(state.activeVersion).toBe("hello@0.1.0");
+      expect(state.activeVersion).toBe(HELLO_ACTIVE_VERSION);
       expect(await readFile(liveFile, "utf8")).toBe(before);
     });
 
@@ -1879,7 +1880,7 @@ describe("qualified repair + same-run activation (#29)", () => {
       );
       expect(reviews()).toBe(0);
       expect(report.stopReason).toBe("pause");
-      expect(state.activeVersion).toBe("hello@0.1.0");
+      expect(state.activeVersion).toBe(HELLO_ACTIVE_VERSION);
       expect(state.definition.requirements[0]?.evidenceSchema).toBe("workspace-bytes-v1");
       expect(await readFile(liveGraph, "utf8")).toBe(before);
     });
@@ -2104,7 +2105,7 @@ describe("qualified repair + same-run activation (#29)", () => {
       );
       const state = await loadRunState(report.stateDir);
       expect(state.activationIntent?.status).toBe("aborted");
-      expect(state.activeVersion).toBe("hello@0.1.0");
+      expect(state.activeVersion).toBe(HELLO_ACTIVE_VERSION);
     });
 
     it("drops the resumed stop's evidence when resume itself stops", async () => {

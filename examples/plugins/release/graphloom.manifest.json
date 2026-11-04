@@ -1,6 +1,6 @@
 {
   "graphId": "release",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "sdkProtocol": 1,
   "entryPoints": {
     "createGraph": "./dist/index.js",
@@ -15,14 +15,14 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "98c53ad8222ce104dd818266718ff7b814dafce39415f023f47a482db5494f27",
+    "sourceTree": "add842bf8cb3e26fe4faa3ea52cb07684916e0de808164f2dc6d00a77e9859be",
     "packageLock": "ffbc952e2c839c9e91dfa6f66c7289343f1a928ad0c3364df305cb9275d7b705",
     "files": {
-      "package.json": "b2017b354a2ab57ad20f5fee602305a7981dad944e3869692ae058e25db9f21b",
+      "package.json": "e5821ec2d36368cb51c8a66731c1243c6a8005870a6b396b90b97564e7bca382",
       "package-lock.json": "ffbc952e2c839c9e91dfa6f66c7289343f1a928ad0c3364df305cb9275d7b705",
       "tsconfig.json": "ffed4b469e52e0642fabcb6a20f4ba178fce44e5e37567a0ee96571a150a1109",
       "src/constants.ts": "5b166097dd18743523753d9abaf0a9275cb90d7bd02ba939666bd63fabebba40",
-      "src/graph.ts": "ea07ad46f4fd69719d8ef1cb1245cb98334fc0047a34132b32dae0aa0975a42e",
+      "src/graph.ts": "cf2d66e6444251688738c49c3352ed436a70478b036ef744f3038957c57b411b",
       "src/index.ts": "d965c7c3cf157fd73d710815b1f57ff194c22bef3de14248b395edaede9345bd",
       "src/qualification.ts": "40866812d0b380f4cc2f85a420d8bee55620719eb7fd0be8ac7ff3902cb88f9b",
       "src/rehearsal.ts": "b141be8dbd8a0e62ede3287c03c94b5d8b75152dbada1f18fda83046e976b310",

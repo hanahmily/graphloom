@@ -19,6 +19,7 @@ import {
 } from "@graphloom/supervisor";
 import { createController, loadRunState, saveRunState } from "./index.js";
 import { clearSwitchRequest, readSwitchRequest, writeSwitchRequest } from "./supervisor-switch.js";
+import { HELLO_VERSION } from "./testing/hello-version.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../../..");
@@ -27,7 +28,7 @@ const GREETING_PATH = "GREETING.txt";
 
 const definition: GraphDefinition = {
   graphId: "hello",
-  version: "0.1.0",
+  version: HELLO_VERSION,
   stages: [
     { id: "write", name: "Write", requirementIds: ["greeting-bytes"] },
     { id: "review", name: "Review", requirementIds: ["independent-review"] },

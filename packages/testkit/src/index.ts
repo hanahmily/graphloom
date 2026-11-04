@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 export { createScope, type TestScope } from "./scope.js";
-export { createGitRepo, exampleBundle, execFileAsync, repoRoot, type GitRepo, type GitRepoOptions } from "./git.js";
+export { createGitRepo, exampleBundle, HELLO_ACTIVE_VERSION, HELLO_VERSION, execFileAsync, repoRoot, type GitRepo, type GitRepoOptions } from "./git.js";
 export { createTaskWorkspace, type TaskBudgets, type TaskLayout, type TaskWorkspace, type TaskWorkspaceOptions } from "./task.js";
 export {
   EXTREME_BUDGETS,

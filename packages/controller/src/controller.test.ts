@@ -33,6 +33,7 @@ import {
 import { isClaimStale, readOwnerClaim } from "./owner.js";
 import { intakeTask, manifestRepairContract } from "./intake.js";
 import { readWorktreeFile, workspaceChangeManifest } from "./worktree.js";
+import { HELLO_VERSION } from "./testing/hello-version.js";
 
 const execFileAsync = promisify(execFile);
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -44,7 +45,7 @@ const GREETING_PATH = "GREETING.txt";
 
 const definition: GraphDefinition = {
   graphId: "hello",
-  version: "0.1.0",
+  version: HELLO_VERSION,
   stages: [
     { id: "write", name: "Write", requirementIds: ["greeting-bytes"] },
     { id: "review", name: "Review", requirementIds: ["independent-review"] },
