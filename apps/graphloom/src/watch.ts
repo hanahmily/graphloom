@@ -157,6 +157,28 @@ function moveLines(events: ProgressEvent[]): string[] {
   return lines;
 }
 
+/** Most urgent first: the run is gone or stopped, a human is needed, then what is wrong while it runs. */
+function attentionRank(key: string): number {
+  const order = ["orphaned", "stop:", "reconcile:", "repeat-", "stall:", "budget:"];
+  const i = order.findIndex((p) => key.startsWith(p));
+  return i < 0 ? order.length : i;
+}
+
+/** Groups conditions, in order, into messages that each fit the size cap without trimming any. */
+function packAttention(state: DurableRunState, groups: string[][]): string[][] {
+  const packs: string[][] = [];
+  const fits = (ls: string[]): boolean => {
+    const message = compose("attention", state, ls);
+    return Buffer.byteLength(message) <= MESSAGE_BYTES && !message.includes("more lines");
+  };
+  for (const lines of groups) {
+    const last = packs[packs.length - 1];
+    if (last !== undefined && fits([...last, ...lines])) last.push(...lines);
+    else packs.push([...lines]);
+  }
+  return packs;
+}
+
 interface Evaluation {
   reports: WatchReport[];
   orphaned: boolean;
@@ -237,7 +259,7 @@ export function evaluate(
     attention.set(`budget:${b.budget}`, [`budget ${b.budget} at ${b.percent}% (${b.used} of ${b.granted}), spent in stage ${stageSpendingMost(state, b.budget)}`]);
   }
   for (const [stageId, f] of Object.entries(snap.failures)) {
-    if (f.count >= 2) attention.set(`repeat-stage:${stageId}:${f.count}`, [`repeated failure: stage ${stageId} invalidated ${f.count} times with the same requirements (${f.sig})`]);
+    if (f.count >= 2) attention.set(`repeat-stage:${stageId}:${f.count}`, [`repeated failure: stage ${stageId} invalidated ${f.count} times with the same requirements (${oneLine(f.sig, 120)})`]);
   }
   const eps = episodeTriggers(state);
   const [prev, last] = eps.slice(-2);
@@ -246,7 +268,9 @@ export function evaluate(
   }
   if (ownerLost !== undefined) attention.set("orphaned", [`controller died: the run is recorded as running but ${ownerLost}; graphloom resume takes it over`]);
 
-  const raised = [...attention].filter(([key]) => !snap.active.includes(key));
+  const raised = [...attention]
+    .filter(([key]) => !snap.active.includes(key))
+    .sort(([a], [b]) => attentionRank(a) - attentionRank(b));
   snap.active = [...attention.keys()];
 
   // Pending moves go out when their window closes, or at once before an attention report.
@@ -254,7 +278,8 @@ export function evaluate(
     report("move", [...snap.pending.lines.map((l) => `- ${l}`), `${summary.stagesComplete}/${summary.stages} stages complete`]);
     delete snap.pending;
   }
-  if (raised.length > 0) report("attention", raised.flatMap(([, lines]) => lines));
+  // A condition is never dropped to fit: the ones that do not fit go in a follow-up report.
+  for (const lines of packAttention(state, raised.map(([, l]) => l))) report("attention", lines);
   if (reports.length === 0 && running && now - snap.lastReportAt >= heartbeatMs) {
     const spend = summary.budgets.find((b) => b.budget === "agentInvocations");
     const moved = summary.budgets.filter((b) => b.budget !== "agentInvocations" && b.used !== undefined && b.used !== (snap.usedAtReport[b.budget] ?? 0));

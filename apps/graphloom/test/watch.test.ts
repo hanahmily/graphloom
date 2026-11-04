@@ -318,6 +318,40 @@ describe("attention", () => {
   });
 });
 
+describe("many attention conditions at once", () => {
+  it("never drops one: the most urgent come first and the rest follow in further reports, each under 1 KB", async () => {
+    const b = await bed();
+    const review = (await loadRunState(b.stateDir)).receipts.find((x) => x.stageId === "review")!;
+    await b.mutate((s) => ({ ...s, receipts: s.receipts.map((x) => (x.stageId === "review" ? { ...x, valid: false } : x)) }));
+    await b.watch({ timeoutMs: 20_000, heartbeatMs: 60 * MIN });
+    await b.mutate((s) => ({ ...s, receipts: [...s.receipts, { ...review, id: "rcpt-91", requirementId: "code-review", valid: false }] }));
+    await b.watch({ timeoutMs: 20_000, heartbeatMs: 60 * MIN });
+    // Together: every budget nearly spent, a reconciliation, a repeated failure, and a dead controller.
+    await b.mutate((s) => ({
+      ...s,
+      budgets: Object.fromEntries(Object.entries(s.budgets).map(([k, v]) => [k, typeof v === "number" ? 1 : v])),
+      receipts: [...s.receipts, { ...review, id: "rcpt-92", requirementId: "code-review", valid: false }],
+      reconciliationRequired: { operationId: "op-1", stageId: "fix", reason: "r".repeat(300), since: "2026-10-27T11:00:00.000Z" },
+    }));
+    await rm(path.join(b.stateDir, "run.owner.json"));
+    const r = await b.watch({ heartbeatMs: 60 * MIN });
+    expect(r.outcome).toBe("orphaned");
+    const text = r.reports.map((x) => x.message).join("\n");
+    for (const x of r.reports) {
+      expect(x.kind).toBe("attention");
+      expect(Buffer.byteLength(x.message)).toBeLessThanOrEqual(1_000);
+      expect(x.message).not.toContain("more lines");
+    }
+    expect(r.reports[0]!.message).toContain("controller died");
+    expect(text).toContain("waiting for a human: reconcile stage fix");
+    expect(text).toContain("repeated failure: stage review invalidated 2 times");
+    expect(text).toMatch(/budget agentInvocations at/);
+    expect(r.reports.length).toBeGreaterThan(1);
+    // None is suppressed afterwards.
+    expect((await b.watch({ heartbeatMs: 60 * MIN })).reports).toEqual([]);
+  });
+});
+
 describe("modes, timeout and persistence", () => {
   it("--until report returns at the first report", async () => {
     const b = await bed();
