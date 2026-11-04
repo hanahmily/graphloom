@@ -17,7 +17,8 @@ description: Verify what a succeeded GraphLoom run delivered before it leaves th
   `graphloom wait`; never edit `state.json`.
 - Use only commands and flags `graphloom --help` lists.
 - Do not rewrite the delivered commit to make a check pass. A failing check on
-  a clean copy is a finding: report it (and see graphloom-triage).
+  a clean copy is a finding: report it (and see graphloom-triage). Rebasing it
+  onto a newer upstream base is allowed only on the user's yes (section 3).
 
 ## 1. Locate the delivery
 
@@ -48,13 +49,32 @@ report (the delivery evidence `inspect` lists).
   findings; follow-ups when there were any.
 - Nothing secret-shaped anywhere in the diff, message or body.
 
-## 3. Re-run the checks on a clean copy
+## 3. Bring the base up to date, then check once
 
-Never in the run's worktree. Clone or `git worktree add` the delivered branch
-into a fresh directory, then run the repository's own checks there (the
-profile's build and test commands, for example `npm ci && npm run build && npm
-test`, or `make test-ci`). Report pass or fail per command. Remove the copy
-afterwards.
+**First the base.** Fetch the upstream default branch and see whether the
+branch still applies cleanly:
+
+```sh
+git -C <repo> fetch <upstream-remote> <default-branch>
+git -C <repo> rev-list --count <base>..<upstream-remote>/<default-branch>
+git -C <repo> merge-tree --write-tree <upstream-remote>/<default-branch> fix/<issue>
+```
+
+If the base is behind, tell the user by how many commits and whether it
+conflicts, and ask whether to rebase onto the current upstream branch. On a
+yes, rebase in a fresh `git worktree` (never the run's worktree), resolve only
+mechanical conflicts such as neighbouring `CHANGES.md` lines, confirm the
+patch is otherwise unchanged (`git range-diff`), and point `fix/<issue>` at the
+result. Anything more than a mechanical conflict goes back to the user.
+
+**Then the checks, once, on the tree you will push.** Never in the run's
+worktree. `git worktree add` the (rebased) branch into a fresh directory and
+run the repository's own checks there (the profile's build and test commands,
+or the repository's pre-push target, for example `make pre-push`). Keep your
+own helper scripts and logs **outside** that directory: checks such as a
+format or clean-tree check fail on an untracked file. Use the repository's
+toolchain on `PATH` (see graphloom-run, section 1). Report pass or fail per
+command. Remove the copy afterwards.
 
 ## 4. Stacked pull requests
 

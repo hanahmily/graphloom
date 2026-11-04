@@ -14,6 +14,10 @@ description: Start a GraphLoom run. Writes task.yaml (graph, repo, config profil
   task or the repository, no new run, no answer to a question the run asks, and
   no reading of GraphLoom's or the target repository's source to work around
   the stop. The user decides every next step.
+- **No placeholder reaches a run.** Before writing the task, read the request
+  the user gave: an unfilled template value (`<...>`, `TODO`, `TBD`, `...`
+  standing for a choice) is a question, not an answer. Ask the user for the
+  value and never start a run with a placeholder in it.
 - Ask before anything outward-facing (push, pull request, issue creation,
   release). Starting a run is local, but confirm the task with the user first:
   a live run spends real model calls against its budgets.
@@ -34,7 +38,9 @@ description: Start a GraphLoom run. Writes task.yaml (graph, repo, config profil
 ## 1. Write the task
 
 A task file selects a graph; the plugin does the rest. Put it in a working
-directory of its own (the operator's, not the target repository):
+directory of its own (the operator's, not the target repository).
+Everything needed to write one is here and in `graphloom --help`; do not read
+GraphLoom's source or built files to work out a field.
 
 ```yaml
 graph: issue-fix                                  # a bundle under plugins/<graph>/ beside the task
@@ -50,6 +56,42 @@ request: "Fix acme/widgets#42."                   # what to do; issue-fix names 
   started run.
 - A `budgets:` block overrides the profile's defaults key by key. Do not raise
   budgets "to be safe"; the defaults come from measured runs.
+- **Paths:** `repo` and `config` are relative to the task file. The run's state
+  goes to `<repo>/graphloom-state/<run>` and its worktree to
+  `<repo>/graphloom/<run>` on branch `graphloom/<run>`, created from the
+  checkout's `HEAD`, which is the base the delivered change sits on.
+  Uncommitted changes in the checkout are only recorded, before and after
+  (`sourceDirtyBefore`/`sourceDirtyAfter`); the run never uses them.
+- A worked example ships with the install:
+  `$(graphloom version --root)/examples/issue-fix-banyandb-task.yaml`.
+
+### Start from a fresh base
+
+The delivered change sits on the checkout's `HEAD`, so a stale checkout means
+a stale pull request (and conflicts at delivery). Before writing the task,
+fetch the upstream default branch and compare:
+
+```sh
+git -C <repo> fetch <upstream-remote> <default-branch>
+git -C <repo> rev-list --count HEAD..<upstream-remote>/<default-branch>
+```
+
+If `HEAD` is behind, tell the user by how many commits and ask whether to
+start from the current upstream branch (for example a new worktree:
+`git -C <repo> worktree add <dir> <upstream-remote>/<default-branch>`) or to
+keep this base. Never move or reset the user's branch without a yes.
+
+### The repository's own toolchain
+
+The run's command jobs (builds, tests, `npm ci`) use the `PATH` of the shell
+that starts `graphloom run` or `graphloom resume`; GraphLoom itself always
+runs on its bundled Node. When the repository pins a Node version (a
+`.nvmrc`, or an exact `engines.node` in a `package.json`, often with
+`engine-strict`), compare it with `node --version` in that shell. If they
+differ and nvm has the pinned version (`$NVM_DIR/versions/node/v<version>/bin`),
+put that directory first on `PATH` in the start command of section 3; if it is
+not installed, ask the user. Do the same for any other toolchain the profile's
+environment checks report as the wrong version.
 
 ### A graph that prepares its own task
 
@@ -90,7 +132,8 @@ zero-provider-call rehearsal is worth it: `graphloom rehearse task.yaml`.
 ## 3. Start it in the background
 
 Make a watch directory beside the task, then start the run detached, with the
-stop hook writing a marker file and stderr kept in a log:
+stop hook writing a marker file and stderr kept in a log (prefix the
+repository's toolchain on `PATH` first when section 1 found one):
 
 ```sh
 mkdir -p .graphloom-watch
