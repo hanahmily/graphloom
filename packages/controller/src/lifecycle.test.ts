@@ -14,6 +14,7 @@ import { createController } from "./index.js";
 import { createScriptedRunner } from "@graphloom/runner";
 import { readOwnerClaim } from "./owner.js";
 import { loadRunState } from "./state.js";
+import { HELLO_VERSION } from "./testing/hello-version.js";
 
 const execFileAsync = promisify(execFile);
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -170,7 +171,7 @@ describe("public controller: hello child host + stop/resume/inspect", () => {
 
     const definition = {
       graphId: "hello",
-      version: "0.1.0",
+      version: HELLO_VERSION,
       stages: [
         { id: "write", name: "Write", requirementIds: ["greeting-bytes"] },
         { id: "review", name: "Review", requirementIds: ["independent-review"] },

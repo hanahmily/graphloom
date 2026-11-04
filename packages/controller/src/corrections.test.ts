@@ -28,6 +28,7 @@ import { createInProcessPluginHost, type PluginHost } from "@graphloom/plugin-ho
 import { createScriptedSupervisor } from "@graphloom/supervisor";
 import { createController, loadRunState } from "./index.js";
 import { saveRunState } from "./state.js";
+import { HELLO_ACTIVE_VERSION, HELLO_VERSION } from "./testing/hello-version.js";
 
 const execFileAsync = promisify(execFile);
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -40,7 +41,7 @@ const BAD_GREETING = "Hello, GraphLoom!";
 
 const definition: GraphDefinition = {
   graphId: "hello",
-  version: "0.1.0",
+  version: HELLO_VERSION,
   stages: [
     { id: "write", name: "Write", requirementIds: ["greeting-bytes"] },
     { id: "review", name: "Review", requirementIds: ["independent-review"] },
@@ -589,7 +590,7 @@ describe("corrections, crash containment, unfamiliar failure (#28)", () => {
     const env = await makeEnv();
     const controller = createController();
     const dead: PluginHost = {
-      activeVersion: "hello@0.1.0",
+      activeVersion: HELLO_ACTIVE_VERSION,
       generation: 1,
       childPid: 424242,
       async describe() {
@@ -694,7 +695,7 @@ describe("corrections, crash containment, unfamiliar failure (#28)", () => {
       hostSerial += 1;
       const serial = hostSerial;
       const base = createInProcessPluginHost(plugin, {
-        activeVersion: "hello@0.1.0",
+        activeVersion: HELLO_ACTIVE_VERSION,
         generation: 1,
       });
       return {
@@ -805,7 +806,7 @@ describe("corrections, crash containment, unfamiliar failure (#28)", () => {
       const serial = hostSerial;
       let advances = 0;
       return {
-        activeVersion: "hello@0.1.0",
+        activeVersion: HELLO_ACTIVE_VERSION,
         generation: 1,
         childPid: 50_000 + serial,
         async describe() {
@@ -915,7 +916,7 @@ describe("corrections, crash containment, unfamiliar failure (#28)", () => {
     };
 
     const host = createInProcessPluginHost(crashing, {
-      activeVersion: "hello@0.1.0",
+      activeVersion: HELLO_ACTIVE_VERSION,
       generation: 1,
     });
 
@@ -970,7 +971,7 @@ describe("corrections, crash containment, unfamiliar failure (#28)", () => {
       ],
     });
     const baseHost = createInProcessPluginHost(inner, {
-      activeVersion: "hello@0.1.0",
+      activeVersion: HELLO_ACTIVE_VERSION,
       generation: 1,
     });
     let timedOut = false;

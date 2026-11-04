@@ -28,7 +28,7 @@ function baseView(overrides: Partial<RunView> = {}): RunView {
     validatorBindings: graph.defaultValidators,
     generation: 1,
     stateRevision: 1,
-    activeVersion: "hello@0.1.0",
+    activeVersion: `hello@${graph.version}`,
     ...overrides,
   };
 }

@@ -26,6 +26,7 @@ import {
   type SupervisorHarness,
 } from "@graphloom/supervisor";
 import { createController, loadRunState, saveRunState, type SupervisorFactoryContext } from "./index.js";
+import { HELLO_VERSION } from "./testing/hello-version.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../../..");
@@ -36,7 +37,7 @@ const PREFERENCE: SupervisorPreference = { harnesses: ["claude-code", "pi"], mod
 
 const baseDefinition: GraphDefinition = {
   graphId: "hello",
-  version: "0.1.0",
+  version: HELLO_VERSION,
   stages: [
     { id: "write", name: "Write", requirementIds: ["greeting-bytes"] },
     { id: "review", name: "Review", requirementIds: ["independent-review"] },

@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import { createScriptedGraph, dispatch, stop, type ConfinementSpec, type GraphDefinition, type JobSpec } from "@graphloom/sdk";
 import { createScriptedRunner, type JobContext, type Runner } from "@graphloom/runner";
 import { createController } from "./index.js";
+import { HELLO_VERSION } from "./testing/hello-version.js";
 
 const execFileAsync = promisify(execFile);
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -19,7 +20,7 @@ const helloBundle = path.join(path.resolve(here, "../../.."), "examples/plugins/
 // The hello bundle's own definition, which the run's pin must match.
 const definition: GraphDefinition = {
   graphId: "hello",
-  version: "0.1.0",
+  version: HELLO_VERSION,
   stages: [
     { id: "write", name: "Write", requirementIds: ["greeting-bytes"] },
     { id: "review", name: "Review", requirementIds: ["independent-review"] },

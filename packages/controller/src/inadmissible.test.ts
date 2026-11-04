@@ -29,6 +29,7 @@ import { commandBinding, commandExecutorPackage } from "@graphloom/executor-comm
 import { createPiSupervisor, createScriptedSupervisor, type PiSupervisorSessionPort } from "@graphloom/supervisor";
 import { createController, loadRunState, type RepairDeps } from "./index.js";
 import { readOwnerClaim } from "./owner.js";
+import { HELLO_VERSION } from "./testing/hello-version.js";
 
 /**
  * #117: an inadmissible supervisor proposal never stops the run by itself.
@@ -46,7 +47,7 @@ const GREETING_PATH = "GREETING.txt";
 
 const definition: GraphDefinition = {
   graphId: "hello",
-  version: "0.1.0",
+  version: HELLO_VERSION,
   stages: [
     { id: "write", name: "Write", requirementIds: ["greeting-bytes"] },
     { id: "review", name: "Review", requirementIds: ["independent-review"] },

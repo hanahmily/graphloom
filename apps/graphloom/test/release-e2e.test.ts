@@ -8,6 +8,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   activateRepair,
   createScriptedGraph,
@@ -28,6 +29,7 @@ import { createController, FINAL_STOP_HELD_REMEDY, loadRunState, type RepairDeps
 const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const bundle = path.join(repoRoot, "examples/plugins/release");
+const RELEASE_VERSION = (JSON.parse(readFileSync(path.join(bundle, "graphloom.manifest.json"), "utf8")) as { version: string }).version;
 const tsc = path.join(repoRoot, "node_modules/typescript/bin/tsc");
 
 const REQUEST = "Release version 1.2.0: record it in VERSION and add a CHANGELOG.md entry for the new export command.";
@@ -428,7 +430,7 @@ describe("the release example plugin through the controller", () => {
     }
     expect(reviewed).toEqual([]);
     const state = await loadRunState(report.stateDir);
-    expect(state.activeVersion).toBe("release@0.1.0");
+    expect(state.activeVersion).toBe(`release@${RELEASE_VERSION}`);
     expect(state.intake.bundle.bundlePath).toBe(env.installed);
     expect(validReceipts(state.receipts)).toEqual(["bump/version-file"]);
   }, 90_000);

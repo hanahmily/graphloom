@@ -10,7 +10,7 @@
 import { execFileSync } from "node:child_process";
 import { copyFile, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { createScope, copyBundle, type TestScope } from "@graphloom/testkit";
+import { createScope, copyBundle, HELLO_ACTIVE_VERSION, type TestScope } from "@graphloom/testkit";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import type { DoctorCheck, DoctorReport } from "../src/doctor.js";
 import { STUB_SECRETS, makeDoctorEnv, removeDoctorBase, repoRoot, type DoctorEnv } from "./doctor-env.js";
@@ -90,7 +90,7 @@ describe("graphloom doctor --task", () => {
 
     const { report, code, text } = await doctorTask(env, "task.yaml");
     expect(code).toBe(1);
-    expect(row(report, "plugin")).toMatchObject({ status: "pass", detail: "hello@0.1.0" });
+    expect(row(report, "plugin")).toMatchObject({ status: "pass", detail: HELLO_ACTIVE_VERSION });
     expect(row(report, "environment has-sh")).toMatchObject({ status: "pass", detail: "ok" });
     expect(row(report, "environment needs-docker")).toMatchObject({ status: "fail", detail: expect.stringContaining("docker is required"), fix: expect.stringContaining("graphloom check") });
     expect(row(report, "supervisor selection")).toMatchObject({ status: "pass", detail: expect.stringContaining("pi (minimax-cn/MiniMax-M3") });

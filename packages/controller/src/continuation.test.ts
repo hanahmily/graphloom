@@ -31,6 +31,7 @@ import {
 import { createScriptedRunner, createTrustedInProcessRunner } from "@graphloom/runner";
 import type { Supervisor } from "@graphloom/supervisor";
 import { createController, loadRunState } from "./index.js";
+import { HELLO_VERSION } from "./testing/hello-version.js";
 
 const execFileAsync = promisify(execFile);
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -44,7 +45,7 @@ const WRITE = "acme.github/post-comment";
 
 const definition: GraphDefinition = {
   graphId: "hello",
-  version: "0.1.0",
+  version: HELLO_VERSION,
   stages: [
     { id: "write", name: "Write", requirementIds: ["greeting-bytes"] },
     { id: "review", name: "Review", requirementIds: ["independent-review"] },

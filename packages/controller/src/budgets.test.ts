@@ -27,6 +27,7 @@ import { createScriptedSupervisor } from "@graphloom/supervisor";
 import { applyGraphDefaultBudgets, CONTROLLER_DEFAULT_BUDGETS, IntakeError, createController, intakeTask, loadRunState, resolveRunBudgets, saveRunState } from "./index.js";
 import { budgetGranted, budgetsUsed, legacyBudgetUsage } from "./budget-usage.js";
 import type { DurableRunState } from "./state.js";
+import { HELLO_VERSION } from "./testing/hello-version.js";
 
 const execFileAsync = promisify(execFile);
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -39,7 +40,7 @@ afterEach(async () => {
 
 const definition: GraphDefinition = {
   graphId: "hello",
-  version: "0.1.0",
+  version: HELLO_VERSION,
   stages: [
     { id: "write", name: "Write", requirementIds: ["greeting-bytes"] },
     { id: "review", name: "Review", requirementIds: ["independent-review"] },

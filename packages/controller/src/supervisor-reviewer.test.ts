@@ -33,6 +33,7 @@ import {
   type ProposalReviewRequest,
   type RepairDeps,
 } from "./index.js";
+import { HELLO_VERSION } from "./testing/hello-version.js";
 
 /**
  * #121: a `stop` (and a `qualify_repair` that blames a validator or executor)
@@ -50,7 +51,7 @@ const GREETING_PATH = "GREETING.txt";
 
 const definition: GraphDefinition = {
   graphId: "hello",
-  version: "0.1.0",
+  version: HELLO_VERSION,
   stages: [
     { id: "write", name: "Write", requirementIds: ["greeting-bytes"] },
     { id: "review", name: "Review", requirementIds: ["independent-review"] },

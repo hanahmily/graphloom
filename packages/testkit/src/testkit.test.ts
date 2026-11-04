@@ -16,6 +16,8 @@ import {
   createScope,
   createTaskWorkspace,
   exampleBundle,
+  HELLO_ACTIVE_VERSION,
+  HELLO_VERSION,
   helloAgents,
   ignoreGraphloomDir,
   slowBundle,
@@ -75,7 +77,7 @@ describe("task workspaces", () => {
 describe("graph bundles", () => {
   it("bumps a private copy to a new version of the same graph", async () => {
     const bundle = await copyBundle(scope, exampleBundle("hello"));
-    expect(await bumpBundleVersion(bundle, "9.9.9")).toEqual({ from: "0.1.0", to: "9.9.9" });
+    expect(await bumpBundleVersion(bundle, "9.9.9")).toEqual({ from: HELLO_VERSION, to: "9.9.9" });
     expect(JSON.parse(await readFile(path.join(bundle, "graphloom.manifest.json"), "utf8"))).toMatchObject({ graphId: "hello", version: "9.9.9" });
     const host = await createChildPluginHost({ entryModule: path.join(bundle, "dist", "index.js"), activeVersion: "hello@9.9.9", generation: 1, cwd: bundle });
     try {
@@ -85,13 +87,13 @@ describe("graph bundles", () => {
       await host.close();
     }
     // The checkout's own bundle is untouched.
-    expect(JSON.parse(await readFile(path.join(exampleBundle("hello"), "graphloom.manifest.json"), "utf8")).version).toBe("0.1.0");
+    expect(JSON.parse(await readFile(path.join(exampleBundle("hello"), "graphloom.manifest.json"), "utf8")).version).toBe(HELLO_VERSION);
   });
 
   it("makes a slow plugin child whose load failure reaches the host only after it exited", async () => {
     const bundle = await slowBundle(scope, exampleBundle("hello"), { loadDelayMs: 50, stdoutDelayMs: 100, failLoad: "broken import" });
     const manifest = JSON.parse(await readFile(path.join(bundle, "graphloom.manifest.json"), "utf8")) as { entryPoints: { createGraph: string } };
-    const host = await createChildPluginHost({ entryModule: path.join(bundle, manifest.entryPoints.createGraph), activeVersion: "hello@0.1.0", generation: 1, cwd: bundle });
+    const host = await createChildPluginHost({ entryModule: path.join(bundle, manifest.entryPoints.createGraph), activeVersion: HELLO_ACTIVE_VERSION, generation: 1, cwd: bundle });
     try {
       const described = await host.describe(ctx("describe"));
       expect(described.ok).toBe(false);

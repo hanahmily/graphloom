@@ -35,6 +35,7 @@ import {
   type ClaudeCodeBindingOptions,
 } from "@graphloom/executor-coding-agent";
 import { scriptedHarnessModule, type ScriptedStep } from "@graphloom/executor-coding-agent/testing";
+import { HELLO_VERSION } from "@graphloom/testkit";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -44,7 +45,7 @@ const TOKEN = "ghp_coding_agent_e2e_secret";
 
 const definition: GraphDefinition = {
   graphId: "hello",
-  version: "0.1.0",
+  version: HELLO_VERSION,
   stages: [
     { id: "write", name: "Write", requirementIds: ["greeting-bytes"] },
     { id: "review", name: "Review", requirementIds: ["independent-review"] },

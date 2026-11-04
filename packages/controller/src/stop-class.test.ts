@@ -25,6 +25,7 @@ import { createScriptedRunner, type JobContext } from "@graphloom/runner";
 import { createController, loadRunState, saveRunState } from "./index.js";
 import { changeSinceStop, classifyStop, decideResume, FINAL_STOP_HELD_REMEDY, type StopClassification } from "./stop-class.js";
 import { NO_PROGRESS_STOP_REASON, STEP_LIMIT_STOP_REASON, type DurableRunState, type StopMark } from "./state.js";
+import { HELLO_VERSION } from "./testing/hello-version.js";
 
 const execFileAsync = promisify(execFile);
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -123,7 +124,7 @@ describe("stop classification (§8)", () => {
 // The hello bundle's definition, routed by scripted decisions in process.
 const definition: GraphDefinition = {
   graphId: "hello",
-  version: "0.1.0",
+  version: HELLO_VERSION,
   stages: [
     { id: "write", name: "Write", requirementIds: ["greeting-bytes"] },
     { id: "review", name: "Review", requirementIds: ["independent-review"] },
