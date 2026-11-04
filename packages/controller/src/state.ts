@@ -226,6 +226,12 @@ export interface ChildOperationRecord {
   settledAt?: string;
 }
 
+/** One executor's declared effect and whether the operator's grants allowed it. */
+export interface ExecutorGrant {
+  effect: import("@graphloom/sdk").ExecutorEffect;
+  granted: boolean;
+}
+
 /** The state a final stop depends on, recorded when the run stopped (stop-class.ts). */
 export interface StopMark {
   /** The stop reason it was recorded for; a different current reason ignores it. */
@@ -324,6 +330,12 @@ export interface DurableRunState {
   agentSessions?: AgentSessionRecord[];
   /** Executors pinned at intake (absent for runs whose runner cannot describe its executors). */
   executorCatalog?: ExecutorCatalogEntry[];
+  /**
+   * The effect each executor declares and whether the operator's grants allowed it,
+   * as the runner reported it when the run last started or resumed. Not pinned: a
+   * grant is the operator's to change between resumes.
+   */
+  executorGrants?: Record<string, ExecutorGrant>;
   /** Executors the operator moved onto installed code with `resume --update-executors`, oldest first. */
   executorTransitions?: ExecutorTransitionRecord[];
   /**

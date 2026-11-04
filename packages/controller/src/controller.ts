@@ -59,7 +59,7 @@ import {
 import { isUnsettled, reconcilePendingDispatch } from "./reconcile.js";
 import { reconcileChildOperations } from "./children.js";
 import { wipeAgentSessions } from "./agent-sessions.js";
-import { applyExecutorRepin, pinExecutorCatalog, verifyExecutorCatalog, type ExecutorRepin } from "./executor-catalog.js";
+import { applyExecutorRepin, currentExecutorGrants, pinExecutorCatalog, verifyExecutorCatalog, type ExecutorRepin } from "./executor-catalog.js";
 import {
   getSession,
   registerSession,
@@ -491,6 +491,8 @@ export function createController(): Controller {
         if (choice !== undefined) state = { ...state, supervisorSelection: selectionRecord(choice.selection, state) };
         const executorCatalog = await pinExecutorCatalog(request.runner);
         if (executorCatalog !== undefined) state = { ...state, executorCatalog };
+        const executorGrants = await currentExecutorGrants(request.runner).catch(() => undefined);
+        if (executorGrants !== undefined) state = { ...state, executorGrants };
         revisionBridge.current = state.stateRevision;
         session.stateDir = state.stateDir;
         registerSession(session);
@@ -767,6 +769,9 @@ export function createController(): Controller {
             (check) => check !== undefined && ("blocker" in check || check.repins.length > 0),
             () => true,
           )));
+        // The grants as the runner states them now: an operator may have granted an effect for this resume.
+        const executorGrants = await currentExecutorGrants(request.runner).catch(() => undefined);
+        if (executorGrants !== undefined) state = { ...state, executorGrants };
         const live = await liveCandidateDigest(state).catch(() => state.candidateDigest);
         const asStopped: DurableRunState = {
           ...state,

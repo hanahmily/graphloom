@@ -841,6 +841,12 @@ for: a resume sets them aside, so a new stop it records (a preflight `pin
 mismatch`) is classified on its own, and restores them only when it holds the
 original final stop.
 
+The runner's grants are also on the run view for graphs: `RunView.executors[]` carries, for
+each pinned executor, its declared `effect` and `effectGranted` next to its input
+shape. A plugin that owns an effectful step reads it to stop cleanly, with a
+final stop that names what the operator must grant, instead of dispatching a job
+the runner refuses and handing the refusal to the supervisor.
+
 On every resume that runs, the controller fills `RunView.resume`:
 `{ generation, at, pluginUpdated, previousStopReason, previousStopRetryable }`,
 kept in durable state as `lastResume` (absent until the first resume; older

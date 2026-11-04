@@ -72,7 +72,7 @@ import {
   REVIEW_MD,
 } from "./constants.js";
 import { checkBatch, DIAGRAMMER_JOB, DIAGRAMS_REFERENCES, DIAGRAMS_SCHEMA, DIAGRAMS_SCHEMA_NAME, diagramInputOf, planDiagrams, MAX_DIAGRAM_BYTES, MAX_DIAGRAMS, SKILL_DIR, skillMount } from "./diagrams.js";
-import { commandRuns, describeCommand, environmentOutput, outputTail, succeeded, validatorEvidence, type CommandRun } from "./evidence.js";
+import { commandRuns, describeCommand, environmentOutput, isObject, outputTail, succeeded, validatorEvidence, type CommandRun } from "./evidence.js";
 import { INTERFACE_PATCH_BYTES } from "./digest.js";
 import { LIMITS } from "./metrics/crap.js";
 import { CHANGE_REPORT_SCHEMA, MAX_ITEM_CHARS } from "./report.js";
@@ -1273,6 +1273,29 @@ function postedReview(view: RunView, ctx: Context, analysis: Analysis): { url: s
   return flow.state === "done" ? { url: flow.posted.url, verdict: p.plan.verdict, open: p.plan.open } : undefined;
 }
 
+/** The stop reason of a draft the run is not allowed to post. */
+export const POSTING_NOT_ENABLED = "posting not enabled";
+
+/** What the stop says: where the draft is, and what the operator does to post it. */
+function postingNotEnabled(): string {
+  return `draft ready; posting is not enabled (set the runner config's github.writeTokenEnv and resume to post). The draft is ${DRAFT_MD} and the report ${REVIEW_HTML}, in the run's worktree`;
+}
+
+/**
+ * Whether the review's write is known to be withheld. The runner's grants are declared data on the run view (`executors[].effectGranted`);
+ * a runner that does not report them is caught by the backstop: this resume's own attempt to post failed for the effect not being granted.
+ * A failure of an earlier generation predates the resume, which an operator makes after granting, so it does not count.
+ */
+function writeWithheld(view: RunView): boolean {
+  const granted = view.executors?.find((e) => e.id === CREATE_PULL_REVIEW.id)?.effectGranted;
+  if (granted !== undefined) return !granted;
+  return view.evidence.some((e) => {
+    if ((e.generation ?? 0) < view.generation || !isObject(e.payload) || !isObject(e.payload.executorFailure)) return false;
+    const failure = e.payload.executorFailure;
+    return isObject(failure.executor) && failure.executor.id === CREATE_PULL_REVIEW.id && typeof failure.summary === "string" && /effect \S+ is not granted/.test(failure.summary);
+  });
+}
+
 /**
  * The Publish stage: read the pull request's reviews, post the one review unless this head already has it, read its comments back,
  * and record the ids in the ledger. The reads are the executors' own (reads of the review and its comments); the one write is
@@ -1289,6 +1312,10 @@ function publishStage(ctx: Context, view: RunView): GraphDecision {
   const secrets = secretFindings(JSON.stringify(createInput(pr, p.plan)));
   if (secrets.length > 0) return stop({ reason: "report refused", blocker: `the review would hold what looks like a credential (${[...new Set(secrets)].slice(0, 3).join("; ")}); it was not posted`, retryable: false }, "refuse to post a review that holds a secret");
   const flow = publishFlow(view.evidence, p.plan, pr);
+  // Posting is the operator's to enable: without the grant the draft is the result, and the run ends here instead of failing the write into the supervisor.
+  if ((flow.state === "viewer" || flow.state === "reviews" || flow.state === "create") && writeWithheld(view)) {
+    return stop({ reason: POSTING_NOT_ENABLED, blocker: postingNotEnabled(), retryable: false }, "stop: the draft is ready and the runner does not grant the review's write");
+  }
   const base = { owner: pr.owner, repo: pr.repo, number: pr.number };
   switch (flow.state) {
     case "supervise":
