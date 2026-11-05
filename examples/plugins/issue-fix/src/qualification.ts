@@ -412,7 +412,7 @@ export const QUALIFICATION_CASES: readonly QualificationCase[] = [
 
   g("write-scope", "source and test", [implementer(TS_READY), tsGreen()], "passed"),
   g("write-scope", "the lockfile without a reason", [implementer(TS_READY), tsGreen(tsPassed, 0, { paths: ["package-lock.json", TS_SOURCE] })], "failed"),
-  g("write-scope", "the frozen legacy tree", [implementer(TS_READY), tsGreen(tsPassed, 0, { paths: ["legacy/go/main.go"] })], "failed"),
+  g("write-scope", "a protected directory", [implementer(TS_READY), tsGreen(tsPassed, 0, { paths: [".github/workflows/ci.yml"] })], "failed"),
   g("write-scope", "the lockfile with a recorded reason", [implementer({ ...TS_READY, scopeExceptions: [{ path: "package-lock.json", reason: "the fix needs a new dependency" }] }), tsGreen(tsPassed, 0, { paths: ["package-lock.json"] })], "passed"),
 
   f("final run passed", [finalCommand(0)], "passed"),

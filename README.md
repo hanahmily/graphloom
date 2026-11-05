@@ -20,8 +20,6 @@ and `apps/graphloom`. The SDK, isolated plugin host, durable controller lifecycl
 the supervisor on Pi, Claude Code, or Codex, executor packages, and qualified
 repair workflows are implemented and covered by scripted integration tests. Live-provider qualification and the
 complete local-release scenarios remain outstanding. [Agent-host mode](docs/design-agent-host.md) is newly designed and not implemented.
-Earlier Go sources are frozen under
-[`legacy/go`](legacy/go) for reference and are not part of CI.
 
 ```sh
 npm ci

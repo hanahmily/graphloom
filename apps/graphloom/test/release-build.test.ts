@@ -310,7 +310,6 @@ describe("the release tree content checks (§2.3, §6 step 6)", () => {
     const root = await cleanTree();
     const outside = await tempDir();
     await mkdir(path.join(root, "packages", "testkit"), { recursive: true });
-    await mkdir(path.join(root, "legacy", "go"), { recursive: true });
     await mkdir(path.join(root, "docs"));
     await mkdir(path.join(root, "packages", "sdk", "src"));
     await writeFile(path.join(root, "packages", "sdk", "src", "index.ts"), "export {};\n");
@@ -328,7 +327,6 @@ describe("the release tree content checks (§2.3, §6 step 6)", () => {
     expect(result.status).toBe(1);
     for (const problem of [
       "excluded path present: packages/testkit",
-      "excluded path present: legacy",
       "excluded path present: docs",
       "core package ships more than package.json and dist/: packages/sdk/src",
       "excluded directory present: examples/graphloom-state",

@@ -153,7 +153,7 @@ describe("graphloom doctor --task", () => {
 
     const { report, code } = await doctorTask(env, "issue-fix-task.yaml");
     expect(code).toBe(1);
-    expect(row(report, "plugin").detail).toBe("issue-fix@0.16.1");
+    expect(row(report, "plugin").detail).toBe("issue-fix@0.16.2");
     // The plugin's own checks: GraphLoom runs on its bundled Node, but this target repository needs one.
     expect(row(report, "environment node")).toMatchObject({ status: "fail", detail: expect.stringContaining("Node.js >= 22 is required") });
     expect(row(report, "environment ocr").status).toBe("pass");

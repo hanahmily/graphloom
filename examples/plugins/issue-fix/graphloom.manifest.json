@@ -1,6 +1,6 @@
 {
   "graphId": "issue-fix",
-  "version": "0.16.1",
+  "version": "0.16.2",
   "sdkProtocol": 1,
   "taskConfig": "required",
   "entryPoints": {
@@ -16,16 +16,16 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "8d262b3a9f79647a0cbd2e372d55abeb9bda303dd0622ae2ff752a4c9d3de8d0",
+    "sourceTree": "a7a80ba10db249cecf09b858fd9ce0e7028b7cc9987d1a66f7893789f6468f15",
     "packageLock": "66c0b05ef6962fb934baddfe8404bdeb4c50f8f782b45ad361ceb1cd67320b2d",
     "files": {
-      "package.json": "76eeacec1a606ff81b605559e8920545f1715505acd75c8fbf70decce51935a6",
+      "package.json": "c19dc0002d014635c0bea0f9c40c842dfbf771f818016d48a9cc54e5be0b366d",
       "package-lock.json": "66c0b05ef6962fb934baddfe8404bdeb4c50f8f782b45ad361ceb1cd67320b2d",
       "tsconfig.json": "3bafb75902b6084b621c996ae838dbfb87088cf095ce411be9809ce79bf3916b",
       "profiles/banyandb-ql.json": "aa687d99a6556ba05ec354092bc2cf04c04e1d96efc2afc61c05bbf4e6a3dafc",
       "profiles/banyandb.json": "b15369f4f2ad04da48e8a04bc79b697505b124781c134da7683e3a9c04cf6f75",
       "profiles/canopy.json": "3a3bc5a203aa177fef63b1ce9c967949b4a98914190c8ecadad1a73785b9c788",
-      "profiles/graphloom.json": "c46c888d8e75348d167452a00fac3e23afadbb716880def30f41d13ed7ab8bc3",
+      "profiles/graphloom.json": "a1fd2d7462389fac7594ae6d8d2083967871d433d2b6978703a61ae1c0eb4dc4",
       "scripts/ocr-path.sh": "93060417c7d5b7b417a2b68e9b78b49d95d63ccb7830672abab30ec78f3204c8",
       "src/acceptance.ts": "cd4cd8f3e50ec6d9a7e0e976082c497da59d32fbced51762789c4204ca69c7ed",
       "src/bench.ts": "c309834017d83bbe46359751fef44af6e6a32e25c9ffbfe3d10eff5397e8efec",
@@ -35,13 +35,13 @@
       "src/evidence.ts": "93783022aa375f4ba1024da60e7cb34c4c0c2114341783e80e2db15145586a82",
       "src/final.ts": "4bc011007a06be8ec0547bfa3beb6a886bf859e685741e28c2ed7463be5a8612",
       "src/findings.ts": "93a90bafccca0a51db94620c1c886915a91c0de2aad75cbc107b61ddf408e964",
-      "src/graph.ts": "04342d2375126dcf0abb51e9c8bf7e4176b23b30a25b93d09ab218493ea09cad",
+      "src/graph.ts": "f1ef602f54f2d4ee5ee720475ae89610ec5f76a02e0936ad22663f1ac573b440",
       "src/index.ts": "96bde504da23994638b30e16e59a968351ef33629062b527a45aac68e995d52c",
       "src/issues.ts": "b0f98551a88a9ffed6d958907d1fe26f3f6658ebecb38e1ddd1bfcd4bdfb3d67",
       "src/ocr.ts": "a5c12554b5807ebdfa161720e2e89d395db0fda22707b72b2dc612a4ff96f941",
       "src/profile.ts": "d7d65a8b513ffb2cd55ecaa7c0f196542f4d20146db1611eb4e16ad570056061",
       "src/prompts.ts": "f69154a8960561c7c7605676ca19577f6ab36274b6897a3ce3f07762920ad31c",
-      "src/qualification.ts": "aa10f329260fee0c3ba67856d405a51a2b253dbe00d4c6ca05564183cac4ffdf",
+      "src/qualification.ts": "77b783c65e8f0debd9afa241565824f70ad11fc05440c02e0b6c9c495182301c",
       "src/rehearsal.ts": "84ae03cef358ff4d77dae334b1554cad43a94e013043f5a3695f09119cdce4c7",
       "src/review-common.ts": "94190745501e537c9b065ee2264097a5acff946f63a064acfb6b9423dec2e20d",
       "src/runners/go-test.ts": "5bfa8f9234f6c39633b97f0d091f20bde2ba36bcebdac6189ce385d8b2ccc1c1",
@@ -51,7 +51,7 @@
       "src/validators.ts": "8e834300e241c4c7f232551adff4d4d4a8bdeae3e0d517d71274108ffb525b35",
       "test/issue-fix.test.ts": "7b439691e81a3d6f0f989ba610df73f5e8b43aad70fc715f3778d72dc4cfccbf",
       "test/issues.test.ts": "3234213eea8f2e3833d4370e9fd4f0f1366ede09c6f674a198f3037d26a89f91",
-      "test/profiles.test.ts": "2934ba813e8013ec4f9955d2a06b90e47e96de0b65337525fe03168b00e29743",
+      "test/profiles.test.ts": "95e6ffd81d79301328c947b4a6540b174ed782c1ca1c767be3281c4f5a506947",
       "test/review-dedupe.test.ts": "3a011182eb59bf966a35ea881b02705827bdc41ac1fb61a92f28a785f56ce69a"
     }
   }
