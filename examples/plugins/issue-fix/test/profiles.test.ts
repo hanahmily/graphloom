@@ -82,7 +82,7 @@ describe("the banyandb profile", () => {
   it("describes the graph identity and finds the plugin's bundled open-code-review first", () => {
     const ours = createGraph().describe(BANYANDB);
     expect(ours.environment?.checks?.find((c) => c.id === "ocr")?.argv.join(" ")).toContain("scripts/ocr-path.sh");
-    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.16.1", privateStateSchema: "issue-fix-private-v1" });
+    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.16.2", privateStateSchema: "issue-fix-private-v1" });
   });
 
   it("declares its agent roles from the resolved profile for graphloom doctor --task (0.15.0)", () => {
@@ -156,7 +156,7 @@ describe("the graphloom profile", () => {
     const statement = (id: string) => definition.requirements.find((r) => r.id === id)!.statement;
     expect(statement("builds")).toBe("In the same checkout of the full change, npm run typecheck, npm run build and npm test all pass and change no file.");
     expect(statement("passes")).toBe("In a prepared checkout of the full change, the named regression test passes, and the checks changed no file.");
-    expect(statement("in-scope")).toBe("Every changed path is inside the repository and outside package-lock.json, .github and legacy, except those the decision record names with a reason.");
+    expect(statement("in-scope")).toBe("Every changed path is inside the repository and outside package-lock.json and .github, except those the decision record names with a reason.");
     expect(statement("reproduces")).toContain("vitest reports it failed with an assertion error in its own body, its file loaded, and no hook, suite or file around it failed");
     expect(definition.environment!.checks!.map((c) => c.id)).toEqual(["node", "npm", "flock", "git", "ocr", "codex", "claude"]);
     expect(definition.environment!.prepare!.map((c) => c.argv.join(" "))).toEqual(["npm ci --include=dev", "npm run build"]);
@@ -167,7 +167,7 @@ describe("the graphloom profile", () => {
     const plan = planInstruction(graphloom, { issue: 7, request: "Fix hanahmily/graphloom#7.", snapshot: "snap" });
     expect(plan).toContain("Plan a fix for hanahmily/graphloom#7 in this repository (hanahmily/graphloom).");
     expect(plan).toContain("package is the test file, relative to the repository root");
-    expect(plan).toContain("scopeExceptions: only when the fix must change package-lock.json, .github, legacy");
+    expect(plan).toContain("scopeExceptions: only when the fix must change package-lock.json, .github");
     // Enhancement issues: the new test is the RED test, and the issue's own surface is not a product decision.
     expect(plan).toContain("About hanahmily/graphloom:");
     expect(plan).toContain("Issues here are often enhancements rather than bug reports.");
@@ -176,7 +176,7 @@ describe("the graphloom profile", () => {
     const implement = implementInstruction(graphloom, { issue: 7, plan: TS_PLAN });
     expect(implement).toContain("keeps the new names and signatures the test imports but restores the old behaviour");
     expect(implement).not.toContain("CHANGES");
-    expect(implement).toContain("Do not change package-lock.json, .github, legacy.");
+    expect(implement).toContain("Do not change package-lock.json, .github.");
     expect(implement).toContain("the full change must pass the test and `npm run typecheck`, `npm run build` and `npm test`");
     const review = codeReviewInstruction(graphloom, { ocr: "ocr", base: "b", background: "" });
     expect(review).toContain("the change's TypeScript test files (`*.test.ts`) and test fixtures, other tests, docs, fixtures, generated files");
@@ -189,11 +189,11 @@ describe("the graphloom profile", () => {
     expect(body).not.toContain("CHANGES");
   });
 
-  it("protects the lockfile, .github and legacy unless the record gives a reason", () => {
-    expect(writeScopeFor(TS_PLAN, graphloom)).toEqual([".", "!package-lock.json", "!.github", "!legacy"]);
-    expect(writeScopeFor({ ...TS_PLAN, scopeExceptions: [{ path: "package-lock.json", reason: "a new dependency" }] }, graphloom)).toEqual([".", "!.github", "!legacy"]);
+  it("protects the lockfile and .github unless the record gives a reason", () => {
+    expect(writeScopeFor(TS_PLAN, graphloom)).toEqual([".", "!package-lock.json", "!.github"]);
+    expect(writeScopeFor({ ...TS_PLAN, scopeExceptions: [{ path: "package-lock.json", reason: "a new dependency" }] }, graphloom)).toEqual([".", "!.github"]);
     expect(decisionProblems({ ...TS_PLAN, scopeExceptions: [{ path: "go.mod", reason: "x" }] }, graphloom)).toEqual([
-      'scope exception "go.mod" is not one of package-lock.json, .github, legacy',
+      'scope exception "go.mod" is not one of package-lock.json, .github',
     ]);
   });
 
@@ -415,7 +415,7 @@ describe("profiles", () => {
   it("ships the banyandb-ql profile in the manifest's pinned files and describes it under the graph's version (#197)", async () => {
     const manifest = JSON.parse(await readFile(path.join(here, "../graphloom.manifest.json"), "utf8")) as { digests: { files: Record<string, string> } };
     expect(Object.keys(manifest.digests.files)).toContain("profiles/banyandb-ql.json");
-    expect(createGraph().describe(shippedProfile("banyandb-ql"))).toMatchObject({ graphId: "issue-fix", version: "0.16.1" });
+    expect(createGraph().describe(shippedProfile("banyandb-ql"))).toMatchObject({ graphId: "issue-fix", version: "0.16.2" });
   });
 });
 

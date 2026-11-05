@@ -134,8 +134,7 @@
   },
   "protectedPaths": [
     "package-lock.json",
-    ".github",
-    "legacy"
+    ".github"
   ],
   "planning": {
     "reach": "Reach: for every behaviour the fix changes, the basis of that decision names each caller and lifecycle path that depends on the old behaviour (resume and restart from durable state, stop and AbortSignal cancellation, thrown errors and rejected promises, retries, concurrent runs and locks, child-process and resource cleanup), starting with the changed module's own close, stop and shutdown paths, and the test that covers it; a path no test covers is stated there as a risk. For a wait the fix makes longer or unbounded, say what happens when the awaited promise never settles or ignores its abort signal.",
@@ -148,7 +147,7 @@
     ]
   },
   "implementation": {
-    "conventions": "Follow AGENTS.md: work in the TypeScript packages, keep the controller, SDK and CLI free of any plugin's own notions, and do not touch legacy/ or .local/. Follow the repository's conventions."
+    "conventions": "Follow AGENTS.md: work in the TypeScript packages, keep the controller, SDK and CLI free of any plugin's own notions, and do not touch .local/. Follow the repository's conventions."
   },
   "review": {
     "language": "TypeScript",

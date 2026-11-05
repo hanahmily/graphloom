@@ -192,7 +192,6 @@ Excluded:
 
 - `packages/testkit`
 - core package sources and tests
-- `legacy/`
 - `docs/`, which is linked from the README at the tag
 - `.github/`
 - `examples/skywalking-banyandb/` and any `graphloom-state` or `graphloom/` directory
@@ -415,7 +414,7 @@ The release runs without a host Node. The host still needs the tools in §4.4.
     shebang. `.sh` files use `#`; the JavaScript and TypeScript extensions
     (`.ts`, `.mts`, `.cts`, `.js`, `.mjs`, `.cjs`) use `//`.
   - Exempt: `.d.ts` files, any `dist/`, `node_modules/`, or `fixtures/`
-    directory, and `legacy/`, which CI does not build. JSON, Markdown, YAML,
+    directory. JSON, Markdown, YAML,
     and lockfiles are not covered extensions.
   - In a Git work tree, the check reads `git ls-files`. In a tree without Git
     metadata, such as an extracted tarball, it walks the files.

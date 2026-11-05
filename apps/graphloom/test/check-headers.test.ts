@@ -43,7 +43,6 @@ const exempt = {
   "dist/index.js": "export {};\n",
   "src/types.d.ts": "export {};\n",
   "test/fixtures/graph.mjs": "export {};\n",
-  "legacy/go/tool.sh": "echo legacy\n",
   // Vendored third-party source is copied unmodified, so it is exempt (examples/plugins/pr-review/vendor/diagram-design).
   "examples/plugins/pr-review/vendor/diagram-design/scripts/tool.mjs": "export {};\n",
   "node_modules/dep/index.js": "module.exports = {};\n",

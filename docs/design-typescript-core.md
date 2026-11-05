@@ -7,7 +7,6 @@ of this design, including durable execution, Pi recovery, executor extensions,
 and qualified repair. Live-provider qualification and full local-release
 verification remain pending.
 [Agent-host mode](design-agent-host.md) is newly designed, not implemented.
-Earlier Go source is retained under legacy/go.
 
 ## 1. Decisions and scope
 
@@ -1191,8 +1190,7 @@ enforced scopes). `apps/graphloom` is the CLI composition root; graph authors
 depend on `@graphloom/sdk`, not controller internals. Keep validation scheduling
 and receipt admission independent of normal graph routing.
 
-Earlier Go sources are frozen under `legacy/go` for selective porting. Do not
-extend that tree for new MVP features. Switch the CLI to full run/inspect/stop/
+Switch the CLI to full run/inspect/stop/
 resume only after parity for supported behavior is demonstrated. No native
 plugin implementation or arbitrary Go-run state migration is required by this plan.
 

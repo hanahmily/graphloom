@@ -4,7 +4,7 @@ Read [README.md](README.md) and the current
 [TypeScript core design](docs/design-typescript-core.md) before architectural work.
 Use [CONTEXT.md](CONTEXT.md) for terminology. The core design owns behavior, public
 interfaces, package seams, verification, and migration. Native Go plugin documents
-are superseded. Historical Go code lives under `legacy/go/` and is not built by CI.
+are superseded.
 
 ## Packages
 
@@ -101,8 +101,7 @@ smoke tests with no `node` on `PATH`); it publishes nothing.
 
 ## Scope and verification
 
-Implement against the TypeScript packages above. Port still-valid behavioral ideas
-from `legacy/go` when useful; do not extend that tree for new MVP features.
+Implement against the TypeScript packages above.
 Implement the requested scope and verify affected behavior. Documentation-only
 edits need consistency, link, and formatting checks; runtime changes need meaningful
 behavior tests. Do not commit, push, publish, deploy, or alter external resources

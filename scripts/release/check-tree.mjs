@@ -23,7 +23,7 @@ import { foreignPackages, parseTarget } from "./prune-tree.mjs";
 export const DIST_ONLY = ["packages/sdk", "packages/agent-harness", "packages/controller", "packages/plugin-host", "packages/supervisor", "packages/runner", "apps/graphloom"];
 
 /** Paths §2.3 excludes, relative to the tree root. */
-export const EXCLUDED = ["packages/testkit", "legacy", "docs", ".github", "examples/skywalking-banyandb", "graphloom", "examples/graphloom", "release-out"];
+export const EXCLUDED = ["packages/testkit", "docs", ".github", "examples/skywalking-banyandb", "graphloom", "examples/graphloom", "release-out"];
 
 /** Directory names never shipped anywhere outside `node_modules`: run state and caches. */
 const EXCLUDED_NAMES = new Set(["graphloom-state", ".git", "coverage", ".cache", ".vite", ".vitest"]);
