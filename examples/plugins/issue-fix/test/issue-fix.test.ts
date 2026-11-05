@@ -2917,7 +2917,7 @@ describe("the banyandb-ql profile and its benchmark gates (#197)", () => {
     // The module cache is the operator's, not hard-coded.
     expect(script).toContain("GRAPHLOOM_BENCH_GOMODCACHE");
     expect(script).toContain("go env GOMODCACHE");
-    expect(script).not.toContain("/mnt/d/gomodcache");
+    expect(script).not.toContain("/srv/gomodcache");
     expect(script).toContain("make bench-ql-report");
     expect(script).toContain("build/bench/ql-report.json");
     // A missing target is an actionable failure.

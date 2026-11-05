@@ -1,6 +1,6 @@
 # Graph execution: happy-path authoring and supervisor-directed execution
 
-Terminology adapted for GraphLoom; implementation references below describe Vajra.
+Terminology adapted for GraphLoom; implementation references below describe an earlier orchestrator.
 
 Status: proposed, 2026-09-22. Architecture research and design, not implemented
 or deployed. This proposal simplifies the authoring and execution model in
@@ -67,7 +67,7 @@ Sources: [architecture](https://github.com/loopx-project/loopx/blob/67ffe60df413
 [coordination decisions](https://github.com/loopx-project/loopx/blob/67ffe60df4135a2fbbad8b64fc9753ba501dd2a2/loopx/control_plane/coordination/authority_core.py#L1),
 [task validator](https://github.com/loopx-project/loopx/blob/67ffe60df4135a2fbbad8b64fc9753ba501dd2a2/loopx/control_plane/turn_driver/executor.py#L441).
 
-**Transfer to Vajra:** supervisor output is a proposed operation. Worker output
+**Transfer to GraphLoom:** supervisor output is a proposed operation. Worker output
 is an observation. Neither can directly advance a milestone or finish a run.
 The controller issues accepted receipts after checking the relevant evidence.
 
@@ -88,7 +88,7 @@ Sources: [settlement](https://github.com/loopx-project/loopx/blob/67ffe60df4135a
 
 **Transfer:** journal supervisor actions before execution, retain their original
 operation IDs, and reconcile external writes before retrying. Do not copy the
-quota ordering as model-cost accounting: Vajra must reserve capacity before a
+quota ordering as model-cost accounting: GraphLoom must reserve capacity before a
 call and account for failed calls and rejected proposals too.
 
 ### 2.3 Ownership is current authority, not an old receipt
@@ -117,7 +117,7 @@ changes have been accounted for and the corresponding settlement recorded.
 
 This is useful context infrastructure, not a prebuilt graph interpreter.
 Optional memory can be unavailable without becoming authority. Required task
-sources need stricter handling in Vajra: their absence must block decisions that
+sources need stricter handling in GraphLoom: their absence must block decisions that
 depend on them.
 
 Sources: [runtime boundary](https://github.com/loopx-project/loopx/blob/67ffe60df4135a2fbbad8b64fc9753ba501dd2a2/loopx/capabilities/decision_context/runtime.py#L230),
@@ -140,7 +140,7 @@ Sources: [feasibility routing](https://github.com/loopx-project/loopx/blob/67ffe
 [context does not override route](https://github.com/loopx-project/loopx/blob/67ffe60df4135a2fbbad8b64fc9753ba501dd2a2/loopx/capabilities/issue_fix/feasibility.py#L237),
 [candidate preflight](https://github.com/loopx-project/loopx/blob/67ffe60df4135a2fbbad8b64fc9753ba501dd2a2/loopx/capabilities/issue_fix/candidate_preflight.py#L381).
 
-**Do not transfer this structure into Vajra v2.** Replacing route YAML with a
+**Do not transfer this structure into the next orchestrator design.** Replacing route YAML with a
 growing Go switch statement would preserve the current failure mode. The
 supervisor must interpret a previously unseen failure and choose a supporting
 operation or reentry without adding a new domain classification to the engine.
@@ -165,9 +165,9 @@ by itself proof that the issue's actual requirement has been satisfied.
 ### 2.7 Scope limits worth preserving in the comparison
 
 - Loopx does not demonstrate happy-path-only authoring or one persistent
-  supervisor directing all off-path work. Those are Vajra design decisions.
+  supervisor directing all off-path work. Those are design decisions of the earlier orchestrator.
 - Its driver intentionally lets unregistered legacy actions reach host execution.
-  A new Vajra v2 operation protocol should reject unsupported operations.
+  A new operation protocol should reject unsupported operations.
 - Its explicit Todo continuation helper currently supports local, lease-free
   continuation; it rejects lease-bearing work. It is not a complete solution for
   moving a live supervisor between hosts.
@@ -535,4 +535,4 @@ and [decision context settlement](https://github.com/loopx-project/loopx/blob/67
 
 The architectural choice is to adopt Loopx's separation of proposal, authority,
 evidence, and effects while making graph semantics and off-path decisions the
-responsibility of Vajra's persistent supervisor.
+responsibility of the persistent supervisor.

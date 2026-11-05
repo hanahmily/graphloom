@@ -25,9 +25,12 @@ Earlier Go sources are frozen under
 
 ```sh
 npm ci
-npm test
 npm run build
+npm run typecheck
+npm test
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
 The local runtime requires Linux, Node.js 22.19 or newer, Git, and util-linux
 `flock`. Controller and repository locks use kernel locks held by a helper
@@ -221,7 +224,8 @@ crashes; filesystem and execution scopes require host enforcement.
   repository, driven by a JSON profile the task names with `config:`; ships
   profiles for BanyanDB and for GraphLoom itself. It replaced the earlier
   BanyanDB-only fix graph.
-- [PR-review graph](docs/design-pr-review-graph.md) (proposed): first a
+- [PR-review graph](docs/design-pr-review-graph.md) (implemented as the `pr-review`
+  example plugin, 0.23): first a
   neutral, cited change report on an incoming pull request (schema, background
   work, features, dependencies, config, interfaces, deletions; no findings or verdict) and
   questions answered by a separate agent from the whole codebase, all in one
@@ -236,13 +240,14 @@ crashes; filesystem and execution scopes require host enforcement.
   requested: <n> open`). Later pushes continue from a per-PR ledger ref: ids
   continue, each earlier item is re-checked (fixed, or still open with a link to its
   comment), round 2 waits until round 1's earlier issues are fixed, and the verdict
-  counts the items still open (0.22).
+  counts the items still open.
 - [Code quality metrics](docs/design-code-quality-metrics.md) (proposed):
   one definition of cyclomatic complexity (< 10), nesting depth (≤ 3), CRAP
   (threshold 30) and mutation survival for changed functions only, with
   tools and confinement; issue-fix uses them as gates, pr-review as facts and
   questions.
-- [Installable releases](docs/design-release.md) (proposed): a self-contained
+- [Installable releases](docs/design-release.md) (phases R0 to R5 implemented; no
+  release is published yet): a self-contained
   release tarball with a bundled Node runtime and the SDK tarball on GitHub
   Releases, versioned install directories with `install.sh`, `graphloom
   upgrade`, `graphloom self`, and automatic updates, `graphloom doctor` and guided `graphloom setup`, runs that stay on
@@ -262,6 +267,12 @@ crashes; filesystem and execution scopes require host enforcement.
 
 Earlier native-plugin and file-described designs are historical references, not
 authority for the TypeScript implementation.
+
+## Community
+
+- [Contributing](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
+- [Code of conduct](CODE_OF_CONDUCT.md)
 
 ## License
 
