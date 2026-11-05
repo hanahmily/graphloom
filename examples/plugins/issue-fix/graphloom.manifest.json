@@ -16,7 +16,7 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "65aac0dc4d6ae7970e11b8dc8bdfe2d03c0bb09b0100951bd611712dbc05328a",
+    "sourceTree": "8d262b3a9f79647a0cbd2e372d55abeb9bda303dd0622ae2ff752a4c9d3de8d0",
     "packageLock": "66c0b05ef6962fb934baddfe8404bdeb4c50f8f782b45ad361ceb1cd67320b2d",
     "files": {
       "package.json": "76eeacec1a606ff81b605559e8920545f1715505acd75c8fbf70decce51935a6",
@@ -49,10 +49,10 @@
       "src/runners/types.ts": "c8993c827f54f377075eefd8630e144190759ac9ac5c9a8bd23efd9b580f3823",
       "src/runners/vitest.ts": "693c5722d62719505d21dee949d39a75f14e9368a11f5084f4bc36c95381171b",
       "src/validators.ts": "8e834300e241c4c7f232551adff4d4d4a8bdeae3e0d517d71274108ffb525b35",
-      "test/issue-fix.test.ts": "6944cd0c89754cbb43600b86bd53cba93e8104cc6b6b9e6d9265bba9a2a0753d",
+      "test/issue-fix.test.ts": "7b439691e81a3d6f0f989ba610df73f5e8b43aad70fc715f3778d72dc4cfccbf",
       "test/issues.test.ts": "3234213eea8f2e3833d4370e9fd4f0f1366ede09c6f674a198f3037d26a89f91",
       "test/profiles.test.ts": "2934ba813e8013ec4f9955d2a06b90e47e96de0b65337525fe03168b00e29743",
-      "test/review-dedupe.test.ts": "9e2fc053c6be9624e950f79167b5b37c80248939afb1c41419a5c773fd4260ca"
+      "test/review-dedupe.test.ts": "3a011182eb59bf966a35ea881b02705827bdc41ac1fb61a92f28a785f56ce69a"
     }
   }
 }

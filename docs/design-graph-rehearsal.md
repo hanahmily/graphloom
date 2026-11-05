@@ -399,15 +399,15 @@ checks (`definition.environment.checks`). What is missing is the composition:
 stand-ins that answer from what the plugin declared, an evaluation of a finished
 run that says more than `status`, and a gate that runs it before a live run.
 
-Prior art: Vajra, a sibling Go orchestrator, solves the same problem with
-`vajra workflow dryrun` — a stand-in agent CLI behind the real adapters,
+Prior art: an earlier Go orchestrator solved the same problem with a
+dry-run command — a stand-in agent CLI behind the real adapters,
 hand-written per-workflow scenarios, and a report that names its one seam of
 unreality. Four of its lessons were paid for with real bugs and are taken here:
 a stand-in must read the prompt, not only its playbook (§4.3); the seam must be
 proven before the run, because a mis-wired stand-in looks like a slow run, not
 a broken one (§4.2); a scenario must be able to fail, hang and go silent, not
 only succeed (§4.4); and a report must name what it stood in for and what it
-did not check (§4.7). §8 records what Vajra does that this design deliberately
+did not check (§4.7). §8 records what that orchestrator does that this design deliberately
 does not take.
 
 ## 2. Goals and non-goals
@@ -659,7 +659,7 @@ catch.
 
 ### 4.2 The seam, proven before the run
 
-Vajra's authors learned that a stand-in that silently fails to intercept
+The earlier orchestrator's authors learned that a stand-in that silently fails to intercept
 produces a run that looks slow rather than broken: the real CLI runs, spends
 tokens, and the suite goes green. Two guards keep this design's one seam
 honest, and both act before the first dispatch rather than after the last:
@@ -685,7 +685,7 @@ appears in a passing one.
 A stand-in that answers from a playbook is a perfect agent working from a
 perfect prompt, so a prompt that never asks for a field the contract requires
 passes every rehearsal and fails only live, where a real model cannot produce
-what it was not asked for. Vajra added this rule after exactly that bug cost
+what it was not asked for. The earlier orchestrator added this rule after exactly that bug cost
 it two expensive runs, and it applies here unchanged: a property the stand-in
 is about to emit — from a scenario reply or synthesized — must be named in the
 rendered assignment it received (the full dotted path or its leaf segment,
@@ -986,7 +986,7 @@ verdict is read next to the list of what it did not prove.
 1. Ship the stand-ins and wrappers (moving the fakes), the seam guard, the
    fidelity check and hermetic setup, `check`, and `rehearse` with schema
    synthesis only; every plugin is rehearsable from day one, and the cheapest
-   lessons from Vajra are in from the first release.
+   lessons from that earlier orchestrator are in from the first release.
 2. Add `replay` and `--record-from`; commit `879ee04f-e57` as banyandb-fix's
    regression scenario and replay fixture. Record `happy` scenarios from the
    next successful live run of each plugin; until then CI rehearses on
@@ -1106,7 +1106,7 @@ Decided 2026-10-04 (reverting an earlier decision from the same day):
     working exactly as its own unit tests require (`packages/controller/src/
     rehearsal.test.ts`, "fails B7-9 when recovery was entered for a trigger
     the scenario did not name") and was not touched — weakening it would
-    break the one thing this whole design exists to catch (Vajra's "a
+    break the one thing this whole design exists to catch (the earlier orchestrator's "a
     mis-wired stand-in looks like a slow run, not a broken one," §4.2).
   - A narrower fix was considered and rejected: tag a recorded scenario with
     the identity of the repo it was captured against (cheapest candidate: the
@@ -1135,7 +1135,7 @@ Decided 2026-10-04 (reverting an earlier decision from the same day):
     were built and recorded for, which is precisely what §2's goals describe
     and what §6's verification items test. Nothing about them changes.
 
-Not borrowed from Vajra, on purpose: its edge-coverage generation builds one
+Not borrowed from that earlier orchestrator, on purpose: its edge-coverage generation builds one
 case per branch from a workflow's declarative predicates and gates on 100%.
 GraphLoom graphs are TypeScript — `advance()` is code, not data — so coverage
 of its branches is a unit-test concern, not something a rehearsal can derive

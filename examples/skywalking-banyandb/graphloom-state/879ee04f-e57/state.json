@@ -122,7 +122,7 @@
           "timedOut": false,
           "aborted": false,
           "durationMs": 48,
-          "stdoutTail": "/home/gao/.nvm/versions/node/v24.6.0/bin/ocr\n",
+          "stdoutTail": "/home/user/.nvm/versions/node/v24.6.0/bin/ocr\n",
           "stderrTail": ""
         },
         "environment": {
@@ -259,7 +259,7 @@
           "timedOut": false,
           "aborted": false,
           "durationMs": 2542,
-          "stdoutTail": "make: Entering directory '/mnt/d/skywalking-banyandb/graphloom/879ee04f-e57/scripts/ci/check'\nInstall ginkgo...\nInstall mock generate tool...\n/mnt/d/skywalking-banyandb/graphloom/879ee04f-e57/scripts/build/../../bin/ginkgo -v  -tags \"\" ./...\n=== RUN   TestGoVersion\n--- PASS: TestGoVersion (0.00s)\nPASS\n\nGinkgo ran 1 suite in 406.791338ms\nTest Suite Passed\nmake: Leaving directory '/mnt/d/skywalking-banyandb/graphloom/879ee04f-e57/scripts/ci/check'\n",
+          "stdoutTail": "make: Entering directory '/work/skywalking-banyandb/graphloom/879ee04f-e57/scripts/ci/check'\nInstall ginkgo...\nInstall mock generate tool...\n/work/skywalking-banyandb/graphloom/879ee04f-e57/scripts/build/../../bin/ginkgo -v  -tags \"\" ./...\n=== RUN   TestGoVersion\n--- PASS: TestGoVersion (0.00s)\nPASS\n\nGinkgo ran 1 suite in 406.791338ms\nTest Suite Passed\nmake: Leaving directory '/work/skywalking-banyandb/graphloom/879ee04f-e57/scripts/ci/check'\n",
           "stderrTail": ""
         },
         "environment": {
@@ -326,7 +326,7 @@
           "timedOut": false,
           "aborted": false,
           "durationMs": 30598,
-          "stdoutTail": "--- api: generate ---\nmake[1]: Entering directory '/mnt/d/skywalking-banyandb/graphloom/879ee04f-e57/api'\nInstall proto plugins...\nmake[1]: Leaving directory '/mnt/d/skywalking-banyandb/graphloom/879ee04f-e57/api'\n--- banyand: generate ---\nmake[1]: Entering directory '/mnt/d/skywalking-banyandb/graphloom/879ee04f-e57/banyand'\nmake[1]: Leaving directory '/mnt/d/skywalking-banyandb/graphloom/879ee04f-e57/banyand'\n--- bydbctl: generate ---\nmake[1]: Entering directory '/mnt/d/skywalking-banyandb/graphloom/879ee04f-e57/bydbctl'\nmake[1]: Leaving directory '/mnt/d/skywalking-banyandb/graphloom/879ee04f-e57/bydbctl'\n--- mcp: generate ---\nmake[1]: Entering directory '/mnt/d/skywalking-banyandb/graphloom/879ee04f-e57/mcp'\nnpm ci --include=dev\n\nadded 299 packages, and audited 300 packages in 2s\n\n72 packages are looking for funding\n  run `npm fund` for details\n\n3 vulnerabilities (2 moderate, 1 high)\n\nTo address all issues, run:\n  npm audit fix\n\nRun `npm audit` for details.\ntouch node_modules/.package-lock.json\nmake[1]: Leaving directory '/mnt/d/skywalking-banyandb/graphloom/879ee04f-e57/mcp'\n--- fodc/agent: generate ---\nmake[1]: Entering directory '/mnt/d/skywalking-banyandb/graphloom/879ee04f-e57/fodc/agent'\nSkipping KTM eBPF generation (using github.com/SkyAPM/ktm-ebpf prebuilt artifacts)\nmake[1]: Leaving directory '/mnt/d/skywalking-banyandb/graphloom/879ee04f-e57/fodc/agent'\n--- fodc/proxy: generate ---\nmake[1]: Entering directory '/mnt/d/skywalking-banyandb/graphloom/879ee04f-e57/fodc/proxy'\nmake[1]: Leaving directory '/mnt/d/skywalking-banyandb/graphloom/879ee04f-e57/fodc/proxy'\n--- pkg: generate ---\nmake[1]: Entering directory '/mnt/d/skywalking-banyandb/graphloom/879ee04f-e57/pkg'\nmake[1]: Leaving directory '/mnt/d/skywalking-banyandb/graphloom/879ee04f-e57/pkg'\n",
+          "stdoutTail": "--- api: generate ---\nmake[1]: Entering directory '/work/skywalking-banyandb/graphloom/879ee04f-e57/api'\nInstall proto plugins...\nmake[1]: Leaving directory '/work/skywalking-banyandb/graphloom/879ee04f-e57/api'\n--- banyand: generate ---\nmake[1]: Entering directory '/work/skywalking-banyandb/graphloom/879ee04f-e57/banyand'\nmake[1]: Leaving directory '/work/skywalking-banyandb/graphloom/879ee04f-e57/banyand'\n--- bydbctl: generate ---\nmake[1]: Entering directory '/work/skywalking-banyandb/graphloom/879ee04f-e57/bydbctl'\nmake[1]: Leaving directory '/work/skywalking-banyandb/graphloom/879ee04f-e57/bydbctl'\n--- mcp: generate ---\nmake[1]: Entering directory '/work/skywalking-banyandb/graphloom/879ee04f-e57/mcp'\nnpm ci --include=dev\n\nadded 299 packages, and audited 300 packages in 2s\n\n72 packages are looking for funding\n  run `npm fund` for details\n\n3 vulnerabilities (2 moderate, 1 high)\n\nTo address all issues, run:\n  npm audit fix\n\nRun `npm audit` for details.\ntouch node_modules/.package-lock.json\nmake[1]: Leaving directory '/work/skywalking-banyandb/graphloom/879ee04f-e57/mcp'\n--- fodc/agent: generate ---\nmake[1]: Entering directory '/work/skywalking-banyandb/graphloom/879ee04f-e57/fodc/agent'\nSkipping KTM eBPF generation (using github.com/SkyAPM/ktm-ebpf prebuilt artifacts)\nmake[1]: Leaving directory '/work/skywalking-banyandb/graphloom/879ee04f-e57/fodc/agent'\n--- fodc/proxy: generate ---\nmake[1]: Entering directory '/work/skywalking-banyandb/graphloom/879ee04f-e57/fodc/proxy'\nmake[1]: Leaving directory '/work/skywalking-banyandb/graphloom/879ee04f-e57/fodc/proxy'\n--- pkg: generate ---\nmake[1]: Entering directory '/work/skywalking-banyandb/graphloom/879ee04f-e57/pkg'\nmake[1]: Leaving directory '/work/skywalking-banyandb/graphloom/879ee04f-e57/pkg'\n",
           "stderrTail": "Makefile:45: warning: overriding recipe for target 'lint'\n../scripts/build/lint.mk:25: warning: ignoring old recipe for target 'lint'\nMakefile:49: warning: overriding recipe for target 'format'\n../scripts/build/lint.mk:30: warning: ignoring old recipe for target 'format'\n"
         },
         "environment": {
@@ -1203,8 +1203,8 @@
     "activeMs": 25904091
   },
   "intake": {
-    "taskPath": "/mnt/d/graphloom/examples/banyandb-fix-task.yaml",
-    "taskDir": "/mnt/d/graphloom/examples",
+    "taskPath": "/work/graphloom/examples/banyandb-fix-task.yaml",
+    "taskDir": "/work/graphloom/examples",
     "task": {
       "graph": "banyandb-fix",
       "repo": "skywalking-banyandb",
@@ -1214,12 +1214,12 @@
         "activeMs": 28800000
       }
     },
-    "repoPath": "/mnt/d/graphloom/examples/skywalking-banyandb",
+    "repoPath": "/work/graphloom/examples/skywalking-banyandb",
     "pinnedHead": "cb15c9110ac546d603710708cdb9d4b295ceef61",
     "bundle": {
       "graphId": "banyandb-fix",
       "version": "0.4.0",
-      "bundlePath": "/mnt/d/graphloom/examples/plugins/banyandb-fix",
+      "bundlePath": "/work/graphloom/examples/plugins/banyandb-fix",
       "sdkProtocol": 1,
       "digests": {
         "sourceTree": "7cd7493f0a88329541945ac126420fa6af45b04bd9cdf84ed6506f5bc071b827",
@@ -1261,10 +1261,10 @@
       "activeMs": 28800000
     }
   },
-  "worktreePath": "/mnt/d/graphloom/examples/skywalking-banyandb/graphloom/879ee04f-e57",
+  "worktreePath": "/work/graphloom/examples/skywalking-banyandb/graphloom/879ee04f-e57",
   "worktreeBranch": "graphloom/879ee04f-e57",
-  "artifactDir": "/mnt/d/graphloom/examples/skywalking-banyandb/graphloom-state/879ee04f-e57/artifacts",
-  "stateDir": "/mnt/d/graphloom/examples/skywalking-banyandb/graphloom-state/879ee04f-e57",
+  "artifactDir": "/work/graphloom/examples/skywalking-banyandb/graphloom-state/879ee04f-e57/artifacts",
+  "stateDir": "/work/graphloom/examples/skywalking-banyandb/graphloom-state/879ee04f-e57",
   "sourceDirtyBefore": [
     ".claude/",
     ".cursor/",
@@ -1308,128 +1308,128 @@
     {
       "id": "graphloom.coding-agent/run",
       "digest": "5b623b9c108b73b5374a8e263ba66de20b128afa45cf7d264dd5736e4dcd8285",
-      "source": "/mnt/d/graphloom/executors/coding-agent",
-      "entryModule": "/mnt/d/graphloom/executors/coding-agent/dist/legacy-executors.js",
+      "source": "/work/graphloom/executors/coding-agent",
+      "entryModule": "/work/graphloom/executors/coding-agent/dist/legacy-executors.js",
       "isolation": "unrestricted",
       "builtin": true
     },
     {
       "id": "graphloom.agent/run",
       "digest": "5b623b9c108b73b5374a8e263ba66de20b128afa45cf7d264dd5736e4dcd8285",
-      "source": "/mnt/d/graphloom/executors/coding-agent",
-      "entryModule": "/mnt/d/graphloom/executors/coding-agent/dist/legacy-executors.js",
+      "source": "/work/graphloom/executors/coding-agent",
+      "entryModule": "/work/graphloom/executors/coding-agent/dist/legacy-executors.js",
       "isolation": "unrestricted",
       "builtin": true
     },
     {
       "id": "graphloom.command/run",
       "digest": "7699bd6289d70c4cb7763a1bde7b157189906b05f3a8aeab2ea0f4829426099c",
-      "source": "/mnt/d/graphloom/executors/command",
-      "entryModule": "/mnt/d/graphloom/executors/command/dist/executors.js",
+      "source": "/work/graphloom/executors/command",
+      "entryModule": "/work/graphloom/executors/command/dist/executors.js",
       "isolation": "unrestricted",
       "builtin": true
     },
     {
       "id": "graphloom.github/list-issues",
       "digest": "98533df6ac27a670b1863ab8ea7f993383a53fe83806d1c2d5c994233c4f4c25",
-      "source": "/mnt/d/graphloom/executors/github",
-      "entryModule": "/mnt/d/graphloom/executors/github/dist/executors.js",
+      "source": "/work/graphloom/executors/github",
+      "entryModule": "/work/graphloom/executors/github/dist/executors.js",
       "isolation": "sandbox",
       "builtin": true
     },
     {
       "id": "graphloom.github/list-pulls",
       "digest": "98533df6ac27a670b1863ab8ea7f993383a53fe83806d1c2d5c994233c4f4c25",
-      "source": "/mnt/d/graphloom/executors/github",
-      "entryModule": "/mnt/d/graphloom/executors/github/dist/executors.js",
+      "source": "/work/graphloom/executors/github",
+      "entryModule": "/work/graphloom/executors/github/dist/executors.js",
       "isolation": "sandbox",
       "builtin": true
     },
     {
       "id": "graphloom.github/get-issue",
       "digest": "98533df6ac27a670b1863ab8ea7f993383a53fe83806d1c2d5c994233c4f4c25",
-      "source": "/mnt/d/graphloom/executors/github",
-      "entryModule": "/mnt/d/graphloom/executors/github/dist/executors.js",
+      "source": "/work/graphloom/executors/github",
+      "entryModule": "/work/graphloom/executors/github/dist/executors.js",
       "isolation": "sandbox",
       "builtin": true
     },
     {
       "id": "graphloom.github/get-pull",
       "digest": "98533df6ac27a670b1863ab8ea7f993383a53fe83806d1c2d5c994233c4f4c25",
-      "source": "/mnt/d/graphloom/executors/github",
-      "entryModule": "/mnt/d/graphloom/executors/github/dist/executors.js",
+      "source": "/work/graphloom/executors/github",
+      "entryModule": "/work/graphloom/executors/github/dist/executors.js",
       "isolation": "sandbox",
       "builtin": true
     },
     {
       "id": "graphloom.github/list-issue-comments",
       "digest": "98533df6ac27a670b1863ab8ea7f993383a53fe83806d1c2d5c994233c4f4c25",
-      "source": "/mnt/d/graphloom/executors/github",
-      "entryModule": "/mnt/d/graphloom/executors/github/dist/executors.js",
+      "source": "/work/graphloom/executors/github",
+      "entryModule": "/work/graphloom/executors/github/dist/executors.js",
       "isolation": "sandbox",
       "builtin": true
     },
     {
       "id": "graphloom.github/list-labels",
       "digest": "98533df6ac27a670b1863ab8ea7f993383a53fe83806d1c2d5c994233c4f4c25",
-      "source": "/mnt/d/graphloom/executors/github",
-      "entryModule": "/mnt/d/graphloom/executors/github/dist/executors.js",
+      "source": "/work/graphloom/executors/github",
+      "entryModule": "/work/graphloom/executors/github/dist/executors.js",
       "isolation": "sandbox",
       "builtin": true
     },
     {
       "id": "graphloom.github/list-milestones",
       "digest": "98533df6ac27a670b1863ab8ea7f993383a53fe83806d1c2d5c994233c4f4c25",
-      "source": "/mnt/d/graphloom/executors/github",
-      "entryModule": "/mnt/d/graphloom/executors/github/dist/executors.js",
+      "source": "/work/graphloom/executors/github",
+      "entryModule": "/work/graphloom/executors/github/dist/executors.js",
       "isolation": "sandbox",
       "builtin": true
     },
     {
       "id": "graphloom.github/create-issue-comment",
       "digest": "98533df6ac27a670b1863ab8ea7f993383a53fe83806d1c2d5c994233c4f4c25",
-      "source": "/mnt/d/graphloom/executors/github",
-      "entryModule": "/mnt/d/graphloom/executors/github/dist/executors.js",
+      "source": "/work/graphloom/executors/github",
+      "entryModule": "/work/graphloom/executors/github/dist/executors.js",
       "isolation": "sandbox",
       "builtin": true
     },
     {
       "id": "graphloom.github/create-pull",
       "digest": "98533df6ac27a670b1863ab8ea7f993383a53fe83806d1c2d5c994233c4f4c25",
-      "source": "/mnt/d/graphloom/executors/github",
-      "entryModule": "/mnt/d/graphloom/executors/github/dist/executors.js",
+      "source": "/work/graphloom/executors/github",
+      "entryModule": "/work/graphloom/executors/github/dist/executors.js",
       "isolation": "sandbox",
       "builtin": true
     },
     {
       "id": "graphloom.github/create-pull-review",
       "digest": "98533df6ac27a670b1863ab8ea7f993383a53fe83806d1c2d5c994233c4f4c25",
-      "source": "/mnt/d/graphloom/executors/github",
-      "entryModule": "/mnt/d/graphloom/executors/github/dist/executors.js",
+      "source": "/work/graphloom/executors/github",
+      "entryModule": "/work/graphloom/executors/github/dist/executors.js",
       "isolation": "sandbox",
       "builtin": true
     },
     {
       "id": "graphloom.github/add-labels",
       "digest": "98533df6ac27a670b1863ab8ea7f993383a53fe83806d1c2d5c994233c4f4c25",
-      "source": "/mnt/d/graphloom/executors/github",
-      "entryModule": "/mnt/d/graphloom/executors/github/dist/executors.js",
+      "source": "/work/graphloom/executors/github",
+      "entryModule": "/work/graphloom/executors/github/dist/executors.js",
       "isolation": "sandbox",
       "builtin": true
     },
     {
       "id": "graphloom.github/remove-labels",
       "digest": "98533df6ac27a670b1863ab8ea7f993383a53fe83806d1c2d5c994233c4f4c25",
-      "source": "/mnt/d/graphloom/executors/github",
-      "entryModule": "/mnt/d/graphloom/executors/github/dist/executors.js",
+      "source": "/work/graphloom/executors/github",
+      "entryModule": "/work/graphloom/executors/github/dist/executors.js",
       "isolation": "sandbox",
       "builtin": true
     },
     {
       "id": "graphloom.github/update-issue",
       "digest": "98533df6ac27a670b1863ab8ea7f993383a53fe83806d1c2d5c994233c4f4c25",
-      "source": "/mnt/d/graphloom/executors/github",
-      "entryModule": "/mnt/d/graphloom/executors/github/dist/executors.js",
+      "source": "/work/graphloom/executors/github",
+      "entryModule": "/work/graphloom/executors/github/dist/executors.js",
       "isolation": "sandbox",
       "builtin": true
     }
@@ -1452,7 +1452,7 @@
       "executorId": "graphloom.coding-agent/run",
       "status": "ok",
       "sessionRef": "claude-a40c373a-3f43-4df5-94e8-abb35bd566b3",
-      "sessionDir": "/mnt/d/graphloom/examples/skywalking-banyandb/graphloom-state/879ee04f-e57/agent-sessions/op-7-6fa545eb",
+      "sessionDir": "/work/graphloom/examples/skywalking-banyandb/graphloom-state/879ee04f-e57/agent-sessions/op-7-6fa545eb",
       "settledAt": "2026-10-02T15:23:42.627Z"
     },
     {
@@ -1464,7 +1464,7 @@
       "executorId": "graphloom.coding-agent/run",
       "status": "ok",
       "sessionRef": "pi-6fb6667400ff",
-      "sessionDir": "/mnt/d/graphloom/examples/skywalking-banyandb/graphloom-state/879ee04f-e57/agent-sessions/op-107-1d22fc77",
+      "sessionDir": "/work/graphloom/examples/skywalking-banyandb/graphloom-state/879ee04f-e57/agent-sessions/op-107-1d22fc77",
       "settledAt": "2026-10-02T15:31:04.558Z"
     },
     {
@@ -1476,7 +1476,7 @@
       "executorId": "graphloom.coding-agent/run",
       "status": "ok",
       "sessionRef": "pi-ac8026238f6b",
-      "sessionDir": "/mnt/d/graphloom/examples/skywalking-banyandb/graphloom-state/879ee04f-e57/agent-sessions/op-199-5fc4315f",
+      "sessionDir": "/work/graphloom/examples/skywalking-banyandb/graphloom-state/879ee04f-e57/agent-sessions/op-199-5fc4315f",
       "settledAt": "2026-10-02T15:43:00.775Z"
     },
     {
@@ -1488,7 +1488,7 @@
       "executorId": "graphloom.coding-agent/run",
       "status": "ok",
       "sessionRef": "pi-694cff3d22d2",
-      "sessionDir": "/mnt/d/graphloom/examples/skywalking-banyandb/graphloom-state/879ee04f-e57/agent-sessions/op-304-04217735",
+      "sessionDir": "/work/graphloom/examples/skywalking-banyandb/graphloom-state/879ee04f-e57/agent-sessions/op-304-04217735",
       "settledAt": "2026-10-02T15:50:01.164Z"
     },
     {
@@ -1500,7 +1500,7 @@
       "executorId": "graphloom.coding-agent/run",
       "status": "ok",
       "sessionRef": "pi-7e0056699bb1",
-      "sessionDir": "/mnt/d/graphloom/examples/skywalking-banyandb/graphloom-state/879ee04f-e57/agent-sessions/op-388-cbfcc553",
+      "sessionDir": "/work/graphloom/examples/skywalking-banyandb/graphloom-state/879ee04f-e57/agent-sessions/op-388-cbfcc553",
       "settledAt": "2026-10-02T15:57:09.998Z"
     },
     {
@@ -1512,7 +1512,7 @@
       "executorId": "graphloom.coding-agent/run",
       "status": "ok",
       "sessionRef": "pi-ce57c4416bc1",
-      "sessionDir": "/mnt/d/graphloom/examples/skywalking-banyandb/graphloom-state/879ee04f-e57/agent-sessions/op-501-3f024352",
+      "sessionDir": "/work/graphloom/examples/skywalking-banyandb/graphloom-state/879ee04f-e57/agent-sessions/op-501-3f024352",
       "settledAt": "2026-10-02T16:03:48.997Z"
     },
     {
@@ -1524,7 +1524,7 @@
       "executorId": "graphloom.coding-agent/run",
       "status": "failed",
       "sessionRef": "pi-fb8dfd3bd3f7",
-      "sessionDir": "/mnt/d/graphloom/examples/skywalking-banyandb/graphloom-state/879ee04f-e57/agent-sessions/op-586-5e83c3ff",
+      "sessionDir": "/work/graphloom/examples/skywalking-banyandb/graphloom-state/879ee04f-e57/agent-sessions/op-586-5e83c3ff",
       "settledAt": "2026-10-02T16:05:15.304Z"
     }
   ],

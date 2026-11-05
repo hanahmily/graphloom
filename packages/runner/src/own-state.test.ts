@@ -18,20 +18,20 @@ describe("resolveOwnStateDirs", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  async function setup(): Promise<{ home: string; tetrate: string }> {
+  async function setup(): Promise<{ home: string; custom: string }> {
     dir = await mkdtemp(path.join(os.tmpdir(), "gl-own-state-"));
     const home = path.join(dir, "home");
-    const tetrate = path.join(home, ".claude-tetrate");
+    const custom = path.join(home, ".claude-custom");
     await mkdir(path.join(home, ".claude"), { recursive: true });
-    await mkdir(tetrate, { recursive: true });
+    await mkdir(custom, { recursive: true });
     await writeFile(path.join(home, ".claude.json"), "{}");
-    return { home, tetrate };
+    return { home, custom };
   }
 
   it("keeps the dir the harness falls back to through CLAUDE_CONFIG_DIR, not only the GRAPHLOOM_ name", async () => {
-    const { home, tetrate } = await setup();
-    const dirs = resolveOwnStateDirs(own, { CLAUDE_CONFIG_DIR: tetrate }, home);
-    expect(dirs).toContain(tetrate);
+    const { home, custom } = await setup();
+    const dirs = resolveOwnStateDirs(own, { CLAUDE_CONFIG_DIR: custom }, home);
+    expect(dirs).toContain(custom);
     expect(dirs).toContain(path.join(home, ".claude"));
   });
 
@@ -41,9 +41,9 @@ describe("resolveOwnStateDirs", () => {
   });
 
   it("drops paths that do not exist and names a path once", async () => {
-    const { home, tetrate } = await setup();
-    const dirs = resolveOwnStateDirs(own, { GRAPHLOOM_CLAUDE_CONFIG_DIR: tetrate, CLAUDE_CONFIG_DIR: tetrate, CODEX_HOME: path.join(home, "missing") }, home);
-    expect(dirs.filter((d) => d === tetrate)).toHaveLength(1);
+    const { home, custom } = await setup();
+    const dirs = resolveOwnStateDirs(own, { GRAPHLOOM_CLAUDE_CONFIG_DIR: custom, CLAUDE_CONFIG_DIR: custom, CODEX_HOME: path.join(home, "missing") }, home);
+    expect(dirs.filter((d) => d === custom)).toHaveLength(1);
     expect(dirs).not.toContain(path.join(home, "missing"));
     expect(dirs).not.toContain(path.join(home, ".codex"));
   });

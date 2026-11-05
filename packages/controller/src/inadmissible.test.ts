@@ -1455,7 +1455,7 @@ describe.skipIf(confinementUnavailable !== undefined)("supervisor jobs stay insi
     const previous = process.env.GOENV;
     process.env.GOENV = operatorGoEnv;
     try {
-      const goEnvW = { ...writeFileJob("unused", ""), input: { commands: [{ id: "go-env", argv: ["go", "env", "-w", "GOCACHE=/mnt/d/graphloom-go/cache"] }] } };
+      const goEnvW = { ...writeFileJob("unused", ""), input: { commands: [{ id: "go-env", argv: ["go", "env", "-w", "GOCACHE=/work/graphloom-go/cache"] }] } };
       const { rejections, state } = await supervised("", [goEnvW, insideJob()], "host-scope-go-env-w");
       expect(rejections[1]).toMatch(/^host change needs the operator: .*rewrites the operator's global Go configuration/);
       expect(await readFile(operatorGoEnv, "utf8")).toBe("GOPROXY=https://operator.example\n");

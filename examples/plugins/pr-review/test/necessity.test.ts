@@ -343,7 +343,7 @@ describe("the design-document globs", () => {
   });
 
   it("name real BanyanDB documents when a checkout of the repository is at hand", () => {
-    const repo = "/mnt/d/skywalking-banyandb";
+    const repo = "/work/skywalking-banyandb";
     if (!existsSync(repo)) return;
     for (const doc of parseProfile(BANYANDB).questions.designDocs) expect(existsSync(`${repo}/${doc}`), doc).toBe(true);
   });

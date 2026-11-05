@@ -11,13 +11,13 @@ are superseded. Historical Go code lives under `legacy/go/` and is not built by 
 | Path | Package | Role |
 |---|---|---|
 | `packages/sdk` | `@graphloom/sdk` | Public value/wire contracts, operations, scripted GraphPlugin |
-| `packages/controller` | `@graphloom/controller` | Durable state, admission, receipts (scaffold) |
-| `packages/plugin-host` | `@graphloom/plugin-host` | Isolated child process adapter (scaffold) |
+| `packages/controller` | `@graphloom/controller` | Durable state, admission, receipts |
+| `packages/plugin-host` | `@graphloom/plugin-host` | Isolated child process adapter |
 | `packages/supervisor` | `@graphloom/supervisor` | Recovery supervisor: harness-neutral host (`createSupervisorHost`) with the Pi harness (any Pi provider/model: Anthropic, OpenAI, Gemini, DeepSeek, Kimi, MiniMax, custom `models.json` endpoints), the Claude Code harness (your own `claude` login, under bwrap), and the Codex harness (your own `codex` login, under bwrap); the plugin's preference selects one per run ([supervisor harnesses](docs/design-supervisor-harnesses.md)) |
-| `packages/runner` | `@graphloom/runner` | Jobs and scopes (scaffold) |
+| `packages/runner` | `@graphloom/runner` | Jobs and scopes |
 | `packages/agent-harness` | `@graphloom/agent-harness` | Agent session drivers (Claude Code, Codex, Pi): processes, stream protocols, session capture, failure classification; vendored into `executors/coding-agent` |
 | `packages/testkit` | `@graphloom/testkit` | Unpublished test fixtures (repos, tasks, bundles, scripted agents, fake provider); tests only |
-| `apps/graphloom` | `@graphloom/cli` | CLI composition root (stub) |
+| `apps/graphloom` | `@graphloom/cli` | CLI: run, resume, check, doctor, setup, rehearse, task, session and more |
 
 ```sh
 npm ci
@@ -49,7 +49,7 @@ an approval a graph declared as data. Tests of these use stub `claude`/`codex`
 binaries and a temporary `HOME`, never the real login; the one live check of
 Claude Code's fork is opt-in (`GRAPHLOOM_LIVE_CLAUDE_FORK=1`).
 
-The proposed `pr-review` graph (no human in a run: one run reviews one head in two
+The `pr-review` graph (0.23.x, implemented) (no human in a run: one run reviews one head in two
 rounds. Round 1 is a neutral change report, questions and their answers on an
 incoming pull request, the first question being whether the change is necessary;
 issues in it are posted and end the run. Otherwise round 2, three aspect reviewers
@@ -66,7 +66,7 @@ which its diagram job draws with; `vendor/` directories are exempt from the SPDX
 header check and listed in `THIRD_PARTY_NOTICES`.
 
 Installable releases (tarball, install layout, upgrade, local release
-procedure) follow the proposed [release design](docs/design-release.md).
+procedure) follow the [release design](docs/design-release.md).
 `scripts/release.sh build <version>` builds the release assets locally into
 `release-out/<version>/` (gate on the pinned Node, license and content checks,
 smoke tests with no `node` on `PATH`); it publishes nothing.

@@ -214,7 +214,7 @@ repository out, and a `bench-gates` final step.
     read-only at `/go/pkg/mod`: `GRAPHLOOM_BENCH_GOMODCACHE`, else the
     operator's cache named by the `file://` proxy a confined job is given (a
     confined job's own `GOMODCACHE` is a run-scoped copy), else `go env
-    GOMODCACHE`, which on this machine is `/mnt/d/gomodcache`; module downloads
+    GOMODCACHE`, the standard Go module cache; module downloads
     are off (`GOPROXY=off`, `GOTOOLCHAIN=local`);
   - runs `make bench-ql-report` in `docker run --rm --cpus=4 --memory=8g
     --memory-swap=8g`, as the invoking user, with every user-level directory

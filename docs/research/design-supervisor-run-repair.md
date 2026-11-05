@@ -1,6 +1,6 @@
 # Run-wide supervisor repair
 
-Terminology adapted for GraphLoom; implementation references below describe Vajra.
+Terminology adapted for GraphLoom; implementation references below describe an earlier orchestrator.
 
 Status: proposed, 2026-09-21. This document defines the next recovery design; it
 is not a description of capabilities already deployed. It supersedes the
@@ -489,7 +489,7 @@ supervisor:
 ```
 
 These keys are proposed and require schema, config validation, and implementation;
-putting them in today's `vajra.yaml` would not enable this design.
+putting them in that orchestrator's current configuration file would not enable this design.
 
 **Eight remediation attempts total per run is the main limit**, shared by every
 milestone, model, worker, failure family, and resumed process. It is not eight per

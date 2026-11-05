@@ -174,7 +174,7 @@ describe("code review records one entry per problem (issue 182)", () => {
 });
 
 // The real run's evidence, when the state file is on this machine: round 1 recorded 14 entries for about 8 problems.
-const REPLAY = process.env.ISSUE_FIX_REPLAY_C44B4AE7 ?? "/mnt/d/skywalking-banyandb/graphloom-state/c44b4ae7-5d1/state.json";
+const REPLAY = process.env.ISSUE_FIX_REPLAY_C44B4AE7 ?? "/work/skywalking-banyandb/graphloom-state/c44b4ae7-5d1/state.json";
 describe.skipIf(!existsSync(REPLAY))("replay of run c44b4ae7-5d1 (issue 182)", () => {
   it("replays the pre-0.10 evidence as it was: no merging, ids and verdicts untouched", () => {
     const state = JSON.parse(readFileSync(REPLAY, "utf8")) as { evidence: EvidenceRecord[] };
