@@ -1,6 +1,6 @@
 {
   "name": "@graphloom/plugin-hello",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Hello Write→Review source-repairable graph plugin",
   "license": "Apache-2.0",
   "type": "module",
