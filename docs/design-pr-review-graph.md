@@ -855,7 +855,11 @@ The section follows a few rules:
   files in path order, with ids derived from the parent's (`static-go-2` gives
   `static-go-2a` and `static-go-2b`, those `static-go-2aa`, and so on). The plan
   is a function of the recorded evidence alone, so the validators recompute the
-  same batches. A single file whose own report still does not fit is not a
+  same batches. Only a run of the graph's own command stands for a batch (same
+  script, id, hunks, language, and the current plugin root); a command another
+  actor ran under the same id, or one built with an older plugin root, is ignored
+  and the batch runs again ([0.23.3](#version-0233-only-the-graphs-own-static-runs-stand-for-a-batch)).
+  A single file whose own report still does not fit is not a
   failure of the run: its functions are not measured, and the section says
   `Not measured: <path> (the static tool's output for <path> did not fit one
   command report)`, as it does for a file whose path cannot be observed. Each
@@ -3540,6 +3544,19 @@ What 0.11 does, where this document leaves it open:
   as before, so their size is bounded by what one command carries; a report or
   Q&A that does not fit still stops the run "incompatible task" and says so.
   (0.12 lifts this: [§6.6](#66-output), multi-part writes.)
+
+### Version 0.23.3: only the graph's own static runs stand for a batch
+
+A live run stopped at Report: every attempt failed with `static-typescript-1: the tool measured other changed lines
+than the diff's`, and supervisor episodes repeated. The supervisor had run a diagnostic job and named its command
+`static-typescript-1`; the graph took the latest command of that id as the batch's result, so the diagnostic (three
+argv entries, no hunks) was judged as the measurement, and since a run of the id existed the real measurement was never
+dispatched again. A static command (head or base side) now stands for its batch only when it is the graph's own: the
+same script, the batch id, the same hunks, the batch's language and the plugin root the tools run from now (the
+validators, which do not know the root, check the rest). Any other run of that id, including one built with another
+plugin root before an upgrade, is ignored, not a problem, and the batch is dispatched again. The same rule applies to the
+changed-lines diff and, in Fetch, to the checkout, ledger-read and workspace commands: their argv must be the graph's. No
+step, name, order or outcome changes.
 
 ### Version 0.23.2: the confined TypeScript metrics resolve `typescript` in a release install
 

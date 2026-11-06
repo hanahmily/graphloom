@@ -132,11 +132,19 @@ export function staticCommand(batch: Batch, hunks: Hunks, pluginRoot: string, ge
   return { id: batch.id, argv: ["sh", "-c", STATIC_SCRIPT, batch.id, String(parts.length), ...parts, batch.language === "go" ? "go" : "ts", pluginRoot, generated.join(","), nodeBin, goBin] };
 }
 
-/** The hunk text a static command measured, read back from its argv. */
-export function measuredHunks(argv: readonly string[]): string | undefined {
+/**
+ * Whether a recorded command is this graph's own static command for a batch: the same script, the batch id, the batch's
+ * hunks, the batch's language and, when the caller knows the plugin root the tools run from now, that root. A command a
+ * supervisor or an operator ran under the same id (a diagnostic named like the batch) or a command built with another
+ * plugin root (before an upgrade) is not the batch's result; it is ignored and the batch is dispatched again.
+ */
+function ownStaticArgv(argv: readonly string[], script: string, id: string, language: Language, hunkText: string, extra: number, toolRoot: string | undefined): boolean {
   const n = Number(argv[4]);
-  if (argv[3] === undefined || !Number.isSafeInteger(n) || n < 0) return undefined;
-  return argv.slice(5, 5 + n).join("");
+  if (argv[0] !== "sh" || argv[1] !== "-c" || argv[2] !== script || argv[3] !== id) return false;
+  if (!Number.isSafeInteger(n) || n < 0 || argv.length !== 5 + n + 5 + extra) return false;
+  if (argv.slice(5, 5 + n).join("") !== hunkText) return false;
+  if (argv[5 + n] !== (language === "go" ? "go" : "ts")) return false;
+  return toolRoot === undefined || argv[5 + n + 1] === toolRoot;
 }
 
 // ---- the base side of a modified function (design §6.8)
@@ -221,9 +229,9 @@ export function staticBaseCommand(b: BaseBatch, base: string, pluginRoot: string
 
 type BaseRead = { path: string; text: string } | { path: string; unavailable: string };
 
-function runAfter(evidence: readonly EvidenceRecord[], id: string, afterRef: string): CommandRun | undefined {
+function runAfter(evidence: readonly EvidenceRecord[], id: string, afterRef: string, own: (run: CommandRun) => boolean = () => true): CommandRun | undefined {
   const after = evidence.findIndex((e) => e.ref === afterRef);
-  return commandRuns(evidence, id).filter((r) => evidence.findIndex((e) => e.ref === r.record.ref) > after).at(-1);
+  return commandRuns(evidence, id).filter((r) => own(r) && evidence.findIndex((e) => e.ref === r.record.ref) > after).at(-1);
 }
 
 /**
@@ -231,7 +239,7 @@ function runAfter(evidence: readonly EvidenceRecord[], id: string, afterRef: str
  * measure, or the head records with their base values. A base that cannot be read or measured never fails the report:
  * the row says why its base is not known, and shows the head's value alone.
  */
-function baseState(evidence: readonly EvidenceRecord[], records: readonly MetricsRecord[], files: readonly PullFile[], afterRef: string, profile: Pick<Profile, "metrics">):
+function baseState(evidence: readonly EvidenceRecord[], records: readonly MetricsRecord[], files: readonly PullFile[], afterRef: string, profile: Pick<Profile, "metrics">, toolRoot?: string):
   | { state: "baseFiles"; commands: EnvironmentCommand[] }
   | { state: "baseTools"; batches: BaseBatch[]; base: string }
   | { state: "done"; records: MetricsRecord[] } {
@@ -271,9 +279,11 @@ function baseState(evidence: readonly EvidenceRecord[], records: readonly Metric
   const toRun: BaseBatch[] = [];
   const documents = new Map<string, { metrics: Map<string, BaseMetrics> } | { unavailable: string }>();
   for (const b of batches) {
-    const run = runAfter(evidence, b.id, afterRef);
-    const argv = run?.command.argv ?? [];
-    if (run === undefined || argv.at(-2) !== base || argv.at(-1) !== b.path || measuredHunks(argv) !== formatHunkFile(wholeFile(b.path, b.text))) {
+    const run = runAfter(evidence, b.id, afterRef, (r) => {
+      const argv = r.command.argv;
+      return ownStaticArgv(argv, STATIC_BASE_SCRIPT, b.id, b.language, formatHunkFile(wholeFile(b.path, b.text)), 2, toolRoot) && argv.at(-2) === base && argv.at(-1) === b.path;
+    });
+    if (run === undefined) {
       toRun.push(b);
       continue;
     }
@@ -340,14 +350,15 @@ export function notRunReasons(profile: Pick<Profile, "metrics">): Reasons {
 }
 
 function diffRun(evidence: readonly EvidenceRecord[]): CommandRun | undefined {
-  return commandRuns(evidence, COMMAND.metricsDiff).at(-1);
+  const own = metricsDiffCommand().argv;
+  return commandRuns(evidence, COMMAND.metricsDiff).filter((r) => r.command.argv.length === own.length && r.command.argv.every((a, i) => a === own[i])).at(-1);
 }
 
-/** The newest run of a batch id since the diff. */
-function runSince(evidence: readonly EvidenceRecord[], id: string): CommandRun | undefined {
+/** The newest run of a batch id since the diff that is the graph's own command for it. */
+function runSince(evidence: readonly EvidenceRecord[], id: string, own: (run: CommandRun) => boolean): CommandRun | undefined {
   const diff = diffRun(evidence);
   const after = diff === undefined ? -1 : evidence.findIndex((e) => e.ref === diff.record.ref);
-  return commandRuns(evidence, id).filter((r) => evidence.findIndex((e) => e.ref === r.record.ref) > after).at(-1);
+  return commandRuns(evidence, id).filter((r) => own(r) && evidence.findIndex((e) => e.ref === r.record.ref) > after).at(-1);
 }
 
 /**
@@ -355,12 +366,13 @@ function runSince(evidence: readonly EvidenceRecord[], id: string): CommandRun |
  * by its two halves, recursively, so a validator recomputes the same plan. A single file whose report is still cut stays
  * a leaf (the caller reports it as not measured, never as a failure); `splits` are the refs of the cut runs.
  */
-function planBatches(evidence: readonly EvidenceRecord[], initial: readonly Batch[]): { leaves: Batch[]; runs: Map<string, CommandRun>; splits: string[] } {
+function planBatches(evidence: readonly EvidenceRecord[], initial: readonly Batch[], hunks: Hunks, toolRoot: string | undefined): { leaves: Batch[]; runs: Map<string, CommandRun>; splits: string[] } {
   const leaves: Batch[] = [];
   const runs = new Map<string, CommandRun>();
   const splits: string[] = [];
   const visit = (b: Batch): void => {
-    const run = runSince(evidence, b.id);
+    const text = formatHunkFile(new Map(b.paths.flatMap((p) => (hunks.has(p) ? [[p, hunks.get(p)!] as const] : []))));
+    const run = runSince(evidence, b.id, (r) => ownStaticArgv(r.command.argv, STATIC_SCRIPT, b.id, b.language, text, 0, toolRoot));
     if (run !== undefined && succeeded(run.command) && reportText(run).truncated && b.paths.length > 1) {
       splits.push(run.record.ref);
       for (const half of splitBatch(b)) visit(half);
@@ -385,6 +397,8 @@ export function measurementState(
   profile: Pick<Profile, "metrics">,
   /** Whether a failed run may run again because the operator resumed since it failed (the graph passes it; validators do not). */
   canRetry?: (run: CommandRun) => boolean,
+  /** The plugin root the static tools run from now (the graph passes it; validators do not): a run built with another root is stale. */
+  toolRoot?: string,
 ): MeasurementState {
   const m = measurable(files, profile);
   if (m.files.length === 0) return { state: "none", reason: "no changed file is in a measured language" };
@@ -404,7 +418,7 @@ export function measurementState(
   const all = hunksFromUnifiedDiff(text.text, { headersOnly: true });
   const wanted = new Set(m.files.map((f) => f.path));
   const hunks: Hunks = new Map([...all].filter(([p]) => wanted.has(p)));
-  const { leaves: batches, runs, splits } = planBatches(evidence, batchesOf(m));
+  const { leaves: batches, runs, splits } = planBatches(evidence, batchesOf(m), hunks, toolRoot);
   if (batches.some((b) => !runs.has(b.id))) return { state: "tools", batches: batches.filter((b) => !runs.has(b.id)), hunks };
   const problems: string[] = [];
   const refs = [diff.record.ref, ...splits];
@@ -440,12 +454,7 @@ export function measurementState(
       continue;
     }
     const batchHunks: Hunks = new Map(b.paths.flatMap((p) => (hunks.has(p) ? [[p, hunks.get(p)!] as const] : [])));
-    // The hunks the tool measured are the hunks of the diff, not whatever the argv carried.
-    const argvHunks = measuredHunks(run.command.argv);
-    if (argvHunks !== formatHunkFile(batchHunks)) {
-      problems.push(`${b.id}: the tool measured other changed lines than the diff's`);
-      continue;
-    }
+    // The run is the graph's own command for this batch (planBatches), so the hunks it measured are the diff's.
     const result = validateMetricsDocument(doc, {
       readFile: (p) => {
         const f = latestFile(evidence, p);
@@ -477,7 +486,7 @@ export function measurementState(
   const missing = m.files.map((f) => f.path).filter((p) => !covered.has(p) && !overflowed.includes(p) && hunks.has(p));
   if (missing.length > 0) return { state: "failed", problems: [`the tools accounted for none of: ${missing.slice(0, 5).join(", ")}`], refs, retry: [] };
   // The modified functions' values at the base (design §6.8): never a failure, only a row that says why its base is not known.
-  const withBase = baseState(evidence, records, files, diff.record.ref, profile);
+  const withBase = baseState(evidence, records, files, diff.record.ref, profile, toolRoot);
   if (withBase.state === "baseFiles") return { state: "baseFiles", commands: withBase.commands };
   if (withBase.state === "baseTools") return { state: "baseTools", batches: withBase.batches, base: withBase.base };
   const measured = withBase.records;
