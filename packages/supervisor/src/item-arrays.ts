@@ -1,7 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
-import { builtinPinForKind, type ExecutorView, type GraphDecision, type JobKind } from "@graphloom/sdk";
+import {
+  builtinPinForKind,
+  MAX_JOB_TIMEOUT_MS,
+  MAX_TIMEOUT_CONTINUATIONS,
+  type ExecutorView,
+  type GraphDecision,
+  type JobKind,
+} from "@graphloom/sdk";
 
 /**
  * The supervisor's model encodes JSON arrays inside a tool call's untyped
@@ -83,7 +90,10 @@ function walk(value: Json, schema: Json, at: string, paths: string[]): Json {
   // The same untyped encoding stringifies scalars: read "120000" and "true" against an integer or boolean position.
   if (typeof current === "string" && !types.includes("string")) {
     const scalar = scalarOf(current, types);
-    if (scalar !== undefined) {
+    const inRange =
+      typeof scalar !== "number" ||
+      ((typeof schema.minimum !== "number" || scalar >= schema.minimum) && (typeof schema.maximum !== "number" || scalar <= schema.maximum));
+    if (scalar !== undefined && inRange) {
       paths.push(`${at} (string to ${typeof scalar})`);
       return scalar;
     }
@@ -121,6 +131,29 @@ function walk(value: Json, schema: Json, at: string, paths: string[]): Json {
   return current;
 }
 
+/**
+ * The job's own typed fields (JobSpec) with the limits the controller enforces. A value outside a range is never
+ * converted: it stays as written and is refused with the range, as before.
+ */
+const JOB_FIELD_SCHEMA: Record<string, Json> = {
+  type: "object",
+  properties: {
+    readOnly: { type: "boolean" },
+    timeoutMs: { type: "integer", minimum: 1, maximum: MAX_JOB_TIMEOUT_MS },
+    timeoutContinuations: { type: "integer", minimum: 0, maximum: MAX_TIMEOUT_CONTINUATIONS },
+    confinement: {
+      type: "object",
+      properties: {
+        network: { type: "boolean" },
+        binds: { type: "array", items: { type: "object", properties: { readOnly: { type: "boolean" } } } },
+        cpus: { type: "number", maximum: 1024 },
+        pids: { type: "integer", minimum: 1, maximum: 4_194_304 },
+        wallClockMs: { type: "integer", minimum: 1, maximum: MAX_JOB_TIMEOUT_MS },
+      },
+    },
+  },
+};
+
 /** The executor id a job targets: its own pin, else its kind's built-in default (as admission resolves it). */
 function targetExecutorId(job: Record<string, Json>): string | undefined {
   const pin = job.executor;
@@ -134,18 +167,21 @@ export function normalizeJobInput<T extends object>(
   job: T,
   executors: readonly ExecutorView[] | undefined,
 ): { job: T; paths: string[] } {
+  const paths: string[] = [];
+  // The job's own fields first: they are typed whatever executor the job targets.
+  const original = job;
+  job = walk(job, JOB_FIELD_SCHEMA, "job", paths) as T;
   const record = job as Record<string, Json>;
-  if (executors === undefined || record.input === undefined) return { job, paths: [] };
+  if (executors === undefined || record.input === undefined) return { job, paths };
   const id = targetExecutorId(record);
   const schema = id === undefined ? undefined : executors.find((e) => e.id === id)?.inputShape?.schema;
-  if (schema === undefined) return { job, paths: [] };
-  const paths: string[] = [];
+  if (schema === undefined) return { job, paths };
   const walked = walk(record.input, schema, "job.input", paths);
   const strays = adoptStrays(record, walked, schema as Record<string, Json>, paths);
   // What moved in arrives with the same encoding, so it is read against the schema too.
   const input = strays.input === walked ? walked : walk(strays.input, schema, "job.input", paths);
   const adopted = strays.job;
-  return paths.length === 0 ? { job, paths } : { job: { ...adopted, input } as T, paths };
+  return job === original && paths.length === 0 ? { job, paths } : { job: { ...adopted, input } as T, paths };
 }
 
 /** A dispatch decision with its job input normalized; any other proposal is returned as it is. */
@@ -161,5 +197,5 @@ export function normalizeProposalInput<P extends object>(
 
 /** The sentence reported back to the model and recorded with the episode. */
 export function normalizationNote(paths: readonly string[]): string {
-  return `Normalized the job input at ${paths.join(", ")} ({"item": …} read as arrays, stringified numbers and booleans as typed values, stray job fields moved into the input); pass typed JSON and keep each field inside its own object next time.`;
+  return `Normalized the job input at ${paths.join(", ")} ({"item": …} read as arrays, stringified numbers and booleans as typed values, stray job fields moved into the input, and the job\'s own timeoutMs, timeoutContinuations, readOnly and confinement limits as numbers and booleans); pass typed JSON and keep each field inside its own object next time.`;
 }

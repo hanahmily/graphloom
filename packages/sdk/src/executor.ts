@@ -393,7 +393,9 @@ export function pinJobExecutor(job: JobSpec): JobSpec {
     job.timeoutMs !== undefined &&
     (typeof job.timeoutMs !== "number" || !Number.isSafeInteger(job.timeoutMs) || job.timeoutMs < 1 || job.timeoutMs > MAX_JOB_TIMEOUT_MS)
   ) {
-    throw new Error(`job timeoutMs must be a whole number of milliseconds from 1 to ${MAX_JOB_TIMEOUT_MS}`);
+    throw new Error(
+      `job timeoutMs must be a whole number of milliseconds (not seconds), as a JSON number, from 1 to ${MAX_JOB_TIMEOUT_MS}; got ${JSON.stringify(job.timeoutMs)}`,
+    );
   }
   if (job.timeoutContinuations !== undefined) {
     const n = job.timeoutContinuations;

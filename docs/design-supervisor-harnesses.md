@@ -297,7 +297,14 @@ existing JSON-fallback path, unchanged:
 1. `normalizeProposalInput` (the `{"item": …}` array encoding, numbers and
    booleans written as strings, and an input field left on the job itself, such
    as a lone command's `id`, all guided by each executor's declared input
-   schema; the live run c68993c4-021 stalled on the last two).
+   schema; the live run c68993c4-021 stalled on the last two). The job's own
+   typed fields get the same treatment, against the limits the controller
+   enforces: `timeoutMs`, `timeoutContinuations`, `readOnly` and the numeric and
+   boolean `confinement` fields. A string that spells a whole number (`"120000"`,
+   `"30000.0"`) or `"true"`/`"false"` becomes the typed value only when it is in
+   range; anything else, such as `"0"`, `"1.5"` or `90000000`, stays as written
+   and is refused with the valid range. The live run also stopped on
+   `"timeoutMs":"120000"`. Every change is named in the note returned to the model.
 2. `localRefusal`: write scope, continuation, escaping observe paths.
 3. `admission.check`: the controller's preconditions, the grounding rule, and
    repeated no-progress proposals

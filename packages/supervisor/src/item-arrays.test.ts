@@ -228,3 +228,56 @@ describe("stringified scalars and stray job fields", () => {
     expect(normalizeJobInput({ kind: "command", executor: { id: "graphloom.command/run" }, input: has, id: "x" }, [COMMAND_SHAPE]).paths).toEqual([]);
   });
 });
+
+/** The live proposals of run c68993c4-021 (final episode): `"timeoutMs":"120000"` on the job, refused as inadmissible. */
+describe("stringified job-level fields", () => {
+  const base = {
+    stageId: "report",
+    kind: "command",
+    purpose: "diagnostic",
+    executor: { id: "graphloom.command/run" },
+    instruction: "Run the pinned metric job.",
+    input: { commands: [{ id: "m", argv: ["sh", "-c", SCRIPT] }] },
+  };
+  const normalize = (extra: Record<string, unknown>) =>
+    normalizeJobInput({ ...base, ...extra }, [COMMAND_SHAPE]) as { job: Record<string, unknown>; paths: string[] };
+
+  it("admits the live job whose timeoutMs is a string, and reports it", async () => {
+    const noted: string[][] = [];
+    const { toolbox, execute } = dispatchTool([COMMAND_SHAPE], noted);
+    const result = await execute("1", { reason: "metric", job: { ...base, readOnly: "true", timeoutMs: "120000" } });
+    expect(result.terminate).toBe(true);
+    const job = jobOf(toolbox) as unknown as Record<string, unknown>;
+    expect(job.timeoutMs).toBe(120000);
+    expect(job.readOnly).toBe(true);
+    expect(noted).toEqual([["job.readOnly (string to boolean)", "job.timeoutMs (string to number)"]]);
+    expect(result.content[0]!.text).toContain("job.timeoutMs");
+  });
+
+  it("converts a whole-number float string and the other typed job fields, even with no catalog", () => {
+    const { job, paths } = normalizeJobInput(
+      { ...base, timeoutMs: "30000.0", timeoutContinuations: "2", confinement: { kind: "bwrap", network: "false", mask: [], binds: [{ path: "/x", readOnly: "true" }] } },
+      undefined,
+    );
+    const j = job as Record<string, unknown>;
+    expect(j.timeoutMs).toBe(30000);
+    expect(j.timeoutContinuations).toBe(2);
+    expect(j.confinement).toEqual({ kind: "bwrap", network: false, mask: [], binds: [{ path: "/x", readOnly: true }] });
+    expect(paths).toHaveLength(4);
+  });
+
+  it("leaves what is not cleanly convertible as written", () => {
+    for (const timeoutMs of ["0", "86400001", "1.5", "2m", "", 1.5, 0, 90_000_000]) {
+      const { job, paths } = normalize({ timeoutMs });
+      expect(job.timeoutMs).toBe(timeoutMs);
+      expect(paths).toEqual([]);
+    }
+    expect(normalize({ readOnly: "yes", timeoutContinuations: "4" }).paths).toEqual([]);
+  });
+
+  it("does not touch a field that is already typed", () => {
+    const { job, paths } = normalize({ timeoutMs: 30_000, readOnly: false });
+    expect(paths).toEqual([]);
+    expect(job.timeoutMs).toBe(30_000);
+  });
+});
