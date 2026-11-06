@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import os from "node:os";
@@ -48,6 +48,8 @@ import { rehearsal } from "../src/rehearsal.js";
 const execFileAsync = promisify(execFile);
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../../../..");
+/** The version the plugin declares, read from its manifest so a release bump never edits this test. */
+const ISSUE_FIX_VERSION: string = (JSON.parse(readFileSync(path.join(here, "..", "graphloom.manifest.json"), "utf8")) as { version: string }).version;
 const BANYANDB = shippedProfile("banyandb");
 const GRAPHLOOM = shippedProfile("graphloom");
 const banyandb = parseProfile(BANYANDB);
@@ -82,7 +84,7 @@ describe("the banyandb profile", () => {
   it("describes the graph identity and finds the plugin's bundled open-code-review first", () => {
     const ours = createGraph().describe(BANYANDB);
     expect(ours.environment?.checks?.find((c) => c.id === "ocr")?.argv.join(" ")).toContain("scripts/ocr-path.sh");
-    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.16.2", privateStateSchema: "issue-fix-private-v1" });
+    expect(ours).toMatchObject({ graphId: "issue-fix", version: ISSUE_FIX_VERSION, privateStateSchema: "issue-fix-private-v1" });
   });
 
   it("declares its agent roles from the resolved profile for graphloom doctor --task (0.15.0)", () => {
@@ -415,7 +417,7 @@ describe("profiles", () => {
   it("ships the banyandb-ql profile in the manifest's pinned files and describes it under the graph's version (#197)", async () => {
     const manifest = JSON.parse(await readFile(path.join(here, "../graphloom.manifest.json"), "utf8")) as { digests: { files: Record<string, string> } };
     expect(Object.keys(manifest.digests.files)).toContain("profiles/banyandb-ql.json");
-    expect(createGraph().describe(shippedProfile("banyandb-ql"))).toMatchObject({ graphId: "issue-fix", version: "0.16.2" });
+    expect(createGraph().describe(shippedProfile("banyandb-ql"))).toMatchObject({ graphId: "issue-fix", version: ISSUE_FIX_VERSION });
   });
 });
 

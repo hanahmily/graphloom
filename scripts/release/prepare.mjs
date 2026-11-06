@@ -26,6 +26,10 @@
  *   node scripts/release/prepare.mjs check-components --current <json> --previous <release.json> [--src <built tree>] [--fixtures-root <dir>]
  *        The component bump rule (§3), and for a changed stateFormat a
  *        migrator and a fixture (§6 step 2).
+ *   node scripts/release/prepare.mjs bump-components --root <repo> --current <json> --previous <release.json>
+ *        Raises the patch version of each executor and plugin that changed since
+ *        the previous release at an unchanged version (§3), with every place
+ *        its version lives. Prints "<kind> <name> <from> <to>" per component.
  *   node scripts/release/prepare.mjs latest --tags <file> [--below <v>]
  *        The newest MAJOR.MINOR.PATCH among `v<version>` tags, one per line.
  */
@@ -129,6 +133,103 @@ export function bumpVersions(root, version) {
     }
   }
   return changed;
+}
+
+/** `^`/`~` kept, the digits replaced. */
+const withRange = (range, version) => `${/^[\^~]/.test(range) ? range[0] : ""}${version}`;
+
+export function patchBump(version) {
+  const [major, minor, patch] = parseVersion(version);
+  return `${major}.${minor}.${patch + 1}`;
+}
+
+/** Source files under a plugin's `src/` (not vendored trees), for the graph's version constant. */
+function pluginSources(dir) {
+  const out = [];
+  const walk = (d) => {
+    for (const entry of readdirSync(d, { withFileTypes: true })) {
+      const full = path.join(d, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name !== "node_modules" && entry.name !== "vendor") walk(full);
+      } else if (entry.name.endsWith(".ts")) out.push(full);
+    }
+  };
+  if (existsSync(path.join(dir, "src"))) walk(path.join(dir, "src"));
+  return out;
+}
+
+/**
+ * §3 and §6 step 2: after the lockstep bump, raises the patch version of every
+ * executor and plugin whose digest or manifest differs from `previous`
+ * (release.json) at an unchanged version, in every place the version lives:
+ * its package.json, a plugin's graph version constant (`GRAPH_VERSION = "x"`
+ * or a `version: "x"` line) and own lockfile, and the dependency pins on an
+ * executor in other workspaces. A component whose version already differs
+ * from the previous release's is left alone. `current` has the release.json
+ * shape (digests of the tree as it is now). Returns `{ kind, name, from, to }`.
+ */
+export function bumpComponents(root, current, previous) {
+  const bumped = [];
+  const dirs = workspaceDirs(root);
+  const wasExecutor = new Map((previous.executors ?? []).map((e) => [e.package, e]));
+  const wasPlugin = new Map((previous.plugins ?? []).map((p) => [p.graphId, p]));
+  const pins = new Map();
+  const bumpPackage = (rel, to) => {
+    const file = path.join(root, rel, "package.json");
+    const pkg = readJson(file);
+    pkg.version = to;
+    writeJson(file, pkg);
+  };
+  for (const e of current.executors ?? []) {
+    const was = wasExecutor.get(e.package);
+    if (!was || was.digest === e.digest || was.version !== e.version) continue;
+    const rel = dirs.find((d) => d.startsWith("executors/") && readJson(path.join(root, d, "package.json")).name === e.package);
+    if (!rel) throw new Error(`executor ${e.package} has no workspace under executors/`);
+    const to = patchBump(e.version);
+    bumpPackage(rel, to);
+    pins.set(e.package, to);
+    bumped.push({ kind: "executor", name: e.package, from: e.version, to });
+  }
+  for (const p of current.plugins ?? []) {
+    const was = wasPlugin.get(p.graphId);
+    if (!was || (was.manifestSha256 === p.manifestSha256 && was.sourceTree === p.sourceTree) || was.version !== p.version) continue;
+    const rel = dirs.find((d) => d.startsWith("examples/plugins/") && readJson(path.join(root, d, "graphloom.manifest.json")).graphId === p.graphId);
+    if (!rel) throw new Error(`plugin ${p.graphId} has no workspace under examples/plugins/`);
+    const to = patchBump(p.version);
+    const dir = path.join(root, rel);
+    bumpPackage(rel, to);
+    // The graph's own declaration of its version.
+    const pattern = new RegExp(`^(\\s*(?:export const GRAPH_VERSION = |version: ))"${p.version.replace(/\./g, "\\.")}"`, "m");
+    const hits = pluginSources(dir).filter((f) => pattern.test(readFileSync(f, "utf8")));
+    if (hits.length > 1) throw new Error(`plugin ${p.graphId}: ${hits.length} source files declare version ${p.version}, expected one`);
+    if (hits.length === 1) writeFileSync(hits[0], readFileSync(hits[0], "utf8").replace(pattern, `$1"${to}"`));
+    // The plugin's own lockfile records its own version.
+    const lockFile = path.join(dir, "package-lock.json");
+    if (existsSync(lockFile)) {
+      const lock = readJson(lockFile);
+      if (lock.version === p.version) lock.version = to;
+      if (lock.packages?.[""]?.version === p.version) lock.packages[""].version = to;
+      writeJson(lockFile, lock);
+    }
+    bumped.push({ kind: "plugin", name: p.graphId, from: p.version, to });
+  }
+  // Dependency pins on a bumped executor (the CLI's, testkit's).
+  for (const rel of [".", ...dirs]) {
+    const file = path.join(root, rel, "package.json");
+    const pkg = readJson(file);
+    let touched = false;
+    for (const field of DEP_FIELDS) {
+      for (const [dep, range] of Object.entries(pkg[field] ?? {})) {
+        const to = pins.get(dep);
+        if (to && /^[\^~]?\d/.test(range)) {
+          pkg[field][dep] = withRange(range, to);
+          touched = true;
+        }
+      }
+    }
+    if (touched) writeJson(file, pkg);
+  }
+  return bumped;
 }
 
 /** The `## [<v>]` section of a changelog: `{ start, end, heading, body }` line indexes, or undefined. */
@@ -357,6 +458,12 @@ if (isMain) {
       case "bump": {
         need("root", "version");
         for (const file of bumpVersions(path.resolve(flags.root), flags.version)) console.log(file);
+        return;
+      }
+      case "bump-components": {
+        need("root", "current", "previous");
+        const bumped = bumpComponents(path.resolve(flags.root), readJson(path.resolve(flags.current)), readJson(path.resolve(flags.previous)));
+        for (const b of bumped) console.log(`${b.kind} ${b.name} ${b.from} ${b.to}`);
         return;
       }
       case "lockstep": {

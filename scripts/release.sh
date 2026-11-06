@@ -267,6 +267,17 @@ no_node_path() { # dir
 
 # ---------------------------------------------------------------- prepare (steps 1-2)
 
+# Regenerates the plugins' manifests on a built clone of the working tree's current changes (into $1).
+regenerate_manifests() {
+  local gen=$1 f
+  stage_clone "$(git rev-parse HEAD)" "$gen"
+  git diff --binary HEAD -- . ':!CHANGELOG.md' | git -C "$gen" apply --whitespace=nowarn
+  (cd "$gen" && NODE_ENV=development npm ci --include=dev --no-audit --no-fund >/dev/null && npm run build >/dev/null && npm run manifest --workspaces --if-present >/dev/null)
+  for f in $(cd "$gen" && git ls-files 'examples/plugins/*/graphloom.manifest.json'); do
+    cmp -s "$gen/$f" "$f" || { cp "$gen/$f" "$f"; echo "regenerated: $f"; }
+  done
+}
+
 do_prepare() {
   command -v gh >/dev/null || [ "$no_pr" = 1 ] || die "prepare needs gh to open the release PR (or pass --no-pr)"
   make_work
@@ -326,13 +337,22 @@ Edit it to what an operator notices, fill in every TODO (the upgrade notes above
   # Each plugin's generated manifest digests its package.json and lockfile (§3), and a
   # manifest script may read the plugin's build. So regenerate them on a built copy of the
   # bumped tree, leaving this checkout's node_modules and dist alone.
-  gen=$work/manifests
-  stage_clone "$(git rev-parse HEAD)" "$gen"
-  git diff --binary HEAD -- . ':!CHANGELOG.md' | git -C "$gen" apply --whitespace=nowarn
-  (cd "$gen" && NODE_ENV=development npm ci --include=dev --no-audit --no-fund >/dev/null && npm run build >/dev/null && npm run manifest --workspaces --if-present >/dev/null)
-  for f in $(cd "$gen" && git ls-files 'examples/plugins/*/graphloom.manifest.json'); do
-    cmp -s "$gen/$f" "$f" || { cp "$gen/$f" "$f"; echo "regenerated: $f"; }
-  done
+  regenerate_manifests "$work/manifests"
+  # The lockstep bump changes every executor's digest and every plugin's manifest, so a
+  # component with no change of its own would fail the bump rule (§3). Raise the patch
+  # version of each one the previous release records at the same version.
+  : >"$work/component-bumps"
+  if [ -n "$previous_json" ]; then
+    node "$rel/prepare.mjs" components --src "$work/manifests" --out "$work/components-before.json"
+    node "$rel/prepare.mjs" bump-components --root "$repo" --current "$work/components-before.json" --previous "$previous_json" >"$work/component-bumps"
+    if [ -s "$work/component-bumps" ]; then
+      awk '{ printf "component bump: %s %s %s -> %s\n", $1, $2, $3, $4 }' "$work/component-bumps"
+      npm install --package-lock-only --ignore-scripts --no-audit --no-fund >/dev/null
+      regenerate_manifests "$work/manifests-bumped"
+    else
+      echo "component bump: none needed"
+    fi
+  fi
   node scripts/check-headers.mjs
   node "$rel/prepare.mjs" changelog --root "$repo" --version "$version"
   node "$rel/prepare.mjs" lockstep --root "$repo" --version "$version"
@@ -361,6 +381,12 @@ Edit it to what an operator notices, fill in every TODO (the upgrade notes above
   {
     echo "Release $tag: lockstep versions, lockfiles, plugin manifests, and the changelog (docs/design-release.md §6 step 2)."
     echo
+    if [ -s "$work/component-bumps" ]; then
+      echo "Components bumped by \`release.sh prepare\` because the lockstep bump changed their digest or manifest (docs/design-release.md §3):"
+      echo
+      awk '{ printf "- %s %s: %s -> %s\n", $1, $2, $3, $4 }' "$work/component-bumps"
+      echo
+    fi
     echo "Gated by \`release.sh prepare\` on $node_version in a clean clone of $commit: \`npm ci --include=dev\`, \`npm run build\`, \`npm run typecheck\`, \`npm test\`."
     echo
     echo "After merge: \`scripts/release.sh build $version --commit <merge commit> --signing-key <key>\` twice (the second with \`--compare-to\`), then \`scripts/release.sh publish $version\`."

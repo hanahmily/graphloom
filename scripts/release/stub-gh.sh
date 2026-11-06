@@ -99,7 +99,15 @@ $1"; shift ;;
     echo "https://github.com/stub/releases/tag/$tag"
     exit 0
     ;;
-  "pr create") echo "https://github.com/stub/pull/1"; exit 0 ;;
+  "pr create")
+    # Keep the body, so a test can read what the PR says.
+    if [ -n "${GRAPHLOOM_STUB_GH_LOG:-}" ]; then
+      while [ $# -gt 0 ]; do
+        if [ "$1" = --body-file ]; then cat "$2" >"$GRAPHLOOM_STUB_GH_LOG.pr-body"; fi
+        shift
+      done
+    fi
+    echo "https://github.com/stub/pull/1"; exit 0 ;;
 esac
 echo "stub gh: unsupported: $*" >&2
 exit 1

@@ -8,6 +8,7 @@
  * fixture plugin and on issue-fix, with stub agents on a stubbed PATH.
  */
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { copyFile, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createScope, copyBundle, HELLO_ACTIVE_VERSION, type TestScope } from "@graphloom/testkit";
@@ -151,9 +152,10 @@ describe("graphloom doctor --task", () => {
     await mkdir(path.dirname(env.runnerFile), { recursive: true });
     await writeFile(env.runnerFile, JSON.stringify({ harness: "claude-code", allowUnrestricted: true }));
 
+    const issueFixVersion = (JSON.parse(readFileSync(path.join(repoRoot, "examples", "plugins", "issue-fix", "graphloom.manifest.json"), "utf8")) as { version: string }).version;
     const { report, code } = await doctorTask(env, "issue-fix-task.yaml");
     expect(code).toBe(1);
-    expect(row(report, "plugin").detail).toBe("issue-fix@0.16.2");
+    expect(row(report, "plugin").detail).toBe(`issue-fix@${issueFixVersion}`);
     // The plugin's own checks: GraphLoom runs on its bundled Node, but this target repository needs one.
     expect(row(report, "environment node")).toMatchObject({ status: "fail", detail: expect.stringContaining("Node.js >= 22 is required") });
     expect(row(report, "environment ocr").status).toBe("pass");
