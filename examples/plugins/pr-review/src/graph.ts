@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
+import { existsSync, realpathSync } from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 import {
   dispatch,
@@ -759,7 +761,7 @@ function recordStep(view: RunView, stageId: string, id: string, commands: Enviro
   return withPrivate(dispatch(commandJob(stageId, instruction, { commands: [next.command] }), `record ${what} as evidence, so a later review cannot supersede it`));
 }
 
-/** Where a tool of the confined static job lives: the plugin's directory, and the Go and Node installations under a hidden home. */
+/** Where a tool of the confined static job lives: the plugin's directory, the Go and Node installations and the `typescript` package under a hidden home. */
 function toolBinds(view: RunView, batches: ReadonlyArray<{ language: string }>): Array<{ path: string; readOnly: boolean }> | undefined {
   const root = environmentOutput(view.evidence, ENV_PLUGIN_ROOT);
   if (root === undefined) return undefined;
@@ -767,8 +769,38 @@ function toolBinds(view: RunView, batches: ReadonlyArray<{ language: string }>):
   const goRoot = environmentOutput(view.evidence, "go-root");
   if (batches.some((b) => b.language === "go") && goRoot !== undefined && path.isAbsolute(goRoot) && goRoot !== "/") binds.push({ path: goRoot, readOnly: true });
   const nodeRoot = path.dirname(path.dirname(process.execPath));
-  if (batches.some((b) => b.language === "typescript") && nodeRoot !== "/" && nodeRoot !== ".") binds.push({ path: nodeRoot, readOnly: true });
+  if (batches.some((b) => b.language === "typescript")) {
+    if (nodeRoot !== "/" && nodeRoot !== ".") binds.push({ path: nodeRoot, readOnly: true });
+    for (const dir of runtimePackageDirs(root, ["typescript"])) {
+      if (!binds.some((b) => dir === b.path || dir.startsWith(`${b.path}${path.sep}`))) binds.push({ path: dir, readOnly: true });
+    }
+  }
   return binds;
+}
+
+/**
+ * The directories of the packages the tools import at run time, as Node resolves them from the plugin: the package's
+ * location and its real location. In a release install the plugin lives beneath the operator's home, which the confined
+ * job hides, and `typescript` sits in an ancestor `node_modules` the plugin directory's own bind does not cover.
+ * A package that does not resolve adds nothing (the tool then fails with Node's own message).
+ */
+export function runtimePackageDirs(pluginRoot: string, names: readonly string[]): string[] {
+  const found = new Set<string>();
+  const from = createRequire(path.join(pluginRoot, "package.json"));
+  for (const name of names) {
+    try {
+      let dir = path.dirname(from.resolve(name));
+      for (; ; dir = path.dirname(dir)) {
+        if (existsSync(path.join(dir, "package.json")) && path.basename(dir) === name.split("/").pop()) break;
+        if (path.dirname(dir) === dir) throw new Error("no package directory");
+      }
+      found.add(dir);
+      found.add(realpathSync(dir));
+    } catch {
+      // not resolvable from here
+    }
+  }
+  return [...found];
 }
 
 function measureAndWrite(ctx: Context, view: RunView, analysis: Analysis, flow: Extract<ReportFlow, { state: "done" }>): GraphDecision {
