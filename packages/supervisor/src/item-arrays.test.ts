@@ -186,3 +186,45 @@ describe("item-array normalization", () => {
     expect(noted).toEqual([["job.input.commands", "job.input.commands[0].argv"]]);
   });
 });
+
+/** The live proposals of run c68993c4-021 (ep-939eb08d): numbers as strings, `id` and `continueOnFailure` left on the job. */
+describe("stringified scalars and stray job fields", () => {
+  const live = {
+    stageId: "report",
+    kind: "command",
+    purpose: "diagnostic",
+    readOnly: true,
+    executor: { id: "graphloom.command/run" },
+    instruction: "Diagnose why the pinned TypeScript metric job cannot resolve typescript.",
+    input: { commands: { item: { argv: { item: ["sh", "-c", SCRIPT] } } } },
+    id: "diag-ts-resolve",
+    continueOnFailure: "true",
+  };
+
+  it("admits the live proposal without an id inside the command: the stray id and flag move into the input", async () => {
+    const noted: string[][] = [];
+    const { toolbox, execute } = dispatchTool([COMMAND_SHAPE], noted);
+    const result = await execute("1", { reason: "diagnose", job: live });
+    expect(result.terminate).toBe(true);
+    const job = jobOf(toolbox) as unknown as Record<string, unknown>;
+    expect(job.input).toEqual({ commands: [{ id: "diag-ts-resolve", argv: ["sh", "-c", SCRIPT] }], continueOnFailure: true });
+    expect(job).not.toHaveProperty("id");
+    expect(job).not.toHaveProperty("continueOnFailure");
+    expect(noted[0]).toEqual(expect.arrayContaining(["job.input.commands[0].id (moved from job.id)", "job.input.continueOnFailure (moved from job.continueOnFailure)"]));
+    expect(result.content[0]!.text).toContain("Normalized the job input");
+  });
+
+  it("reads a stringified integer and boolean against the schema, and leaves strings where a string is allowed", () => {
+    const input = { commands: [{ id: "120", argv: ["echo", "true"], timeoutMs: "120000" }], continueOnFailure: "false" };
+    const { job, paths } = normalizeJobInput({ kind: "command", executor: { id: "graphloom.command/run" }, input }, [COMMAND_SHAPE]);
+    expect(job.input).toEqual({ commands: [{ id: "120", argv: ["echo", "true"], timeoutMs: 120000 }], continueOnFailure: false });
+    expect(paths).toHaveLength(2);
+  });
+
+  it("does not move a key into an element that already has it, or into an ambiguous list", () => {
+    const two = { commands: [{ argv: ["a"] }, { argv: ["b"] }] };
+    expect(normalizeJobInput({ kind: "command", executor: { id: "graphloom.command/run" }, input: two, id: "x" }, [COMMAND_SHAPE]).paths).toEqual([]);
+    const has = { commands: [{ id: "mine", argv: ["a"] }] };
+    expect(normalizeJobInput({ kind: "command", executor: { id: "graphloom.command/run" }, input: has, id: "x" }, [COMMAND_SHAPE]).paths).toEqual([]);
+  });
+});
