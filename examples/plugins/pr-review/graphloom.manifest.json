@@ -1,6 +1,6 @@
 {
   "graphId": "pr-review",
-  "version": "0.23.2",
+  "version": "0.23.3",
   "sdkProtocol": 1,
   "taskConfig": "required",
   "entryPoints": {
@@ -16,10 +16,10 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "ff7da32bf6d75a17bbd04f2bf9329b86d021887df14c6f8125cb802cf75462fb",
+    "sourceTree": "22a96a4df9b1d6d71cabe45cae856a64bbbd3f7de3388e9ad7e6fc61829f1327",
     "packageLock": "6ba71af10b9d0d39ffa547982c2d11c9bf2f20b5206cae3ee15e0af6a0b7068e",
     "files": {
-      "package.json": "4dec8af82ef266557dae8106a52603ced8a72366ad07b1a2836433422388e560",
+      "package.json": "29812ff03d6da6c8ed407b81a95271a01f0a9a24c8b774d6838761b6fc2ac47a",
       "package-lock.json": "6ba71af10b9d0d39ffa547982c2d11c9bf2f20b5206cae3ee15e0af6a0b7068e",
       "tsconfig.json": "d166142bd5d917d1eb7d3011cf6423c652f30e2989881deec6147a997bf41597",
       "profiles/banyandb.json": "7e40bfe0952a77cad2c33389fca3743202e42888e180b7a27aebed11ff858855",
@@ -63,7 +63,7 @@
       "src/cites.ts": "aac861a7321fb094c1e6a199b1c53c34dddb98df29bc2e9812ca4d4ad6f28725",
       "src/claims.ts": "cf570c0ea188b7858cce87a6e43bcee302b061d595170341b5418758afdb2762",
       "src/commands.ts": "ba0370e065e1b19561785a76b122c62b463bbaad93755a57815ea1e0660b5681",
-      "src/constants.ts": "ad12d1ae923af43151773178836583aba8c9a4e29896fb19b6445c5f263fb595",
+      "src/constants.ts": "35e338e129270bf971701aa84d7a472533385c3ba25b0bdc2852cbde5a951853",
       "src/coverage.ts": "8d5417bc88cb49cb399dc28fa4db61c32da4cea22898c4ff0f9bd6221f81c688",
       "src/detectors.ts": "84a4f0045cc3639c0e4494101341ee4697400c2367c80d838fc8cff609a2f3ba",
       "src/diagrams.ts": "60182fb25157fd4a3e1d25809c59fa8a130b0a8b2789cc1af9d8a33bf1b1755e",
@@ -76,7 +76,7 @@
       "src/fit.ts": "71f7e1484bf1abc6b73441a230a7fad5d268a2164723c23ff09ea87437b07bba",
       "src/flow.ts": "a83792504b417f9554861a954948b7b2eaf7b1cd33dddb7166b2e7222cc3cbb9",
       "src/flowlayout.ts": "18175cd7867230794ee384eeae0719ce29b61cb32004f471d6b9c932013dcc94",
-      "src/graph.ts": "5523a2cb008a39a48edddcdc5c9b514172d6d90751655f1347a8d38f4e0f9841",
+      "src/graph.ts": "d1c12d5f5e04ca0fb0f97e8d4c2a73a3e4b443224003b4592c23fbeafb1830e0",
       "src/groundwork.ts": "5a12d35f33eee1ef6a136449a48e4dccd1c0e6971a92a01e814d6c5dabfeabd7",
       "src/html.ts": "e816f409d4c361ef52b467f558c699abd565e1f1c8058b3a632c1cb77225088b",
       "src/htmlsvg.ts": "8516c3d13419eab655f9d1ddf4cfb8f386cdd49e6bfd0ffd497b64dfc96b6b70",
@@ -86,7 +86,7 @@
       "src/large.ts": "df5668953dfd4a7523cab6e1149c4c6333ff30fb8f47c99a7748c139e24d6b14",
       "src/largeprompts.ts": "b50da707490a766448e948fc0877c0547a18f6cf0498eeff0d829ff837883255",
       "src/ledger.ts": "1c38263a021022248135a0c9f232dbedc34c7fb366822510fbf0e8ef9336501a",
-      "src/measurements.ts": "5afae805325553a3f26f2988d42e9312ec21126a1207398fb1cc67337256e0f4",
+      "src/measurements.ts": "9cd42bc2397af500d2a344d957d07a9c3d7dfa62853af15515b5fa2449a6a620",
       "src/metrics/coverage.ts": "3f023ced01890cabbb5dab176f99a4e3877ed13fa3bf76983f731f1b77cd10ff",
       "src/metrics/crap.ts": "0b40d4785ab3b1da37a1fbc32029fb2f346930c7f23182fb1779c22df230e7eb",
       "src/metrics/generated.ts": "aac742beb0af53afc62cb0b24e79c6f61a5528dff06c256551db0be7119a44ba",
@@ -192,7 +192,7 @@
       "test/round1.test.ts": "9d0fe22216eb2ae90bd2ac827ba2e214f928ceba3e092f9266b31d8ae66b51ac",
       "test/rounds.test.ts": "971afce14d12f78e3198a872c07c633f41424c00229990e80ef4023ac68fa675",
       "test/scope.test.ts": "594904c01dde39cf2c3ef211707e9ad853ee79e9840bfbb0e78fe685cbb23611",
-      "test/static-batches.test.ts": "d5f9f472c56aec8c3770cc584c1ea3f5cbcec3a67faf095f1e4bc2c4d59a7e7a",
+      "test/static-batches.test.ts": "1efe6beb3c8f9d7e8474b66d359375386b9ec685e15971ee544112f968fc5929",
       "test/static-tools.test.ts": "b24836a8eec8cadf70f89f00ee8ef651ebc298bc37456526095e93ab23505545",
       "test/support.ts": "bdc1344dd774f9dbf3f0c58fdb297ce0b9ec06aabe0e23726a04536cfde19ee4",
       "test/symbols.test.ts": "97c763e078f97e2d67089f8b55559842032067d024a0c724a0095a76fad01370",

@@ -8,7 +8,7 @@ import path from "node:path";
 import type { EvidenceRecord } from "@graphloom/sdk";
 import { afterAll, describe, expect, it } from "vitest";
 import { COMMAND } from "../src/constants.js";
-import { BATCH_FILES, batchesOf, measurable, measurementState, renderMeasurements, splitBatch, staticCommand, type Batch } from "../src/measurements.js";
+import { BATCH_FILES, batchesOf, measurable, measurementState, metricsDiffCommand, renderMeasurements, splitBatch, staticCommand, type Batch } from "../src/measurements.js";
 import { parseHunkFile } from "../src/metrics/hunks.js";
 import { pullFile } from "../src/snapshot.js";
 import { BANYANDB, profileOf, root } from "./support.js";
@@ -25,7 +25,7 @@ let n = 0;
 const ref = (): string => `ev-${++n}`;
 const fileEvidence = (p: string): EvidenceRecord => ({ ref: ref(), kind: "file", payload: { path: p, bytes: "package pkg\n\n" } }) as EvidenceRecord;
 const diffEvidence = (): EvidenceRecord =>
-  ({ ref: ref(), kind: "command", payload: { command: { id: COMMAND.metricsDiff, argv: [], exitCode: 0, stdoutTail: "", stderrTail: "", report: { text: paths.map((p) => `+++ b/${p}\n@@ -0,0 +1,2 @@\n`).join(""), truncated: false } } } }) as EvidenceRecord;
+  ({ ref: ref(), kind: "command", payload: { command: { id: COMMAND.metricsDiff, argv: metricsDiffCommand().argv, exitCode: 0, stdoutTail: "", stderrTail: "", report: { text: paths.map((p) => `+++ b/${p}\n@@ -0,0 +1,2 @@\n`).join(""), truncated: false } } } }) as EvidenceRecord;
 const emptyDoc = (b: Batch): string => JSON.stringify({ schema: "graphloom-metrics-v1", tool: "gometrics", records: [], files: b.paths.map((p) => ({ path: p, language: "go", test: false, functions: [] })), skipped: [] });
 /** A static run of `b`: its report whole, or cut. */
 const runEvidence = (b: Batch, report: "whole" | "cut"): EvidenceRecord => {
@@ -101,6 +101,39 @@ describe("the static batches", () => {
     expect(state.state, JSON.stringify(state)).toBe("ready");
     if (state.state !== "ready") return;
     expect(state.excluded.map((e) => e.path)).toEqual([paths[2]]);
+  });
+});
+
+describe("a static run is the batch's result only when it is the graph's own", () => {
+  const only = batchesOf(measurable(files, profile))[0]!;
+  /** A run recorded under the batch's id, with the given argv (a diagnostic a supervisor named like the batch). */
+  const recorded = (argv: string[], text = ""): EvidenceRecord =>
+    ({ ref: ref(), kind: "command", payload: { command: { id: only.id, argv, exitCode: 0, stdoutTail: "", stderrTail: "", report: { text, truncated: false } } } }) as EvidenceRecord;
+
+  it("accepts the graph's own run, with or without the current plugin root", () => {
+    const evidence = [...base(), runEvidence(only, "whole")];
+    expect(measurementState(evidence, files, profile).state).toBe("ready");
+    expect(measurementState(evidence, files, profile, undefined, root).state).toBe("ready");
+  });
+
+  it("ignores a foreign run under the batch's id and dispatches the batch again", () => {
+    const state = measurementState([...base(), recorded(["sh", "-c", "echo diagnostic", only.id])], files, profile, undefined, root);
+    expect(state).toMatchObject({ state: "tools", batches: [{ id: only.id }] });
+  });
+
+  it("keeps the graph's own run when a foreign one with the same id comes after it", () => {
+    const evidence = [...base(), runEvidence(only, "whole"), recorded(["sh", "-c", "echo diagnostic", only.id])];
+    expect(measurementState(evidence, files, profile, undefined, root).state).toBe("ready");
+  });
+
+  it("treats a run built with another plugin root as stale and dispatches the batch again", () => {
+    const old = recorded(staticCommand(only, hunks, "/old/0.1.1/plugin", [], process.execPath).argv, emptyDoc(only));
+    expect(measurementState([...base(), old], files, profile, undefined, root)).toMatchObject({ state: "tools", batches: [{ id: only.id }] });
+  });
+
+  it("ignores a run of the graph's script that carries other hunks", () => {
+    const other = staticCommand(only, parseHunkFile(`${paths[0]}:1-1\n`), root, [], process.execPath);
+    expect(measurementState([...base(), recorded(other.argv)], files, profile, undefined, root).state).toBe("tools");
   });
 });
 

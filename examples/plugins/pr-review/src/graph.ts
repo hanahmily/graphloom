@@ -388,8 +388,9 @@ interface Context {
 }
 
 /** The latest run of command `id`: its result, and whether it failed since the operator's last resume (a failure before it is run again once). */
-function commandState(view: RunView, id: string): { run: CommandRun | undefined; failed: boolean; retry: boolean } {
-  const run = commandRuns(view.evidence, id).at(-1);
+function commandState(view: RunView, id: string, expected?: EnvironmentCommand): { run: CommandRun | undefined; failed: boolean; retry: boolean } {
+  // With `expected`, only a run of that very argv is the graph's own: a command a supervisor named with the same id does not stand for it.
+  const run = commandRuns(view.evidence, id).filter((r) => expected === undefined || sameArgv(r.command.argv, expected.argv)).at(-1);
   if (run === undefined) return { run, failed: false, retry: false };
   const ok = succeeded(run.command);
   return { run, failed: !ok, retry: !ok && isStaleFailure(run.record, view) };
@@ -407,15 +408,15 @@ function fetch(ctx: Context, view: RunView): GraphDecision {
   const { profile, pr } = ctx;
   // The head is checked out first, then the pull request is read: evidence is judged against the workspace
   // change it was produced under, and the checkout changes it, so a read made before would no longer count.
-  const guard = commandState(view, COMMAND.guard);
+  const guard = commandState(view, COMMAND.guard, guardCommand(pr.head));
   if (guard.failed && !guard.retry && guard.run !== undefined) {
     if (guard.run.command.exitCode === GUARD_REFUSED) {
       return stop({ reason: "incompatible task", blocker: `the pull request touches .graphloom/, which holds this graph's own files and which a pull request may not change: ${outputTail(guard.run.command, 300).replace(/\s+/g, " ")}`, evidenceRefs: [guard.run.record.ref], retryable: false }, "stop: the pull request touches .graphloom/");
     }
   }
-  const checkout = commandState(view, COMMAND.checkout);
-  const tree = commandState(view, COMMAND.headTree);
-  const dir = commandState(view, COMMAND.reviewDir);
+  const checkout = commandState(view, COMMAND.checkout, checkoutCommand(pr.head));
+  const tree = commandState(view, COMMAND.headTree, headTreeCommand(pr.head));
+  const dir = commandState(view, COMMAND.reviewDir, reviewDirCommand());
   const checked = [guard, checkout, tree, dir];
   const failed = checked.find((c) => c.failed && !c.retry);
   if (failed?.run !== undefined) {
@@ -436,7 +437,7 @@ function fetch(ctx: Context, view: RunView): GraphDecision {
   const s = snapshotState(view.evidence, pr, profile.limits, profile.questions.excludeRoots);
   if (s.state === "reading") return withPrivate(dispatch(githubJob(s.next, readInput(s.next, pr, s.cursor)), s.why));
   if (s.state === "incompatible") return stop({ reason: "incompatible task", blocker: s.problem, evidenceRefs: s.refs.slice(-10), retryable: false }, "stop: this pull request cannot be reported");
-  const ledger = commandState(view, COMMAND.ledger);
+  const ledger = commandState(view, COMMAND.ledger, ledgerReadCommand(pr.owner, pr.repo, pr.number));
   if (ledger.failed && !ledger.retry && ledger.run !== undefined) {
     return supervise({ reason: `the ledger read failed: ${describeCommand(ledger.run.command)}`, evidenceRefs: [ledger.run.record.ref] }, "escalate a failed ledger read");
   }
@@ -805,12 +806,12 @@ export function runtimePackageDirs(pluginRoot: string, names: readonly string[])
 
 function measureAndWrite(ctx: Context, view: RunView, analysis: Analysis, flow: Extract<ReportFlow, { state: "done" }>): GraphDecision {
   const { profile, pr } = ctx;
-  const m = measurementState(view.evidence, analysis.snapshot.files, profile, retryOf(view));
+  const m = measurementState(view.evidence, analysis.snapshot.files, profile, retryOf(view), environmentOutput(view.evidence, ENV_PLUGIN_ROOT));
   switch (m.state) {
     case "observe":
       return withPrivate(observe({ paths: m.paths }, "observe the changed files the static tools measure, so their records can be recomputed from the head's bytes"));
     case "diff": {
-      const diff = commandState(view, COMMAND.metricsDiff);
+      const diff = commandState(view, COMMAND.metricsDiff, metricsDiffCommand());
       if (diff.failed && !diff.retry && diff.run !== undefined) return supervise({ reason: `the changed-lines diff failed: ${describeCommand(diff.run.command)}`, evidenceRefs: [diff.run.record.ref] }, "escalate a failed diff");
       return withPrivate(dispatch(commandJob(REPORT_STAGE, "List the changed lines (git diff -U0 -w)", { commands: [metricsDiffCommand()], env: { ...GIT_ENV } }), "list the head-side changed lines for the static metrics tools"));
     }
@@ -1112,7 +1113,7 @@ function recordLedger(ctx: Context, view: RunView, w: AnswerWrites): GraphDecisi
       return withPrivate(dispatch(commandJob(ANSWERS_STAGE, "Read the pull request's ledger ref again", { commands: [ledgerReadCommand(ctx.pr.owner, ctx.pr.repo, ctx.pr.number)], env: { ...GIT_ENV } }), "read the ledger ref again: it moved since Fetch read it"));
     }
   }
-  const lr = commandState(view, COMMAND.ledger);
+  const lr = commandState(view, COMMAND.ledger, ledgerReadCommand(ctx.pr.owner, ctx.pr.repo, ctx.pr.number));
   if (lr.failed && lr.run !== undefined) return supervise({ reason: `the ledger read failed: ${describeCommand(lr.run.command)}`, evidenceRefs: [lr.run.record.ref] }, "escalate a failed ledger read");
   if (w.prior?.state === "missing" || (w.prior?.state === "unreadable" && retryOf(view)(w.prior.run))) {
     return withPrivate(dispatch(commandJob(ANSWERS_STAGE, "Read the prior ledger's ledger.json", { commands: w.prior?.state === "missing" ? w.prior.next : [{ id: w.prior!.run.command.id, argv: w.prior!.run.command.argv }], continueOnFailure: true, env: { ...GIT_ENV } }), "read the prior ledger.json, so the new one keeps its heads"));
