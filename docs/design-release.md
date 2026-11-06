@@ -449,6 +449,14 @@ The release runs without a host Node. The host still needs the tools in §4.4.
   `release.json`, its version must also have changed. A plugin's
   `package.json` version must also equal its manifest `version`, and its
   generated manifest must be current (`npm run manifest` produces no diff).
+  The lockstep bump itself changes every executor's digest (its recorded
+  `@graphloom/sdk` dependency) and every plugin's manifest, so `release.sh
+  prepare` applies the rule for the maintainer: it raises the patch version of
+  each executor and plugin whose digest or manifest then differs from the
+  previous release at an unchanged version (§6 step 2). A component whose
+  version already differs from the previous release's, because the maintainer
+  bumped it for a change of its own, is left alone, as are the minor and major
+  parts of any version.
 - **Breaking changes.** Before 1.0, a breaking change needs a minor release;
   after 1.0, a major release. Breaking changes include the SDK protocol
   (`sdkProtocol`), CLI flags, configuration keys, and the support window for
@@ -1492,8 +1500,16 @@ scripts/release.sh publish <version>   # steps 9-10, after the maintainer confir
    Tag `v<version>` does not exist, and `<version>` is greater than the latest
    release.
 2. **Version and changelog.** Set the lockstep versions (§3) and refresh
-   `package-lock.json` with `npm install --package-lock-only`. Check the
-   component bump rule against the previous `release.json`. Check that each
+   `package-lock.json` with `npm install --package-lock-only`. Regenerate the
+   plugin manifests on a built copy of the bumped tree, then apply the component
+   bump rule against the previous `release.json`: each executor or plugin whose
+   digest or manifest changed at an unchanged version gets a patch bump in every
+   place its version lives (`package.json`, a plugin's graph version constant
+   such as `GRAPH_VERSION` or `version:` in its source and its own lockfile, the
+   dependency pins on an executor in `apps/graphloom` and `packages/testkit`);
+   the lockfile and manifests are refreshed again, and the bumped components are
+   listed in `prepare`'s output and in the release PR body. Then check the
+   rule as a final assertion (it now holds unless a bump was not possible). Check that each
    plugin manifest is current and that `scripts/check-headers.mjs` passes.
    Require a `CHANGELOG.md` section with upgrade notes. If `stateFormat`
    changed, require a migrator and a fixture (step 8). Commit these changes on

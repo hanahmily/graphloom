@@ -209,6 +209,113 @@ interface Fixture {
   ghCalls(): string[];
 }
 
+describe("bumpComponents: the automatic component bump (§3, §6 step 2)", () => {
+  async function tree() {
+    const root = await tempDir();
+    await writeJson(path.join(root, "package.json"), { name: "graphloom", version: "0.2.0", workspaces: ["packages/*", "executors/*", "apps/*", "examples/plugins/*"] });
+    await writeJson(path.join(root, "packages/testkit/package.json"), { name: "@graphloom/testkit", version: "0.0.0", devDependencies: { "@graphloom/executor-github": "0.2.1" } });
+    await writeJson(path.join(root, "apps/graphloom/package.json"), {
+      name: "@graphloom/cli",
+      version: "0.2.0",
+      dependencies: { "@graphloom/executor-command": "0.1.5", "@graphloom/executor-github": "^0.2.1" },
+    });
+    await writeJson(path.join(root, "executors/command/package.json"), { name: "@graphloom/executor-command", version: "0.1.5" });
+    await writeJson(path.join(root, "executors/github/package.json"), { name: "@graphloom/executor-github", version: "0.2.1" });
+    await writeJson(path.join(root, "executors/untouched/package.json"), { name: "@graphloom/executor-untouched", version: "1.0.0" });
+    for (const [dir, id, version, declaration] of [
+      ["alpha", "alpha", "0.3.0", 'export const GRAPH_VERSION = "0.3.0";\n'],
+      ["beta", "beta", "0.4.1", 'export const graph = {\n  id: "beta",\n  version: "0.4.1",\n  other: { version: "1" },\n};\n'],
+      ["gamma", "gamma", "0.5.0", 'export const GRAPH_VERSION = "0.5.0";\n'],
+    ] as const) {
+      const d = path.join(root, "examples/plugins", dir);
+      await writeJson(path.join(d, "package.json"), { name: `@graphloom/plugin-${dir}`, version });
+      await writeJson(path.join(d, "graphloom.manifest.json"), { graphId: id, version });
+      await writeJson(path.join(d, "package-lock.json"), { name: `@graphloom/plugin-${dir}`, version, lockfileVersion: 3, packages: { "": { name: `@graphloom/plugin-${dir}`, version } } });
+      await mkdir(path.join(d, "src"), { recursive: true });
+      await writeFile(path.join(d, "src", "graph.ts"), declaration);
+      await mkdir(path.join(d, "vendor"), { recursive: true });
+      await writeFile(path.join(d, "vendor", "ignored.ts"), `export const GRAPH_VERSION = "${version}";\n`);
+    }
+    return root;
+  }
+  const previous = {
+    version: "0.2.0",
+    executors: [
+      { package: "@graphloom/executor-command", version: "0.1.5", digest: "a" },
+      { package: "@graphloom/executor-github", version: "0.2.0", digest: "b" },
+      { package: "@graphloom/executor-untouched", version: "1.0.0", digest: "c" },
+    ],
+    plugins: [
+      { graphId: "alpha", version: "0.3.0", manifestSha256: "m1", sourceTree: "t1" },
+      { graphId: "beta", version: "0.4.1", manifestSha256: "m2", sourceTree: "t2" },
+      { graphId: "gamma", version: "0.4.9", manifestSha256: "m3", sourceTree: "t3" },
+    ],
+  };
+  const current = {
+    executors: [
+      { package: "@graphloom/executor-command", version: "0.1.5", digest: "changed" },
+      // The operator bumped github already (0.2.0 -> 0.2.1), so it is left alone.
+      { package: "@graphloom/executor-github", version: "0.2.1", digest: "changed" },
+      { package: "@graphloom/executor-untouched", version: "1.0.0", digest: "c" },
+    ],
+    plugins: [
+      { graphId: "alpha", version: "0.3.0", manifestSha256: "changed", sourceTree: "t1" },
+      { graphId: "beta", version: "0.4.1", manifestSha256: "m2", sourceTree: "changed" },
+      { graphId: "gamma", version: "0.5.0", manifestSha256: "changed", sourceTree: "changed" },
+    ],
+  };
+
+  it("patch-bumps a component changed only at an unchanged version, in every place its version lives", async () => {
+    const root = await tree();
+    const bumped = P.bumpComponents(root, current, previous);
+    expect(bumped).toEqual([
+      { kind: "executor", name: "@graphloom/executor-command", from: "0.1.5", to: "0.1.6" },
+      { kind: "plugin", name: "alpha", from: "0.3.0", to: "0.3.1" },
+      { kind: "plugin", name: "beta", from: "0.4.1", to: "0.4.2" },
+    ]);
+    const read = (rel: string) => JSON.parse(readFileSync(path.join(root, rel), "utf8"));
+    expect(read("executors/command/package.json").version).toBe("0.1.6");
+    expect(read("apps/graphloom/package.json").dependencies).toEqual({ "@graphloom/executor-command": "0.1.6", "@graphloom/executor-github": "^0.2.1" });
+    expect(read("examples/plugins/alpha/package.json").version).toBe("0.3.1");
+    expect(read("examples/plugins/alpha/package-lock.json")).toMatchObject({ version: "0.3.1", packages: { "": { version: "0.3.1" } } });
+    expect(readFileSync(path.join(root, "examples/plugins/alpha/src/graph.ts"), "utf8")).toBe('export const GRAPH_VERSION = "0.3.1";\n');
+    expect(readFileSync(path.join(root, "examples/plugins/beta/src/graph.ts"), "utf8")).toContain('  version: "0.4.2",\n  other: { version: "1" },');
+    // A vendored tree is never rewritten.
+    expect(readFileSync(path.join(root, "examples/plugins/alpha/vendor/ignored.ts"), "utf8")).toContain('"0.3.0"');
+  });
+
+  it("leaves a component the operator already bumped, and one with no change, alone", async () => {
+    const root = await tree();
+    P.bumpComponents(root, current, previous);
+    const read = (rel: string) => JSON.parse(readFileSync(path.join(root, rel), "utf8"));
+    expect(read("executors/github/package.json").version).toBe("0.2.1");
+    expect(read("packages/testkit/package.json").devDependencies["@graphloom/executor-github"]).toBe("0.2.1");
+    expect(read("executors/untouched/package.json").version).toBe("1.0.0");
+    expect(read("examples/plugins/gamma/package.json").version).toBe("0.5.0");
+    expect(readFileSync(path.join(root, "examples/plugins/gamma/src/graph.ts"), "utf8")).toBe('export const GRAPH_VERSION = "0.5.0";\n');
+  });
+
+  it("makes the bump rule hold: after the bump, the changed components' versions differ from the previous release", async () => {
+    const root = await tree();
+    expect(P.componentProblems(previous, current)).toHaveLength(3);
+    const bumped = P.bumpComponents(root, current, previous);
+    const after = {
+      ...current,
+      executors: current.executors.map((e) => ({ ...e, version: bumped.find((b: { name: string }) => b.name === e.package)?.to ?? e.version })),
+      plugins: current.plugins.map((p) => ({ ...p, version: bumped.find((b: { name: string }) => b.name === p.graphId)?.to ?? p.version })),
+    };
+    expect(P.componentProblems(previous, after)).toEqual([]);
+    // Bumping again with the new versions is a no-op: nothing is raised twice.
+    expect(P.bumpComponents(root, after, previous)).toEqual([]);
+  });
+
+  it("refuses a plugin whose version is declared in two source files", async () => {
+    const root = await tree();
+    await writeFile(path.join(root, "examples/plugins/alpha/src/other.ts"), 'export const GRAPH_VERSION = "0.3.0";\n');
+    expect(() => P.bumpComponents(root, current, previous)).toThrow(/2 source files declare version 0\.3\.0/);
+  });
+});
+
 const LOCKSTEP_PACKAGES = ["sdk", "agent-harness", "controller", "plugin-host", "supervisor", "runner"];
 
 const GENERATE_MANIFEST = `${HEADER}import { createHash } from "node:crypto";
@@ -439,7 +546,7 @@ describe("release.sh prepare (§6 steps 1-2)", () => {
     expect(spawnSync("git", ["ls-remote", "--heads", fx.remote, "release/v0.1.0"], { encoding: "utf8" }).stdout).toBe("");
   }, 120_000);
 
-  it("pushes the branch and opens the PR, and enforces the bump rule against the previous release", async () => {
+  it("pushes the branch and opens the PR, and bumps the components the lockstep bump changed against the previous release", async () => {
     const fx = await makeFixture();
     await writeFile(path.join(fx.repo, "CHANGELOG.md"), `# Changelog\n\n${COMPLETE_SECTION("0.1.0")}`);
     let r = fx.releaseSh(["prepare", "0.1.0", "--node-dir", fx.nodeDir]);
@@ -448,7 +555,8 @@ describe("release.sh prepare (§6 steps 1-2)", () => {
     const pr = fx.ghCalls().find((c) => c.startsWith("pr create"));
     expect(pr).toContain("--base main --head release/v0.1.0 --title release: v0.1.0");
 
-    // "Merge" it, publish 0.1.0 as recorded with another executor digest, and prepare 0.1.1 without a bump.
+    // "Merge" it, publish 0.1.0 as recorded with other digests, and prepare 0.1.1 with no manual bump:
+    // prepare raises the patch version of the executor and the plugin itself (§3).
     fx.git("checkout", "-q", "main");
     fx.git("merge", "-q", "--ff-only", "release/v0.1.0");
     fx.git("push", "-q", "origin", "main");
@@ -458,15 +566,28 @@ describe("release.sh prepare (§6 steps 1-2)", () => {
       stateFormat: 1,
       sdk: { sdkProtocol: 1 },
       executors: [{ package: "@graphloom/executor-command", version: "0.1.0", digest: "f".repeat(64) }],
-      plugins: [],
+      plugins: [{ graphId: "hello", version: "0.1.0", manifestSha256: "e".repeat(64), sourceTree: "d".repeat(64) }],
     });
     const changelog = readFileSync(path.join(fx.repo, "CHANGELOG.md"), "utf8");
     await writeFile(path.join(fx.repo, "CHANGELOG.md"), P.insertSection(changelog, COMPLETE_SECTION("0.1.1")));
     r = fx.releaseSh(["prepare", "0.1.1", "--node-dir", fx.nodeDir]);
-    expect(r.status).toBe(1);
-    expect(r.stdout + r.stderr).toContain("previous release: 0.1.0");
-    expect(r.stderr).toContain("executor @graphloom/executor-command: its digest changed since 0.1.0, but its version is still 0.1.0; bump it");
-    expect(fx.ghCalls().filter((c) => c.startsWith("pr create"))).toHaveLength(1);
+    expect(r.status, r.stderr + r.stdout).toBe(0);
+    expect(r.stdout).toContain("previous release: 0.1.0");
+    expect(r.stdout).toContain("component bump: executor @graphloom/executor-command 0.1.0 -> 0.1.1");
+    expect(r.stdout).toContain("component bump: plugin hello 0.1.0 -> 0.1.1");
+    expect(r.stdout).toContain("components: the bump rule holds against 0.1.0");
+    const show = (f: string) => JSON.parse(fx.git("show", `HEAD:${f}`));
+    expect(show("executors/command/package.json").version).toBe("0.1.1");
+    expect(show("apps/graphloom/package.json").dependencies["@graphloom/executor-command"]).toBe("0.1.1");
+    expect(show("examples/plugins/hello/package.json").version).toBe("0.1.1");
+    expect(show("examples/plugins/hello/package-lock.json")).toMatchObject({ version: "0.1.1", packages: { "": { version: "0.1.1" } } });
+    expect(show("examples/plugins/hello/graphloom.manifest.json").version).toBe("0.1.1");
+    expect(show("package-lock.json").packages["executors/command"].version).toBe("0.1.1");
+    expect(fx.git("status", "--porcelain")).toBe("");
+    const body = readFileSync(`${fx.ghLog}.pr-body`, "utf8");
+    expect(body).toContain("- executor @graphloom/executor-command: 0.1.0 -> 0.1.1");
+    expect(body).toContain("- plugin hello: 0.1.0 -> 0.1.1");
+    expect(fx.ghCalls().filter((c) => c.startsWith("pr create"))).toHaveLength(2);
   }, 180_000);
 });
 
