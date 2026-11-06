@@ -2831,7 +2831,7 @@ tools run under bwrap.
 | A session the maintainer opens (`graphloom session open`, [§17](#17-discussing-a-run-graphloom-session-open)) | The confinement of the job that recorded it: `untrusted-read` with the same masks, a read-only checkout, no GitHub token, network on for the agent's login and model API, and the maintainer's own CLI login. A configured session launcher is bound read-only and its state directories writable. The run's state is not mounted; the `graphloom` process records the conversation after the agent exits |
 | The diagram job ([§6.10](#610-features-and-their-data-flow)) | `untrusted-read` (bwrap) like the other agents, with the vendored skill's directory bound read-only, and told not to read the repository |
 | The skill's checks on a diagram (`diagram-check-<attempt>-<n>`) | bwrap with no network, read-only, the plugin's directory read-only: `python3` runs the skill's `self_check.py` and `verify-geometry.py` on a scratch file in the run's temporary directory |
-| Static metrics (`gometrics`, `tsmetrics`) | bwrap with no network, read-only. They run the plugin's own parser over the head tree and execute none of it, so they always run, with or without Docker |
+| Static metrics (`gometrics`, `tsmetrics`) | bwrap with no network, read-only, binding the plugin directory, the Go root, the Node installation and the `typescript` package as Node resolves it from the plugin (a release install keeps it in an ancestor `node_modules` beneath the hidden home). They run the plugin's own parser over the head tree and execute none of it, so they always run, with or without Docker |
 | Checks, coverage, mutation, reproducing tests: **everything that runs PR code** | `sandbox: docker` (below) |
 | Materialize, searches, writes | Graph commands with fixed argv over pinned trees. No repository code runs |
 | GitHub reads and writes | The sandboxed executor package |
@@ -3540,6 +3540,15 @@ What 0.11 does, where this document leaves it open:
   as before, so their size is bounded by what one command carries; a report or
   Q&A that does not fit still stops the run "incompatible task" and says so.
   (0.12 lifts this: [§6.6](#66-output), multi-part writes.)
+
+### Version 0.23.2: the confined TypeScript metrics resolve `typescript` in a release install
+
+A live run on the installed 0.1.1 failed the static TypeScript job with `ERR_MODULE_NOT_FOUND: Cannot find package
+'typescript'`. The job hides the operator's home and bound only the plugin directory, the Go root and the Node
+installation; in a release install the plugin lives under that home and `typescript` resolves from the install root's
+`node_modules/`, an ancestor that was not bound. A source checkout outside the home hid the gap. The static job (head
+and base side alike) now also binds, read-only, the real directory of the `typescript` package as Node resolves it from
+the plugin. No step, name, order or outcome changes.
 
 ### Version 0.23.1: Publish ends cleanly when posting is not enabled
 

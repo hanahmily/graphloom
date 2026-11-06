@@ -1,6 +1,6 @@
 {
   "graphId": "pr-review",
-  "version": "0.23.1",
+  "version": "0.23.2",
   "sdkProtocol": 1,
   "taskConfig": "required",
   "entryPoints": {
@@ -16,10 +16,10 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "2a938ba0e952a272add7cbdfdeb0ee83cc7c1497e2f885b512a2436b764117c3",
+    "sourceTree": "ff7da32bf6d75a17bbd04f2bf9329b86d021887df14c6f8125cb802cf75462fb",
     "packageLock": "6ba71af10b9d0d39ffa547982c2d11c9bf2f20b5206cae3ee15e0af6a0b7068e",
     "files": {
-      "package.json": "2cdf86d7b80bdc49426e4618778bb2942d443a49701c25900c86cebf7bca6c0c",
+      "package.json": "4dec8af82ef266557dae8106a52603ced8a72366ad07b1a2836433422388e560",
       "package-lock.json": "6ba71af10b9d0d39ffa547982c2d11c9bf2f20b5206cae3ee15e0af6a0b7068e",
       "tsconfig.json": "d166142bd5d917d1eb7d3011cf6423c652f30e2989881deec6147a997bf41597",
       "profiles/banyandb.json": "7e40bfe0952a77cad2c33389fca3743202e42888e180b7a27aebed11ff858855",
@@ -63,7 +63,7 @@
       "src/cites.ts": "aac861a7321fb094c1e6a199b1c53c34dddb98df29bc2e9812ca4d4ad6f28725",
       "src/claims.ts": "cf570c0ea188b7858cce87a6e43bcee302b061d595170341b5418758afdb2762",
       "src/commands.ts": "ba0370e065e1b19561785a76b122c62b463bbaad93755a57815ea1e0660b5681",
-      "src/constants.ts": "b7f1f20202f13c508257934f4cdd41929921968de8d2529d384876bb53dabac8",
+      "src/constants.ts": "ad12d1ae923af43151773178836583aba8c9a4e29896fb19b6445c5f263fb595",
       "src/coverage.ts": "8d5417bc88cb49cb399dc28fa4db61c32da4cea22898c4ff0f9bd6221f81c688",
       "src/detectors.ts": "84a4f0045cc3639c0e4494101341ee4697400c2367c80d838fc8cff609a2f3ba",
       "src/diagrams.ts": "60182fb25157fd4a3e1d25809c59fa8a130b0a8b2789cc1af9d8a33bf1b1755e",
@@ -76,7 +76,7 @@
       "src/fit.ts": "71f7e1484bf1abc6b73441a230a7fad5d268a2164723c23ff09ea87437b07bba",
       "src/flow.ts": "a83792504b417f9554861a954948b7b2eaf7b1cd33dddb7166b2e7222cc3cbb9",
       "src/flowlayout.ts": "18175cd7867230794ee384eeae0719ce29b61cb32004f471d6b9c932013dcc94",
-      "src/graph.ts": "be38d22d26a474ff82648d2b8594b258e958eb35d031ef54ca64a1f8f188ef67",
+      "src/graph.ts": "5523a2cb008a39a48edddcdc5c9b514172d6d90751655f1347a8d38f4e0f9841",
       "src/groundwork.ts": "5a12d35f33eee1ef6a136449a48e4dccd1c0e6971a92a01e814d6c5dabfeabd7",
       "src/html.ts": "e816f409d4c361ef52b467f558c699abd565e1f1c8058b3a632c1cb77225088b",
       "src/htmlsvg.ts": "8516c3d13419eab655f9d1ddf4cfb8f386cdd49e6bfd0ffd497b64dfc96b6b70",
@@ -181,6 +181,7 @@
       "test/qa-ids-searches.test.ts": "c6901388c91b774a130dfa4126acf9be37b5e3a3789f4ad4b9878f603396b542",
       "test/qa-units.test.ts": "d50544a525fcd78f93570a346205354324681011672c72bdee67687396a4153b",
       "test/rehearsal-docs.test.ts": "348ec40ab564e45a023985a48ed4f0139e34fb9f90dc37419a1c886c85cb7890",
+      "test/release-layout.test.ts": "c04643bf1e9389aca4c1ba6a6f7d7497ed656260cde35abd07a07336e0576edd",
       "test/report-analysis.test.ts": "106ebb6ceef88a3ac3004319f18e4a1ef24fffe711c7190368f11cfdc5d9b25c",
       "test/report.test.ts": "d2586ad91970641d18267741275d675907de1e2978203300f42f774cf76e600e",
       "test/rereview.test.ts": "930aeb016a362b62d3af083a6a2b9966cdaa233bd97a2055002ecdbd62275a64",

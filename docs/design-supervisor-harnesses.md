@@ -294,8 +294,10 @@ passes anything else to `parseSupervisorDecision`. That function already
 nests flattened action fields and rejects `accept`. A decision then takes the
 existing JSON-fallback path, unchanged:
 
-1. `normalizeProposalInput` (the `{"item": …}` array encoding, guided by each
-   executor's declared input schema).
+1. `normalizeProposalInput` (the `{"item": …}` array encoding, numbers and
+   booleans written as strings, and an input field left on the job itself, such
+   as a lone command's `id`, all guided by each executor's declared input
+   schema; the live run c68993c4-021 stalled on the last two).
 2. `localRefusal`: write scope, continuation, escaping observe paths.
 3. `admission.check`: the controller's preconditions, the grounding rule, and
    repeated no-progress proposals

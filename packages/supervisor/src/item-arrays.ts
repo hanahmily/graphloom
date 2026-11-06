@@ -5,11 +5,14 @@ import { builtinPinForKind, type ExecutorView, type GraphDecision, type JobKind 
 
 /**
  * The supervisor's model encodes JSON arrays inside a tool call's untyped
- * `job.input` as `{"item": [...]}` (or `{"item": x}` for one element). Guided
- * by the target executor's declared input schema, this turns that encoding
- * back into the array the schema expects, and only there: an object where the
- * schema expects an object (even one with an `item` key) is never touched, and
- * neither is any input whose executor declares no shape.
+ * `job.input` as `{"item": [...]}` (or `{"item": x}` for one element), writes
+ * numbers and booleans as strings ("120000", "true"), and at times leaves a
+ * field of the input (a command's `id`, `continueOnFailure`) on the job itself.
+ * Guided by the target executor's declared input schema, this turns each back
+ * into what the schema expects, and only there: an object where the schema
+ * expects an object (even one with an `item` key) is never touched, a string
+ * stays a string where the schema allows one, and neither is any input whose
+ * executor declares no shape.
  */
 
 type Json = unknown;
@@ -23,10 +26,68 @@ function schemaTypes(schema: Record<string, Json>): string[] {
   return typeof t === "string" ? [t] : Array.isArray(t) ? t.filter((x): x is string => typeof x === "string") : [];
 }
 
+/** The number or boolean a string spells, when the schema allows that type and the string is exactly its spelling. */
+function scalarOf(text: string, types: readonly string[]): number | boolean | undefined {
+  if (types.includes("boolean") && (text === "true" || text === "false")) return text === "true";
+  if ((types.includes("integer") || types.includes("number")) && /^-?\d+(\.\d+)?$/.test(text)) {
+    const n = Number(text);
+    if (Number.isFinite(n) && (types.includes("number") || Number.isInteger(n))) return n;
+  }
+  return undefined;
+}
+
+/** The fields a job itself carries (JobSpec); any other key on a dispatch's job belongs to its input. */
+const JOB_FIELDS: ReadonlySet<string> = new Set([
+  "jobId", "stageId", "kind", "purpose", "instruction", "resultSchema", "writeScope", "readOnly", "executor", "input",
+  "effect", "tools", "continueFrom", "timeoutMs", "timeoutContinuations", "checkout", "confinement",
+]);
+
+/**
+ * A key the model wrote on the job that the executor's input schema places inside the input: at the input's top level,
+ * or in the one element of an array property whose items require it (`id` of a lone command). Moved only when the target
+ * lacks it, so nothing the model put in the right place is overridden.
+ */
+function adoptStrays(job: Record<string, Json>, input: Json, schema: Record<string, Json>, paths: string[]): { job: Record<string, Json>; input: Json } {
+  if (!isRecord(input) || !isRecord(schema.properties)) return { job, input };
+  let nextJob = job;
+  let nextInput: Record<string, Json> = input;
+  for (const [key, value] of Object.entries(job)) {
+    if (JOB_FIELDS.has(key) || Object.hasOwn(nextInput, key)) continue;
+    let target: string | undefined;
+    if (Object.hasOwn(schema.properties, key)) {
+      nextInput = { ...nextInput, [key]: value };
+      target = `job.input.${key}`;
+    } else {
+      for (const [name, sub] of Object.entries(schema.properties)) {
+        const items = isRecord(sub) && isRecord(sub.items) ? sub.items : undefined;
+        const list = nextInput[name];
+        if (items === undefined || !isRecord(items.properties) || !Object.hasOwn(items.properties, key)) continue;
+        if (!Array.isArray(list) || list.length !== 1 || !isRecord(list[0]) || Object.hasOwn(list[0], key)) continue;
+        nextInput = { ...nextInput, [name]: [{ ...list[0], [key]: value }] };
+        target = `job.input.${name}[0].${key}`;
+        break;
+      }
+    }
+    if (target === undefined) continue;
+    const { [key]: _moved, ...rest } = nextJob;
+    nextJob = rest;
+    paths.push(`${target} (moved from job.${key})`);
+  }
+  return { job: nextJob, input: nextInput };
+}
+
 function walk(value: Json, schema: Json, at: string, paths: string[]): Json {
   if (!isRecord(schema)) return value;
   const types = schemaTypes(schema);
   let current = value;
+  // The same untyped encoding stringifies scalars: read "120000" and "true" against an integer or boolean position.
+  if (typeof current === "string" && !types.includes("string")) {
+    const scalar = scalarOf(current, types);
+    if (scalar !== undefined) {
+      paths.push(`${at} (string to ${typeof scalar})`);
+      return scalar;
+    }
+  }
   // An array-only position: the one place `{"item": …}` is unwrapped.
   if (types.includes("array") && !types.includes("object") && isRecord(current)) {
     const keys = Object.keys(current);
@@ -79,8 +140,12 @@ export function normalizeJobInput<T extends object>(
   const schema = id === undefined ? undefined : executors.find((e) => e.id === id)?.inputShape?.schema;
   if (schema === undefined) return { job, paths: [] };
   const paths: string[] = [];
-  const input = walk(record.input, schema, "job.input", paths);
-  return paths.length === 0 ? { job, paths } : { job: { ...job, input }, paths };
+  const walked = walk(record.input, schema, "job.input", paths);
+  const strays = adoptStrays(record, walked, schema as Record<string, Json>, paths);
+  // What moved in arrives with the same encoding, so it is read against the schema too.
+  const input = strays.input === walked ? walked : walk(strays.input, schema, "job.input", paths);
+  const adopted = strays.job;
+  return paths.length === 0 ? { job, paths } : { job: { ...adopted, input } as T, paths };
 }
 
 /** A dispatch decision with its job input normalized; any other proposal is returned as it is. */
@@ -96,5 +161,5 @@ export function normalizeProposalInput<P extends object>(
 
 /** The sentence reported back to the model and recorded with the episode. */
 export function normalizationNote(paths: readonly string[]): string {
-  return `Normalized {"item": …} to plain arrays at ${paths.join(", ")}; pass arrays directly next time.`;
+  return `Normalized the job input at ${paths.join(", ")} ({"item": …} read as arrays, stringified numbers and booleans as typed values, stray job fields moved into the input); pass typed JSON and keep each field inside its own object next time.`;
 }
