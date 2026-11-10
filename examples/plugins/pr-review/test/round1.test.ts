@@ -133,6 +133,15 @@ describe("round 1's issues, computed from necessity.json and qa.json", () => {
       expect(r.issues[0]!.body).toContain("`sym2` (Q2)");
       expect(r.prior).toEqual([expect.objectContaining({ id: "Q2", status: "open" })]);
     });
+    it("lists, for each question a merged issue covers, its own equivalent and answer", () => {
+      const symbols = [1, 2, 3].map((n) => ({ id: `S${n}`, path: "pkg/schema/ttl.go", startLine: 3, qualified: `sym${n}` }));
+      const withText = (q: Q, text: string): Q => ({ ...q, answer: { ...q.answer!, answer: text } });
+      const qs = [reuse("Q1", [cite("pkg/a.go")], "S1"), withText(reuse("Q2", [cite("pkg/b.go", "base", 20)], "S2"), "b already merges rows"), reuse("Q3", [cite("pkg/a.go"), cite("pkg/b.go", "base", 20)], "S3")];
+      const r = round1Record({ head: "h".repeat(40), necessity: necessity("necessary"), qa: qa(qs, symbols), files, itemCites: { R1: { path: "pkg/schema/ttl.go", start: 3, end: 3 } }, packs: PACKS })!;
+      expect(r.issues[0]!.covered).toEqual([expect.objectContaining({ id: "Q2", symbol: "`sym2`", equivalents: ["pkg/b.go:20"], excerpt: "b already merges rows" }), expect.objectContaining({ id: "Q3", equivalents: ["pkg/a.go:10", "pkg/b.go:20"] })]);
+      expect(r.issues[0]!.body).toContain("- `sym2` (Q2): `pkg/b.go:20`: b already merges rows");
+    });
+
     it("joins two groups through a question that cites both, whatever the order of the questions", () => {
       const symbols = [1, 2, 3].map((n) => ({ id: `S${n}`, path: "pkg/schema/ttl.go", startLine: 3, qualified: `sym${n}` }));
       const qs = [reuse("Q1", [cite("pkg/a.go")], "S1"), reuse("Q2", [cite("pkg/b.go")], "S2"), reuse("Q3", [cite("pkg/a.go"), cite("pkg/b.go")], "S3")];

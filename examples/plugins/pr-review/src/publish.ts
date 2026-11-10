@@ -29,7 +29,7 @@ import { ASPECTS } from "./aspects.js";
 import { findingsOf, type AspectRecord } from "./review.js";
 import { recordedAspect } from "./reviewdraft.js";
 import type { PullFile } from "./snapshot.js";
-import type { Round1Record } from "./round1.js";
+import type { Round1Covered, Round1Record } from "./round1.js";
 import type { PullRequest } from "./request.js";
 import { READS, readResult, type ReadSpec } from "./snapshot.js";
 
@@ -73,6 +73,8 @@ export interface PublishItem {
   meta?: ItemMeta;
   /** An earlier head's item posted again, because its old thread is outdated. */
   repost?: boolean;
+  /** The other round-1 questions this issue stands for. */
+  covers?: string[];
 }
 
 /** What the ledger records of a posted item beyond its id: the stable key, the place and the text. */
@@ -107,6 +109,8 @@ export interface PriorLine {
   /** A still-open round-2 item whose place on this head was found again (or which is posted again): where it is now, and its anchor recomputed against this head's patch, which the ledger persists in place of the earlier head's. */
   moved?: { path: string; line: number; endLine: number; meta: ItemMeta };
   item: PriorItem;
+  /** A still-open round-1 issue that stands for other questions on this head: who, and with which equivalent each. */
+  covered?: readonly Round1Covered[];
 }
 
 /** A finding a verifier dismissed (never posted): it is recorded closed, so a later head does not raise it again. */
@@ -193,7 +197,7 @@ export function planReview(i: {
       ? issues.filter((x) => !listed.has(x.id)).map((x) => {
           const text = neutralize(x.body);
           const posted = clip(text, MAX_ITEM_TEXT);
-          return { id: x.id, origin: "round1" as const, body: `${posted}\n\n${findingMarker(x.id)}`, ...(posted !== text ? { full: text } : {}), ...(x.path !== undefined && x.line !== undefined ? { path: x.path, line: x.line } : {}), side: "RIGHT" as const, inline: false, meta: { key: x.key ?? "", ...(x.path !== undefined ? { side: "RIGHT" as const } : {}) } };
+          return { id: x.id, origin: "round1" as const, body: `${posted}\n\n${findingMarker(x.id)}`, ...(posted !== text ? { full: text } : {}), ...(x.path !== undefined && x.line !== undefined ? { path: x.path, line: x.line } : {}), side: "RIGHT" as const, inline: false, ...(x.covers !== undefined ? { covers: x.covers } : {}), meta: { key: x.key ?? "", ...(x.path !== undefined ? { side: "RIGHT" as const } : {}) } };
         })
       : [
           ...(i.draft?.comments ?? []).filter((c) => c.kind === "finding").map((e) => { const b = findingBody(e); return ({ id: e.id, origin: "round2" as const, body: `${b.text}\n\n${findingMarker(e.id)}`, ...(b.full !== undefined ? { full: b.full } : {}), path: e.path, line: e.line, ...(e.startLine !== undefined ? { startLine: e.startLine } : {}), side: e.side, inline: false, ...(i.meta?.has(e.id) ? { meta: i.meta.get(e.id)! } : {}) }); }),
@@ -273,7 +277,9 @@ function priorSection(priors: readonly PriorLine[], pull: Pick<PullRequest, "own
   const lines = priors.map((l) => {
     const why = l.reason !== "" ? ` (${clip(oneLine(neutralize(l.reason)), 160)})` : "";
     if (l.status === "fixed") return `- ${l.id}: fixed in ${head.slice(0, 7)}${why}`;
-    return `- ${l.id}: still open${l.repost ? "; its old thread is outdated, so it is commented again" : l.link !== undefined ? ` ([earlier comment](${l.link}))` : ""}${why}`;
+    const added = l.repost ? [] : (l.covered ?? []).filter((c) => !(l.item.covers ?? []).includes(c.id));
+    const more = added.map((c) => `\n  - ${l.id} (still open) now also covers ${c.id} ${c.symbol}: ${c.equivalents.map((e) => `\`${e.replace(/^dependency:/, "")}\``).join(", ")}${c.excerpt !== "" ? ` (${clip(oneLine(neutralize(c.excerpt)), 160)})` : ""}`).join("");
+    return `- ${l.id}: still open${l.repost ? "; its old thread is outdated, so it is commented again" : l.link !== undefined ? ` ([earlier comment](${l.link}))` : ""}${why}${more}`;
   });
   const fixed = priors.filter((l) => l.status === "fixed").length;
   return [`Earlier items (${fixed} fixed, ${priors.length - fixed} still open):`, ...lines].join("\n");
@@ -342,9 +348,9 @@ export interface LedgerPatch {
   open: number;
   reviewId: number;
   url: string | null;
-  items: Array<{ id: string; origin: PublishItem["origin"]; path: string | null; line: number | null; endLine?: number; inline: boolean; commentId: number | null; /** The whole text of an item whose posted text was compacted. */ body?: string; /** The item's text as posted (whole), without its marker. */ text: string; repost?: boolean; meta?: ItemMeta }>;
+  items: Array<{ id: string; origin: PublishItem["origin"]; path: string | null; line: number | null; endLine?: number; inline: boolean; commentId: number | null; /** The whole text of an item whose posted text was compacted. */ body?: string; /** The item's text as posted (whole), without its marker. */ text: string; repost?: boolean; covers?: string[]; meta?: ItemMeta }>;
   /** What became of the earlier heads' items on this head. */
-  priors: Array<{ id: string; origin: PriorLine["origin"]; status: PriorLine["status"]; carried: boolean; reason: string; outdated?: boolean; /** Where a still-open item is on this head, with its anchor recomputed against this head's patch. */ moved?: PriorLine["moved"] }>;
+  priors: Array<{ id: string; origin: PriorLine["origin"]; status: PriorLine["status"]; carried: boolean; reason: string; outdated?: boolean; /** Where a still-open item is on this head, with its anchor recomputed against this head's patch. */ moved?: PriorLine["moved"]; /** The round-1 questions a still-open issue stands for on this head. */ covers?: string[] }>;
   /** Findings dismissed on this head, recorded closed. */
   closed: Array<{ id: string; path: string; line: number; endLine: number; side: "RIGHT" | "LEFT"; text: string; meta: ItemMeta }>;
 }
@@ -359,8 +365,8 @@ export function ledgerPatch(pr: Pick<PullRequest, "head">, plan: ReviewPlan, pos
     open: plan.open,
     reviewId: posted.reviewId,
     url: posted.url,
-    items: plan.items.map((x) => ({ id: x.id, origin: x.origin, path: x.path ?? null, /** The item's first line (a range's last is `endLine`; GitHub's own convention is the end, kept for the posted comment only). */ line: x.startLine ?? x.line ?? null, ...(x.line !== undefined ? { endLine: x.line } : {}), inline: x.inline, commentId: x.inline ? ids.get(x.id) ?? null : null, ...(x.full !== undefined ? { body: x.full } : {}), text: x.full ?? x.body.slice(0, x.body.length - findingMarker(x.id).length).trim(), ...(x.repost === true ? { repost: true } : {}), ...(x.meta !== undefined ? { meta: x.meta } : {}) })),
-    priors: plan.priors.map((l) => ({ id: l.id, origin: l.origin, status: l.status, carried: l.carried, reason: l.reason, ...(l.outdated !== undefined ? { outdated: l.outdated } : {}), ...(l.moved !== undefined ? { moved: l.moved } : {}) })),
+    items: plan.items.map((x) => ({ id: x.id, origin: x.origin, path: x.path ?? null, /** The item's first line (a range's last is `endLine`; GitHub's own convention is the end, kept for the posted comment only). */ line: x.startLine ?? x.line ?? null, ...(x.line !== undefined ? { endLine: x.line } : {}), inline: x.inline, commentId: x.inline ? ids.get(x.id) ?? null : null, ...(x.full !== undefined ? { body: x.full } : {}), text: x.full ?? x.body.slice(0, x.body.length - findingMarker(x.id).length).trim(), ...(x.repost === true ? { repost: true } : {}), ...(x.covers !== undefined ? { covers: x.covers } : {}), ...(x.meta !== undefined ? { meta: x.meta } : {}) })),
+    priors: plan.priors.map((l) => ({ id: l.id, origin: l.origin, status: l.status, carried: l.carried, reason: l.reason, ...(l.outdated !== undefined ? { outdated: l.outdated } : {}), ...(l.moved !== undefined ? { moved: l.moved } : {}), ...(l.covered !== undefined && l.covered.length > 0 ? { covers: l.covered.map((c) => c.id) } : {}) })),
     closed: plan.closed.map((c) => ({ id: c.id, path: c.path, line: c.line, endLine: c.endLine, side: c.side, text: c.text, meta: c.meta })),
   };
 }
@@ -467,7 +473,7 @@ const findings=Array.isArray(v.findings)?v.findings:[];
 const qa=Array.isArray(v.qa)?v.qa:[];
 const note=(f,status,extra)=>{const keep=(Array.isArray(f.history)?f.history:[]).filter((x)=>x.head!==p.head);f.history=keep.concat([Object.assign({head:p.head,status:status},extra||{})])};
 for(const it of p.items){
-const fields=Object.assign({origin:it.origin,path:it.path,line:it.line,text:it.text},it.endLine?{endLine:it.endLine}:{},it.body?{body:it.body}:{},it.meta||{});
+const fields=Object.assign({origin:it.origin,path:it.path,line:it.line,text:it.text},it.covers?{covers:it.covers}:{},it.endLine?{endLine:it.endLine}:{},it.body?{body:it.body}:{},it.meta||{});
 let f=findings.find((x)=>x.id===it.id);
 if(f){if(it.meta){delete f.anchorText;delete f.patchId;delete f.hunk;delete f.outdated}Object.assign(f,fields)}else{f=Object.assign({head:p.head,id:it.id},fields);findings.push(f)}
 f.state="open";f.github=gh(it);note(f,"open",it.repost?{reposted:true}:{});
@@ -476,7 +482,7 @@ const q=qa.find((x)=>x.id===it.id);if(q){q.state="open";q.github=gh(it)}
 for(const pr of p.priors||[]){
 const f=findings.find((x)=>x.id===pr.id);if(!f)continue;
 if(pr.status==="fixed"){f.state="fixed";f.fixedIn=p.head;note(f,"fixed",{reason:pr.reason})}
-else if(!p.items.some((it)=>it.id===pr.id)){note(f,"open",{reason:pr.reason,carried:pr.carried});if(pr.moved){delete f.anchorText;delete f.patchId;delete f.hunk;Object.assign(f,{path:pr.moved.path,line:pr.moved.line,endLine:pr.moved.endLine},pr.moved.meta)}if(pr.outdated===true)f.outdated=true;else if(pr.outdated===false)delete f.outdated}
+else if(!p.items.some((it)=>it.id===pr.id)){note(f,"open",{reason:pr.reason,carried:pr.carried});if(pr.covers)f.covers=pr.covers;else delete f.covers;if(pr.moved){delete f.anchorText;delete f.patchId;delete f.hunk;Object.assign(f,{path:pr.moved.path,line:pr.moved.line,endLine:pr.moved.endLine},pr.moved.meta)}if(pr.outdated===true)f.outdated=true;else if(pr.outdated===false)delete f.outdated}
 const q=qa.find((x)=>x.id===pr.id);if(q&&pr.status==="fixed")q.state="fixed";
 }
 for(const c of p.closed||[]){if(findings.some((x)=>x.id===c.id))continue;findings.push(Object.assign({head:p.head,id:c.id,origin:"round2",path:c.path,line:c.line,endLine:c.endLine,side:c.side,text:c.text,state:"withdrawn",history:[{head:p.head,status:"withdrawn"}]},c.meta||{}))}
@@ -528,7 +534,8 @@ export function priorLines(registry: PriorRegistry, pull: Pick<PullRequest, "own
     const item = registry.items.find((x) => x.id === r.id);
     if (item === undefined) continue;
     const link = commentLink(pull, item);
-    out.push({ id: r.id, origin: "round1", status: r.status, reason: r.reason, carried: r.status === "open" && r.reason.startsWith("not re-checked"), ...(link !== undefined ? { link } : {}), repost: r.status === "open" && !r.reason.startsWith("not re-checked") && threadOutdated(threads, item.commentId), item });
+    const covered = round1.issues.find((x) => x.id === r.id)?.covered;
+    out.push({ id: r.id, origin: "round1", status: r.status, reason: r.reason, ...(covered !== undefined ? { covered } : {}), carried: r.status === "open" && r.reason.startsWith("not re-checked"), ...(link !== undefined ? { link } : {}), repost: r.status === "open" && !r.reason.startsWith("not re-checked") && threadOutdated(threads, item.commentId), item });
   }
   const outcomes = new Map((records ?? []).flatMap((r) => r.prior ?? []).map((o) => [o.id, o] as const));
   for (const item of registry.items.filter((x) => x.origin === "round2" && x.status === "open")) {

@@ -3563,8 +3563,11 @@ moves, so the maintainer had to filter noise. The rule is kept and made precise:
 round-1 issue only when one of its citations is a declared library or lies outside the files the pull request changes
 (base or head, renames counted by both paths), so the pull request could reuse it. An answer whose equivalents are all in
 changed files is recorded under `noted` in `round1.json` and is not an issue; one that cites nothing stays an issue.
-Several questions citing the same outside equivalent are one issue that lists the symbols (`covers`), and an earlier head's
-open issue folded into another is still `open` ([§9.4](#94-rounds)). The other categories are unchanged. No step, name,
+Several questions citing the same outside equivalent are one issue (the lowest question id leads, whatever the order) that lists, for each
+covered question, its symbol, its own outside equivalents and a line of its answer (`covers`, `covered`); an earlier head's open
+issue folded into another is still `open` ([§9.4](#94-rounds)). When a still-open issue whose thread is live gains covered questions on
+a later head, the review body says so under its earlier-comment link ("Q1 (still open) now also covers Q5 `sym`: ...") and the ledger
+records the coverage (`covers`), so the author sees the newly affected symbol. The other categories are unchanged. No step, name,
 order or outcome changes.
 
 ### Version 0.23.3: only the graph's own static runs stand for a batch

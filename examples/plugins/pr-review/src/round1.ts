@@ -47,6 +47,15 @@ export interface Round1Issue {
   anchored: boolean;
   /** The ids of other questions this issue stands for, because they cite the same equivalent outside the change (design §9.4). */
   covers?: string[];
+  /** What each of those questions answered: its symbol, its own outside equivalents and a line of its answer. */
+  covered?: Round1Covered[];
+}
+
+export interface Round1Covered {
+  id: string;
+  symbol: string;
+  equivalents: string[];
+  excerpt: string;
 }
 
 /** An `existing-reuse-common` answer set aside, not an issue: every equivalent it names lies in code the pull request changes. */
@@ -174,10 +183,13 @@ function mergeSharedEquivalents(issues: Round1Issue[], outsideOf: ReadonlyMap<st
   for (const g of groups) {
     const [host, ...rest] = [...g.members].sort((m, n) => idOrder(m.id, n.id));
     if (host === undefined || rest.length === 0) continue;
-    host.covers = rest.map((x) => x.id);
-    host.body = `${host.body}
-
-The same equivalent applies to ${rest.length} more: ${rest.map((x) => `${nameOf(x)} (${x.id})`).join(", ")}.`;
+    host.covered = rest.map((x): Round1Covered => {
+      const q = qa.questions.find((z) => z.id === x.id);
+      return { id: x.id, symbol: nameOf(x), equivalents: (outsideOf.get(x.id) ?? []).slice(0, 3), excerpt: clip(oneLine(q?.answer?.answer ?? ""), 200) };
+    });
+    host.covers = host.covered.map((c) => c.id);
+    // Each covered question's own outside equivalent and answer, so every claim in the merged comment rests on that question's answer.
+    host.body = `${host.body}\n\nThe same issue applies to ${rest.length} more, each with its own answer:\n${host.covered.map((c) => `- ${c.symbol} (${c.id}): ${c.equivalents.map((e) => `\`${e.replace(/^dependency:/, "")}\``).join(", ")}${c.excerpt !== "" ? `: ${c.excerpt}` : ""}`).join("\n")}`;
     rest.forEach((x) => merged.add(x));
   }
   if (merged.size > 0) issues.splice(0, issues.length, ...issues.filter((x) => !merged.has(x)));

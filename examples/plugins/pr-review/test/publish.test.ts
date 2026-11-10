@@ -510,3 +510,30 @@ describe("posting is the operator's to enable: without the write grant the run e
     expect(stopOf(issues())).toMatchObject({ reason: "complete" });
   });
 });
+
+describe("a still-open round-1 issue that gains questions on a later head", () => {
+  const OLD = "a".repeat(40);
+  const item = (covers?: string[]) => ({ id: "Q1", origin: "round1" as const, key: "k|Q1", status: "open" as const, head: OLD, history: [], ...(covers !== undefined ? { covers } : {}) });
+  const covered = [{ id: "Q2", symbol: "`sym2`", equivalents: ["pkg/b.go:10"], excerpt: "b does the same" }, { id: "Q5", symbol: "`newSymbol`", equivalents: ["pkg/a.go:3"], excerpt: "a does it" }];
+  const host = issue("Q1", { kinds: ["existing"], covers: ["Q2", "Q5"], covered });
+  const line = (covers?: string[]) => ({ id: "Q1", origin: "round1" as const, status: "open" as const, reason: "it is still an issue on this head", carried: false, link: "https://github.com/o/r/pull/7#discussion_r1", repost: false, covered, item: item(covers) });
+
+  it("shows the newly covered question under the earlier comment's link, and the ledger records the coverage", () => {
+    const plan = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([host]), prior: [line(["Q2"])] });
+    expect(plan.items).toEqual([]);
+    expect(plan.body).toContain("Q1 (still open) now also covers Q5 `newSymbol`: `pkg/a.go:3` (a does it)");
+    expect(plan.body).not.toContain("now also covers Q2");
+    const patch = ledgerPatch({ head: HEAD }, plan, { reviewId: 1, url: null, how: "created" } as never, new Map());
+    expect(patch.priors).toEqual([expect.objectContaining({ id: "Q1", covers: ["Q2", "Q5"] })]);
+  });
+
+  it("shows nothing new when the earlier head already covered them", () => {
+    expect(planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([host]), prior: [line(["Q2", "Q5"])] }).body).not.toContain("now also covers");
+  });
+
+  it("records the covers of a new merged issue it posts", () => {
+    const plan = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([host]) });
+    expect(plan.items[0]!.covers).toEqual(["Q2", "Q5"]);
+    expect(ledgerPatch({ head: HEAD }, plan, { reviewId: 1, url: null, how: "created" } as never, new Map()).items[0]!.covers).toEqual(["Q2", "Q5"]);
+  });
+});
