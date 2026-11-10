@@ -56,7 +56,7 @@ describe("rounds: review-only runs the report, then round 2", () => {
     expect(stopOf(sim)!.blocker).toMatch(/^round 2: changes requested: 1 open on apache\/skywalking-banyandb#7 at 0123456789ab; the review is posted \(https:/);
     // Every requirement is received, in the fixed order, so no step was added or dropped.
     expect(sim.receipts.filter((r) => r.valid).map((r) => r.requirementId)).toEqual([
-      "pr-snapshot", "head-checked-out", "prior-ledger", "change-report", "measurements", "claims-checked", "questions-complete", "answers-complete", "answers-grounded", "round1-gated", "code-review", "draft-composed", "review-published",
+      "pr-snapshot", "head-checked-out", "prior-ledger", "change-report", "measurements", "claims-checked", "questions-complete", "answers-complete", "answers-grounded", "round1-gated", "code-review", "findings-proven", "draft-composed", "review-published",
     ]);
     expect(stages(sim)).toEqual(expect.arrayContaining(["fetch", "report", "questions", "answers", "review", "draft", "publish"]));
     expect(sim.github.creates).toHaveLength(1);

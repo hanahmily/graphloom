@@ -259,7 +259,22 @@ export interface Profile {
 export interface ReviewConfig {
   fork: { maxParentTokens: number };
   rules: Record<Aspect, RuleEntry[]>;
+  /** Reproducing tests (design §8.2): run in the Docker sandbox, on by default; off makes every behavioral finding unproven. */
+  repro: ReproConfig;
 }
+
+export interface ReproConfig {
+  enabled: boolean;
+  /** The most one test's run may take (the cap each run is counted at in the budget). */
+  perFindingMs: number;
+  /** The most all runs on one head may take, across the three aspects. */
+  timeBudgetMs: number;
+  /** The longest test file, in bytes. */
+  maxTestBytes: number;
+}
+
+/** The defaults of `review.repro` (design §8.2). */
+export const DEFAULT_REPRO: ReproConfig = { enabled: true, perFindingMs: 3 * 60_000, timeBudgetMs: 30 * 60_000, maxTestBytes: 16 * 1024 };
 
 /** The base session's context beyond which a reviewer is seeded instead of forked (design §8.1). */
 export const DEFAULT_MAX_PARENT_TOKENS = 100_000;
@@ -677,12 +692,26 @@ function checkRoles(raw: unknown): { roles: Record<Role, string>; settings: Part
 
 function checkReview(raw: unknown): ReviewConfig {
   const rules = Object.fromEntries(ASPECTS.map((a) => [a, [] as RuleEntry[]])) as Record<Aspect, RuleEntry[]>;
-  const out: ReviewConfig = { fork: { maxParentTokens: DEFAULT_MAX_PARENT_TOKENS }, rules };
+  const out: ReviewConfig = { fork: { maxParentTokens: DEFAULT_MAX_PARENT_TOKENS }, rules, repro: { ...DEFAULT_REPRO } };
   if (raw === undefined) return out;
   need(isObject(raw), "review must be an object");
   const r = raw as Record<string, unknown>;
-  need(r.repro === undefined, "review.repro is not supported in this version: the reproducing tests are a later part of the review layer");
-  onlyKeys(r, "review", ["fork", "aspects"]);
+  onlyKeys(r, "review", ["fork", "aspects", "repro"]);
+  if (r.repro !== undefined) {
+    need(isObject(r.repro), "review.repro must be an object");
+    const rp = r.repro as Record<string, unknown>;
+    onlyKeys(rp, "review.repro", ["enabled", "perFindingMs", "timeBudgetMs", "maxTestBytes"]);
+    need(rp.enabled === undefined || typeof rp.enabled === "boolean", "review.repro.enabled must be true or false");
+    need(rp.perFindingMs === undefined || (isCount(rp.perFindingMs) && (rp.perFindingMs as number) >= 10_000 && (rp.perFindingMs as number) <= 60 * 60_000), "review.repro.perFindingMs must be between 10,000 and 3,600,000");
+    need(rp.timeBudgetMs === undefined || (isCount(rp.timeBudgetMs) && (rp.timeBudgetMs as number) <= 6 * 60 * 60_000), "review.repro.timeBudgetMs must be a positive number of at most 21,600,000");
+    need(rp.maxTestBytes === undefined || (isCount(rp.maxTestBytes) && (rp.maxTestBytes as number) <= 64 * 1024), "review.repro.maxTestBytes must be a positive integer of at most 65,536");
+    out.repro = {
+      enabled: (rp.enabled as boolean | undefined) ?? DEFAULT_REPRO.enabled,
+      perFindingMs: (rp.perFindingMs as number | undefined) ?? DEFAULT_REPRO.perFindingMs,
+      timeBudgetMs: (rp.timeBudgetMs as number | undefined) ?? DEFAULT_REPRO.timeBudgetMs,
+      maxTestBytes: (rp.maxTestBytes as number | undefined) ?? DEFAULT_REPRO.maxTestBytes,
+    };
+  }
   if (r.fork !== undefined) {
     need(isObject(r.fork), "review.fork must be an object");
     onlyKeys(r.fork as Record<string, unknown>, "review.fork", ["maxParentTokens"]);

@@ -48,7 +48,45 @@ export interface DraftEntry {
   linked?: string[];
   /** The design principle the finding says the change breaks (design §8.1). */
   principle?: string;
+  /** The reviewer's test and what the graph's run of it recorded (design §8.2), when the finding has one: the maintainer can run it. */
+  test?: DraftTest;
 }
+
+/** A finding's reproducing test as the draft carries it: the exact text the graph ran, and its recorded result. */
+export interface DraftTest {
+  language: "go" | "typescript";
+  dir: string;
+  name: string;
+  expect: "assertion" | "panic";
+  oracle: string;
+  sha256: string;
+  text: string;
+  /** The two runs' outcomes, and where and how the first failing run failed. */
+  runs: string[];
+  at?: string;
+  failure?: string;
+}
+
+export function draftTestOf(f: Finding): DraftTest | undefined {
+  const r = f.repro;
+  if (r === undefined || r.text.trim() === "") return undefined;
+  const rec = f.proof?.record;
+  return {
+    language: rec?.language ?? (f.path.endsWith(".go") ? "go" : "typescript"),
+    dir: r.dir,
+    name: r.name,
+    expect: r.expect,
+    oracle: r.oracle,
+    sha256: rec?.sha256 ?? "",
+    text: r.text,
+    runs: rec?.runs ?? [],
+    ...(rec?.at !== undefined ? { at: rec.at } : {}),
+    ...(rec?.failure !== undefined ? { failure: rec.failure } : {}),
+  };
+}
+
+/** The line a proven finding's comment carries, and the one it opens its test block with. */
+export const provenLine = (t: DraftTest): string => `Proven by a failing test the graph ran twice in a sandbox: \`${t.name}\` (${t.language}, in \`${t.dir}\`) failed${t.at !== undefined ? ` at \`${t.at}\`` : ""}${t.failure !== undefined ? `: ${clip(oneLine(t.failure), 300)}` : ""}. The expected value comes from: ${clip(oneLine(t.oracle), 240)}`;
 
 export interface AspectView {
   aspect: Aspect;
@@ -136,6 +174,7 @@ function entryOf(members: readonly Finding[], files: readonly PullFile[], reason
   const isAnchored = anchored(file, primary.side, primary.startLine, primary.endLine);
   const notes = [...new Set(members.flatMap((f) => f.notes))];
   const principle = members.find((f) => f.principle !== undefined)?.principle;
+  const test = draftTestOf(primary);
   return {
     id: primary.id,
     kind: "finding",
@@ -149,8 +188,9 @@ function entryOf(members: readonly Finding[], files: readonly PullFile[], reason
     line: primary.endLine,
     anchored: isAnchored,
     ...(principle !== undefined ? { principle } : {}),
-    body: scrub([primary.content, ...(principle !== undefined ? [`Breaks the project's design principle \`${principle}\`.`] : []), ...(primary.verdict !== undefined && primary.verdict.verdict === "confirmed" && primary.verdict.witness !== "" ? [`Verified independently: ${oneLine(primary.verdict.reason)} (${primary.verdict.witness}).`] : []), ...(reason !== undefined && notes.length > 0 ? [`Note: ${notes.join("; ")}.`] : [])].join("\n\n")),
+    body: scrub([primary.content, ...(principle !== undefined ? [`Breaks the project's design principle \`${principle}\`.`] : []), ...(primary.verdict !== undefined && primary.verdict.verdict === "confirmed" && primary.verdict.witness !== "" ? [`Verified independently: ${oneLine(primary.verdict.reason)} (${primary.verdict.witness}).`] : []), ...(proof.state === "proven" && test !== undefined ? [provenLine(test)] : []), ...(reason !== undefined && notes.length > 0 ? [`Note: ${notes.join("; ")}.`] : [])].join("\n\n")),
     ...(kept !== undefined && "text" in kept ? { suggestion: kept.text } : {}),
+    ...(test !== undefined ? { test } : {}),
     ...(members.length > 1 ? { linked: members.filter((f) => f !== primary).map((f) => f.id) } : {}),
   };
 }
@@ -305,7 +345,7 @@ function summaryText(scope: ScopeRecord, principled: readonly Finding[], aspects
   const confirmed = aspects.reduce((n, a) => n + a.confirmed, 0);
   const text = [
     `Reviewed ${scopeLine(scope)} for ${ASPECTS.join(", ")}, with every finding verified by an independent reader.`,
-    `${confirmed} finding${confirmed === 1 ? "" : "s"} confirmed: ${comments.filter((c) => c.kind === "finding").length} drafted as comments, ${judgment.filter((j) => j.proof?.state === "unproven").length} confirmed but unproven for lack of a reproducing test.`,
+    `${confirmed} finding${confirmed === 1 ? "" : "s"} confirmed: ${comments.filter((c) => c.kind === "finding").length} drafted as comments, ${comments.filter((c) => c.proof?.state === "proven").length} of them proven by a failing test the graph ran, ${judgment.filter((j) => j.proof?.state === "unproven").length} confirmed but unproven (each says why).`,
     ...(principled.length > 0 ? [`Confirmed breaks of the project's design principles: ${principled.map((f) => `${f.id} breaks ${f.principle}`).join(", ")}.`] : []),
     `${judgment.filter((j) => j.reason?.startsWith("disputed")).length} disputed, ${dismissed} dismissed, ${questions} question${questions === 1 ? "" : "s"} for the author.`,
     `Recommended verdict: ${recommended}${recommended === "approve" ? " (drafted as comment)" : ""}.`,
@@ -334,6 +374,10 @@ function entryMarkdown(e: DraftEntry, level: "####" | "###"): string[] {
   const head = [e.id, e.kind === "question" ? "question" : e.reason === undefined ? e.severity ?? "" : "", ...(e.aspects.length > 0 ? [e.aspects.join(", ")] : []), ...(e.principle !== undefined ? [`breaks principle ${e.principle}`] : []), ...(e.proof?.state === "non-behavioral" ? ["non-behavioral"] : []), ...(e.reason !== undefined ? [e.reason] : []), `${e.path}:${lines(e)}`, e.side].filter((x) => x !== "");
   const out = [`${level} ${head.join(" · ")}${e.anchored ? "" : " · not in the diff (goes in the review body)"}`, e.body];
   if (e.suggestion !== undefined) out.push("```suggestion", e.suggestion, "```");
+  if (e.test !== undefined) {
+    const t = e.test;
+    out.push(`The test${e.proof?.state === "proven" ? " that proves it" : " (it does not prove the finding)"}: ${t.name} (${t.language}, in ${t.dir}; expects ${t.expect}; runs: ${t.runs.length > 0 ? t.runs.join(", ") : "none"}; SHA-256 ${t.sha256 !== "" ? t.sha256.slice(0, 12) : "not recorded"})`, `\`\`\`${t.language === "go" ? "go" : "ts"}`, t.text.replace(/\n$/, ""), "```");
+  }
   if (e.linked !== undefined && e.linked.length > 0) out.push(`Also raised as ${e.linked.join(", ")}.`);
   return out;
 }

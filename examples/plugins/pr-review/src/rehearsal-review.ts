@@ -8,6 +8,37 @@
  */
 import type { RehearsalReply, RehearsalScenario } from "@graphloom/sdk";
 import { REVIEW_SCHEMA_NAME, VERIFY_SCHEMA_NAME, quotePrefix, type ReviewComment } from "./review.js";
+import { NO_REPRO, sha256, type ReproLanguage, type RunOutcome } from "./repro.js";
+
+/** One scripted run of a reproducing test, as the sandbox script would report it (design §8.2). */
+export interface ScriptedRun {
+  outcome: RunOutcome;
+  /** Where a failing assertion was reported, in the test's own file (a line number), or the whole `<file>:<line>`. */
+  at?: string | number;
+  /** A panic's frames in the repository (`path:line`). */
+  frames?: string[];
+  message?: string;
+}
+
+/**
+ * The stand-in sandbox's result for the command that runs a finding's test: a `graphloom-repro-v1` report for the test text the
+ * reviewer wrote, with the given outcome for each run. `sha256` and `file` are what the script would write unless given.
+ */
+export function reproStub(finding: string, language: ReproLanguage, text: string, runs: readonly ScriptedRun[], over: { sha256?: string; file?: string } = {}): { exitCode: number; stdout: string } {
+  const file = over.file ?? (language === "go" ? `graphloom_repro_${finding}_test.go` : `graphloom-repro-${finding}.test.ts`);
+  const lines = [`graphloom-repro-v1 ${language}`, `finding ${finding}`, `sha256 ${over.sha256 ?? sha256(text)}`, `file ${file}`];
+  runs.forEach((r, i) => {
+    const n = i + 1;
+    lines.push(`run ${n} ${r.outcome}`);
+    if (r.at !== undefined) lines.push(`at ${n} ${typeof r.at === "number" ? `${file}:${r.at}` : r.at}`);
+    for (const f of r.frames ?? []) lines.push(`frame ${n} ${f}`);
+    if (r.message !== undefined) lines.push(`message ${n} ${r.message}`);
+  });
+  return { exitCode: 0, stdout: `${lines.join("\n")}\n` };
+}
+
+/** The image check that says the Go sandbox is there: the rehearsal has no Docker, so a scenario that runs tests says it does. */
+export const SANDBOX_GO_READY = { "sandbox-go": { exitCode: 0, stdout: "ready\n" } };
 
 /** A scripted comment: the fields of a review comment, any of them left to its default, and the values untyped so a scenario can also script a wrong one. */
 export interface ScriptedComment {
@@ -28,6 +59,7 @@ const comment = (c: ScriptedComment): ReviewComment => ({
   evidence: "read the function and its callers",
   distinct: false,
   principle: "",
+  repro: NO_REPRO,
   ...c,
 } as ReviewComment);
 
@@ -44,10 +76,11 @@ export interface ScriptedVerdict {
   quotes?: Array<{ path: string; line: number; text: string }>;
   reason?: string;
   fixes?: boolean;
+  test?: { demonstrates: boolean; reason: string };
 }
 
 export const verifyReply = (verdicts: readonly ScriptedVerdict[]): RehearsalReply => ({
-  output: { verdicts: verdicts.map((v) => ({ verdict: "confirmed", kind: "behavioral", witness: "", quotes: [], reason: "checked against the code", fixes: false, ...v })) },
+  output: { verdicts: verdicts.map((v) => ({ verdict: "confirmed", kind: "behavioral", witness: "", quotes: [], reason: "checked against the code", fixes: false, test: { demonstrates: false, reason: "no test" }, ...v })) },
 });
 
 /** What the review replies are about: the scope's size and the file the findings sit in (a Go file of the pull request). */

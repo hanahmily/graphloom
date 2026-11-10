@@ -363,7 +363,7 @@ const FINDING_TONE: Record<FindingTone, Tone> = { confirmed: "bad", disputed: "w
 const FINDING_ORDER: readonly FindingTone[] = ["confirmed", "disputed", "unproven"];
 
 /** A finding's tone: disputed when its verifier did not settle it, else unproven when no test proves it, else confirmed. */
-export const findingTone = (f: Pick<Finding, "state" | "kind">): FindingTone => (f.state === "disputed" ? "disputed" : proofOf(f).state === "unproven" ? "unproven" : "confirmed");
+export const findingTone = (f: Pick<Finding, "state" | "kind"> & { proof?: Finding["proof"] }): FindingTone => (f.state === "disputed" ? "disputed" : proofOf(f).state === "unproven" ? "unproven" : "confirmed");
 
 /**
  * The findings that stand (not the dismissed ones) as a grid of aspect by severity: each cell a tile with the count, the

@@ -152,7 +152,7 @@ export const verdictLine = (open: number): string => (open === 0 ? "Review passe
 
 function findingBody(e: DraftEntry): { text: string; full?: string } {
   const aspects = e.aspects.length > 0 ? ` · ${e.aspects.join(", ")}` : "";
-  const tags = [e.proof?.state === "non-behavioral" ? "non-behavioral" : undefined, e.principle !== undefined ? `breaks principle ${e.principle}` : undefined].filter((t): t is string => t !== undefined);
+  const tags = [e.proof?.state === "non-behavioral" ? "non-behavioral" : e.proof?.state === "proven" ? "proven by a failing test" : undefined, e.principle !== undefined ? `breaks principle ${e.principle}` : undefined].filter((t): t is string => t !== undefined);
   const label = `**${e.severity !== undefined ? severityLabel(e.severity) : "[finding]"}**${aspects}${tags.length > 0 ? ` · ${tags.join(" · ")}` : ""}`;
   const text = `${label}\n\n${clip(neutralize(e.body), MAX_ITEM_TEXT)}`;
   const suggestion = e.suggestion !== undefined && e.anchored && e.side === "RIGHT" ? `\n\n\`\`\`suggestion\n${e.suggestion}\n\`\`\`` : "";

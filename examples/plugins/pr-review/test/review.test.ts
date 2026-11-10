@@ -32,7 +32,7 @@ describe("the review layer, entered in the same run when round 1 found no issue"
     expect(stopOf(sim), JSON.stringify(sim.final).slice(0, 600)).toMatchObject({ reason: "complete", retryable: false });
     expect(stopOf(sim)!.blocker).toMatch(/^round 2: changes requested: 1 open on apache\/skywalking-banyandb#7 at 0123456789ab; the review is posted \(https:/);
     expect(sim.receipts.filter((r) => r.valid).map((r) => r.requirementId)).toEqual([
-      "pr-snapshot", "head-checked-out", "prior-ledger", "change-report", "measurements", "claims-checked", "questions-complete", "answers-complete", "answers-grounded", "round1-gated", "code-review", "draft-composed", "review-published",
+      "pr-snapshot", "head-checked-out", "prior-ledger", "change-report", "measurements", "claims-checked", "questions-complete", "answers-complete", "answers-grounded", "round1-gated", "code-review", "findings-proven", "draft-composed", "review-published",
     ]);
   });
 
@@ -124,7 +124,7 @@ describe("the review layer, entered in the same run when round 1 found no issue"
     if (w.state !== "read") return;
     const d = parseDraft(w.value)!;
     expect(d.comments.filter((c) => c.kind === "finding").map((c) => [c.id, c.severity, c.aspects])).toEqual([["F3", "P2", ["maintainability"]]]);
-    expect(d.judgment.map((j) => [j.id, j.reason])).toEqual([["F1", "unproven: reproducing tests are not available in this version"]]);
+    expect(d.judgment.map((j) => [j.id, j.reason])).toEqual([["F1", "unproven: no test"]]);
     expect(d.verdict).toBe("comment");
     expect(d.recommended).toBe("comment");
     expect(d.maintainer.join("\n")).toContain("Dismissed F2");

@@ -46,12 +46,12 @@ describe("the BanyanDB profile", () => {
       ["questions", ["questions-complete"]],
       ["answers", ["answers-complete", "answers-grounded"]],
       ["round1", ["round1-gated"]],
-      ["review", ["code-review"]],
+      ["review", ["code-review", "findings-proven"]],
       ["draft", ["draft-composed"]],
       ["publish", ["review-published"]],
     ]);
     expect(d.requirements.map((r) => r.id)).toEqual(d.defaultValidators.map((b) => b.requirementId));
-    expect(new Set(d.requirements.map((r) => r.id)).size).toBe(13);
+    expect(new Set(d.requirements.map((r) => r.id)).size).toBe(14);
     expect(d.resultContracts!.map((c) => [c.name, c.evidenceKind])).toEqual([["change-report-v1", "other"], ["change-report-revision-v1", "other"], ["diagrams-v1", "other"], ["claim-check-v1", "review"], ["questions-v1", "other"], ["answers-v1", "other"], ["answers-revision-v1", "other"], ["necessity-v1", "other"], ["necessity-revision-v1", "other"], ["answer-check-v1", "review"], ["pr-code-review-v1", "review"], ["pr-finding-verification-v1", "review"]]);
   });
 
@@ -115,7 +115,15 @@ describe("profile refusals", () => {
 
   it("says which later version a review-layer field belongs to", () => {
     for (const key of ["rules", "checks", "comments"]) expect(refused({ [key]: {} })).toMatch(new RegExp(`${key} is not supported in this version`));
-    expect(refused({ review: { repro: { enabled: false } } })).toMatch(/review.repro is not supported in this version: the reproducing tests/);
+  });
+
+  it("takes review.repro: on by default with the design's limits, and refuses what it cannot run", () => {
+    expect(profileOf().review.repro).toEqual({ enabled: true, perFindingMs: 180_000, timeBudgetMs: 1_800_000, maxTestBytes: 16_384 });
+    expect(profileOf({ review: { repro: { enabled: false, perFindingMs: 60_000 } } }).review.repro).toEqual({ enabled: false, perFindingMs: 60_000, timeBudgetMs: 1_800_000, maxTestBytes: 16_384 });
+    expect(refused({ review: { repro: { enabled: "no" } } })).toMatch(/review.repro.enabled must be true or false/);
+    expect(refused({ review: { repro: { perFindingMs: 5 } } })).toMatch(/review.repro.perFindingMs must be between/);
+    expect(refused({ review: { repro: { maxTestBytes: 10_000_000 } } })).toMatch(/review.repro.maxTestBytes/);
+    expect(refused({ review: { repro: { network: true } } })).toMatch(/review.repro.network/);
   });
 
   it("takes the review layer's settings: the fork bound and an aspect's rule entries over the shipped ones", () => {

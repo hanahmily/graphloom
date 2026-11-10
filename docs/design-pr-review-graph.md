@@ -2025,17 +2025,13 @@ these differences from the text below, each recorded where it applies:
   that every file of the scope falls under one entry (the first whose glob
   matches, `**` last) and gives the reviewer those groups; a file under none
   fails the aspect before any reviewer runs. The ocr binary is not run.
-- **No reproducing tests** ([§8.2](#82-reproducing-tests) is part 2). Every
-  behavioral finding is therefore `unproven`, as §8.2 specifies for
-  `review.repro.enabled: false`: listed under "Needs your judgment", never
-  drafted as P0 or P1, never a reason for `request-changes`. The one place
-  that decides it is `proofOf` (`src/proof.ts`); part 2 replaces it with
-  the recomputation from `graphloom-repro-v1` reports, adds `repro` to
-  `pr-code-review-v1` and `test` to `pr-finding-verification-v1`, adds the
-  `findings-proven` requirement and turns `review.repro` on in the profile
-  (it is refused today). A suggestion of a non-behavioral finding is kept when
-  the verifier says it fixes the finding, it replaces exactly the commented
-  RIGHT range and is at most 20 lines; there is no fix run.
+- **Reproducing tests (0.24, part 2).** `proofOf` (`src/proof.ts`) now reads the proof the sweep records
+  on each behavioral finding, computed from the `graphloom-repro-v1` command reports and the verifier's
+  `test` judgment; the `findings-proven` requirement recomputes it from the evidence. What is implemented
+  and what is not is listed under [§8.2](#82-reproducing-tests). A suggestion of a behavioral finding is
+  never drafted until its fix run exists (it is kept only when its test passes with it applied); a
+  suggestion of a non-behavioral finding is kept when the verifier says it fixes the finding, it
+  replaces exactly the commented RIGHT range and is at most 20 lines.
 - **Not in this version:** the `rule-checks` requirement, the Checks stage
   (the profile still refuses `checks`), the ledger update with the
   findings' states, "already raised" human threads (`earlier` is empty),
@@ -2198,6 +2194,60 @@ maintainability reviewer sees what the answers already settled.
   ([one entry per problem](design-issue-fix-graph.md#one-entry-per-problem)).
 
 ### 8.2 Reproducing tests
+
+**Status (0.24, part 2: first slice).** Implemented, as the text below specifies unless a bullet says
+otherwise:
+
+- **Contract.** `pr-code-review-v1` comments carry `repro` (`{ dir, name, text, expect, oracle }`, every
+  field empty when the reviewer writes no test), checked on every pass (`reproProblems`,
+  `src/repro.ts`): at most `review.repro.maxTestBytes` (16 KiB), a Go `_test.go` file with its package
+  clause declaring the one named `Test` function, or a vitest file declaring the named test, a safe
+  repository-relative `dir`, an `oracle` of at most 600 characters, and no test on a non-behavioral
+  comment. A problem goes back with the pass (the existing correction, two retries, then the supervisor).
+  `pr-finding-verification-v1` carries `test: { demonstrates, reason }`. The verifier reclassifies a
+  non-behavioral comment that claims wrong behavior, as before; it then has no test, so it is
+  `unproven (no test)`.
+- **Runs.** After a pass and before its verifier, each behavioral finding with a test (P0 first, then by
+  id) runs in one Docker sandbox command job (`repro-<finding>`, the coverage job's image, limits,
+  read-only caches, `{ from: "candidate" }` checkout and no network) through the plugin's fixed
+  `tools/repro/repro.sh`. The test text travels as base64 in the argv and is written under the
+  container's `/tmp/repro/`, never into the checkout (a test checks that the checkout is unchanged).
+  Go uses `go test -overlay`; TypeScript runs vitest on a scratch file with the workspace's own config
+  and the `resolveId` hook. The script writes the `graphloom-repro-v1` report: per run `failed`, `passed`,
+  `build-failed`, `timeout` or `killed`, the failing location, a panic's frames and the failure message
+  (at most 2 KiB, secret-scanned), and the test's SHA-256.
+- **Outcome.** `judgeRun` and `settledProof` (`src/repro.ts`, `src/review.ts`) apply the four conditions
+  of "Proven" below, and the finding records `proof`: `proven` with the run's record, or `unproven` with one
+  of the reasons below. Nothing drafts an unproven finding as P0 or P1, or lets it make the verdict
+  `request-changes`; a proven one is drafted normally, its comment says "Proven by a failing test the
+  graph ran twice in a sandbox" with the failure, and `draft.json`, `draft.md` and the appendix carry the
+  test text and its run for the maintainer. The review comment's label says `proven by a failing test`.
+- **`findings-proven`** is a requirement of the Review stage with its own validator and receipt. It
+  recomputes every `proven` finding from the recorded test text, the command's report and the verdict,
+  and fails when the record does not match what the evidence says.
+
+Differences from the text below, each deliberate:
+
+- **Two invocations, not `-count=2`.** A Go panic ends the test binary, so a second run in the same
+  binary never happens and an expected panic could not fail twice. The script runs `go test
+  -count=1 -json` twice (the second run uses the warm build cache).
+- **No `tsmutate`, so no shared config.** `tsmutate` ([metrics §3.1](design-code-quality-metrics.md#31-tsmutate))
+  is not implemented yet. `tools/repro/vitest.config.mjs` is a template the script fills with paths it
+  computed: it imports the workspace's own vitest or vite config, sets `test.dir`, `test.include` and
+  `server.fs.allow`, and prepends the `resolveId` plugin. The workspace is the nearest directory at or
+  above `dir` whose `package.json` declares vitest.
+- **Panic attribution** requires a frame in the cited file (not yet inside a changed hunk).
+- **Budget.** `timeBudgetMs / perFindingMs` (rounded down, so zero when the budget is under one cap; the profile is not rejected, every finding is then `unproven (repro budget exhausted)`) tests run on one head (default 10), each counted at the
+  cap, since the controller records no durations; each run of a test's two gets half of `perFindingMs`.
+  The rest are `unproven (repro budget exhausted)`. P0 and P1 first applies within a pass; aspects run one
+  after another, so an earlier aspect's tests are not displaced.
+- **A later head** does not rerun a proven finding's test: a finding re-judged on a later head has no test,
+  so it is `unproven (no test)` there ([§9.3](#93-re-checking-earlier-findings)).
+
+Not implemented (a follow-up): the **fix run** (a suggestion of a behavioral finding is not drafted; the
+fix is checked in a later part with the overlay or `load` hook), the **one correction** of a test that is
+unproven for a reason the reviewer can fix (only the contract-level correction exists), a reviewer's
+**second run** per finding, `tsmutate`/`gomutate` sharing, and the hunk-level panic attribution.
 
 **Rule.** A reviewer who finds a bug writes a test that shows it. Reading the
 code is not enough. Each comment declares its `kind`:
@@ -2474,7 +2524,7 @@ open ones in its verdict ([§8.5](#85-publish)), and the ledger records each
 item's status per head. Not implemented: the commit and file mapping of
 [§9.2](#92-mapping-a-new-head-to-the-last-reviewed-one) (round 2's scope on a
 new head is the same as on a first), the rerun of a proven finding's test
-(there are no reproducing tests yet), a verifier's judgment of an author's
+(0.24 records a test and its run but does not rerun it on a later head), a verifier's judgment of an author's
 dispute, and the threads' own resolution state as an input.
 
 ### 9.1 Where the ledger lives
@@ -2579,7 +2629,7 @@ question (and for N1), so it can check what they claim against the code; they de
 | Round 2 did not run (round 1 has open issues), or the file is outside the scope | still open, not re-checked | still open (link), with the reason |
 | A new finding a verifier dismissed | recorded `withdrawn` | not listed |
 
-Not in 0.22: a proven finding's recorded test rerun on the head (there are no reproducing tests,
+Not in 0.22: a proven finding's recorded test rerun on the head (0.24 records the test but does not rerun it,
 [§8.2](#82-reproducing-tests)), a verifier judging the author's dispute of a finding, and
 `resolved-by-maintainer` from a thread resolved on GitHub without a fix. A thread's
 `isOutdated` is read from the snapshot; its other state is not.
@@ -3480,7 +3530,7 @@ and independent verifiers per aspect, the draft review, the Review section of
 the reports, the operator's `areas` input for large pull requests and the
 generic approval inputs behind it ([§8](#8-the-review-layer),
 [Version 0.18](#version-018-the-review-layer-part-1)). The reproducing tests
-([§8.2](#82-reproducing-tests)) are part 2.
+([§8.2](#82-reproducing-tests)) are part 2 ([Version 0.24](#version-024-reproducing-tests-part-2-first-slice)).
 
 | Phase | Scope | Verification |
 |---|---|---|
@@ -3554,6 +3604,34 @@ What 0.11 does, where this document leaves it open:
   as before, so their size is bounded by what one command carries; a report or
   Q&A that does not fit still stops the run "incompatible task" and says so.
   (0.12 lifts this: [§6.6](#66-output), multi-part writes.)
+
+### Version 0.24: reproducing tests (part 2, first slice)
+
+Maintainers re-checked the review's correctness findings by hand because nothing showed they were true. A behavioral
+finding now carries a test the graph ran, and the draft says so.
+
+- **Contracts.** `pr-code-review-v1` comments gain `repro`; `pr-finding-verification-v1` verdicts gain `test`
+  ([§8.2](#82-reproducing-tests)). Both are required fields (a comment with no test leaves them empty).
+- **Graph.** After each pass, each behavioral finding with a test runs in the Docker sandbox (one command job each,
+  `tools/repro/repro.sh`; Go `-overlay`, TypeScript scratch file with a `resolveId` hook), then the verifier reads the
+  test and its recorded run. The sandbox is the one coverage uses; Fetch now checks its images when `review.repro` is
+  on even if coverage is off.
+- **Profile.** `review.repro` (`enabled` default true, `perFindingMs` 3 minutes, `timeBudgetMs` 30 minutes,
+  `maxTestBytes` 16 KiB) replaces the refusal. With `enabled: false` every behavioral finding is
+  `unproven (execution disabled by the profile)` and the reviewers are told to write no test.
+- **Requirement.** `findings-proven` joins the Review stage (validator `findings-proven`, version 1), so a run has
+  one more receipt after `code-review`.
+- **Outcome.** proven (the test failed in both runs at the cited behavior and the verifier says it demonstrates the
+  bug), or unproven with `no test`, `test does not fail`, `inconclusive (<kind>)`, `flaky`, `does not demonstrate`,
+  `sandbox unavailable`, `execution disabled by the profile` or `repro budget exhausted`.
+- **Draft, report, post.** A proven finding is drafted normally (P0 and P1 allowed, `request-changes` possible) with its
+  test and failure in the comment and the test text in `draft.json`/`draft.md`; an unproven one stays under "Needs your
+  judgment" with its reason and its test, if it has one. A suggestion of a behavioral finding is not drafted until its
+  fix run exists.
+- **Not yet:** the fix run, the one correction after an unproven run, tsmutate/gomutate sharing, hunk-level panic
+  attribution and rerunning a proven test on a later head ([§8.2](#82-reproducing-tests) lists them).
+
+No step, name or order changes; one requirement is added to the existing Review stage.
 
 ### Version 0.23.4: an equivalent inside the change is not a round-1 issue
 
