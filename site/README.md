@@ -23,6 +23,7 @@ configures Pages or an Actions workflow; do that when the repository is public.
 ## Keeping it in step
 
 The run diagram is a copy of `docs/assets/run-*.svg`. When you change one,
-copy it to the matching file here. Command lines on the page must
+copy it to the matching file here. The two `demo-*.svg` recordings are generated
+by `scripts/build-demo-svgs.mjs`, which writes both `docs/assets/` and `site/assets/`. Command lines on the page must
 exist in `graphloom --help`, and the quickstart must match
 [`docs/design-release.md`](../docs/design-release.md).

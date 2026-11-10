@@ -24,7 +24,17 @@ What it does not do: it does not push branches or post reviews unless you enable
 
 ## Demo
 
-[PLACEHOLDER: a short recording of one pr-review run ending in the posted review, and one issue-fix run ending in RED → GREEN and the branch]
+Both recordings are real runs, shortened: the commands and their output are quoted from the run's state and the pull requests it produced (long lines are cut with "…"; the times on the right are real).
+
+**pr-review** on [apache/skywalking-banyandb#1460](https://github.com/apache/skywalking-banyandb/pull/1460): one run, the stop because posting was not yet enabled, the resume, and [the review it posted](https://github.com/apache/skywalking-banyandb/pull/1460#pullrequestreview-5768856844) ("Changes requested: 2 open", two inline comments).
+
+<img src="docs/assets/demo-pr-review.svg" alt="Animated terminal recording of a pr-review run on apache/skywalking-banyandb#1460: task new, run, the watcher's stage moves, a stop because posting is not enabled, the resume, and the posted review beginning 'Changes requested: 2 open' with two inline comments." width="900">
+
+**issue-fix** on [apache/skywalking#14169](https://github.com/apache/skywalking/issues/14169) (BanyanDB): a 9 minute 52 second run, the regression test failing on the base (RED), passing with the fix (GREEN), an independent review, and the branch that became [pull request #1459](https://github.com/apache/skywalking-banyandb/pull/1459).
+
+<img src="docs/assets/demo-issue-fix.svg" alt="Animated terminal recording of an issue-fix run for apache/skywalking#14169: the plan, the regression test failing on the base (RED), the six-file fix, the same test passing (GREEN), the independent review accepting, and the delivered branch fix/14169 that became pull request 1459." width="900">
+
+With reduced-motion enabled the recordings show their final frame.
 
 ## Get started
 
