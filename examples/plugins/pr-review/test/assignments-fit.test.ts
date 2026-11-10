@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import type { EnvironmentCommand, JobSpec } from "@graphloom/sdk";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { recordedQa } from "../src/parts.js";
 import { assignmentProblem, ASSIGNMENT_BUDGET_CHARS, ASSIGNMENT_MARGIN_CHARS, fitLines, MAX_ASSIGNMENT_CHARS, shrinkToFit } from "../src/fit.js";
 import { diagramSpecs, MAX_DIAGRAM_DATA_CHARS } from "../src/diagrams.js";
@@ -17,7 +17,7 @@ import type { Groundwork } from "../src/groundwork.js";
 
 import { hugeRehearsal } from "../src/rehearsal.js";
 import { HUGE_AREAS, HUGE_LIMITS, hugeSymbolNames } from "../src/rehearsal-huge.js";
-import { BANYANDB, assignmentOf, profileOf, simulate, simulateYielding, type Simulation } from "./support.js";
+import { BANYANDB, assignmentOf, profileOf, simulateYielding, type Simulation } from "./support.js";
 import { hugePath, HUGE_FILES_PER_AREA } from "../src/rehearsal-huge.js";
 import { passReply, verifyReply } from "../src/rehearsal-review.js";
 import { REVIEW_SCHEMA_NAME, VERIFY_SCHEMA_NAME } from "../src/review.js";
@@ -37,7 +37,11 @@ const writtenBy = (c: EnvironmentCommand): string | undefined => (/-p\d+$/.test(
 
 describe("every agent assignment fits the executor's bound on a pull request at the scale of #1445", () => {
   const { scenario, headFiles } = hugeRehearsal({ ...BANYANDB, ...CONFIG });
-  const sim = simulate({ scenario, config: CONFIG, files: headFiles, maxSteps: 2_500, budgets: { agentInvocations: 400, jobs: 2_000, decisions: 4_000, corrections: 40 } });
+  // The run takes tens of seconds; yielding keeps the worker answering vitest's RPC (simulateYielding).
+  let sim: Simulation;
+  beforeAll(async () => {
+    sim = await simulateYielding({ scenario, config: CONFIG, files: headFiles, maxSteps: 2_500, budgets: { agentInvocations: 400, jobs: 2_000, decisions: 4_000, corrections: 40 } });
+  }, 900_000);
 
   it("is a pull request of that size", () => {
     expect(Object.keys(headFiles).length).toBeGreaterThanOrEqual(200);
