@@ -16,7 +16,7 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "6029ca8890fba1f5ac39e33fb805859111d02b71f7487aac1d127c52d826c8c5",
+    "sourceTree": "58768beab7b1d96e6871f7f8873941d5dbab60cd54610a97309e660b15a6089a",
     "packageLock": "6ba71af10b9d0d39ffa547982c2d11c9bf2f20b5206cae3ee15e0af6a0b7068e",
     "files": {
       "package.json": "3eafeeee5d35813128cacffe2ddfdad634481740f60bb1964f8f331cbadc325f",
@@ -34,7 +34,7 @@
       "tools/gometrics/testdata/corpus/basic.go": "85ef0acab8043f7693d7b013d1c79ae1cf4266552407cc0af448451740eaec08",
       "tools/gometrics/testdata/corpus/closures.go": "454bbc3416c0183cddbf9d17cbe27f46e58b3e871518dad8d7ee357a3020c29f",
       "tools/gometrics/testdata/gocyclo-expected.json": "9c6a7cc52edfce37fb13dec96efb4b8a789ff108b0a504b6571272b49049f6b8",
-      "tools/repro/repro.sh": "db12d94a1e2ddb6f647e6f7299ac42fbb4e014a7f40542fb99695b8f56d8110d",
+      "tools/repro/repro.sh": "e9a8cadc40d4307e1defe2f4c264ce988337cb5a0f59d82c1a0e348546b10288",
       "tools/repro/vitest-summary.mjs": "f33a171cee3f48c2878f0995527d8848253d81a14f3d4b77b916b9d193eecd86",
       "tools/repro/vitest.config.mjs": "26e44f6c0391bdec8e3c240279748f7c102a1763313f99ed0389615d570da686",
       "vendor/diagram-design/LICENSE": "bb7e12e91fecef43024111123ff784cec6c485585561d8b552557c0173b3ed29",
@@ -189,8 +189,8 @@
       "test/release-layout.test.ts": "c04643bf1e9389aca4c1ba6a6f7d7497ed656260cde35abd07a07336e0576edd",
       "test/report-analysis.test.ts": "106ebb6ceef88a3ac3004319f18e4a1ef24fffe711c7190368f11cfdc5d9b25c",
       "test/report.test.ts": "d2586ad91970641d18267741275d675907de1e2978203300f42f774cf76e600e",
-      "test/repro-script.test.ts": "8faffdba7f8ba928bfd4e61018b67ab3a1e3308072dbdc28407f3744676627fa",
-      "test/repro.test.ts": "43a23b5cd15f779c34e6cd950b5e912ab03467df1a7dc0e02f1ec88c192e88be",
+      "test/repro-script.test.ts": "32856e1e815cbe2a4e0237cdd4955986c50907aea58b4bbc3733d4b646c64802",
+      "test/repro.test.ts": "ad4d7d7cea3f7d094a0ec0ce57037951cddf9a5e2a9498ee352c534d78b6cba1",
       "test/rereview.test.ts": "930aeb016a362b62d3af083a6a2b9966cdaa233bd97a2055002ecdbd62275a64",
       "test/reuse.test.ts": "2f153341f66ed857253b561c885f50da2b6255c6a791793fea9ae0386b56b75c",
       "test/review-principles.test.ts": "7f3abc02bc6fec3b48ed7efd4eabdb6a0a1b9bc33bbca4ca0ca32671147b998e",

@@ -121,7 +121,8 @@ if [ "$lang" = go ]; then
       say "run $i timeout"
     elif [ "$term" = '"Action":"fail"' ]; then
       say "run $i failed"
-      grep '"Action":"output"' "$mine" | sed -n 's/.*"Output":"\(.*\)"}$/\1/p' | unescape > "$tmp/lines.$i"
+      # Failure details come from the named test and its subtests (t.Run reports under Name/sub); the outcome is the parent's.
+      grep -e "\"Test\":\"$name\"" -e "\"Test\":\"$name/" "$out" | grep '"Action":"output"' | sed -n 's/.*"Output":"\(.*\)"}$/\1/p' | unescape > "$tmp/lines.$i"
       at=$(sed -n "s/^ *\\(graphloom_repro_${finding}_test\\.go:[0-9][0-9]*\\): .*/\\1/p" "$tmp/lines.$i" | head -n 1)
       [ -z "$at" ] || say "at $i $at"
       # A panic's frames in the repository: a tab, then an absolute path under the checkout, without the test's own file.

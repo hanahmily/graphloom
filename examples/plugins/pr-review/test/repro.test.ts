@@ -109,6 +109,10 @@ describe("what a recorded run means for a finding (design §8.2)", () => {
     expect(judge(FAILED)).toMatchObject({ state: "proven", record: { runs: ["failed", "failed"], at: "graphloom_repro_F1_test.go:6", failure: "7w refused: unit not supported", name: "TestParseWeek", sha256: sha256(GO_TEST) } });
   });
 
+  it("proves a test whose assertion failed inside a subtest: the location and message come with the parent's failure", () => {
+    expect(judge([{ outcome: "failed", at: 8, message: "sub: parse(7w) = 0, want 7" }, { outcome: "failed", at: 8 }])).toMatchObject({ state: "proven", record: { at: "graphloom_repro_F1_test.go:8", failure: "sub: parse(7w) = 0, want 7" } });
+  });
+
   it("proves an expected panic only when a frame lies in the cited file", () => {
     const panics = [{ outcome: "failed" as const, frames: [PATH + ":30"], message: "panic: index out of range" }, { outcome: "failed" as const, frames: [PATH + ":30"] }];
     expect(judge(panics, {}, repro({ expect: "panic" })).state).toBe("proven");

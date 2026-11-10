@@ -57,6 +57,12 @@ describe.skipIf(!hasGo)("repro.sh with Go: go test -overlay, the test never writ
     expect(readdirSync(path.join(mod, "pkg/schema"))).toEqual(["ttl.go"]);
   });
 
+  it("takes a failing subtest's location and message, with the outcome from the parent test", () => {
+    const repro = test("TestSub", '\tt.Run("seven weeks", func(t *testing.T) {\n\t\tif got := parse("7w"); got != 7 {\n\t\t\tt.Fatalf("sub: parse(7w) = %d, want 7", got)\n\t\t}\n\t})');
+    const { text } = runScript(mod, "go", "F11", repro, ".");
+    expect(judge(text, "F11", repro, "go", "pkg/schema/ttl.go")).toMatchObject({ state: "proven", record: { runs: ["failed", "failed"], at: "graphloom_repro_F11_test.go:8", failure: expect.stringContaining("sub: parse(7w) = 0, want 7") } });
+  });
+
   it("does not reproduce a test that passes, and calls a test that does not build inconclusive", () => {
     const passes = test("TestOther", '\tif parse("x") != 1 {\n\t\tt.Fatal("no")\n\t}');
     expect(judge(runScript(mod, "go", "F4", passes, ".").text, "F4", passes, "go", "pkg/schema/ttl.go")).toMatchObject({ state: "unproven", reason: "test does not fail" });
