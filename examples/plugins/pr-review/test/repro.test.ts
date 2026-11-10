@@ -4,7 +4,7 @@
 import type { EvidenceRecord, JobSpec, RehearsalScenario } from "@graphloom/sdk";
 import { describe, expect, it } from "vitest";
 import { parseDraft } from "../src/draft.js";
-import { parseVerification, parsePass, REVIEW_SCHEMA_NAME, VERIFY_SCHEMA_NAME } from "../src/review.js";
+import { maxReproRuns, parseVerification, parsePass, REVIEW_SCHEMA_NAME, VERIFY_SCHEMA_NAME } from "../src/review.js";
 import { passReply, reproStub, SANDBOX_GO_READY, verifyReply } from "../src/rehearsal-review.js";
 import { judgeRun, parseReproReport, reproProblems, reproSpecOf, sha256, type Repro } from "../src/repro.js";
 import { readParts } from "../src/parts.js";
@@ -309,6 +309,17 @@ describe("a failing test proves nothing unless the verifier validly confirms the
       expect(sim.receipts.some((r) => r.requirementId === "findings-proven" && r.valid)).toBe(true);
     });
   }
+});
+
+describe("a total budget under one test's cap", () => {
+  it("runs no test and leaves the finding unproven (repro budget exhausted); the profile keeps the setting as given", () => {
+    const budget = { review: { repro: { perFindingMs: 120_000, timeBudgetMs: 60_000 } } };
+    const sim = run(scenario([passReply(1, [find({ repro: repro() })]), ...empty()], [confirmF1()], { "repro-F1": reproStub("F1", "go", GO_TEST, FAILED) }, budget), budget);
+    expect(reproJobs(sim)).toEqual([]);
+    expect(findingOf(sim, "correctness", "F1").proof).toMatchObject({ state: "unproven", reason: "repro budget exhausted" });
+    expect(maxReproRuns({ perFindingMs: 120_000, timeBudgetMs: 60_000 })).toBe(0);
+    expect(maxReproRuns({ perFindingMs: 120_000, timeBudgetMs: 240_000 })).toBe(2);
+  });
 });
 
 describe("the time budget holds across the passes of one aspect", () => {

@@ -490,7 +490,8 @@ export interface ReproEnv {
 export const reproRunSeconds = (config: { perFindingMs: number }): number => Math.max(5, Math.floor(config.perFindingMs / 2000));
 
 /** The most tests one head's review runs: the time budget over the per-finding cap. */
-export const maxReproRuns = (config: { perFindingMs: number; timeBudgetMs: number }): number => Math.max(1, Math.floor(config.timeBudgetMs / config.perFindingMs));
+/** (Zero when the total budget is under one finding's cap: no test fits, and every finding is unproven for the budget.) */
+export const maxReproRuns = (config: { perFindingMs: number; timeBudgetMs: number }): number => Math.floor(config.timeBudgetMs / config.perFindingMs);
 
 export interface AspectSpec {
   aspect: Aspect;

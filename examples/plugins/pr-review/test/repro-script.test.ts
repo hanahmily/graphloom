@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -94,5 +94,17 @@ describe.skipIf(!hasVitest)("repro.sh with TypeScript: a scratch file with the r
     expect(judge(runScript(ROOT, "typescript", "F9", passes, "auto").text, "F9", passes, "typescript", `${dir}/ids.ts`)).toMatchObject({ state: "unproven", reason: "test does not fail" });
     const missing = { ...passes, text: passes.text.replace("./ids.js", "./no-such-module.js") };
     expect(judge(runScript(ROOT, "typescript", "F10", missing, "auto").text, "F10", missing, "typescript", `${dir}/ids.ts`)).toMatchObject({ state: "unproven", reason: "inconclusive (build failed)" });
+  });
+
+  it("runs only the scratch test in a repository whose config defines projects", () => {
+    const repo = mkdtempSync(path.join(tmpdir(), "repro-projects-"));
+    scratch.push(repo);
+    mkdirSync(path.join(repo, "src"), { recursive: true });
+    writeFileSync(path.join(repo, "package.json"), '{ "name": "multi", "private": true, "devDependencies": { "vitest": "*" } }\n');
+    writeFileSync(path.join(repo, "vitest.config.mjs"), 'export default { test: { projects: [{ test: { name: "unit", include: ["src/**/*.test.ts"] } }, { test: { name: "other", include: ["other/**/*.test.ts"] } }] } };\n');
+    writeFileSync(path.join(repo, "src/own.test.ts"), 'import { it } from "vitest";\nit("the repo\'s own suite", () => {});\n');
+    symlinkSync(path.join(ROOT, "node_modules"), path.join(repo, "node_modules"));
+    const repro: Repro = { dir: "src", name: "fails", expect: "assertion", oracle: "the docs", text: 'import { it, expect } from "vitest";\n\nit("fails", () => {\n  expect(1).toBe(2);\n});\n' };
+    expect(judge(runScript(repo, "typescript", "F12", repro, "auto").text, "F12", repro, "typescript", "src/mod.ts")).toMatchObject({ state: "proven", record: { runs: ["failed", "failed"] } });
   });
 });

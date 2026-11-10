@@ -2237,7 +2237,7 @@ Differences from the text below, each deliberate:
   `server.fs.allow`, and prepends the `resolveId` plugin. The workspace is the nearest directory at or
   above `dir` whose `package.json` declares vitest.
 - **Panic attribution** requires a frame in the cited file (not yet inside a changed hunk).
-- **Budget.** `timeBudgetMs / perFindingMs` tests run on one head (default 10), each counted at the
+- **Budget.** `timeBudgetMs / perFindingMs` (rounded down, so zero when the budget is under one cap; the profile is not rejected, every finding is then `unproven (repro budget exhausted)`) tests run on one head (default 10), each counted at the
   cap, since the controller records no durations; each run of a test's two gets half of `perFindingMs`.
   The rest are `unproven (repro budget exhausted)`. P0 and P1 first applies within a pass; aspects run one
   after another, so an earlier aspect's tests are not displaced.

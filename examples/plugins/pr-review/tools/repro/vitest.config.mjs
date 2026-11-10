@@ -28,5 +28,7 @@ export default {
   root: "@WS@",
   plugins: [resolver, ...(Array.isArray(base.plugins) ? base.plugins : [])],
   server: { ...(base.server ?? {}), fs: { ...((base.server ?? {}).fs ?? {}), allow: ["@TMP@", "@WS@", "@ROOT@"] } },
-  test: { ...(base.test ?? {}), dir: "@TMP@", include: [scratch], exclude: [], typecheck: { enabled: false }, coverage: { enabled: false }, watch: false },
+  // Only the scratch test runs: what redirects test discovery (the repository's projects or workspace, a shard, a name filter) is
+  // dropped; its transform, resolve, setup and environment settings stay.
+  test: { ...(base.test ?? {}), projects: undefined, workspace: undefined, shard: undefined, testNamePattern: undefined, dir: "@TMP@", include: [scratch], exclude: [], typecheck: { enabled: false }, coverage: { enabled: false }, watch: false },
 };
