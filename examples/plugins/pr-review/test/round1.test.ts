@@ -93,6 +93,48 @@ describe("round 1's issues, computed from necessity.json and qa.json", () => {
     expect(r.issues[0]!.body).toContain("pkg/timestamp/duration.go:30");
   });
 
+  describe("an existing-equivalent answer is an issue only when the equivalent lies outside the change", () => {
+    const cite = (path: string, tree = "base", start = 10) => ({ path, start, end: start + 5, tree });
+    const reuse = (id: string, citations: Array<ReturnType<typeof cite>>, symbol = "S1"): Q => ({ id, type: "existing-reuse-common", symbol, answer: { status: "answered", citations } });
+    const files = [file("pkg/schema/ttl.go"), { ...file("pkg/merge/new.go"), status: "renamed", previousPath: "pkg/merge/old.go" }];
+
+    it("is not an issue when every equivalent is in a file the pull request changes, and is noted", () => {
+      const r = run([reuse("Q1", [cite("pkg/schema/ttl.go"), cite("pkg/merge/old.go"), cite("pkg/merge/new.go", "head")])], necessity("necessary"), files);
+      expect(r.issues.filter((i) => i.id === "Q1")).toEqual([]);
+      expect(r.noted).toEqual([{ id: "Q1", key: expect.any(String), note: "the equivalent it names is the code this pull request changes" }]);
+    });
+
+    it("is an issue when the equivalent is in a file the pull request does not change", () => {
+      const r = run([reuse("Q1", [cite("pkg/timestamp/duration.go")])], necessity("necessary"), files);
+      expect(ids(r)).toEqual(["Q1"]);
+      expect(r.noted).toBeUndefined();
+    });
+
+    it("is an issue when it cites a declared library, even at a path the pull request also changes", () => {
+      const r = run([reuse("Q1", [cite("pkg/schema/ttl.go", "dependency")])], necessity("necessary"), files);
+      expect(ids(r)).toEqual(["Q1"]);
+    });
+
+    it("is an issue when the citations are mixed, one inside the change and one outside", () => {
+      const r = run([reuse("Q1", [cite("pkg/schema/ttl.go"), cite("pkg/timestamp/duration.go")])], necessity("necessary"), files);
+      expect(ids(r)).toEqual(["Q1"]);
+    });
+
+    it("stays an issue when the answer cites nothing, since it cannot show the equivalent is the changed code", () => {
+      expect(ids(run([reuse("Q1", [])], necessity("necessary"), files))).toEqual(["Q1"]);
+    });
+
+    it("lists several symbols citing the same outside equivalent as one issue", () => {
+      const symbols = [1, 2, 3].map((n) => ({ id: `S${n}`, path: "pkg/schema/ttl.go", startLine: 3, qualified: `sym${n}` }));
+      const questions = [reuse("Q1", [cite("pkg/timestamp/duration.go")], "S1"), reuse("Q2", [cite("pkg/timestamp/duration.go"), cite("pkg/schema/ttl.go")], "S2"), reuse("Q3", [cite("pkg/other/x.go")], "S3"), reuse("Q4", [cite("pkg/timestamp/duration.go")], "S3")];
+      const r = round1Record({ head: "h".repeat(40), necessity: necessity("necessary"), qa: qa(questions, symbols), files, itemCites: { R1: { path: "pkg/schema/ttl.go", start: 3, end: 3 } }, packs: PACKS, prior: [{ id: "Q2", key: "k2", origin: "round1", status: "open" } as never] })!;
+      expect(ids(r)).toEqual(["Q1", "Q3"]);
+      expect(r.issues[0]!.covers).toEqual(["Q2", "Q4"]);
+      expect(r.issues[0]!.body).toContain("`sym2` (Q2)");
+      expect(r.prior).toEqual([expect.objectContaining({ id: "Q2", status: "open" })]);
+    });
+  });
+
   it("include a missing-test question whose answer finds no covering test, even when it is fully answered", () => {
     const r = run([
       { id: "Q1", type: "missing-test", symbol: "S1", answer: { status: "answered", none_found: true } },

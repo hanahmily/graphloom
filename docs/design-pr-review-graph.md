@@ -99,7 +99,7 @@ passed.
 | The first question is whether the change is necessary, and the answer can end the questions | N1 is asked before every other question, with evidence for each of its three parts. When it concludes `unnecessary` and the answer checker supports that, no other question is asked. `questionable` and `needs author` never skip, and an operator can ask for everything anyway ([§7.5](#75-the-necessity-question-n1)) |
 | One run reviews one head, in two rounds, and no human is in it | Round 1 (report and Q&A) is decided by plugin code at the **Round 1** stage ([§9.4](#94-rounds)); with issues the run posts them and ends, without any, round 2 runs in the same run. The request is `Review on …`; there is no pause, no approval and no `report ready` stop ([§2](#2-the-run-two-rounds-and-no-human)) |
 | The report and the answers are grounded | Deterministic detectors, symbol extraction, whole-repository search, the dependency inventory and test mapping feed them. Every item cites the diff or the base tree. An absence lists the searches that found nothing. Completeness checks cover every changed file, symbol and question. Independent checkers verify every claim ([§6](#6-the-change-report), [§7](#7-questions-and-answers)) |
-| Plugin code decides what reaches the PR's author | Round 1's issues are computed from `necessity.json` and `qa.json`: N1's conclusion when it is not `necessary`; every `needs author` and every partially answered question; every answer that found an existing equivalent, a reusable library or common logic, and every missing-test answer that cites no covering test, even when fully answered. Each blocks round 2 ([§9.4](#94-rounds)) |
+| Plugin code decides what reaches the PR's author | Round 1's issues are computed from `necessity.json` and `qa.json`: N1's conclusion when it is not `necessary`; every `needs author` and every partially answered question; every answer that found an existing equivalent, a reusable library or common logic outside the code the pull request changes (an equivalent inside a changed file is the change itself, [§9.4](#94-rounds)), and every missing-test answer that cites no covering test, even when fully answered. Each blocks round 2 ([§9.4](#94-rounds)) |
 | `graphloom session open` is for whoever wants to look, not part of the flow | It still starts a fork of an agent's recorded session in a terminal, confined as its job was, and records the conversation; nothing the conversation says reaches the run ([§17](#17-discussing-a-run-graphloom-session-open)) |
 | The reviewers start fresh | Each aspect reviewer starts a fresh session seeded with `review.md` only, and records that ([§8.1](#81-review)) |
 | Judgement words are allowed | No word list is enforced. The report and the Q&A stay structurally neutral (no severities, verdict or findings), the prompts ask for factual descriptions, and the checkers judge claims for support ([§6.5](#65-deterministic-validation)) |
@@ -345,7 +345,7 @@ then pass on that, and the run publishes round 1 and ends.
 | Questions | `questions-complete` | N1, the necessity question, was asked first ([§7.5](#75-the-necessity-question-n1)): its three parts have their evidence, an independent checker verified every cited design statement, trace step and the conclusion, and N1's checked answer and decision are recorded in `necessity.json`. When N1 concluded `unnecessary`, the checker supports it and the operator did not ask for every question, N1 is the only question required and the skip is recorded. Otherwise every required question was asked ([§7.1](#71-questions)): purpose for each change item whose purpose the PR text does not state (a stated purpose recorded with a matching quote instead); `existing-reuse-common` for each new symbol, one question with one answer (in large mode, for each high-level change instead, [§7.6](#76-questions-in-large-mode)); `missing-test` for each new or modified symbol with no mapped test; and one question per value over a metric limit and per surviving mutant. Every changed function has a measurement record or a not-run reason | `necessity-v1`, `answer-check-v1`, `necessity-write`, `questions-v1`, search and test-map reports | `questions-complete` (`independence: separate-reviewer`: N1's check is its latest review) |
 | Answers | `answers-complete` | N1 has its recorded answer first (alone, with the skip recorded in the Q&A, when it was skipped past). Every other question has an answer from the `<answerer>`, with evidence (citations, the searches run, each re-run by the plugin with the count it measured, quotes) and a status of `answered`, `partially answered` or `needs author`. Every "none found" answer lists its whole-repository searches and the dependency inventory. Every cited metric equals its record. Every proposal cites line ranges inside its function. `review.md`, `report.json` and `qa.json` are written | `answers-v1`, `qa-write` | `answers-complete` |
 | Answers | `answers-grounded` | An independent `<answer-checker>` verified N1's cited design statements, trace steps and conclusion, and re-checked every cited equivalent, library, duplicate and covering test, and every "none found" claim, against the trees. Every answer left is `supported` or `partial`. An answer still unsupported after one correction is `needs author`, with both statements recorded | `claim-check-v1` | `answers-grounded` |
-| Round 1 | `round1-gated` | Round 1 is decided by plugin code from `necessity.json` and `qa.json`, with no model and no human, and recorded as `round1/round1.json` (`pr-review-round1-v1`): N1's conclusion when it is not `necessary`; every `needs author` and every partially answered question; every answer that found an existing equivalent, a reusable library or common logic, and every missing-test answer that cites no covering test, even when fully answered. Each issue has its id (`N1`, `Q3`), kinds, status, text and, when its place lies inside a hunk at the head, its anchor. The record recomputes from the recorded Q&A | `round1-v1` | `round1-gated` |
+| Round 1 | `round1-gated` | Round 1 is decided by plugin code from `necessity.json` and `qa.json`, with no model and no human, and recorded as `round1/round1.json` (`pr-review-round1-v1`): N1's conclusion when it is not `necessary`; every `needs author` and every partially answered question; every answer that found an existing equivalent, a reusable library or common logic outside the code the pull request changes (an equivalent inside a changed file is the change itself, [§9.4](#94-rounds)), and every missing-test answer that cites no covering test, even when fully answered. Each issue has its id (`N1`, `Q3`), kinds, status, text and, when its place lies inside a hunk at the head, its anchor. The record recomputes from the recorded Q&A | `round1-v1` | `round1-gated` |
 | Review | `code-review` | Unless round 1 found issues (no human is asked: the stage is entered in the same run): for each aspect (correctness, maintainability, security), the latest read-only `<reviewer-aspect>` pass reviewed every file in scope with that aspect's rule file, every rule group `ocr delegate rule` returned for it has source `custom` and that file's rule text, and the pass gave a status for every open prior finding of the aspect. Every pass started a fresh session seeded with `review.md` only, and the scope record says so. Each aspect's sweep saturated or ran four passes. Every finding has a verdict from its `<verifier-aspect>`, in a fresh session on a harness different from its reviewer's | `pr-code-review-v1`, `ocr-rule-groups` command reports, `pr-finding-verification-v1` | `open-code-review` |
 | Review | `findings-proven` | Unless round 1 found issues: every behavioral finding is `proven` (its test, rerun by the graph in the Docker sandbox, failed on the head in every run, in the test's own assertion or by a panic inside the cited code, and the verifier judged that the test shows the claimed bug), or is recorded `unproven` with its reason. No unproven behavioral finding is drafted as P0 or P1 or counts toward the verdict | `graphloom-repro-v1` command reports, `pr-finding-verification-v1` | `findings-proven` |
 | Review | `rule-checks` | Unless round 1 found issues: each profile rule was evaluated on the diff | from `pr-snapshot` | `rule-checks` |
@@ -2619,8 +2619,18 @@ reviews one head.
    - every question whose answer needs the author;
    - every partially answered question;
    - every answer that found an existing equivalent, a reusable library or
-     common logic (an `existing-reuse-common` answer that did not find "none"),
-     even when it is fully answered;
+     common logic (an `existing-reuse-common` answer that did not find "none")
+     **outside the code the pull request changes**, even when it is fully
+     answered. An answer counts only when at least one of its citations is a
+     declared library (tree `dependency`) or lies in a base or head file the
+     pull request does not add, modify, rename or delete. An answer whose
+     citations are all in changed files names the code the pull request moves or
+     adapts: it is not an issue, and `round1.json` records it under `noted` with
+     "the equivalent it names is the code this pull request changes". An answer
+     with no citation stays an issue. Questions (several new symbols) that cite
+     the same outside equivalent are **one** issue, which lists the symbols and
+     carries the other questions' ids in `covers`; plugin code decides all of
+     this from the structured citations, never a model;
    - every `missing-test` question whose answer finds no covering test (it
      says none was found, or cites no test file by the effective language
      packs' `testFiles` convention, the one answer validation uses), even when it
@@ -3544,6 +3554,18 @@ What 0.11 does, where this document leaves it open:
   as before, so their size is bounded by what one command carries; a report or
   Q&A that does not fit still stops the run "incompatible task" and says so.
   (0.12 lifts this: [§6.6](#66-output), multi-part writes.)
+
+### Version 0.23.4: an equivalent inside the change is not a round-1 issue
+
+A live run on a refactor that moves an existing batch merge onto a new path ended round 1 with 23 issues, 17 of them
+"something equivalent already exists", one per new symbol; most of the "equivalents" were the code the pull request itself
+moves, so the maintainer had to filter noise. The rule is kept and made precise: an `existing-reuse-common` answer is a
+round-1 issue only when one of its citations is a declared library or lies outside the files the pull request changes
+(base or head, renames counted by both paths), so the pull request could reuse it. An answer whose equivalents are all in
+changed files is recorded under `noted` in `round1.json` and is not an issue; one that cites nothing stays an issue.
+Several questions citing the same outside equivalent are one issue that lists the symbols (`covers`), and an earlier head's
+open issue folded into another is still `open` ([§9.4](#94-rounds)). The other categories are unchanged. No step, name,
+order or outcome changes.
 
 ### Version 0.23.3: only the graph's own static runs stand for a batch
 

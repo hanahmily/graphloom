@@ -45,6 +45,15 @@ export interface Round1Issue {
   line?: number;
   /** The place lies inside a hunk of the file's patch at the head; otherwise the issue goes in the review body. */
   anchored: boolean;
+  /** The ids of other questions this issue stands for, because they cite the same equivalent outside the change (design §9.4). */
+  covers?: string[];
+}
+
+/** An `existing-reuse-common` answer set aside, not an issue: every equivalent it names lies in code the pull request changes. */
+export interface Round1Noted {
+  id: string;
+  key: string;
+  note: string;
 }
 
 /** What this head's round 1 says of an issue an earlier head's round 1 left open (design §9.4, item 4). */
@@ -65,6 +74,8 @@ export interface Round1Record {
   issues: Round1Issue[];
   /** The issues earlier heads left open, each judged on this head; absent for a run with none. */
   prior?: Round1Prior[];
+  /** Answers about an existing equivalent that are not issues because the equivalent is the code this pull request changes. */
+  noted?: Round1Noted[];
   /** Why round 1 did not run (`rounds: review-only`, design §3.2): it records no issue, and earlier round-1 items are left as they were. */
   skipped?: string;
 }
@@ -88,7 +99,7 @@ interface QaQuestion {
   answer?: { answer: string; status: string; none_found: boolean; citations: Array<{ path: string; start: number; end: number; tree: string }> };
 }
 
-function qaOf(json: string): { questions: QaQuestion[]; symbols: Array<{ id: string; path: string; startLine: number }> } | undefined {
+function qaOf(json: string): { questions: QaQuestion[]; symbols: Array<{ id: string; path: string; startLine: number; qualified: string }> } | undefined {
   let v: unknown;
   try {
     v = JSON.parse(json);
@@ -111,8 +122,58 @@ function qaOf(json: string): { questions: QaQuestion[]; symbols: Array<{ id: str
         : {}),
     };
   });
-  const symbols = (Array.isArray(v.symbols) ? v.symbols.filter(isObj) : []).map((s) => ({ id: str(s.id), path: str(s.path), startLine: Number(s.startLine) || 1 }));
+  const symbols = (Array.isArray(v.symbols) ? v.symbols.filter(isObj) : []).map((s) => ({ id: str(s.id), path: str(s.path), startLine: Number(s.startLine) || 1, qualified: str(s.qualified) }));
   return { questions, symbols };
+}
+
+const NOTED_REASON = "the equivalent it names is the code this pull request changes";
+
+/**
+ * The cited equivalents that lie outside the change, as `path:start` keys: a library's source, or a base or head file the
+ * pull request does not add, modify, rename or delete. Deterministic: no model judges it.
+ */
+function outsideEquivalents(citations: ReadonlyArray<{ path: string; start: number; tree: string }>, changed: ReadonlySet<string>): string[] {
+  const out = new Set<string>();
+  for (const c of citations) {
+    if (c.path === "") continue;
+    if (c.tree === "dependency") out.add(`dependency:${c.path}:${c.start}`);
+    else if (!changed.has(c.path)) out.add(`${c.path}:${c.start}`);
+  }
+  return [...out];
+}
+
+/**
+ * Several symbols citing the same outside equivalent are one issue that lists them. Only issues that are solely an
+ * `existing` issue merge: the first of a group (in question order) carries it and `covers` the rest.
+ */
+function mergeSharedEquivalents(issues: Round1Issue[], outsideOf: ReadonlyMap<string, string[]>, qa: { questions: QaQuestion[]; symbols: Array<{ id: string; qualified: string }> }): void {
+  const groups: Array<{ keys: Set<string>; members: Round1Issue[] }> = [];
+  for (const x of issues) {
+    const keys = outsideOf.get(x.id);
+    if (keys === undefined || x.kinds.length !== 1 || x.kinds[0] !== "existing") continue;
+    const g = groups.find((y) => keys.some((k) => y.keys.has(k)));
+    if (g === undefined) groups.push({ keys: new Set(keys), members: [x] });
+    else {
+      keys.forEach((k) => g.keys.add(k));
+      g.members.push(x);
+    }
+  }
+  const nameOf = (x: Round1Issue): string => {
+    const id = qa.questions.find((z) => z.id === x.id)?.symbol;
+    const q = id !== undefined ? qa.symbols.find((s) => s.id === id)?.qualified : undefined;
+    return q !== undefined && q !== "" ? `\`${q}\`` : x.id;
+  };
+  const merged = new Set<Round1Issue>();
+  for (const g of groups) {
+    const [host, ...rest] = g.members;
+    if (host === undefined || rest.length === 0) continue;
+    host.covers = rest.map((x) => x.id);
+    host.body = `${host.body}
+
+The same equivalent applies to ${rest.length} more: ${rest.map((x) => `${nameOf(x)} (${x.id})`).join(", ")}.`;
+    rest.forEach((x) => merged.add(x));
+  }
+  if (merged.size > 0) issues.splice(0, issues.length, ...issues.filter((x) => !merged.has(x)));
 }
 
 export interface Round1Input {
@@ -154,19 +215,29 @@ export function round1Record(i: Round1Input): Round1Record | undefined {
       ...(changed !== undefined ? place(changed.path, changed.start) : { anchored: false }),
     });
   }
+  const changedPaths = new Set(i.files.flatMap((f) => (f.previousPath !== null ? [f.path, f.previousPath] : [f.path])));
+  const noted: Round1Noted[] = [];
+  const outsideOf = new Map<string, string[]>();
   for (const q of qa.questions) {
     if (q.type === "necessity" || q.answer === undefined) continue;
     const a = q.answer;
     const kinds: Round1Kind[] = [];
     if (a.status === "needs author") kinds.push("needs-author");
     if (a.status === "partially answered") kinds.push("partial");
-    if (q.type === "existing-reuse-common" && !a.none_found) kinds.push("existing");
+    let outside: string[] = [];
+    if (q.type === "existing-reuse-common" && !a.none_found) {
+      outside = outsideEquivalents(a.citations, changedPaths);
+      // No citation at all cannot show the equivalent is the changed code, so it stays an issue.
+      if (outside.length > 0 || a.citations.every((c) => c.path === "")) kinds.push("existing");
+      else noted.push({ id: q.id, key: q.stable, note: NOTED_REASON });
+    }
     if (q.type === "missing-test" && (a.none_found || !a.citations.some((c) => c.tree !== "dependency" && isTestPath(i.packs, c.path)))) kinds.push("missing-test");
     if (kinds.length === 0) continue;
     const sym = q.symbol !== undefined ? qa.symbols.find((s) => s.id === q.symbol) : undefined;
     const cite = i.itemCites[q.item];
     const at = sym !== undefined ? { path: sym.path, line: sym.startLine } : q.functionPath !== undefined ? { path: q.functionPath, line: 1 } : cite !== undefined ? { path: cite.path, line: cite.start } : undefined;
     const cited = a.citations.filter((c) => c.path !== "").slice(0, 3).map((c) => `\`${c.path}${c.start > 0 ? `:${c.start}` : ""}\``);
+    if (outside.length > 0) outsideOf.set(q.id, outside);
     issues.push({
       id: q.id,
       key: q.stable,
@@ -176,15 +247,18 @@ export function round1Record(i: Round1Input): Round1Record | undefined {
       ...(at !== undefined ? place(at.path, at.line) : { anchored: false }),
     });
   }
+  mergeSharedEquivalents(issues, outsideOf, qa);
   const open = (i.prior ?? []).filter((p) => p.origin === "round1" && p.status === "open");
   const askedOnlyN1 = qa.questions.every((q) => q.type === "necessity");
   const prior = open.map((p): Round1Prior => {
+    const host = issues.find((x) => x.covers?.includes(p.id));
+    if (host !== undefined) return { id: p.id, key: p.key, status: "open", reason: `it is still an issue on this head, listed with ${host.id}` };
     if (issues.some((x) => x.id === p.id)) return { id: p.id, key: p.key, status: "open", reason: "it is still an issue on this head" };
     if (p.id !== NECESSITY_ID && askedOnlyN1) return { id: p.id, key: p.key, status: "open", reason: "not re-checked: N1 was judged unnecessary, so the other questions were skipped" };
     const q = qa.questions.find((x) => x.id === p.id);
     return { id: p.id, key: p.key, status: "fixed", reason: p.id === NECESSITY_ID ? `N1 now concludes ${conclusion}` : q !== undefined ? `its question is now ${q.answer?.status ?? "answered"}, with no blocking category` : "its subject is no longer in the change" };
   });
-  return { schema: ROUND1_SCHEMA, head: i.head, necessity: conclusion, issues, ...(open.length > 0 ? { prior } : {}) };
+  return { schema: ROUND1_SCHEMA, head: i.head, necessity: conclusion, issues, ...(open.length > 0 ? { prior } : {}), ...(noted.length > 0 ? { noted } : {}) };
 }
 
 export const round1Json = (r: Round1Record): string => JSON.stringify(r);
