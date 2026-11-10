@@ -1,6 +1,6 @@
 {
   "name": "@graphloom/executor-coding-agent",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Built-in coding-agent executor (graphloom.coding-agent/run): adapts an agent harness to the executor protocol",
   "license": "Apache-2.0",
   "type": "module",
@@ -60,10 +60,10 @@
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.87.1",
-    "@graphloom/sdk": "0.0.0",
+    "@graphloom/sdk": "0.2.0",
     "@earendil-works/pi-ai": "0.87.1"
   },
   "devDependencies": {
-    "@graphloom/agent-harness": "0.0.0"
+    "@graphloom/agent-harness": "0.2.0"
   }
 }

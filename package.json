@@ -1,7 +1,7 @@
 {
   "name": "graphloom",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.2.0",
   "description": "Graph-native harness for multi-agent execution",
   "license": "Apache-2.0",
   "type": "module",

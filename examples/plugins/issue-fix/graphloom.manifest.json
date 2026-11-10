@@ -1,6 +1,6 @@
 {
   "graphId": "issue-fix",
-  "version": "0.16.2",
+  "version": "0.16.3",
   "sdkProtocol": 1,
   "taskConfig": "required",
   "entryPoints": {
@@ -16,11 +16,11 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "da05b80bdfaa1c8762080429805f40082e85e8684650682075aab6695aab8ee0",
-    "packageLock": "66c0b05ef6962fb934baddfe8404bdeb4c50f8f782b45ad361ceb1cd67320b2d",
+    "sourceTree": "36bf7712d40eff0925591cb5fb5217993a8d4244815c6e631e9942b5612945bd",
+    "packageLock": "663f26f12515b8591e90b3378ecd82c6e36177229f13daae6ee9f5ff7f14a6b5",
     "files": {
-      "package.json": "c19dc0002d014635c0bea0f9c40c842dfbf771f818016d48a9cc54e5be0b366d",
-      "package-lock.json": "66c0b05ef6962fb934baddfe8404bdeb4c50f8f782b45ad361ceb1cd67320b2d",
+      "package.json": "36e182c199ce9622c3d5bf0d951959e8ae0bb0f3ed5128076b6c8e74a296e01f",
+      "package-lock.json": "663f26f12515b8591e90b3378ecd82c6e36177229f13daae6ee9f5ff7f14a6b5",
       "tsconfig.json": "3bafb75902b6084b621c996ae838dbfb87088cf095ce411be9809ce79bf3916b",
       "profiles/banyandb-ql.json": "aa687d99a6556ba05ec354092bc2cf04c04e1d96efc2afc61c05bbf4e6a3dafc",
       "profiles/banyandb.json": "b15369f4f2ad04da48e8a04bc79b697505b124781c134da7683e3a9c04cf6f75",
@@ -35,7 +35,7 @@
       "src/evidence.ts": "93783022aa375f4ba1024da60e7cb34c4c0c2114341783e80e2db15145586a82",
       "src/final.ts": "4bc011007a06be8ec0547bfa3beb6a886bf859e685741e28c2ed7463be5a8612",
       "src/findings.ts": "93a90bafccca0a51db94620c1c886915a91c0de2aad75cbc107b61ddf408e964",
-      "src/graph.ts": "f1ef602f54f2d4ee5ee720475ae89610ec5f76a02e0936ad22663f1ac573b440",
+      "src/graph.ts": "aa9299434839ef4e4ee45eed2e5cead4f4d41bd191f234c530ec9cd80bb199ab",
       "src/index.ts": "96bde504da23994638b30e16e59a968351ef33629062b527a45aac68e995d52c",
       "src/issues.ts": "b0f98551a88a9ffed6d958907d1fe26f3f6658ebecb38e1ddd1bfcd4bdfb3d67",
       "src/ocr.ts": "a5c12554b5807ebdfa161720e2e89d395db0fda22707b72b2dc612a4ff96f941",

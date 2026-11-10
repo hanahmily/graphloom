@@ -1,6 +1,6 @@
 {
   "name": "@graphloom/sdk",
-  "version": "0.0.0",
+  "version": "0.2.0",
   "description": "Public GraphLoom plugin SDK: value/wire contracts and scripted GraphPlugin",
   "license": "Apache-2.0",
   "type": "module",

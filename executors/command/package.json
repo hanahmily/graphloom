@@ -1,6 +1,6 @@
 {
   "name": "@graphloom/executor-command",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Built-in command executor (graphloom.command/run): runs argv commands in the job's workspace and records their outcomes",
   "license": "Apache-2.0",
   "type": "module",
@@ -27,9 +27,9 @@
     "test": "tsc -p tsconfig.json && vitest run"
   },
   "dependencies": {
-    "@graphloom/sdk": "0.0.0"
+    "@graphloom/sdk": "0.2.0"
   },
   "devDependencies": {
-    "@graphloom/runner": "0.0.0"
+    "@graphloom/runner": "0.2.0"
   }
 }

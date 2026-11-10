@@ -1,6 +1,6 @@
 {
   "name": "@graphloom/supervisor",
-  "version": "0.0.0",
+  "version": "0.2.0",
   "description": "Run-wide supervisor session and recovery protocol",
   "license": "Apache-2.0",
   "type": "module",
@@ -19,8 +19,8 @@
   "dependencies": {
     "@earendil-works/pi-ai": "0.87.1",
     "@earendil-works/pi-coding-agent": "0.87.1",
-    "@graphloom/agent-harness": "0.0.0",
-    "@graphloom/sdk": "0.0.0"
+    "@graphloom/agent-harness": "0.2.0",
+    "@graphloom/sdk": "0.2.0"
   },
   "engines": {
     "node": ">=22.19.0"

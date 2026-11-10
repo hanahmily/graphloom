@@ -1,6 +1,6 @@
 {
   "graphId": "pr-review",
-  "version": "0.24.0",
+  "version": "0.24.1",
   "sdkProtocol": 1,
   "taskConfig": "required",
   "entryPoints": {
@@ -16,11 +16,11 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "60f70a67822e4ae3e928746a05e3caf302a7737e32bb882b4e74f5da339f8f69",
-    "packageLock": "6ba71af10b9d0d39ffa547982c2d11c9bf2f20b5206cae3ee15e0af6a0b7068e",
+    "sourceTree": "3ac8be356896c34856d4d7b1833e6d9a0660c8349312f1329e864468fbea0a5b",
+    "packageLock": "6f170a29e8c34454e4ff05044489dd4e61cdeeedb7fb98747b1b61623a44d718",
     "files": {
-      "package.json": "3eafeeee5d35813128cacffe2ddfdad634481740f60bb1964f8f331cbadc325f",
-      "package-lock.json": "6ba71af10b9d0d39ffa547982c2d11c9bf2f20b5206cae3ee15e0af6a0b7068e",
+      "package.json": "7c359ca4734f9d0bb8ff79df5ec365693be1203cc5164ffc375d57f69c7c7b55",
+      "package-lock.json": "6f170a29e8c34454e4ff05044489dd4e61cdeeedb7fb98747b1b61623a44d718",
       "tsconfig.json": "d166142bd5d917d1eb7d3011cf6423c652f30e2989881deec6147a997bf41597",
       "profiles/banyandb.json": "7e40bfe0952a77cad2c33389fca3743202e42888e180b7a27aebed11ff858855",
       "tools/README.md": "91b5de1909d83fd98463dfaaba0ea006a616075b041dc426c5a8ebaa98ab9039",
@@ -66,7 +66,7 @@
       "src/cites.ts": "aac861a7321fb094c1e6a199b1c53c34dddb98df29bc2e9812ca4d4ad6f28725",
       "src/claims.ts": "cf570c0ea188b7858cce87a6e43bcee302b061d595170341b5418758afdb2762",
       "src/commands.ts": "ba0370e065e1b19561785a76b122c62b463bbaad93755a57815ea1e0660b5681",
-      "src/constants.ts": "67343a3c2337538ebdd414f317fdbe2397057a52a04b06cca7a807af52698f3b",
+      "src/constants.ts": "96a66cee6133adb413114418a7e65e19e9884138e2f61fa21c40d0d327cd21d2",
       "src/coverage.ts": "2c2660cbedad0b9a3b96534cd9c5972b595b829c37912e5d9d5b8ed3e04bb2c0",
       "src/detectors.ts": "84a4f0045cc3639c0e4494101341ee4697400c2367c80d838fc8cff609a2f3ba",
       "src/diagrams.ts": "60182fb25157fd4a3e1d25809c59fa8a130b0a8b2789cc1af9d8a33bf1b1755e",
