@@ -118,6 +118,7 @@ footer nav a:hover{color:var(--ink)}
     <a class="brand" href="#top"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/mark-dark.svg"><img class="mark" src="assets/mark-light.svg" alt="" width="28" height="28"></picture><span>GraphLoom</span></a>
     <nav aria-label="Primary">
       <a href="#how">How it works</a>
+      <a href="#demo">Demo</a>
       <a href="#graphs">Graphs</a>
       <a href="#quickstart">Quickstart</a>
       <a href="https://github.com/hanahmily/graphloom">GitHub</a>
@@ -159,6 +160,20 @@ footer nav a:hover{color:var(--ink)}
       <div><dt>Executors</dt><dd>Sandboxed workers that do jobs: coding agents, commands (build, test), GitHub reads and writes.</dd></div>
       <div><dt>Operator</dt><dd>You, in the loop by design. Runs stop and ask when a human decision is needed. Nothing is pushed or posted unless you enable it.</dd></div>
     </dl>
+  </div>
+</section>
+<section id="demo" aria-labelledby="demo-h">
+  <div class="wrap">
+    <h2 id="demo-h">Two real runs</h2>
+    <p class="sub">Recordings of runs that happened, shortened: commands and output are quoted from the run's state and the pull requests it produced (long lines are cut with "…"; the times on the right are real).</p>
+    <figure>
+      <div class="diagram" tabindex="0" role="region" aria-label="Recording: a pr-review run (scrolls sideways on narrow screens)"><img src="assets/demo-pr-review.svg" alt="Animated terminal recording of a pr-review run on apache/skywalking-banyandb#1460: task new, run, the watcher's stage moves, a stop because posting is not enabled, the resume, and the posted review beginning 'Changes requested: 2 open' with two inline comments." width="900" height="1128"></div>
+      <figcaption>pr-review on <a href="https://github.com/apache/skywalking-banyandb/pull/1460">apache/skywalking-banyandb#1460</a>, ending in <a href="https://github.com/apache/skywalking-banyandb/pull/1460#pullrequestreview-5768856844">the review it posted</a>.</figcaption>
+    </figure>
+    <figure>
+      <div class="diagram" tabindex="0" role="region" aria-label="Recording: an issue-fix run (scrolls sideways on narrow screens)"><img src="assets/demo-issue-fix.svg" alt="Animated terminal recording of an issue-fix run for apache/skywalking#14169: the plan, the regression test failing on the base (RED), the six-file fix, the same test passing (GREEN), the independent review accepting, and the delivered branch fix/14169 that became pull request 1459." width="900" height="1077"></div>
+      <figcaption>issue-fix on <a href="https://github.com/apache/skywalking/issues/14169">apache/skywalking#14169</a>: RED, fix, GREEN and review in 9 minutes 52 seconds, the branch that became <a href="https://github.com/apache/skywalking-banyandb/pull/1459">pull request #1459</a>.</figcaption>
+    </figure>
   </div>
 </section>
 <section id="inside" aria-labelledby="arch-h">
