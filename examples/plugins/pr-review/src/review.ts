@@ -386,9 +386,13 @@ export function quotePlan(findings: ReadonlyArray<Finding>, base: string | undef
 }
 
 /** The proof once the verifier has judged (design §8.2 condition 4): a failing test proves the finding only when the verifier confirmed it and judged that the test demonstrates the claimed bug. */
-export function settledProof(base: FindingProof, v: FindingVerdict): FindingProof {
-  if (base.state !== "proven" || v.verdict !== "confirmed" || v.test?.demonstrates === true) return base;
-  return { state: "unproven", reason: "does not demonstrate", record: base.record };
+export function settledProof(base: FindingProof, v: FindingVerdict | undefined, witnessOk: boolean): FindingProof {
+  if (base.state !== "proven") return base;
+  if (v === undefined) return { state: "unproven", reason: "verifier did not confirm", record: base.record };
+  if (v.verdict !== "confirmed") return { state: "unproven", reason: `verifier did not confirm (${v.verdict})`, record: base.record };
+  if (!witnessOk) return { state: "unproven", reason: "verifier did not confirm (no valid witness)", record: base.record };
+  if (v.test?.demonstrates !== true) return { state: "unproven", reason: "does not demonstrate", record: base.record };
+  return base;
 }
 
 /** The suggestion the draft keeps, or why it does not: the verifier says it fixes the finding, it is short, and it replaces exactly the commented RIGHT range. */
@@ -549,7 +553,9 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
   const reproProofs = (): { proofs: Map<string, FindingProof>; next?: { finding: Finding; plan: ReproPlan; run: ReproRunSpec } } => {
     const proofs = new Map<string, FindingProof>();
     const env = spec.repro;
-    let used = env?.used ?? 0;
+    // Tests already executed on this head: earlier aspects', and this aspect's earlier passes' (the current pass's are counted as they come).
+    const current = new Set(reproFor.map((f) => reproCommandId(f.id)));
+    let used = (env?.used ?? 0) + new Set(commandRuns(evidence).filter((r) => r.command.id.startsWith("repro-") && !current.has(r.command.id)).map((r) => r.command.id)).size;
     let next: { finding: Finding; plan: ReproPlan; run: ReproRunSpec } | undefined;
     const order = [...reproFor].sort((a, b) => SEVERITIES.indexOf(a.severity) - SEVERITIES.indexOf(b.severity) || Number(a.id.slice(1)) - Number(b.id.slice(1)));
     for (const f of order) {
@@ -597,7 +603,7 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
       if (v === undefined) {
         f.state = "disputed";
         f.notes.push("the verifier gave no verdict for it");
-        if (f.kind === "behavioral") f.proof = ran.proofs.get(f.id) ?? noTest(f);
+        if (f.kind === "behavioral") f.proof = settledProof(ran.proofs.get(f.id) ?? noTest(f), undefined, false);
         continue;
       }
       f.verdict = v;
@@ -605,7 +611,7 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
         f.kind = "behavioral";
         f.notes.push("the verifier reclassified it as behavioral: it claims wrong behavior");
       }
-      if (f.kind === "behavioral") f.proof = settledProof(ran.proofs.get(f.id) ?? noTest(f), v);
+      if (f.kind === "behavioral") f.proof = settledProof(ran.proofs.get(f.id) ?? noTest(f), v, v.verdict === "confirmed" && WITNESS.test(v.witness));
       if (v.verdict === "confirmed") {
         if (WITNESS.test(v.witness)) f.state = "confirmed";
         else {

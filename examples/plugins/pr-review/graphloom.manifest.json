@@ -16,7 +16,7 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "69af038129d78fd45548c0882e73141e6ab1354b1c2d0c29adc36428dd35a973",
+    "sourceTree": "0724335485b88bf0077fb58aeef92fd429c9ed99a7dccf7f41bff34d6cfc5d0c",
     "packageLock": "6ba71af10b9d0d39ffa547982c2d11c9bf2f20b5206cae3ee15e0af6a0b7068e",
     "files": {
       "package.json": "3eafeeee5d35813128cacffe2ddfdad634481740f60bb1964f8f331cbadc325f",
@@ -134,7 +134,7 @@
       "src/repro.ts": "728a14488d2c739804e0d5f04435be647f6018f091b363953855cff328144bec",
       "src/reproplan.ts": "29a4c4f85cc963350f77ea7df97c0a257aa247806dc63818919e7d4e21d05be8",
       "src/request.ts": "7cec3239ace53c06fb8b9e0167d143c0f99d6a6bc7e7b4e257dae94b7c6ba090",
-      "src/review.ts": "cae357f379000872c0570f5cf9628f59e1b773f02161b49c71f46c6d268a8ed1",
+      "src/review.ts": "c1969463e05d51e9d55d841cab9b665e82f7376ad9561778c1d0736db34054fd",
       "src/reviewdraft.ts": "55a7ff2ff8e73774e61f4a526a64a4cab98b2d82f0c3e35db29f67f2344db1c6",
       "src/reviewprompts.ts": "c449747d015fa6e57edb9fd8059380445312bf5530c2e09c7b6655f80c305179",
       "src/reviewscope.ts": "d59e6ca8dc1ed6877794b089500dcc7fe868946f3c039387db74f09468cede0d",
@@ -190,7 +190,7 @@
       "test/report-analysis.test.ts": "106ebb6ceef88a3ac3004319f18e4a1ef24fffe711c7190368f11cfdc5d9b25c",
       "test/report.test.ts": "d2586ad91970641d18267741275d675907de1e2978203300f42f774cf76e600e",
       "test/repro-script.test.ts": "8faffdba7f8ba928bfd4e61018b67ab3a1e3308072dbdc28407f3744676627fa",
-      "test/repro.test.ts": "f9bafa5e596c9cd92be87d6953b03b8e3c073512dfda68526e06f8dd8e8abf4b",
+      "test/repro.test.ts": "43a23b5cd15f779c34e6cd950b5e912ab03467df1a7dc0e02f1ec88c192e88be",
       "test/rereview.test.ts": "930aeb016a362b62d3af083a6a2b9966cdaa233bd97a2055002ecdbd62275a64",
       "test/reuse.test.ts": "2f153341f66ed857253b561c885f50da2b6255c6a791793fea9ae0386b56b75c",
       "test/review-principles.test.ts": "7f3abc02bc6fec3b48ed7efd4eabdb6a0a1b9bc33bbca4ca0ca32671147b998e",

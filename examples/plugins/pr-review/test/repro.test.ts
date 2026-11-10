@@ -287,6 +287,45 @@ describe("a behavioral finding whose test does not prove it", () => {
   });
 });
 
+describe("a failing test proves nothing unless the verifier validly confirms the finding", () => {
+  const stubs = { "repro-F1": reproStub("F1", "go", GO_TEST, FAILED), "rvq-correctness-1-1": { exitCode: 0, stdout: "1 ok\nchecked 1\n" } };
+  const quote = [{ path: PATH, line: 7, text: "unit := byte(0)" }];
+  const cases: Array<[string, unknown, string, string]> = [
+    ["refutes it", verifyReply([{ finding: "F1", verdict: "refuted", quotes: quote, reason: "the case exists", ...demonstrates() }]), "dismissed", "verifier did not confirm (refuted)"],
+    ["is uncertain", verifyReply([{ finding: "F1", verdict: "uncertain", reason: "cannot tell", ...demonstrates() }]), "disputed", "verifier did not confirm (uncertain)"],
+    ["gives no verdict", verifyReply([]), "disputed", "verifier did not confirm"],
+    ["confirms without a witness", confirmF1({ witness: "" }), "disputed", "verifier did not confirm (no valid witness)"],
+  ];
+  for (const [name, verdict, state, reason] of cases) {
+    it(`downgrades the proof when the verifier ${name}, and the Review stage still validates`, () => {
+      const sim = run(scenario([passReply(1, [find({ repro: repro() })]), ...empty(), passReply(1, [])], [verdict, verdict], stubs));
+      expect(findingOf(sim, "correctness", "F1")).toMatchObject({ state, proof: { state: "unproven", reason, record: { runs: ["failed", "failed"] } } });
+      const evidence = candidateEvidence(sim.evidence, "d1");
+      expect(findingsProven.evaluate({ requirementId: "findings-proven", statement: "", evidence, candidateDigest: "d1", config: BANYANDB })).toMatchObject({ status: "passed" });
+      expect(sim.receipts.some((r) => r.requirementId === "findings-proven" && r.valid)).toBe(true);
+    });
+  }
+});
+
+describe("the time budget holds across the passes of one aspect", () => {
+  it("runs one test with a budget of one, though a later pass of the same aspect raises another", () => {
+    const second = repro({ name: "TestParseDays", text: GO_TEST.replace("TestParseWeek", "TestParseDays") });
+    const budget = { review: { repro: { perFindingMs: 120_000, timeBudgetMs: 120_000 } } };
+    const sim = run(
+      scenario(
+        [passReply(1, [find({ repro: repro() })]), passReply(1, [find({ start_line: 20, end_line: 21, repro: second })]), ...empty()],
+        [confirmF1(), verifyReply([{ finding: "F2", verdict: "confirmed", witness: `${PATH}:21`, ...demonstrates() }])],
+        { "repro-F1": reproStub("F1", "go", GO_TEST, FAILED), "repro-F2": reproStub("F2", "go", second.text, FAILED) },
+        budget,
+      ),
+      budget,
+    );
+    expect(reproJobs(sim).map((j) => (j.input as { commands: Array<{ id: string }> }).commands[0]!.id)).toEqual(["repro-F1"]);
+    expect(findingOf(sim, "correctness", "F1").proof).toMatchObject({ state: "proven" });
+    expect(findingOf(sim, "correctness", "F2").proof).toMatchObject({ state: "unproven", reason: "repro budget exhausted" });
+  });
+});
+
 describe("a comment's test goes back for correction, and a non-behavioral comment the verifier reclassifies needs a test", () => {
   it("sends an over-size test back with the problem, then runs the corrected one", () => {
     const huge = repro({ text: `${GO_TEST}// ${"x".repeat(17_000)}\n` });
