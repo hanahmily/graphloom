@@ -69,10 +69,13 @@ describe.skipIf(!go)("the confined static command, run for real (without the san
     const goRoot = spawnSync("go", ["env", "GOROOT"], { encoding: "utf8" }).stdout.trim();
     const command = staticCommand(batch("go", ["banyand/cmd/server/flags.go"]), hunks, root, [], process.execPath, path.join(goRoot, "bin", "go"));
     expect(command.argv.at(-1)).toBe(path.join(goRoot, "bin", "go"));
-    // No go anywhere on PATH: only the toolchain the command names can run.
-    const pathWithoutGo = (process.env.PATH ?? "").split(path.delimiter).filter((d) => !existsSync(path.join(d, "go"))).join(path.delimiter);
+    // The first go on PATH is a decoy that fails loudly: only the toolchain the command names may run. (Removing every
+    // PATH directory that holds a go would also remove sh where go lives in /usr/bin, as on CI runners.)
+    const decoy = mkdtempSync(path.join(os.tmpdir(), "gl-decoy-go-"));
+    writeFileSync(path.join(decoy, "go"), "#!/bin/sh\necho 'the first go on PATH ran' >&2\nexit 97\n", { mode: 0o755 });
     const reportFile = path.join(dir, ".report-out");
-    const r = spawnSync(command.argv[0]!, command.argv.slice(1), { cwd: dir, env: { ...process.env, PATH: pathWithoutGo, GRAPHLOOM_REPORT_FILE: reportFile }, encoding: "utf8" });
+    const r = spawnSync(command.argv[0]!, command.argv.slice(1), { cwd: dir, env: { ...process.env, PATH: `${decoy}${path.delimiter}${process.env.PATH ?? ""}`, GRAPHLOOM_REPORT_FILE: reportFile }, encoding: "utf8" });
+    rmSync(decoy, { recursive: true, force: true });
     expect(r.stderr).toBe("");
     expect(r.status).toBe(0);
     expect(JSON.parse(readFileSync(reportFile, "utf8"))).toEqual(FLAGS_DOC);
