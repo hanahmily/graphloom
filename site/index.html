@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>GraphLoom: write a graph in TypeScript, let the loom run its agents</title>
+<title>GraphLoom: AI review and fixes you can check, not redo</title>
 <meta name="description" content="GraphLoom is a graph-native harness for multi-agent coding work. Write the process as an executable TypeScript graph; GraphLoom runs coding agents through it with durable state, verified evidence, budgets and a recovering supervisor.">
 <meta name="color-scheme" content="light dark">
 <link rel="icon" href="assets/mark-light.svg" type="image/svg+xml">
@@ -33,9 +33,11 @@ code,pre{font-family:var(--mono);font-size:.9em}
 .hero .wrap{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,.9fr);gap:48px;align-items:center}
 .eyebrow{font:600 13px/1.4 var(--mono);color:var(--muted);margin:0 0 20px}
 .hero h1{display:flex;align-items:center;gap:16px;margin:0 0 20px;font-size:60px;line-height:1.05;letter-spacing:-.02em;font-weight:700}
-.tagline{font-size:28px;line-height:1.3;margin:0 0 20px;font-weight:500}
+.pain{font-size:26px;line-height:1.3;margin:0 0 16px;font-weight:600}
+.author{font-size:18px;margin:0 0 20px;color:var(--ink)}
+.tagline{font-size:20px;line-height:1.3;margin:0 0 28px;font-weight:500}
 .tagline span{color:var(--accent);display:block}
-.lede{color:var(--muted);font-size:18px;max-width:38em;margin:0 0 32px}
+.lede{color:var(--muted);font-size:17px;max-width:38em;margin:0 0 20px}
 .btns{display:flex;gap:12px;flex-wrap:wrap}
 .btn{display:inline-flex;align-items:center;gap:8px;min-height:44px;padding:10px 20px;border-radius:10px;font-weight:600;text-decoration:none;border:1px solid transparent}
 .btn.primary{background:var(--accent);color:var(--onaccent)}
@@ -106,7 +108,7 @@ footer nav a{color:var(--muted);padding:10px 0}
 footer nav a:hover{color:var(--ink)}
 @media (max-width:880px){.hero .wrap,.cards,.qs{grid-template-columns:minmax(0,1fr)}.art{display:none}.terms{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media (max-width:720px){.why,.status{grid-template-columns:minmax(0,1fr)}}
-@media (max-width:560px){.wrap{padding:0 16px}.terms{grid-template-columns:minmax(0,1fr)}section{padding:56px 0}.hero{padding:56px 0 48px}.hero h1{font-size:44px}.tagline{font-size:22px}}
+@media (max-width:560px){.wrap{padding:0 16px}.terms{grid-template-columns:minmax(0,1fr)}section{padding:56px 0}.hero{padding:56px 0 48px}.hero h1{font-size:44px}.tagline{font-size:18px}.pain{font-size:21px}}
 </style>
 </head>
 <body>
@@ -128,8 +130,10 @@ footer nav a:hover{color:var(--ink)}
     <div>
       <p class="eyebrow">Open source · Apache-2.0 · pre-1.0</p>
       <h1><picture><source media="(prefers-color-scheme: dark)" srcset="assets/mark-dark.svg"><img class="mark" src="assets/mark-light.svg" alt="" width="56" height="56"></picture>GraphLoom</h1>
+      <p class="pain">You already let AI review your contributors' pull requests and draft fixes for your issues, and you still re-check every line it gives you.</p>
+      <p class="author">What I was missing was AI output that comes with proof I can check in a minute, instead of claims I have to redo.</p>
+      <p class="lede">GraphLoom runs coding agents (Claude Code, Codex or Pi, with your own logins, on your machine) through a fixed process, and it only hands you a result once the evidence for it has been checked. You write the process as an executable TypeScript graph.</p>
       <p class="tagline">Write a graph in TypeScript. <span>Let the loom run its agents.</span></p>
-      <p class="lede">A graph-native harness for multi-agent coding work. You write the process as an executable TypeScript graph, and GraphLoom runs coding agents (Claude Code, Codex, Pi) through it with durable state, verified evidence, budgets, and a supervisor that recovers from failures instead of giving up.</p>
       <div class="btns">
         <a class="btn primary" href="#quickstart">Get started</a>
         <a class="btn ghost" href="https://github.com/hanahmily/graphloom">GitHub</a>
@@ -157,13 +161,10 @@ footer nav a:hover{color:var(--ink)}
     </dl>
   </div>
 </section>
-<section id="architecture" aria-labelledby="arch-h">
+<section id="inside" aria-labelledby="arch-h">
   <div class="wrap">
-    <h2 id="arch-h">Architecture</h2>
-    <p class="sub">The controller owns durable state, receipts and budgets. The graph plugin runs in its own process, and jobs run on sandboxed executors.</p>
-    <figure>
-      <div class="diagram" tabindex="0" role="region" aria-label="Diagram: architecture (scrolls sideways on narrow screens)"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/architecture-dark.svg"><img src="assets/architecture-light.svg" alt="GraphLoom architecture: the CLI talks to the controller, which holds durable state, receipts and budgets and talks to the plugin host that runs the graph plugin in its own process. The controller sends jobs to the runner, which dispatches them to sandboxed executors (coding-agent, command, github). Executors write evidence that the controller reads. A supervisor is attached to the controller." width="1280" height="620"></picture></div>
-    </figure>
+    <h2 id="arch-h">How it works inside</h2>
+    <p class="sub">The controller, plugin host, runner, executors and supervisor, with the architecture diagram and the design documents, are described in <a href="https://github.com/hanahmily/graphloom/blob/main/docs/overview.md">docs/overview.md</a>.</p>
   </div>
 </section>
 <section id="graphs" aria-labelledby="graphs-h">

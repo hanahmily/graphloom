@@ -2,7 +2,7 @@
 
 A static page: plain HTML and CSS, no JavaScript, no external requests (no CDN,
 web fonts or trackers). Light and dark follow `prefers-color-scheme`. The
-diagrams in `assets/` are the same SVGs the README uses (`docs/assets/`),
+run diagram in `assets/` is the same SVG the repository keeps in `docs/assets/`,
 plus the mark and the hero weave.
 
 ## Preview
@@ -22,7 +22,7 @@ configures Pages or an Actions workflow; do that when the repository is public.
 
 ## Keeping it in step
 
-The architecture and run diagrams are copies of `docs/assets/*.svg`. When you
-change one, copy it to the matching file here. Command lines on the page must
+The run diagram is a copy of `docs/assets/run-*.svg`. When you change one,
+copy it to the matching file here. Command lines on the page must
 exist in `graphloom --help`, and the quickstart must match
 [`docs/design-release.md`](../docs/design-release.md).
