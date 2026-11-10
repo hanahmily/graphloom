@@ -1,17 +1,137 @@
-# GraphLoom
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="docs/assets/banner-light.svg">
+  <img src="docs/assets/banner-light.svg" alt="GraphLoom. Write a graph in TypeScript. Let the loom run its agents." width="100%">
+</picture>
 
-**A graph-native harness for multi-agent execution.**
+<p align="center"><b>Write a graph in TypeScript. Let the loom run its agents.</b><br>
+Apache-2.0 · pre-1.0 · Linux · runs locally</p>
 
-Write a graph in TypeScript. Let the loom run its agents.
+GraphLoom is a graph-native harness for multi-agent coding work. You write the
+process as an executable TypeScript graph, and GraphLoom runs coding agents
+(Claude Code, Codex, Pi) through it with durable state, verified evidence,
+budgets, and a supervisor that recovers from failures instead of giving up.
+Each run works in an isolated Git worktree. A stage is accepted only when
+validators check its evidence. Nothing is pushed or posted unless you enable it.
 
-Graph plugins define required outcomes and normal execution. A run-wide supervisor
-drives exceptional recovery so the graph can still finish—including tested repairs
-to readable plugin source—rather than giving up on the first failure. The
-controller manages execution lifecycle, owns accepted evidence, and preserves
-permissions, history, and finite budgets. Required outcomes remain unchanged when
-a validator implementation is repaired.
+## What you get
+
+- **Graphs as code.** A graph is a TypeScript plugin that defines the stages of
+  a job, what each stage must prove, and how to route. It is code, not a prompt
+  list.
+- **Isolated, bounded runs.** Each run executes one `task.yaml` in its own Git
+  worktree, with pinned inputs and finite budgets for agent calls, jobs and time.
+- **Receipts, not claims.** Executors record evidence; validators check it. A
+  stage is accepted only when the check passes.
+- **A supervisor that recovers.** One recovery agent per run investigates
+  failures, can repair the plugin with tested changes, and re-enters the graph.
+  The graph's stages and required outcomes stay fixed.
+- **Operator in the loop.** Runs stop and ask when a human decision is needed.
+  Follow a run with `graphloom watch` and look inside it with `graphloom inspect`.
+
+## How a run works
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/run-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="docs/assets/run-light.svg">
+  <img src="docs/assets/run-light.svg" alt="How a run works: task.yaml, graph plugin, stages, jobs on executors, evidence, validators, receipts, done. The supervisor loops failures back into the graph; the operator decides at stop-and-ask points and before delivery." width="100%">
+</picture>
+
+## Quickstart
+
+Requirements: Linux, and Claude Code, Codex or Pi installed and logged in on
+your machine. GraphLoom runs locally; there is no hosted service. A release
+bundles its own Node.js runtime, so installing one needs no Node on the target
+machine; the build below needs any Node on `PATH` to fetch the pinned runtime,
+plus `git`, `tar`, `gzip`, `xz` and `sha256sum`.
+
+1. Install. Installable releases are local builds for now: no release is
+   published yet. Build one from a clone and install it with the installer
+   (use the version in the root `package.json`, currently `0.0.0`; see the
+   [release design](docs/design-release.md)):
+
+   ```sh
+   git clone https://github.com/hanahmily/graphloom.git
+   cd graphloom
+   scripts/release.sh build 0.0.0 --unsigned
+   scripts/install.sh --from release-out/0.0.0/graphloom-0.0.0-linux-x64.tar.gz
+   ```
+
+   `--unsigned` makes a development build that the publish step refuses; it is
+   the right choice for your own machine. The installer puts a `graphloom` shim
+   in `~/.local/bin` and runs `graphloom doctor`.
+2. Set up and check: `graphloom setup`, `graphloom doctor`.
+3. Write a task. For `pr-review`, `graphloom task new pr-review <owner/repo#N>`
+   writes it. For `issue-fix`, write `task.yaml` by hand (below) or let the
+   `graphloom-run` skill write it.
+4. Run, follow, inspect: `graphloom run task.yaml`, `graphloom watch <run>`,
+   `graphloom inspect <run>`.
+
+A `task.yaml` for `issue-fix` ([`examples/issue-fix-graphloom-task.yaml`](examples/issue-fix-graphloom-task.yaml)):
+
+```yaml
+graph: issue-fix
+repo: .
+config: plugins/issue-fix/profiles/graphloom.json
+request: "Fix hanahmily/graphloom#119."
+```
+
+`graph` selects the plugin, `repo` the repository to work on, `config` the
+graph's profile, and `request` what to do.
+
+## Example graphs
+
+### issue-fix
+
+issue → plan → regression test that fails first (RED) → fix → test passes
+(GREEN) → independent review → a local branch with a ready pull-request
+description. It does not push; opening the pull request is yours to do (the
+`graphloom-deliver` skill asks before it pushes anything).
+
+### pr-review
+
+Round 1: a neutral change report, then questions and answers. The first
+question is "Is this change necessary?", checked against the project's design
+principles. Round 2: correctness, maintainability and security reviewers; each
+finding is checked by an independent verifier on a different harness. It posts
+one `COMMENT` review whose first line is the verdict. The post is the one write
+it makes and needs the runner config's `github.writeTokenEnv`; the plugin never
+sees the token.
+
+## Drive it from your agent
+
+GraphLoom ships agent skills for Claude Code, Codex and opencode, installed with
+`graphloom skills install`:
+
+| Skill | Use it to |
+|---|---|
+| `graphloom-setup` | set up GraphLoom |
+| `graphloom-issue` | turn a requirement into an issue sized for one run |
+| `graphloom-run` | start a run |
+| `graphloom-watch` | watch it cheaply |
+| `graphloom-triage` | diagnose a stop |
+| `graphloom-deliver` | ship the result |
+
+## Architecture
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/architecture-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="docs/assets/architecture-light.svg">
+  <img src="docs/assets/architecture-light.svg" alt="GraphLoom architecture: the CLI talks to the controller, which holds durable state, receipts and budgets and talks to the plugin host that runs the graph plugin in its own process. The controller sends jobs to the runner, which dispatches them to sandboxed executors (coding-agent, command, github). Executors write evidence that the controller reads. A supervisor is attached to the controller." width="100%">
+</picture>
 
 ## Status
+
+GraphLoom is pre-1.0. Linux only. Runs locally on your machine with your own
+Claude Code, Codex or Pi logins; there is no hosted service. Installable
+releases are local builds for now. The sections below hold the details:
+[graph selection and configuration](#select-a-graph), [the supervisor](#the-supervisor),
+[extending and repairing plugins](#extend-and-repair), and the
+[documentation index](#documentation). See also [CONTRIBUTING](CONTRIBUTING.md),
+[SECURITY](SECURITY.md), [CODE_OF_CONDUCT](CODE_OF_CONDUCT.md) and the
+[Apache-2.0 license](LICENSE).
+
+## Implementation status and development
 
 The [TypeScript core design](docs/design-typescript-core.md) is authoritative.
 Active code lives under `packages/` (`sdk`, `controller`, `plugin-host`,
@@ -30,8 +150,9 @@ npm test
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
-The local runtime requires Linux, Node.js 22.19 or newer, Git, and util-linux
-`flock`. Controller and repository locks use kernel locks held by a helper
+The local runtime requires Linux, Git, and util-linux `flock`. An installed
+release bundles its own Node.js; running from a clone, and development, need
+Node.js 22.19 or newer. Controller and repository locks use kernel locks held by a helper
 process; a controller exit releases them without deleting or reclaiming leases.
 
 ## Select a graph
