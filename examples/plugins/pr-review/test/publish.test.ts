@@ -70,7 +70,7 @@ describe("the review the Publish stage posts", () => {
     const plan = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([]), draft: draft([entry("F3", { suggestion: "return err", startLine: 10, line: 12, aspects: ["correctness", "security"], severity: "P1", proof: { state: "proven" } }), entry("F4", { anchored: false, line: 400 })]) });
     expect(plan.comments).toHaveLength(1);
     expect(plan.comments[0]).toMatchObject({ path: "pkg/a.go", startLine: 10, line: 12, side: "RIGHT" });
-    expect(plan.comments[0]!.body).toBe(`**[P1] major** · correctness, security\n\nThe loop drops the error.\n\n\`\`\`suggestion\nreturn err\n\`\`\`\n\n${findingMarker("F3")}`);
+    expect(plan.comments[0]!.body).toBe(`**[P1] major** · correctness, security · proven by a failing test\n\nThe loop drops the error.\n\n\`\`\`suggestion\nreturn err\n\`\`\`\n\n${findingMarker("F3")}`);
     expect(plan.body).toContain(`**[P2] minor** · correctness · non-behavioral\n\nThe loop drops the error.\n\n${findingMarker("F4")}`);
   });
 
@@ -175,7 +175,7 @@ describe("the gate after Answers: issues publish round 1 and end the run, none c
     expect(stopOf(sim)).toMatchObject({ reason: "complete", retryable: false });
     expect(stopOf(sim)!.blocker).toMatch(/^round 1: changes requested: \d+ issues? open on apache\/skywalking-banyandb#7 at 0123456789ab; the review is posted \(https:.*\), and round 2 \(the aspect reviewers\) runs on a later head/);
     expect(sim.jobs.filter((j) => j.stageId === "review" || j.stageId === "draft")).toEqual([]);
-    expect(sim.receipts.filter((x) => x.valid).map((x) => x.requirementId).slice(-4)).toEqual(["round1-gated", "code-review", "draft-composed", "review-published"]);
+    expect(sim.receipts.filter((x) => x.valid).map((x) => x.requirementId).slice(-5)).toEqual(["round1-gated", "code-review", "findings-proven", "draft-composed", "review-published"]);
   });
 
   it("posts exactly one review, whose event is COMMENT and whose first line counts the open issues", () => {

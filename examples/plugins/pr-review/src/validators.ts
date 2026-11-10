@@ -20,7 +20,7 @@ import { requiredQuestions, statedPurposes } from "./questions.js";
 import { principlesRecord } from "./principles.js";
 import { htmlPagesFrom, htmlProblems } from "./html.js";
 import { writtenLedger } from "./ledger.js";
-import { codeReview, draftComposed, reviewPublished, round1Gated } from "./reviewvalidators.js";
+import { codeReview, draftComposed, findingsProven, reviewPublished, round1Gated } from "./reviewvalidators.js";
 import { readParts, recordedAppendix, recordedHtml, recordedNecessityJson, recordedQa, recordedReport, sha256 } from "./parts.js";
 
 const passed = (reason: string): ValidationResult => ({ status: "passed", reason });
@@ -429,6 +429,7 @@ const VALIDATORS: Record<string, Validator> = {
   "answers-complete": answersComplete,
   "answers-grounded": answersGrounded,
   "code-review": codeReview,
+  "findings-proven": findingsProven,
   "draft-composed": draftComposed,
   "round1-gated": round1Gated,
   "review-published": reviewPublished,

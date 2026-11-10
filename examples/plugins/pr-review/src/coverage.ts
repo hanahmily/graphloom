@@ -134,9 +134,12 @@ const MOUNTS_SCRIPT = [
   'exit 0',
 ].join("\n");
 
+/** Whether the profile runs anything in the Docker sandbox: the coverage tests, or the review's reproducing tests (design §8.2). */
+export const sandboxWanted = (profile: Pick<Profile, "metrics" | "review">): boolean => profile.metrics.coverage || profile.review.repro.enabled;
+
 /** The image checks (and pulls) of Fetch, and where the host's caches are; empty when coverage is off or no language has an image. */
-export function sandboxProbeCommands(profile: Pick<Profile, "metrics">): EnvironmentCommand[] {
-  if (!profile.metrics.coverage) return [];
+export function sandboxProbeCommands(profile: Pick<Profile, "metrics" | "review">): EnvironmentCommand[] {
+  if (!sandboxWanted(profile)) return [];
   const commands: EnvironmentCommand[] = [];
   for (const language of LANGUAGES) {
     const { image } = resolveSandbox(profile, language);
@@ -154,13 +157,13 @@ export function sandboxProbeCommands(profile: Pick<Profile, "metrics">): Environ
 }
 
 /** The probe commands not yet run. */
-export function missingProbe(evidence: readonly EvidenceRecord[], profile: Pick<Profile, "metrics">): EnvironmentCommand[] {
+export function missingProbe(evidence: readonly EvidenceRecord[], profile: Pick<Profile, "metrics" | "review">): EnvironmentCommand[] {
   return sandboxProbeCommands(profile).filter((c) => commandRuns(evidence, c.id).length === 0);
 }
 
 /** The environment checks that let `graphloom check` and `doctor --task` say what the sandbox lacks, without pulling anything. */
-export function sandboxEnvironmentChecks(profile: Pick<Profile, "metrics">): EnvironmentCommand[] {
-  if (!profile.metrics.coverage) return [];
+export function sandboxEnvironmentChecks(profile: Pick<Profile, "metrics" | "review">): EnvironmentCommand[] {
+  if (!sandboxWanted(profile)) return [];
   const script = [
     'cd / || exit 0; img="$1"',
     'command -v docker >/dev/null 2>&1 || { echo "unavailable: the docker CLI is not installed"; exit 0; }',
@@ -350,7 +353,7 @@ export interface CoverageInput {
   index: ReadonlyMap<string, readonly FunctionIndexEntry[]>;
   /** The measured files of the pull request. */
   files: ReadonlyArray<{ path: string; language: Language }>;
-  profile: Pick<Profile, "metrics">;
+  profile: Pick<Profile, "metrics" | "review">;
   /** The static measurement's last evidence (the changed-lines diff): coverage runs count after it. */
   afterRef: string | undefined;
 }
@@ -405,7 +408,7 @@ function resolvedMounts(evidence: readonly EvidenceRecord[], sandbox: Sandbox, l
 }
 
 /** The package that ran, or why not: the job has no image, or Docker or the image is not available. */
-function languageReadiness(evidence: readonly EvidenceRecord[], profile: Pick<Profile, "metrics">, language: "go" | "typescript"): { ready: true; image: string; sandbox: Sandbox & { image: string }; cache: string; mounts: ResolvedMount[] } | { reason: string } | { probe: true } {
+export function languageReadiness(evidence: readonly EvidenceRecord[], profile: Pick<Profile, "metrics" | "review">, language: "go" | "typescript"): { ready: true; image: string; sandbox: Sandbox & { image: string }; cache: string; mounts: ResolvedMount[] } | { reason: string } | { probe: true } {
   const sandbox = resolveSandbox(profile, language);
   if (sandbox.image === undefined) return { reason: `the profile pins no ${language} sandbox image (metrics.sandbox.${language}.image)` };
   const status = sandboxStatus(evidence, language);
@@ -435,7 +438,7 @@ function runFor(evidence: readonly EvidenceRecord[], id: string, afterIndex: num
 }
 
 /** The controller's refusals of a docker job, after `afterIndex`: the job never ran, and said why. */
-function dockerRefusal(evidence: readonly EvidenceRecord[], afterIndex: number): string | undefined {
+export function dockerRefusal(evidence: readonly EvidenceRecord[], afterIndex: number): string | undefined {
   for (let i = evidence.length - 1; i > afterIndex; i -= 1) {
     const p = evidence[i]!.payload;
     const failure = isObject(p) && isObject(p.executorFailure) ? p.executorFailure : undefined;

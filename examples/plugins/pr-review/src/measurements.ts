@@ -394,7 +394,7 @@ function planBatches(evidence: readonly EvidenceRecord[], initial: readonly Batc
 export function measurementState(
   evidence: readonly EvidenceRecord[],
   files: readonly PullFile[],
-  profile: Pick<Profile, "metrics">,
+  profile: Pick<Profile, "metrics" | "review">,
   /** Whether a failed run may run again because the operator resumed since it failed (the graph passes it; validators do not). */
   canRetry?: (run: CommandRun) => boolean,
   /** The plugin root the static tools run from now (the graph passes it; validators do not): a run built with another root is stale. */

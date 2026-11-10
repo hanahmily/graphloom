@@ -14,7 +14,10 @@ import { analyze, evidencePull } from "./analysis.js";
 import { htmlProblems } from "./html.js";
 import { pinnedBase } from "./commands.js";
 import { parseProfile, ProfileError, reviewerRole, verifierRole, type Profile } from "./profile.js";
-import { MAX_SWEEP_PASSES, type AspectRecord } from "./review.js";
+import { MAX_SWEEP_PASSES, reproRunSeconds, type AspectRecord } from "./review.js";
+import { commandRuns } from "./evidence.js";
+import { hasTest, judgeRun, reproCommandId, reproSpec } from "./repro.js";
+import { reproPlanFor } from "./reproplan.js";
 import { FRESH_START_REASON } from "./reviewscope.js";
 import { draftWrites, recordedAspect, recordedRound1, recordedRules, recordedScope, round1Computed, writtenDraftFiles } from "./reviewdraft.js";
 import { round1Json } from "./round1.js";
@@ -110,6 +113,59 @@ export const codeReview: Validator = profiled((input, profile) => {
   return passed(
     `${s.files.length} file(s) of ${s.source === "whole" ? "the whole pull request" : `${s.areas.map((a) => a.id).join(", ")} (${s.source === "all-areas" ? "every readable area: the briefing cites none" : "cited by the briefing's risks, behavior and compatibility entries"})`} were reviewed for correctness, maintainability and security (${s.context.reason}); ${records.map((r) => `${r.aspect}: ${r.passes.length} pass(es)${r.unsaturated ? " (unsaturated)" : ""}`).join(", ")}; ${findings.length} finding(s), each judged by a verifier on another harness than its reviewer's: ${count("confirmed")} confirmed, ${count("disputed")} disputed, ${count("dismissed")} dismissed`,
   );
+});
+
+/**
+ * `findings-proven` (design §8.2): every behavioral finding that the record calls proven is recomputed from the evidence: the recorded
+ * test text, the command the graph ran for it in the sandbox and the verifier's judgment. The reviewer's claim, and the record's own proof,
+ * are never trusted. A behavioral finding with no proof recorded fails: the sweep always records one.
+ */
+export const findingsProven: Validator = profiled((input, profile) => {
+  if (blocked(input)) return passed("round 1 found issues: they are published and round 2 runs on a later head, so no finding was proven or left unproven");
+  const problems: string[] = [];
+  let proven = 0;
+  let unproven = 0;
+  let nonBehavioral = 0;
+  for (const a of ASPECTS) {
+    const r = recordedAspect(input.evidence, a);
+    if (r.state === "none") return inconclusive(`the ${a} review is not finished`);
+    if (r.state === "failed") return failed(r.reason);
+    for (const f of r.value.findings) {
+      if (f.kind !== "behavioral") {
+        nonBehavioral += 1;
+        continue;
+      }
+      if (f.repro !== undefined && Buffer.byteLength(f.repro.text, "utf8") > profile.review.repro.maxTestBytes) problems.push(`${f.id}: its test is over the ${profile.review.repro.maxTestBytes} bytes a test may be`);
+      if (f.proof === undefined) {
+        problems.push(`${f.id} is behavioral and records no proof`);
+        continue;
+      }
+      if (f.proof.state !== "proven") {
+        unproven += 1;
+        if (f.proof.reason.trim() === "") problems.push(`${f.id} is unproven without a reason`);
+        continue;
+      }
+      proven += 1;
+      const why = (m: string): number => problems.push(`${f.id} is recorded as proven but ${m}`);
+      if (!profile.review.repro.enabled) why("the profile turns reproducing tests off");
+      else if (f.state !== "confirmed" || f.verdict?.verdict !== "confirmed") why("its verifier did not confirm it");
+      else if (f.verdict.test?.demonstrates !== true) why("its verifier did not judge that the test demonstrates the bug");
+      else if (f.repro === undefined || !hasTest(f.repro)) why("it has no test text");
+      else {
+        const plan = reproPlanFor(input.evidence, profile, f.path);
+        if ("reason" in plan) why(`the sandbox could not run its test (${plan.reason})`);
+        else {
+          const run = commandRuns(input.evidence, reproCommandId(f.id)).at(-1);
+          const planned = reproSpec({ finding: f.id, language: plan.language, repro: f.repro, workspace: plan.workspace, timeoutSeconds: reproRunSeconds(profile.review.repro) });
+          const again = judgeRun(f, f.repro, plan.language, run, planned, plan.image);
+          if (again.state !== "proven") why(`the recorded run of its test does not recompute as a proof (${again.reason})`);
+          else if (JSON.stringify(again.record) !== JSON.stringify(f.proof.record)) why("the recorded run does not match what its evidence recomputes");
+        }
+      }
+    }
+  }
+  if (problems.length > 0) return failed(problems.slice(0, 4).join("; "));
+  return passed(`${proven} behavioral finding${proven === 1 ? "" : "s"} proven by a failing test the graph ran (recomputed from the evidence), ${unproven} unproven with a reason, ${nonBehavioral} non-behavioral (no test needed)`);
 });
 
 export const draftComposed: Validator = profiled((input, profile) => {

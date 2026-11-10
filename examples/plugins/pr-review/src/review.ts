@@ -8,8 +8,10 @@
  * runs (at most `MAX_SWEEP_PASSES`); the sweep ends at the first pass whose findings were all dismissed. The ledger is a
  * pure function of the recorded passes and verdicts, so a resume or a supervisor decision cannot lose it.
  *
- * Contract `pr-code-review-v1` is `code-review-v2` plus `side`, `suggestion`, `aspect`, `kind` and `prior`; it has no `repro` yet
- * (the reproducing tests are a later part, and `proof.ts` is where they plug in).
+ * Contract `pr-code-review-v1` is `code-review-v2` plus `side`, `suggestion`, `aspect`, `kind`, `principle` and `repro` (a
+ * behavioral comment's test, design §8.2). A pass's behavioral findings that carry a test are run in the Docker sandbox, one at
+ * a time, before they are verified (`repro.ts`); the verifier reads the test and its recorded run, and `proof.ts` reads the
+ * finding's `proof`, which this module computes from the recorded runs and the verdict alone.
  *
  * On a later head (design §9.3) the first pass is also given the findings an earlier head left open, already re-anchored to this
  * head, and judges each `still_present` or `fixed`; the verifier confirms the ones still present like a new finding (confirmed
@@ -19,6 +21,7 @@ import type { EnvironmentCommand, EvidenceRecord } from "@graphloom/sdk";
 import { isAspect, type Aspect } from "./aspects.js";
 import { agentRuns, commandRuns, succeeded, reportText, type AgentRun, type CommandRun } from "./evidence.js";
 import { overlaps as priorOverlaps } from "./prior.js";
+import { hasTest, judgeRun, reproCommandId, reproProblems, REPRO_SCHEMA, reproSpec, type FindingProof, type Repro, type ReproLanguage, type ReproRunSpec } from "./repro.js";
 import { treeQuotePlan, readTreeQuotes, type TreeQuotePlan } from "./treequotes.js";
 
 export const REVIEW_SCHEMA_NAME = "pr-code-review-v1";
@@ -31,6 +34,7 @@ export const MAX_SWEEP_PASSES = 4;
 export const MAX_REVIEW_RETRIES = 2;
 /** The longest suggestion kept, in lines (`suggestions.maxLines`). */
 export const MAX_SUGGESTION_LINES = 20;
+const DEFAULT_MAX_TEST_BYTES = 16 * 1024;
 const MAX_CONTENT_CHARS = 4_000;
 const MAX_SPAN_LINES = 400;
 const MIN_QUOTE_CHARS = 8;
@@ -70,7 +74,7 @@ export const REVIEW_SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["path", "side", "start_line", "end_line", "aspect", "kind", "severity", "content", "suggestion", "finding", "evidence", "distinct", "principle"],
+        required: ["path", "side", "start_line", "end_line", "aspect", "kind", "severity", "content", "suggestion", "finding", "evidence", "distinct", "principle", "repro"],
         properties: {
           path: { type: "string" },
           side: { type: "string", enum: [...SIDES] },
@@ -86,6 +90,8 @@ export const REVIEW_SCHEMA = {
           distinct: { type: "boolean" },
           // The id of a design principle (design §8.1) the comment says the change breaks; "" for none. The job constrains it to the ids given to this reviewer.
           principle: { type: "string" },
+          // A behavioral comment's test (design §8.2); every field empty when the reviewer writes none.
+          repro: REPRO_SCHEMA,
         },
       },
     },
@@ -112,7 +118,7 @@ export const VERIFY_SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["finding", "verdict", "kind", "witness", "quotes", "reason", "fixes"],
+        required: ["finding", "verdict", "kind", "witness", "quotes", "reason", "fixes", "test"],
         properties: {
           finding: { type: "string" },
           verdict: { type: "string", enum: [...REVIEW_VERDICTS] },
@@ -121,6 +127,8 @@ export const VERIFY_SCHEMA = {
           quotes: { type: "array", items: { type: "object", additionalProperties: false, required: ["path", "line", "text"], properties: { path: { type: "string" }, line: { type: "integer" }, text: { type: "string" } } } },
           reason: { type: "string" },
           fixes: { type: "boolean" },
+          // For a behavioral finding with a test: whether the test, as the graph ran it, demonstrates the claimed bug (design §8.2). false (reason "") when there is no test.
+          test: { type: "object", additionalProperties: false, required: ["demonstrates", "reason"], properties: { demonstrates: { type: "boolean" }, reason: { type: "string" } } },
         },
       },
     },
@@ -142,6 +150,8 @@ export interface ReviewComment {
   distinct: boolean;
   /** The design principle the comment says the change breaks (design §8.1); "" or absent for none. */
   principle?: string;
+  /** The test of a behavioral comment (design §8.2); absent or with empty text for none. */
+  repro?: Repro;
 }
 
 export interface PassSummary {
@@ -164,6 +174,8 @@ export interface FindingVerdict {
   quotes: VerdictQuote[];
   reason: string;
   fixes: boolean;
+  /** Whether the reviewer's test, as run, demonstrates the claimed bug (design §8.2); absent in a record written before tests. */
+  test?: { demonstrates: boolean; reason: string };
 }
 
 export interface Finding {
@@ -187,6 +199,10 @@ export interface Finding {
   distinct: boolean;
   /** The design principle the finding says the change breaks; absent for none (and in records written before it existed). */
   principle?: string;
+  /** The reviewer's test (design §8.2), when it wrote one: its text is what the graph ran and the verifier read. */
+  repro?: Repro;
+  /** What the graph and the verifier made of the test (`proofOf` reads it); absent for a non-behavioral finding and in records written before tests. */
+  proof?: FindingProof;
   /** An earlier head's finding that this sweep re-judges (design §9.3), not one it raised; never in an aspect record's `findings`. */
   prior?: boolean;
   state: FindingState;
@@ -212,6 +228,8 @@ export interface PassContext {
   principles?: ReadonlySet<string>;
   /** The ids of the earlier findings this pass must judge: each exactly once in `prior`. */
   prior?: ReadonlySet<string>;
+  /** The longest test file a comment's `repro` may carry, in bytes (the profile's `review.repro.maxTestBytes`). */
+  maxTestBytes?: number;
 }
 
 export interface ParsedPass {
@@ -278,6 +296,7 @@ export function parsePass(output: unknown, ctx: PassContext): ParsedPass | { pro
     if (c.principle !== undefined && (typeof c.principle !== "string" || (c.principle !== "" && !(ctx.principles ?? new Set<string>()).has(c.principle)))) {
       problems.push(`${at}.principle must be "" or ${ctx.principles !== undefined && ctx.principles.size > 0 ? `one of the principle ids you were given (${[...ctx.principles].join(", ")})` : "empty: no design principle was given to you"}`);
     }
+    problems.push(...reproProblems(c.repro, { path: String(c.path), kind: String(c.kind) }, at, ctx.maxTestBytes ?? DEFAULT_MAX_TEST_BYTES));
     if (problems.length === 0 || problems.every((p) => !p.startsWith(at))) comments.push(c as unknown as ReviewComment);
   });
   const priorIds = ctx.prior ?? new Set<string>();
@@ -327,6 +346,8 @@ export function parseVerification(output: unknown, pending: ReadonlySet<string>)
     if (!REVIEW_VERDICTS.includes(v.verdict as ReviewVerdict)) problems.push(`${at}.verdict must be confirmed, refuted or uncertain`);
     if (!KINDS.includes(v.kind as FindingKind)) problems.push(`${at}.kind must be behavioral or non-behavioral`);
     if (typeof v.witness !== "string" || typeof v.reason !== "string" || typeof v.fixes !== "boolean" || !Array.isArray(v.quotes)) problems.push(`${at} needs witness and reason (text), quotes (a list) and fixes (true or false)`);
+    const t = (v as { test?: unknown }).test;
+    if (t !== undefined && (!isObj(t) || typeof t.demonstrates !== "boolean" || typeof t.reason !== "string")) problems.push(`${at}.test must be { demonstrates: true or false, reason: text }`);
     if (problems.length === 0) {
       verdicts.set(v.finding, {
         verdict: v.verdict as ReviewVerdict,
@@ -335,6 +356,7 @@ export function parseVerification(output: unknown, pending: ReadonlySet<string>)
         quotes: (v.quotes as unknown[]).filter(isObj).map((q) => ({ path: String(q.path ?? ""), line: Number(q.line), text: String(q.text ?? "") })),
         reason: oneLine(v.reason as string),
         fixes: v.fixes as boolean,
+        ...(isObj(t) ? { test: { demonstrates: t.demonstrates as boolean, reason: oneLine(t.reason as string) } } : {}),
       });
     }
   });
@@ -363,11 +385,19 @@ export function quotePlan(findings: ReadonlyArray<Finding>, base: string | undef
   return treeQuotePlan(findings.filter((f) => f.verdict?.verdict === "refuted" && quoteProblem(f.verdict) === undefined).map((f) => ({ id: f.id, tree: "head" as const, quotes: f.verdict!.quotes })), base, idPrefix);
 }
 
+/** The proof once the verifier has judged (design §8.2 condition 4): a failing test proves the finding only when the verifier confirmed it and judged that the test demonstrates the claimed bug. */
+export function settledProof(base: FindingProof, v: FindingVerdict): FindingProof {
+  if (base.state !== "proven" || v.verdict !== "confirmed" || v.test?.demonstrates === true) return base;
+  return { state: "unproven", reason: "does not demonstrate", record: base.record };
+}
+
 /** The suggestion the draft keeps, or why it does not: the verifier says it fixes the finding, it is short, and it replaces exactly the commented RIGHT range. */
 export function keptSuggestion(f: Finding): { text: string } | { dropped: string } | undefined {
   if (f.suggestion.trim() === "") return undefined;
   if (f.verdict?.verdict !== "confirmed") return { dropped: "the finding is not confirmed" };
   if (f.side !== "RIGHT") return { dropped: "a suggestion replaces lines of the head, and this comment is on the base" };
+  // Design §8.2: a behavioral finding's suggestion is kept only when the test passes with it applied (the fix run), which a later part adds.
+  if (f.kind === "behavioral") return { dropped: "a suggestion of a behavioral finding is kept only when its test passes with the suggestion applied, and the fix run is not part of this version" };
   if (!f.verdict.fixes) return { dropped: "the verifier did not say the suggestion fixes the finding" };
   const lines = f.suggestion.replace(/\n$/, "").split("\n").length;
   if (lines > MAX_SUGGESTION_LINES) return { dropped: `it is ${lines} lines, more than ${MAX_SUGGESTION_LINES}` };
@@ -428,10 +458,35 @@ export const quotePrefix = (aspect: Aspect, pass: number): string => `rvq-${aspe
 
 export type AspectFlow =
   | { state: "pass"; n: number; feedback: string[]; known: Finding[]; /** The earlier findings the first pass judges. */ prior: PriorFinding[] }
+  | { state: "repro"; finding: Finding; plan: ReproPlan; run: ReproRunSpec }
   | { state: "verify"; n: number; findings: Finding[]; feedback: string[] }
   | { state: "quotes"; commands: EnvironmentCommand[] }
   | { state: "supervise"; reason: string; refs: string[] }
   | { state: "done"; findings: Finding[]; passes: PassRecord[]; unsaturated: boolean; refs: string[]; prior: PriorOutcome[] };
+
+/** Where and how a finding's test runs: its language, the TypeScript workspace and the sandbox image. */
+export interface ReproPlan {
+  language: ReproLanguage;
+  workspace: string;
+  image: string;
+}
+
+/** What the sweep needs of the sandbox and the profile to run the reviewers' tests (design §8.2). */
+export interface ReproEnv {
+  config: { enabled: boolean; perFindingMs: number; timeBudgetMs: number; maxTestBytes: number };
+  /** Tests of earlier aspects of this head that ran: they count against the time budget. */
+  used: number;
+  /** The plan for a test of the cited file, or why the sandbox cannot run it. */
+  plan(path: string): ReproPlan | { reason: string };
+  /** The sandbox's refusal of a job after the evidence record `ref`, when it refused one (Docker or the image is missing). */
+  refusedSince(ref: string): string | undefined;
+}
+
+/** Seconds each of a test's two runs may take: half the finding's cap (design §8.2: `perFindingMs`). */
+export const reproRunSeconds = (config: { perFindingMs: number }): number => Math.max(5, Math.floor(config.perFindingMs / 2000));
+
+/** The most tests one head's review runs: the time budget over the per-finding cap. */
+export const maxReproRuns = (config: { perFindingMs: number; timeBudgetMs: number }): number => Math.max(1, Math.floor(config.timeBudgetMs / config.perFindingMs));
 
 export interface AspectSpec {
   aspect: Aspect;
@@ -448,6 +503,8 @@ export interface AspectSpec {
   suppress?: ReadonlyArray<{ path: string; side: CommentSide; start: number; end: number }>;
   base: string | undefined;
   retryable?: (r: CommandRun) => boolean;
+  /** The reviewers' tests (design §8.2); absent runs none, as `review.repro.enabled: false`. */
+  repro?: ReproEnv;
 }
 
 const sameArgv = (a: readonly string[], b: readonly string[]): boolean => a.length === b.length && a.every((x, i) => x === b[i]);
@@ -484,16 +541,63 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
   let verifyFeedback: string[] = [];
   const refs: string[] = [];
 
+  /** The latest pass's behavioral findings that carry a test: they run before they are verified. */
+  let reproFor: Finding[] = [];
+  let passRef = "";
+  const noTest = (f: Finding): FindingProof => ({ state: "unproven", reason: hasTest(f.repro) ? "inconclusive (the test was not run)" : "no test" });
+  /** What each test's recorded run says (design §8.2 conditions 1 to 3), and the next run still to make, in the order P0 first. */
+  const reproProofs = (): { proofs: Map<string, FindingProof>; next?: { finding: Finding; plan: ReproPlan; run: ReproRunSpec } } => {
+    const proofs = new Map<string, FindingProof>();
+    const env = spec.repro;
+    let used = env?.used ?? 0;
+    let next: { finding: Finding; plan: ReproPlan; run: ReproRunSpec } | undefined;
+    const order = [...reproFor].sort((a, b) => SEVERITIES.indexOf(a.severity) - SEVERITIES.indexOf(b.severity) || Number(a.id.slice(1)) - Number(b.id.slice(1)));
+    for (const f of order) {
+      const repro = f.repro!;
+      const unproven = (reason: string): void => void proofs.set(f.id, { state: "unproven", reason });
+      if (env === undefined || !env.config.enabled) {
+        unproven("execution disabled by the profile");
+        continue;
+      }
+      const plan = env.plan(f.path);
+      if ("reason" in plan) {
+        unproven(`sandbox unavailable (${plan.reason})`);
+        continue;
+      }
+      const run: ReproRunSpec = { finding: f.id, language: plan.language, repro, workspace: plan.workspace, timeoutSeconds: reproRunSeconds(env.config) };
+      const made = commandRuns(evidence, reproCommandId(f.id)).at(-1);
+      if (made !== undefined) {
+        used += 1;
+        proofs.set(f.id, judgeRun(f, repro, plan.language, made, reproSpec(run), plan.image));
+        continue;
+      }
+      if (used >= maxReproRuns(env.config)) {
+        unproven("repro budget exhausted");
+        continue;
+      }
+      const refused = env.refusedSince(passRef);
+      if (refused !== undefined) {
+        unproven(`sandbox unavailable (${refused})`);
+        continue;
+      }
+      used += 1;
+      next ??= { finding: f, plan, run };
+    }
+    return { proofs, ...(next !== undefined ? { next } : {}) };
+  };
+
   type Resolved = { kind: "ok"; blocking: boolean } | { kind: "quotes"; commands: EnvironmentCommand[] } | { kind: "supervise"; reason: string; refs: string[] };
   /** Applies the verifier's verdicts to the findings the latest pass raised: a confirmation needs its own witness, a refutation quotes the tree shows, anything else is disputed. */
   const resolve = (): Resolved => {
     const pending = [...findings, ...priors].filter((f) => awaiting.includes(f.id));
     const n = passes.length;
+    const ran = reproProofs();
     for (const f of pending) {
       const v = verdicts!.get(f.id);
       if (v === undefined) {
         f.state = "disputed";
         f.notes.push("the verifier gave no verdict for it");
+        if (f.kind === "behavioral") f.proof = ran.proofs.get(f.id) ?? noTest(f);
         continue;
       }
       f.verdict = v;
@@ -501,6 +605,7 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
         f.kind = "behavioral";
         f.notes.push("the verifier reclassified it as behavioral: it claims wrong behavior");
       }
+      if (f.kind === "behavioral") f.proof = settledProof(ran.proofs.get(f.id) ?? noTest(f), v);
       if (v.verdict === "confirmed") {
         if (WITNESS.test(v.witness)) f.state = "confirmed";
         else {
@@ -562,7 +667,7 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
         retries += 1;
         continue;
       }
-      const parsed = ev.run.contract?.status === "invalid" ? { problems: ev.run.contract.problems.slice(0, 20) } : parsePass(ev.run.output, { aspect: spec.aspect, scope: spec.scope, known: known(), ...(spec.principles !== undefined ? { principles: spec.principles } : {}), ...(passes.length === 0 && given.length > 0 ? { prior: new Set(given.map((p) => p.id)) } : {}) });
+      const parsed = ev.run.contract?.status === "invalid" ? { problems: ev.run.contract.problems.slice(0, 20) } : parsePass(ev.run.output, { aspect: spec.aspect, scope: spec.scope, known: known(), ...(spec.repro !== undefined ? { maxTestBytes: spec.repro.config.maxTestBytes } : {}), ...(spec.principles !== undefined ? { principles: spec.principles } : {}), ...(passes.length === 0 && given.length > 0 ? { prior: new Set(given.map((p) => p.id)) } : {}) });
       if ("problems" in parsed) {
         retries += 1;
         feedback = parsed.problems;
@@ -598,6 +703,7 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
           merged += 1;
           if (SEVERITIES.indexOf(c.severity) < SEVERITIES.indexOf(twin.severity)) twin.severity = c.severity;
           if (c.kind === "behavioral") twin.kind = "behavioral";
+          if (c.kind === "behavioral" && !hasTest(twin.repro) && hasTest(c.repro)) twin.repro = c.repro;
           if (twin.principle === undefined && c.principle !== undefined && c.principle !== "") twin.principle = c.principle;
           twin.notes.push(`merged with another comment of pass ${n} on overlapping lines`);
           continue;
@@ -618,6 +724,7 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
           evidence: oneLine(c.evidence),
           distinct: c.distinct,
           ...(c.principle !== undefined && c.principle !== "" ? { principle: c.principle } : {}),
+          ...(c.kind === "behavioral" && hasTest(c.repro) ? { repro: c.repro } : {}),
           state: "pending",
           reaffirmed: [],
           notes: [],
@@ -626,6 +733,8 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
         findings.push(f);
       }
       passes.push({ n, reviewed: parsed.summary.reviewed_files, raised: raised.map((f) => f.id), reaffirmed, nits, merged, ...(suppressed > 0 ? { suppressed } : {}) });
+      reproFor = raised.filter((f) => f.kind === "behavioral" && hasTest(f.repro));
+      passRef = ev.run.record.ref;
       // The earlier findings are judged in the first pass only: a later pass verifies what it raised, and what was settled stays settled.
       awaiting = [...raised.map((f) => f.id), ...(n === 1 ? priors.filter((f) => said.get(f.id)?.status === "still_present").map((f) => f.id) : [])];
       verdicts = undefined;
@@ -661,6 +770,10 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
   if (phase === "verify") {
     if (verdicts === undefined) {
       if (verifyRetries > MAX_REVIEW_RETRIES) return { state: "supervise", reason: `the ${spec.aspect} verifier's result still fails the contract after ${MAX_REVIEW_RETRIES} retries: ${verifyFeedback.slice(0, 3).join("; ")}`, refs: tail };
+      // The reviewers' tests run before the verifier reads them, one at a time.
+      const ran = reproProofs();
+      if (ran.next !== undefined) return { state: "repro", ...ran.next };
+      for (const f of reproFor) f.proof = ran.proofs.get(f.id) ?? noTest(f);
       return { state: "verify", n: passes.length, findings: [...priors, ...findings].filter((f) => awaiting.includes(f.id)), feedback: verifyFeedback };
     }
     const r = resolve();

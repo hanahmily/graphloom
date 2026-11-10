@@ -209,7 +209,7 @@ describe("coverageState", () => {
     expect(pull.at(-1)).toBe(profile.metrics.sandbox!.go!.image);
     expect(pull[2]).toContain("graphloom sandbox pull");
     expect(missingProbe([command("sandbox-go", "ready"), command("host-mounts-go", "ok /a\nok /b"), command("host-go-modcache", "/g")], profile).map((c) => c.id)).toEqual(["sandbox-typescript", "host-npm-cache"]);
-    expect(sandboxProbeCommands(profileOf({ metrics: { coverage: false } }))).toEqual([]);
+    expect(sandboxProbeCommands(profileOf({ metrics: { coverage: false }, review: { repro: { enabled: false } } }))).toEqual([]);
   });
 
   it("plans one Go command over the touched packages, with the spec in its argv, and a Docker confinement that the SDK accepts", () => {
@@ -403,7 +403,7 @@ describe("the sandbox environment checks", () => {
     expect(checks.map((c) => c.id)).toEqual(["docker-go", "docker-typescript"]);
     const sh = (image: string): string => spawnSync("/bin/sh", ["-c", checks[0]!.argv[2]!, "docker-go", image], { encoding: "utf8", env: { ...process.env, PATH: "/nonexistent" } }).stdout;
     expect(sh(profile.metrics.sandbox!.go!.image!)).toMatch(/^unavailable: the docker CLI is not installed/);
-    expect(sandboxEnvironmentChecks(profileOf({ metrics: { coverage: false } }))).toEqual([]);
+    expect(sandboxEnvironmentChecks(profileOf({ metrics: { coverage: false }, review: { repro: { enabled: false } } }))).toEqual([]);
   });
 });
 
@@ -472,7 +472,7 @@ describe("coverage-measured (through the graph)", () => {
 
 describe("the sandbox-unavailable and coverage-off runs", () => {
   it("run no job in a container and say so, whatever the profile asks", () => {
-    for (const config of [{}, { metrics: { generated: [], coverage: false, mutation: { enabled: false } } }]) {
+    for (const config of [{}, { metrics: { generated: [], coverage: false, mutation: { enabled: false } }, review: { repro: { enabled: false } } }]) {
       const sim = simulate({ scenarioName: "sandbox-unavailable", config });
       expect(sim.jobs.filter((j) => j.confinement?.kind === "docker" || j.checkout !== undefined)).toEqual([]);
       expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "answers accepted" } });

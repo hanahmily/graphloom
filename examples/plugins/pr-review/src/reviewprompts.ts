@@ -13,6 +13,7 @@ import type { NecessityRecord } from "./necessity.js";
 import { principlesFrom, type Principle, type PrinciplesContext } from "./principles.js";
 import { fitPrinciples, howToRead } from "./qaprompts.js";
 import type { PullRequest } from "./request.js";
+import { reproLanguage } from "./repro.js";
 import { MAX_SUGGESTION_LINES, type Finding, type PriorFinding } from "./review.js";
 import type { Snapshot } from "./snapshot.js";
 
@@ -60,6 +61,20 @@ export interface ReviewerAssignment {
   round1?: ReadonlyMap<string, PrincipleRound1> | undefined;
   baseDir?: string | undefined;
   reviewDir?: string | undefined;
+  /** The profile's `review.repro`: whether the graph runs the tests a behavioral comment carries, and the longest it accepts. */
+  repro?: { enabled: boolean; maxTestBytes: number } | undefined;
+}
+
+/** What a reviewer is told of writing a test (design §8.2), or that none is run. */
+export function reproInstruction(repro: { enabled: boolean; maxTestBytes: number } | undefined): string {
+  if (repro !== undefined && !repro.enabled) return "Tests are not run in this review (the profile turns them off): leave every `repro` field empty (dir, name, text and oracle \"\", expect \"assertion\"); a behavioral finding is then listed for the maintainer's judgment, unproven.";
+  const max = repro?.maxTestBytes ?? 16 * 1024;
+  return [
+    "A behavioral finding is proven by a test, and the graph runs it, not you: put the test in the comment's `repro` as `{ dir, name, text, expect, oracle }`.",
+    `\`text\` is one whole test file in the repository's own framework (a Go _test.go file in the package's own or its _test package, starting with its package clause; or a vitest file), at most ${max} bytes, that fails on this head because of the bug you claim; \`name\` is the one test it adds (a Go Test function, or the name of the vitest test); \`dir\` is the repository-relative directory it belongs in (the Go package, or the directory of the module the test imports from, so its relative imports resolve as in a test added there); \`expect\` is "assertion" (a t.Error/t.Fatal or an expect() that fails: the default) or "panic" (the code under test panics or throws, with a frame in the file you cite); \`oracle\` says where the expected value comes from: the PR text, the report, a linked issue, documentation or the code's documented contract, never what the head happens to return.`,
+    "The test runs in a sandbox with no network, so it must show the bug with crafted inputs and an assertion. A resource-exhaustion finding asserts it inside the test (testing.AllocsPerRun, a measured size or a context deadline followed by t.Fatal): a process the sandbox kills proves nothing. The test never changes the repository: it is run from a scratch file.",
+    "A finding you cannot show with a test (a committed credential, a risky new dependency, naming, duplication, structure, coupling, test quality) is non-behavioral and carries no test: leave dir, name, text and oracle \"\" and expect \"assertion\". A behavioral finding with no test is listed for the maintainer's judgment as unproven, and is never drafted as P0 or P1.",
+  ].join(" ");
 }
 
 const KNOWN_INLINE_CHARS = 8_000;
@@ -115,7 +130,7 @@ export function planReviewer(a: ReviewerAssignment): Fitted {
     spills.push(...fb.spills);
     const principles = principleBlock(a.principles, a.round1, scale);
     const text = [
-      `You are the ${a.aspect} reviewer for ${a.pr.owner}/${a.pr.repo}#${a.pr.number} at head ${a.pr.head}, pass ${a.pass}. Review the files in scope for this one aspect, from the head's code and its diff. You are read-only: change nothing, run no code from the repository, and write no test.`,
+      `You are the ${a.aspect} reviewer for ${a.pr.owner}/${a.pr.repo}#${a.pr.number} at head ${a.pr.head}, pass ${a.pass}. Review the files in scope for this one aspect, from the head's code and its diff. You are read-only: change nothing, run no code from the repository and write no file; a test goes in a comment's \`repro\`, and the graph runs it.`,
       "",
       UNTRUSTED_PREAMBLE,
       "",
@@ -132,7 +147,7 @@ export function planReviewer(a: ReviewerAssignment): Fitted {
       "",
       `Method: for each file, read its diff and the code around it and review it against its rule. ${WHOLE_CHANGE_CHECK} ${DEDUPE_RULE}`,
       `Each comment in \`comments\` is one problem: path (a file in scope), side (RIGHT for the head, LEFT for the base), start_line and end_line on that side, aspect, kind (behavioral: it claims the code does something wrong; non-behavioral: naming, duplication, structure, coupling, test quality, a committed credential or a risky new dependency; a correctness comment is always behavioral), severity (${SEVERITY_TEXT}), content (what fails, under which input, what to do; concise, citing path:line; no private reasoning), suggestion (replacement lines for exactly the commented RIGHT range, at most ${MAX_SUGGESTION_LINES} lines; "" for none), finding ("" for a new problem, or the id of a listed finding you are confirming still present), evidence (what you read that shows it), and distinct (true only when two of your comments on nearby lines are different problems), principle (${principles.length > 0 ? "the id of the design principle the comment says the change breaks, \"\" for any other comment" : "always \"\""}).`,
-      "Behavioral findings are not proven by a test in this version: they are verified by an independent reader, and listed for the maintainer's judgment. State the input and the wrong result so that the verifier can check it against the code.",
+      `${reproInstruction(a.repro)} State the input and the wrong result in \`content\` so that an independent reader can check it against the code.`,
       `\`prior\` is the list of your judgments of the earlier findings listed below${a.prior !== undefined && a.prior.length > 0 ? "" : " (none are listed to you: return an empty list)"}.`,
       `\`summary\` reports total_files (${a.files.length}), reviewed_files (the files you reviewed; it must equal total_files) and skipped (every file you did not review, with the reason; it must be empty). Return no comment for a file you found nothing in.`,
       ...priorBlock(a.prior),
@@ -169,6 +184,21 @@ export interface VerifierAssignment {
   reviewDir?: string | undefined;
 }
 
+/** The reviewer's test and what the graph's run of it recorded, for the verifier (design §8.2). */
+function testLines(f: Finding, full: boolean): string[] {
+  const r = f.repro;
+  if (r === undefined || r.text.trim() === "") return f.kind === "behavioral" ? ["  The reviewer wrote no test: set test.demonstrates false."] : [];
+  const rec = f.proof?.record;
+  const language = rec?.language ?? reproLanguage(f.path) ?? "?";
+  const ran = rec !== undefined && rec.runs.length > 0 ? `ran twice against the head: ${rec.runs.join(", ")}` : "was not run to a result";
+  const verdict = f.proof?.state === "proven" ? "it failed in both runs, on an assertion of the test (or a panic in the cited file)" : `it is not proven so far: ${f.proof?.state === "unproven" ? f.proof.reason : "no result"}`;
+  return [
+    `  The reviewer's test (${language}, in ${r.dir}, test ${JSON.stringify(r.name)}, expects ${r.expect}; the expected value comes from: ${clipText(oneLine(r.oracle), full ? 600 : 200)}). The graph ${ran}; ${verdict}.`,
+    ...(rec?.failure !== undefined ? [`  Failure${rec.at !== undefined ? ` at ${rec.at}` : ""}: ${clipText(oneLine(rec.failure), full ? 1_000 : 300)}`] : []),
+    ...(full ? ["  The test, exactly as it was run:", ...r.text.split("\n").map((l) => `    ${l}`)] : ["  (the test's text is in the findings file)"]),
+  ];
+}
+
 const findingBlock = (f: Finding, full: boolean, principles?: ReadonlyMap<string, Principle>): string =>
   [
     `${f.id} [${f.aspect}, ${f.kind}, ${f.severity}] ${f.path}:${f.startLine}-${f.endLine} (${f.side === "RIGHT" ? "head" : "base"})${f.prior === true ? " (an earlier head's finding, which the reviewer judged still present: its lines are the head's now)" : ""}`,
@@ -176,6 +206,7 @@ const findingBlock = (f: Finding, full: boolean, principles?: ReadonlyMap<string
     ...(f.principle !== undefined ? [`  Says it breaks the design principle ${f.principle}: "${principles?.has(f.principle) ? (full ? oneLine(principles.get(f.principle)!.statement) : clipText(principles.get(f.principle)!.statement, 300)) : "(statement not available)"}"`] : []),
     ...(f.evidence !== "" ? [`  The reviewer read: ${full ? f.evidence : clipText(f.evidence, 200)}`] : []),
     ...(f.suggestion.trim() !== "" ? [`  Suggestion for the commented lines: ${full ? f.suggestion.replace(/\s*\n\s*/g, " ⏎ ") : clipText(f.suggestion, 200)}`] : []),
+    ...testLines(f, full),
   ].join("\n");
 
 /** A verifier's assignment: the findings one pass raised, each to be confirmed, refuted or left uncertain, in a fresh read-only session. */
@@ -192,11 +223,12 @@ export function planVerifier(a: VerifierAssignment): Fitted {
       "",
       howToRead(a.baseDir),
       "",
-      "For each finding return one entry of `verdicts`: finding (its id), verdict, kind, witness, quotes, reason and fixes.",
+      "For each finding return one entry of `verdicts`: finding (its id), verdict, kind, witness, quotes, reason, fixes and test.",
       "- confirmed: the defect is real (for a finding of an earlier head: it is still there on this head). Give a witness of your own: the call path or the input that triggers it as `path:line` (the first place it goes wrong), not the reviewer's text restated. A confirmation without a path:line witness counts as unresolved.",
       "- refuted: the claim is false. Give one to three quotes (path, line, text) of lines of the head that disprove it, each copied from one line (at least eight characters), such as the lock that is held or the caller that does not exist. They are checked against the head's files; a quote the file does not show leaves the finding unresolved.",
       "- uncertain: you cannot decide; say what each side rests on in reason.",
       "kind is your own judgment of whether the finding claims wrong behavior (behavioral) or no wrong behavior (non-behavioral: naming, duplication, structure, coupling, test quality). reason is one or two sentences. fixes is true only when the reviewer's suggestion, applied to exactly the commented lines, would resolve the finding (false when there is none).",
+      "test is `{ demonstrates, reason }`: for a finding with a test, whether the test, as the graph ran it, demonstrates the claimed bug. It does when the test exercises the behavior the finding claims is wrong, its expected value comes from the stated oracle (the PR text, the report, documentation or the code's documented contract) and not from what the head returns, and the failure it recorded is that behavior. It does not when the test checks something unrelated, behavior the pull request or the documentation states as intended, or an expected value copied from the head's own output, when the test did not fail, or when the failure is in setup or elsewhere; and it is false, with reason \"no test\", when there is none. The graph recomputes whether the test failed; you judge whether failing means the finding is true. A test that fails does not make a finding true by itself: refute or leave uncertain a finding whose test only fails because it asserts the wrong thing.",
       ...(a.findings.some((f) => f.principle !== undefined) ? ["A finding that names a design principle claims the code contradicts that principle's statement. Confirm it only when the cited code really contradicts the statement as written, not merely a stricter or different reading of it; a principle the code does not contradict is refuted."] : []),
       "Nothing is downgraded: a P0 or P1 with thin evidence still gets a verdict, and one you cannot decide is `uncertain`.",
       "",

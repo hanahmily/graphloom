@@ -118,8 +118,11 @@ describe("a suggestion is kept only when it can be posted", () => {
 
 describe("the proof of a finding is the one place the reproducing tests plug in", () => {
   it("makes a behavioral finding unproven, with the reason, and a non-behavioral one need no test", () => {
-    expect(proofOf({ kind: "behavioral" })).toEqual({ state: "unproven", reason: "reproducing tests are not available in this version" });
+    expect(proofOf({ kind: "behavioral" })).toEqual({ state: "unproven", reason: "no test" });
     expect(proofOf({ kind: "non-behavioral" })).toEqual({ state: "non-behavioral" });
+    expect(proofOf({ kind: "behavioral", proof: { state: "unproven", reason: "test does not fail" } })).toEqual({ state: "unproven", reason: "test does not fail" });
+    const record = { language: "go" as const, dir: "pkg", name: "TestX", expect: "assertion" as const, sha256: "0".repeat(64), runs: ["failed" as const, "failed" as const] };
+    expect(proofOf({ kind: "behavioral", proof: { state: "proven", record } })).toEqual({ state: "proven", summary: "proven by a failing test the graph ran (TestX)" });
   });
 });
 
@@ -146,7 +149,7 @@ describe("the draft", () => {
     const dis = finding({ id: "F3", state: "disputed", notes: ["the verifier could not decide"], kind: "behavioral", startLine: 40, endLine: 41 });
     const d = composeDraft(input([record("correctness", [bh, dis]), record("maintainability", [nb])]));
     expect(d.comments.map((e) => [e.id, e.severity, e.proof?.state])).toEqual([["F1", "P2", "non-behavioral"]]);
-    expect(d.judgment.map((e) => [e.id, e.reason])).toEqual([["F2", "unproven: reproducing tests are not available in this version"], ["F3", "disputed: the verifier could not decide"]]);
+    expect(d.judgment.map((e) => [e.id, e.reason])).toEqual([["F2", "unproven: no test"], ["F3", "disputed: the verifier could not decide"]]);
     expect(d.judgment[0]!.severity).toBe("P2");
     expect(d.recommended).toBe("comment");
   });

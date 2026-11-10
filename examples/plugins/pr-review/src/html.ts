@@ -179,6 +179,8 @@ function findingHtml(f: Finding, d: Draft, g: Github, full: boolean): string {
       ? `<p>Checker (${esc(verifier)}): <strong>${esc(f.verdict.verdict)}</strong>${f.verdict.witness !== "" ? ` at <code>${esc(f.verdict.witness)}</code>` : ""}: ${esc(f.verdict.reason)}${f.verdict.quotes.length > 0 ? ` Quotes: ${f.verdict.quotes.map((q) => `<code>${esc(`${q.path}:${q.line}`)}</code> <q>${esc(clip(q.text.replace(/\s+/g, " "), 100))}</q>`).join("; ")}.` : ""}</p>`
       : "",
     proof.state === "unproven" ? `<p class="muted">Unproven: ${esc(proof.reason)}; it is listed for your judgment and never drafted as P0 or P1.</p>` : "",
+    proof.state === "proven" && f.proof?.state === "proven" ? `<p>${esc(proof.summary)}: it failed in both runs${f.proof.record.at !== undefined ? ` at <code>${esc(f.proof.record.at)}</code>` : ""}${f.proof.record.failure !== undefined ? `: ${esc(f.proof.record.failure.replace(/\s+/g, " ").slice(0, 300))}` : ""}.</p>` : "",
+    full && f.repro !== undefined && f.repro.text.trim() !== "" ? `<p>The test (${esc(f.repro.name)}, in <code>${esc(f.repro.dir)}</code>; expected value from: ${esc(f.repro.oracle)}):</p><pre><code>${esc(f.repro.text)}</code></pre>` : "",
     f.notes.length > 0 ? `<p class="muted">${esc(f.notes.join("; "))}.</p>` : "",
     full && f.suggestion.trim() !== "" ? `<p>Suggestion:</p><pre><code>${esc(f.suggestion)}</code></pre>` : "",
   ].join("");

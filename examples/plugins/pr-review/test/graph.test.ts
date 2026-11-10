@@ -354,7 +354,7 @@ describe("sandbox-unavailable", () => {
   });
 
   it("says the profile turned coverage off, when it did", () => {
-    const off = simulate({ scenarioName: "sandbox-unavailable", config: { metrics: { generated: [], coverage: false, mutation: { enabled: false } } } });
+    const off = simulate({ scenarioName: "sandbox-unavailable", config: { metrics: { generated: [], coverage: false, mutation: { enabled: false } }, review: { repro: { enabled: false } } } });
     expect(off.written!.markdown).toContain("Coverage: not run (coverage disabled by the profile); CRAP is shown as its upper bound.\nMutation: not run (mutation disabled by the profile).");
     expect(jobsOf(off, "Check the Docker")).toEqual([]);
   });

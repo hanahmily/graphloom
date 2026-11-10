@@ -38,6 +38,7 @@ import {
   DRAFT_STAGE,
   REQUIREMENT_CODE_REVIEW,
   REQUIREMENT_DRAFT,
+  REQUIREMENT_FINDINGS_PROVEN,
   REVIEW_STAGE,
   COMMAND,
   ENV_PLUGIN_ROOT,
@@ -89,6 +90,7 @@ import { assignmentProblem, type FileSpill } from "./fit.js";
 import { isLarge } from "./mode.js";
 import { harnessName, parseProfile, ProfileError, reviewerRole, verifierRole, ROLES, DISTINCT_PAIRS, type Profile, type Role } from "./profile.js";
 import { ASPECTS, ruleGroups, ruleFileText, type Aspect } from "./aspects.js";
+import { reproEnv, reproJob, reproRunsIn } from "./reproplan.js";
 import { aspectFlow, aspectRecordId, aspectRecordJson, ASPECT_RECORD_SCHEMA, findingsOf, REVIEW_REFERENCES, REVIEW_SCHEMA, REVIEW_SCHEMA_NAME, VERIFY_REFERENCES, VERIFY_SCHEMA, VERIFY_SCHEMA_NAME, type AspectRecord } from "./review.js";
 import { chooseScope, FRESH_START_REASON, scopeRecordJson, SCOPE_RECORD_ID, SCOPE_SCHEMA, type ScopeRecord } from "./reviewscope.js";
 import { planReviewer, planVerifier, round1Verdicts } from "./reviewprompts.js";
@@ -224,6 +226,11 @@ export function definitionFor(profile: Profile): GraphDefinition {
       evidenceSchema: VERIFY_SCHEMA_NAME,
     },
     {
+      id: REQUIREMENT_FINDINGS_PROVEN,
+      statement: `Unless round 1 found issues: every behavioral finding is \`proven\` only when the graph's own run of its reproducing test says so, recomputed from the recorded evidence and never from the reviewer's claim (design §8.2): the reviewer's test text (a Go _test.go file or a vitest file, at most ${profile.review.repro.maxTestBytes} bytes, with the directory, the one test's name, its expectation and the oracle its expected value comes from) was run by one command job in the Docker sandbox (no network, read-only dependency cache, a checkout of the head, the test never written into it: Go with go test -overlay, TypeScript as a scratch file with the repository's own vitest config) twice, built and ran exactly the named test, and failed in both runs; each failure is attributable to the cited behavior (an assertion reported at a line of the test's own file, or for expect: panic a panic with a frame in the cited file); the test text the verifier judged has the recorded SHA-256; and the verifier confirmed the finding and judged that the test demonstrates the claimed bug. A compile error, a build failure, a timeout, a sandbox kill, a failure elsewhere or a test that fails in one run only is inconclusive or flaky, not proven; a test that passes does not reproduce the finding. Every other behavioral finding is unproven with its reason (no test, test does not fail, inconclusive, flaky, does not demonstrate, sandbox unavailable, ${profile.review.repro.enabled ? "repro budget exhausted" : "execution disabled by the profile (review.repro.enabled is false)"}), is never drafted as P0 or P1 and never makes the verdict request-changes; ${profile.review.repro.enabled ? `at most ${Math.max(1, Math.floor(profile.review.repro.timeBudgetMs / profile.review.repro.perFindingMs))} tests run on one head (review.repro.timeBudgetMs over perFindingMs), P0 and P1 first` : "no test runs"}. The suggestion of a behavioral finding is not drafted in this version (its fix run, design §8.2, is a later part).`,
+      evidenceSchema: VERIFY_SCHEMA_NAME,
+    },
+    {
       id: REQUIREMENT_DRAFT,
       statement: `Unless round 1 found issues: the draft review is composed by plugin code from the aspects' records and the Q&A (no model writes it) and written whole to ${DRAFT_JSON} (pr-review-draft-v1, canonical) and ${DRAFT_MD} (its editable rendering), each as one command or a bounded multi-part write. Confirmed findings that claim no wrong behavior are the comments, grouped by aspect (correctness, security, maintainability), at most P2; confirmed findings of different aspects on overlapping lines of one file are one entry that lists every aspect; confirmed behavioral findings, which are unproven in this version, and disputed findings are listed under "Needs your judgment" and never drafted as P0 or P1; the Q&A items that need the author are pre-selected (none, once round 1 passed) and the rest listed under "Not selected"; a suggestion is kept only when the verifier says it fixes the finding, it is at most 20 lines and replaces exactly the commented RIGHT range; a comment outside a hunk of the file's patch is marked as going in the review body; the recommended verdict is request-changes only for a proven P0 or P1 finding (none in this version), approve only when nothing is open, and approve is drafted as comment; the summary is at most 1,200 characters. The draft holds no path inside .graphloom/ and no secret. ${REVIEW_MD}, ${REVIEW_HTML} and ${REVIEW_APPENDIX_HTML} are written again with a Review section: findings by severity with counts, each with its one-line claim, aspect badge, cite and checker verdict, collapsed except the P0 and P1 findings that stand, in the briefing; every finding in full and the draft in the appendix. They recompute from report.json, qa.json, necessity.json and the draft, with the same inert check. The Publish stage posts the draft's comments that are findings; this stage posts nothing.`,
       evidenceSchema: DRAFT_SCHEMA,
@@ -252,6 +259,7 @@ export function definitionFor(profile: Profile): GraphDefinition {
     { requirementId: REQUIREMENT_GROUNDED, validatorId: "answers-grounded", version: "1", independence: "separate-reviewer" },
     // The reviews' verifiers are independent reviewers: the controller admits it from review evidence of a read-only review job.
     { requirementId: REQUIREMENT_CODE_REVIEW, validatorId: "code-review", version: "1", independence: "separate-reviewer" },
+    { requirementId: REQUIREMENT_FINDINGS_PROVEN, validatorId: "findings-proven", version: "1" },
     { requirementId: REQUIREMENT_DRAFT, validatorId: "draft-composed", version: "1" },
     { requirementId: REQUIREMENT_ROUND1, validatorId: "round1-gated", version: "1" },
     { requirementId: REQUIREMENT_PUBLISHED, validatorId: "review-published", version: "1" },
@@ -285,7 +293,7 @@ export function definitionFor(profile: Profile): GraphDefinition {
       { id: QUESTIONS_STAGE, name: "Questions", requirementIds: [REQUIREMENT_QUESTIONS] },
       { id: ANSWERS_STAGE, name: "Answers", requirementIds: [REQUIREMENT_ANSWERS, REQUIREMENT_GROUNDED] },
       { id: ROUND1_STAGE, name: "Round 1", requirementIds: [REQUIREMENT_ROUND1] },
-      { id: REVIEW_STAGE, name: "Review", requirementIds: [REQUIREMENT_CODE_REVIEW] },
+      { id: REVIEW_STAGE, name: "Review", requirementIds: [REQUIREMENT_CODE_REVIEW, REQUIREMENT_FINDINGS_PROVEN] },
       { id: DRAFT_STAGE, name: "Draft", requirementIds: [REQUIREMENT_DRAFT] },
       { id: PUBLISH_STAGE, name: "Publish", requirementIds: [REQUIREMENT_PUBLISHED] },
     ],
@@ -1176,12 +1184,19 @@ function review(ctx: Context, view: RunView): GraphDecision {
     }
     const earlier = findingsOf(records);
     const ap = aspectPrior(registry, aspect, analysis.snapshot.files, files);
-    const f = aspectFlow(view.evidence.slice(from + 1), { aspect, scope: files, principles: principleIds, earlier, firstId: registry.nextF, prior: ap.given, suppress: ap.suppress, base, retryable: (r) => isStaleFailure(r.record, view) });
+    const f = aspectFlow(view.evidence.slice(from + 1), { aspect, scope: files, principles: principleIds, earlier, firstId: registry.nextF, prior: ap.given, suppress: ap.suppress, base, retryable: (r) => isStaleFailure(r.record, view), repro: reproEnv(view.evidence, profile, reproRunsIn(view.evidence.slice(0, from + 1))) });
     const reviewDir = reviewDirOf(view);
     const baseDir = baseTreeDir(view, { baseTree: true });
     switch (f.state) {
       case "supervise":
         return supervise({ reason: f.reason, evidenceRefs: f.refs }, "hand the unresolved review to the supervisor");
+      case "repro": {
+        const root = environmentOutput(view.evidence, ENV_PLUGIN_ROOT);
+        if (root === undefined) return supervise({ reason: "the environment check recorded no plugin directory, which the reproducing-test script runs from" }, "escalate a missing plugin path");
+        const job = reproJob(REVIEW_STAGE, view.evidence, profile, f.run, root);
+        if ("problem" in job) return supervise({ reason: `${f.finding.id}'s test cannot be run: ${job.problem}` }, "escalate a reproducing test that cannot be dispatched");
+        return withPrivate(dispatch(job, `run ${f.finding.id}'s reproducing test (${f.finding.severity}, ${f.plan.language}) twice in the Docker sandbox over a checkout of the head, before the verifier reads it`));
+      }
       case "quotes":
         return withPrivate(dispatch(commandJob(REVIEW_STAGE, "Check the refutations' quotes against the head", { commands: f.commands.slice(0, 16), env: { ...GIT_ENV } }), "check each refutation's quotes against the head's files"));
       case "pass": {
@@ -1197,6 +1212,7 @@ function review(ctx: Context, view: RunView): GraphDecision {
           known: f.known,
           prior: f.prior,
           feedback: f.feedback,
+          repro: profile.review.repro,
           ...(reviewPrinciples !== undefined ? { principles: reviewPrinciples, round1 } : {}),
           ...(baseDir !== undefined ? { baseDir } : {}),
           ...(reviewDir !== undefined ? { reviewDir } : {}),
