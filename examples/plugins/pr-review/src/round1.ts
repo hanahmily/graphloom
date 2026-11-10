@@ -146,17 +146,24 @@ function outsideEquivalents(citations: ReadonlyArray<{ path: string; start: numb
  * Several symbols citing the same outside equivalent are one issue that lists them. Only issues that are solely an
  * `existing` issue merge: the first of a group (in question order) carries it and `covers` the rest.
  */
+const idOrder = (a: string, b: string): number => (Number(a.replace(/\D/g, "")) - Number(b.replace(/\D/g, ""))) || a.localeCompare(b);
+
 function mergeSharedEquivalents(issues: Round1Issue[], outsideOf: ReadonlyMap<string, string[]>, qa: { questions: QaQuestion[]; symbols: Array<{ id: string; qualified: string }> }): void {
   const groups: Array<{ keys: Set<string>; members: Round1Issue[] }> = [];
   for (const x of issues) {
     const keys = outsideOf.get(x.id);
     if (keys === undefined || x.kinds.length !== 1 || x.kinds[0] !== "existing") continue;
-    const g = groups.find((y) => keys.some((k) => y.keys.has(k)));
-    if (g === undefined) groups.push({ keys: new Set(keys), members: [x] });
-    else {
-      keys.forEach((k) => g.keys.add(k));
-      g.members.push(x);
+    // Join every group this one shares an equivalent with (a bridge joins two), so grouping does not depend on order.
+    const hit = groups.filter((y) => keys.some((k) => y.keys.has(k)));
+    const g = hit[0] ?? { keys: new Set<string>(), members: [] };
+    if (hit.length === 0) groups.push(g);
+    for (const o of hit.slice(1)) {
+      o.keys.forEach((k) => g.keys.add(k));
+      g.members.push(...o.members);
+      groups.splice(groups.indexOf(o), 1);
     }
+    keys.forEach((k) => g.keys.add(k));
+    g.members.push(x);
   }
   const nameOf = (x: Round1Issue): string => {
     const id = qa.questions.find((z) => z.id === x.id)?.symbol;
@@ -165,7 +172,7 @@ function mergeSharedEquivalents(issues: Round1Issue[], outsideOf: ReadonlyMap<st
   };
   const merged = new Set<Round1Issue>();
   for (const g of groups) {
-    const [host, ...rest] = g.members;
+    const [host, ...rest] = [...g.members].sort((m, n) => idOrder(m.id, n.id));
     if (host === undefined || rest.length === 0) continue;
     host.covers = rest.map((x) => x.id);
     host.body = `${host.body}

@@ -133,6 +133,14 @@ describe("round 1's issues, computed from necessity.json and qa.json", () => {
       expect(r.issues[0]!.body).toContain("`sym2` (Q2)");
       expect(r.prior).toEqual([expect.objectContaining({ id: "Q2", status: "open" })]);
     });
+    it("joins two groups through a question that cites both, whatever the order of the questions", () => {
+      const symbols = [1, 2, 3].map((n) => ({ id: `S${n}`, path: "pkg/schema/ttl.go", startLine: 3, qualified: `sym${n}` }));
+      const qs = [reuse("Q1", [cite("pkg/a.go")], "S1"), reuse("Q2", [cite("pkg/b.go")], "S2"), reuse("Q3", [cite("pkg/a.go"), cite("pkg/b.go")], "S3")];
+      const go = (order: Q[]) => round1Record({ head: "h".repeat(40), necessity: necessity("necessary"), qa: qa(order, symbols), files, itemCites: { R1: { path: "pkg/schema/ttl.go", start: 3, end: 3 } }, packs: PACKS })!;
+      const shape = (r: ReturnType<typeof go>) => r.issues.map((i) => [i.id, i.covers]).sort();
+      const expected = [["Q1", ["Q2", "Q3"]]];
+      for (const order of [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]]) expect(shape(go(order.map((n) => qs[n]!))), order.join()).toEqual(expected);
+    });
   });
 
   it("include a missing-test question whose answer finds no covering test, even when it is fully answered", () => {
