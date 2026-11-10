@@ -42,6 +42,8 @@ export interface PriorItem {
   hunk?: [number, number, number];
   /** The item's text as posted, without its marker. */
   text?: string;
+  /** The other round-1 questions the item stood for on its last head (they cite the same outside equivalent). */
+  covers?: string[];
   reviewId?: number;
   commentId?: number | null;
   inline?: boolean;
@@ -93,6 +95,7 @@ export function registryOf(ledger: unknown): PriorRegistry {
       ...(num(raw.endLine) !== undefined ? { endLine: num(raw.endLine)! } : {}),
       ...(raw.side === "RIGHT" || raw.side === "LEFT" ? { side: raw.side } : {}),
       ...(str(raw.anchorText) !== undefined ? { anchorText: str(raw.anchorText)! } : {}),
+      ...(Array.isArray(raw.covers) && raw.covers.every((c) => typeof c === "string") ? { covers: raw.covers as string[] } : {}),
       ...(str(raw.severity) !== undefined ? { severity: str(raw.severity)! } : {}),
       ...(str(raw.kind) !== undefined ? { kind: str(raw.kind)! } : {}),
       ...(str(raw.patchId) !== undefined ? { patchId: str(raw.patchId)! } : {}),

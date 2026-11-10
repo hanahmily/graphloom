@@ -6,7 +6,7 @@ import type { FinalAnswer } from "../src/answers.js";
 import { defaultNecessity } from "../src/rehearsal-qa.js";
 import { necessityAnswer, necessityJson, type Necessity, type PrincipleVerdict } from "../src/necessity.js";
 import { effectivePacks } from "../src/packs.js";
-import { parseRound1Record, round1Json, round1Record, ROUND1_SCHEMA } from "../src/round1.js";
+import { MAX_ITEM_TEXT, parseRound1Record, round1Json, round1Record, ROUND1_SCHEMA } from "../src/round1.js";
 import type { PullFile } from "../src/snapshot.js";
 import { parsePatch } from "../src/patch.js";
 
@@ -91,6 +91,85 @@ describe("round 1's issues, computed from necessity.json and qa.json", () => {
     ]);
     expect(r.issues.map((i) => [i.id, i.kinds, i.status])).toEqual([["Q1", ["existing"], "answered"]]);
     expect(r.issues[0]!.body).toContain("pkg/timestamp/duration.go:30");
+  });
+
+  describe("an existing-equivalent answer is an issue only when the equivalent lies outside the change", () => {
+    const cite = (path: string, tree = "base", start = 10) => ({ path, start, end: start + 5, tree });
+    const reuse = (id: string, citations: Array<ReturnType<typeof cite>>, symbol = "S1"): Q => ({ id, type: "existing-reuse-common", symbol, answer: { status: "answered", citations } });
+    const files = [file("pkg/schema/ttl.go"), { ...file("pkg/merge/new.go"), status: "renamed", previousPath: "pkg/merge/old.go" }];
+
+    it("is not an issue when every equivalent is in a file the pull request changes, and is noted", () => {
+      const r = run([reuse("Q1", [cite("pkg/schema/ttl.go"), cite("pkg/merge/old.go"), cite("pkg/merge/new.go", "head")])], necessity("necessary"), files);
+      expect(r.issues.filter((i) => i.id === "Q1")).toEqual([]);
+      expect(r.noted).toEqual([{ id: "Q1", key: expect.any(String), note: "the equivalent it names is the code this pull request changes" }]);
+    });
+
+    it("is an issue when the equivalent is in a file the pull request does not change", () => {
+      const r = run([reuse("Q1", [cite("pkg/timestamp/duration.go")])], necessity("necessary"), files);
+      expect(ids(r)).toEqual(["Q1"]);
+      expect(r.noted).toBeUndefined();
+    });
+
+    it("is an issue when it cites a declared library, even at a path the pull request also changes", () => {
+      const r = run([reuse("Q1", [cite("pkg/schema/ttl.go", "dependency")])], necessity("necessary"), files);
+      expect(ids(r)).toEqual(["Q1"]);
+    });
+
+    it("is an issue when the citations are mixed, one inside the change and one outside", () => {
+      const r = run([reuse("Q1", [cite("pkg/schema/ttl.go"), cite("pkg/timestamp/duration.go")])], necessity("necessary"), files);
+      expect(ids(r)).toEqual(["Q1"]);
+    });
+
+    it("stays an issue when the answer cites nothing, since it cannot show the equivalent is the changed code", () => {
+      expect(ids(run([reuse("Q1", [])], necessity("necessary"), files))).toEqual(["Q1"]);
+    });
+
+    it("lists several symbols citing the same outside equivalent as one issue", () => {
+      const symbols = [1, 2, 3].map((n) => ({ id: `S${n}`, path: "pkg/schema/ttl.go", startLine: 3, qualified: `sym${n}` }));
+      const questions = [reuse("Q1", [cite("pkg/timestamp/duration.go")], "S1"), reuse("Q2", [cite("pkg/timestamp/duration.go"), cite("pkg/schema/ttl.go")], "S2"), reuse("Q3", [cite("pkg/other/x.go")], "S3"), reuse("Q4", [cite("pkg/timestamp/duration.go")], "S3")];
+      const r = round1Record({ head: "h".repeat(40), necessity: necessity("necessary"), qa: qa(questions, symbols), files, itemCites: { R1: { path: "pkg/schema/ttl.go", start: 3, end: 3 } }, packs: PACKS, prior: [{ id: "Q2", key: "k2", origin: "round1", status: "open" } as never] })!;
+      expect(ids(r)).toEqual(["Q1", "Q3"]);
+      expect(r.issues[0]!.covers).toEqual(["Q2", "Q4"]);
+      expect(r.issues[0]!.body).toContain("`sym2` (Q2)");
+      expect(r.prior).toEqual([expect.objectContaining({ id: "Q2", status: "open" })]);
+    });
+    it("lists, for each question a merged issue covers, its own equivalent and answer", () => {
+      const symbols = [1, 2, 3].map((n) => ({ id: `S${n}`, path: "pkg/schema/ttl.go", startLine: 3, qualified: `sym${n}` }));
+      const withText = (q: Q, text: string): Q => ({ ...q, answer: { ...q.answer!, answer: text } });
+      const qs = [reuse("Q1", [cite("pkg/a.go")], "S1"), withText(reuse("Q2", [cite("pkg/b.go", "base", 20)], "S2"), "b already merges rows"), reuse("Q3", [cite("pkg/a.go"), cite("pkg/b.go", "base", 20)], "S3")];
+      const r = round1Record({ head: "h".repeat(40), necessity: necessity("necessary"), qa: qa(qs, symbols), files, itemCites: { R1: { path: "pkg/schema/ttl.go", start: 3, end: 3 } }, packs: PACKS })!;
+      expect(r.issues[0]!.covered).toEqual([expect.objectContaining({ id: "Q2", symbol: "`sym2`", equivalents: ["pkg/b.go:20"], excerpt: "b already merges rows" }), expect.objectContaining({ id: "Q3", equivalents: ["pkg/a.go:10", "pkg/b.go:20"] })]);
+      expect(r.issues[0]!.body).toContain("- `sym2` (Q2): `pkg/b.go:20`: b already merges rows");
+    });
+
+    it("builds a merged body that fits the posted budget and names every covered question, in the body and in covers", () => {
+      for (const n of [8, 40, 120]) {
+        const symbols = Array.from({ length: n }, (_, k) => ({ id: `S${k + 1}`, path: "pkg/schema/ttl.go", startLine: 3, qualified: `someLongQualifiedSymbolName${k + 1}` }));
+        const long = "this already exists and merges rows the same way ".repeat(8);
+        const qs = Array.from({ length: n }, (_, k) => ({ ...reuse(`Q${k + 1}`, [cite("pkg/timestamp/duration.go", "base", 10 + k)], `S${k + 1}`), answer: { status: "answered", answer: long, citations: [cite("pkg/timestamp/duration.go", "base", 10)] } }));
+        const r = round1Record({ head: "h".repeat(40), necessity: necessity("necessary"), qa: qa(qs, symbols), files, itemCites: { R1: { path: "pkg/schema/ttl.go", start: 3, end: 3 } }, packs: PACKS })!;
+        const merged = r.issues.filter((i) => i.covers !== undefined);
+        expect(merged).toHaveLength(1);
+        const m = merged[0]!;
+        expect(m.body.length, `n=${n}`).toBeLessThanOrEqual(MAX_ITEM_TEXT);
+        // Every question is either named in the body and in covers, or still its own issue; none is lost.
+        for (const q of qs.slice(1)) {
+          const inBody = new RegExp(`\\b${q.id}\\b`).test(m.body);
+          expect(inBody, q.id).toBe(m.covers!.includes(q.id));
+          expect(inBody || ids(r).includes(q.id), q.id).toBe(true);
+        }
+        if (n <= 40) expect(m.covers).toHaveLength(n - 1);
+      }
+    });
+
+    it("joins two groups through a question that cites both, whatever the order of the questions", () => {
+      const symbols = [1, 2, 3].map((n) => ({ id: `S${n}`, path: "pkg/schema/ttl.go", startLine: 3, qualified: `sym${n}` }));
+      const qs = [reuse("Q1", [cite("pkg/a.go")], "S1"), reuse("Q2", [cite("pkg/b.go")], "S2"), reuse("Q3", [cite("pkg/a.go"), cite("pkg/b.go")], "S3")];
+      const go = (order: Q[]) => round1Record({ head: "h".repeat(40), necessity: necessity("necessary"), qa: qa(order, symbols), files, itemCites: { R1: { path: "pkg/schema/ttl.go", start: 3, end: 3 } }, packs: PACKS })!;
+      const shape = (r: ReturnType<typeof go>) => r.issues.map((i) => [i.id, i.covers]).sort();
+      const expected = [["Q1", ["Q2", "Q3"]]];
+      for (const order of [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]]) expect(shape(go(order.map((n) => qs[n]!))), order.join()).toEqual(expected);
+    });
   });
 
   it("include a missing-test question whose answer finds no covering test, even when it is fully answered", () => {
