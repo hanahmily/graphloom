@@ -17,12 +17,12 @@
     "test": "tsc -p tsconfig.json && vitest run"
   },
   "dependencies": {
-    "@graphloom/executor-github": "0.2.1",
-    "@graphloom/runner": "0.0.0",
-    "@graphloom/sdk": "0.0.0"
+    "@graphloom/executor-github": "0.2.2",
+    "@graphloom/runner": "0.2.0",
+    "@graphloom/sdk": "0.2.0"
   },
   "devDependencies": {
-    "@graphloom/plugin-host": "0.0.0",
-    "@graphloom/supervisor": "0.0.0"
+    "@graphloom/plugin-host": "0.2.0",
+    "@graphloom/supervisor": "0.2.0"
   }
 }

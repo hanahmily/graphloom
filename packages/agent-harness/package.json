@@ -1,6 +1,6 @@
 {
   "name": "@graphloom/agent-harness",
-  "version": "0.0.0",
+  "version": "0.2.0",
   "description": "Drives agent sessions (Claude Code, Codex, Pi): processes, stream protocols, session capture, failure classification",
   "license": "Apache-2.0",
   "type": "module",

@@ -1,6 +1,6 @@
 {
   "name": "@graphloom/controller",
-  "version": "0.0.0",
+  "version": "0.2.0",
   "description": "Durable state, admission, receipts, and run lifecycle",
   "license": "Apache-2.0",
   "type": "module",
@@ -16,9 +16,9 @@
     "test": "tsc -p tsconfig.json && vitest run"
   },
   "dependencies": {
-    "@graphloom/plugin-host": "0.0.0",
-    "@graphloom/runner": "0.0.0",
-    "@graphloom/sdk": "0.0.0",
-    "@graphloom/supervisor": "0.0.0"
+    "@graphloom/plugin-host": "0.2.0",
+    "@graphloom/runner": "0.2.0",
+    "@graphloom/sdk": "0.2.0",
+    "@graphloom/supervisor": "0.2.0"
   }
 }

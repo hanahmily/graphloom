@@ -1,6 +1,6 @@
 {
   "name": "@graphloom/executor-github",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Built-in GitHub executors (graphloom.github/*) run through the common executor protocol",
   "license": "Apache-2.0",
   "type": "module",
@@ -31,6 +31,6 @@
     "test": "tsc -p tsconfig.json && vitest run"
   },
   "dependencies": {
-    "@graphloom/sdk": "0.0.0"
+    "@graphloom/sdk": "0.2.0"
   }
 }

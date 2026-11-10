@@ -76,7 +76,7 @@ const REVIEW_SCHEMA: Record<string, unknown> = {
 
 const definition: GraphDefinition = {
   graphId: "hello",
-  version: "0.1.2",
+  version: "0.1.3",
   privateStateSchema: "hello-private-v1",
   resultContracts: [
     { name: "writer-result-v1", schema: WRITER_RESULT_SCHEMA, evidenceKind: "other" },
