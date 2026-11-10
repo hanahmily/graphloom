@@ -6,7 +6,7 @@ import type { FinalAnswer } from "../src/answers.js";
 import { defaultNecessity } from "../src/rehearsal-qa.js";
 import { necessityAnswer, necessityJson, type Necessity, type PrincipleVerdict } from "../src/necessity.js";
 import { effectivePacks } from "../src/packs.js";
-import { parseRound1Record, round1Json, round1Record, ROUND1_SCHEMA } from "../src/round1.js";
+import { MAX_ITEM_TEXT, parseRound1Record, round1Json, round1Record, ROUND1_SCHEMA } from "../src/round1.js";
 import type { PullFile } from "../src/snapshot.js";
 import { parsePatch } from "../src/patch.js";
 
@@ -140,6 +140,26 @@ describe("round 1's issues, computed from necessity.json and qa.json", () => {
       const r = round1Record({ head: "h".repeat(40), necessity: necessity("necessary"), qa: qa(qs, symbols), files, itemCites: { R1: { path: "pkg/schema/ttl.go", start: 3, end: 3 } }, packs: PACKS })!;
       expect(r.issues[0]!.covered).toEqual([expect.objectContaining({ id: "Q2", symbol: "`sym2`", equivalents: ["pkg/b.go:20"], excerpt: "b already merges rows" }), expect.objectContaining({ id: "Q3", equivalents: ["pkg/a.go:10", "pkg/b.go:20"] })]);
       expect(r.issues[0]!.body).toContain("- `sym2` (Q2): `pkg/b.go:20`: b already merges rows");
+    });
+
+    it("builds a merged body that fits the posted budget and names every covered question, in the body and in covers", () => {
+      for (const n of [8, 40, 120]) {
+        const symbols = Array.from({ length: n }, (_, k) => ({ id: `S${k + 1}`, path: "pkg/schema/ttl.go", startLine: 3, qualified: `someLongQualifiedSymbolName${k + 1}` }));
+        const long = "this already exists and merges rows the same way ".repeat(8);
+        const qs = Array.from({ length: n }, (_, k) => ({ ...reuse(`Q${k + 1}`, [cite("pkg/timestamp/duration.go", "base", 10 + k)], `S${k + 1}`), answer: { status: "answered", answer: long, citations: [cite("pkg/timestamp/duration.go", "base", 10)] } }));
+        const r = round1Record({ head: "h".repeat(40), necessity: necessity("necessary"), qa: qa(qs, symbols), files, itemCites: { R1: { path: "pkg/schema/ttl.go", start: 3, end: 3 } }, packs: PACKS })!;
+        const merged = r.issues.filter((i) => i.covers !== undefined);
+        expect(merged).toHaveLength(1);
+        const m = merged[0]!;
+        expect(m.body.length, `n=${n}`).toBeLessThanOrEqual(MAX_ITEM_TEXT);
+        // Every question is either named in the body and in covers, or still its own issue; none is lost.
+        for (const q of qs.slice(1)) {
+          const inBody = new RegExp(`\\b${q.id}\\b`).test(m.body);
+          expect(inBody, q.id).toBe(m.covers!.includes(q.id));
+          expect(inBody || ids(r).includes(q.id), q.id).toBe(true);
+        }
+        if (n <= 40) expect(m.covers).toHaveLength(n - 1);
+      }
     });
 
     it("joins two groups through a question that cites both, whatever the order of the questions", () => {

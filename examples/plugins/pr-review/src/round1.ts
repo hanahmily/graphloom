@@ -155,6 +155,44 @@ function outsideEquivalents(citations: ReadonlyArray<{ path: string; start: numb
  * Several symbols citing the same outside equivalent are one issue that lists them. Only issues that are solely an
  * `existing` issue merge: the first of a group (in question order) carries it and `covers` the rest.
  */
+/** The longest item text the review posts (publish clips beyond it), so a merged comment is built to fit it. */
+export const MAX_ITEM_TEXT = 1_800;
+const BODY_ROOM = MAX_ITEM_TEXT - 50;
+
+const equivText = (c: Round1Covered, n: number): string => c.equivalents.slice(0, n).map((e) => `\`${e.replace(/^dependency:/, "")}\``).join(", ");
+
+/**
+ * The host's body with one line per covered question, built to fit the posted item's budget: each excerpt shrunk evenly,
+ * then one compact line per question (id, symbol, first equivalent), then ids only. A question that still does not fit is
+ * left out of the result, never clipped away silently; the returned `covered` is exactly what the body names.
+ */
+function coveredBody(hostBody: string, covered: readonly Round1Covered[]): { body: string; covered: Round1Covered[] } {
+  const head = (n: number): string => `${hostBody}\n\nThe same issue applies to ${n} more, each with its own answer:\n`;
+  const full = (c: Round1Covered, room: number): string => `- ${c.symbol} (${c.id}): ${equivText(c, 3)}${room > 0 && c.excerpt !== "" ? `: ${clip(c.excerpt, room)}` : ""}`;
+  const compact = (c: Round1Covered, sym: number): string => `- ${clip(c.symbol, sym)} (${c.id}): ${equivText(c, 1)}`;
+  const tries: Array<(n: number) => string[]> = [
+    (n) => {
+      const fixed = covered.map((c) => full(c, 0).length + 1).reduce((a, b) => a + b, 0);
+      const room = Math.floor((BODY_ROOM - head(n).length - fixed) / n) - 2;
+      return room >= 20 ? covered.map((c) => full(c, room)) : [];
+    },
+    () => covered.map((c) => compact(c, 60)),
+    () => covered.map((c) => compact(c, 24)),
+  ];
+  for (const t of tries) {
+    const lines = t(covered.length);
+    if (lines.length > 0 && head(covered.length).length + lines.join("\n").length <= BODY_ROOM) return { body: head(covered.length) + lines.join("\n"), covered: [...covered] };
+  }
+  // Ids only, as many as fit.
+  const kept: Round1Covered[] = [];
+  const ids = (list: readonly Round1Covered[]): string => `${hostBody}\n\nThe same issue also applies to: ${list.map((c) => c.id).join(", ")}.`;
+  for (const c of covered) {
+    if (ids([...kept, c]).length > BODY_ROOM) break;
+    kept.push(c);
+  }
+  return kept.length > 0 ? { body: ids(kept), covered: kept } : { body: hostBody, covered: [] };
+}
+
 const idOrder = (a: string, b: string): number => (Number(a.replace(/\D/g, "")) - Number(b.replace(/\D/g, ""))) || a.localeCompare(b);
 
 function mergeSharedEquivalents(issues: Round1Issue[], outsideOf: ReadonlyMap<string, string[]>, qa: { questions: QaQuestion[]; symbols: Array<{ id: string; qualified: string }> }): void {
@@ -183,14 +221,17 @@ function mergeSharedEquivalents(issues: Round1Issue[], outsideOf: ReadonlyMap<st
   for (const g of groups) {
     const [host, ...rest] = [...g.members].sort((m, n) => idOrder(m.id, n.id));
     if (host === undefined || rest.length === 0) continue;
-    host.covered = rest.map((x): Round1Covered => {
+    const all = rest.map((x): { issue: Round1Issue; covered: Round1Covered } => {
       const q = qa.questions.find((z) => z.id === x.id);
-      return { id: x.id, symbol: nameOf(x), equivalents: (outsideOf.get(x.id) ?? []).slice(0, 3), excerpt: clip(oneLine(q?.answer?.answer ?? ""), 200) };
+      return { issue: x, covered: { id: x.id, symbol: nameOf(x), equivalents: (outsideOf.get(x.id) ?? []).slice(0, 3), excerpt: clip(oneLine(q?.answer?.answer ?? ""), 200) } };
     });
-    host.covers = host.covered.map((c) => c.id);
-    // Each covered question's own outside equivalent and answer, so every claim in the merged comment rests on that question's answer.
-    host.body = `${host.body}\n\nThe same issue applies to ${rest.length} more, each with its own answer:\n${host.covered.map((c) => `- ${c.symbol} (${c.id}): ${c.equivalents.map((e) => `\`${e.replace(/^dependency:/, "")}\``).join(", ")}${c.excerpt !== "" ? `: ${c.excerpt}` : ""}`).join("\n")}`;
-    rest.forEach((x) => merged.add(x));
+    const fit = coveredBody(host.body, all.map((c) => c.covered));
+    host.body = fit.body;
+    host.covered = fit.covered;
+    host.covers = fit.covered.map((c) => c.id);
+    // A question whose line could not fit stays its own issue: `covers` names only what the body shows.
+    const kept = new Set(host.covers);
+    all.filter((c) => kept.has(c.issue.id)).forEach((c) => merged.add(c.issue));
   }
   if (merged.size > 0) issues.splice(0, issues.length, ...issues.filter((x) => !merged.has(x)));
 }

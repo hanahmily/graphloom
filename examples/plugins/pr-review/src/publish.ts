@@ -29,7 +29,7 @@ import { ASPECTS } from "./aspects.js";
 import { findingsOf, type AspectRecord } from "./review.js";
 import { recordedAspect } from "./reviewdraft.js";
 import type { PullFile } from "./snapshot.js";
-import type { Round1Covered, Round1Record } from "./round1.js";
+import { MAX_ITEM_TEXT, type Round1Covered, type Round1Record } from "./round1.js";
 import type { PullRequest } from "./request.js";
 import { READS, readResult, type ReadSpec } from "./snapshot.js";
 
@@ -41,7 +41,6 @@ export const PUBLISH_SCHEMA = "pr-review-publish-v1";
  */
 export const MAX_REVIEW_BODY = 40_000;
 export const MAX_INLINE_COMMENTS = 50;
-const MAX_ITEM_TEXT = 1_800;
 const MAX_ITEM_BODY = 3_800;
 /** The least text a compacted item keeps: a one-liner shorter than this says too little to act on. */
 const MIN_ONE_LINER = 80;
