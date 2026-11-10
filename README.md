@@ -61,19 +61,41 @@ plus `git`, `tar`, `gzip`, `xz` and `sha256sum`.
    the right choice for your own machine. The installer puts a `graphloom` shim
    in `~/.local/bin` and runs `graphloom doctor`.
 2. Set up and check: `graphloom setup`, `graphloom doctor`.
-3. Write a task. For `pr-review`, `graphloom task new pr-review <owner/repo#N>`
-   writes it. For `issue-fix`, write `task.yaml` by hand (below) or let the
-   `graphloom-run` skill write it.
-4. Run, follow, inspect: `graphloom run task.yaml`, `graphloom watch <run>`,
+3. Make a working directory of your own, not the target repository, and link
+   the graph's bundle into it. A task finds its graph under `plugins/<graph>`
+   beside the task file; link the installed version's real path, never `current`:
+
+   ```sh
+   mkdir -p ~/graphloom-work/plugins && cd ~/graphloom-work
+   ln -s "$(graphloom version --root)/examples/plugins/issue-fix" plugins/issue-fix
+   ```
+
+   Use `plugins/pr-review` the same way for pull-request reviews.
+4. Write the task there. For `pr-review`, `graphloom task new` writes it; it
+   needs `--profile`, a name looked up in `profiles/` beside you and then in the
+   bundle, or a path to a JSON file. The bundle ships a `banyandb` profile; for
+   another repository, copy it and adjust it, then pass the path:
+
+   ```sh
+   graphloom task new pr-review <owner/repo#N> --repo <clone> --profile <name-or-path.json>
+   ```
+
+   For `issue-fix`, write `task.yaml` by hand (below) or let the `graphloom-run`
+   skill write it. Its profile is also a copy to adjust: the bundle ships
+   `banyandb`, `banyandb-ql`, `canopy` and `graphloom` profiles in
+   `plugins/issue-fix/profiles/`.
+5. Run, follow, inspect: `graphloom run task.yaml`, `graphloom watch <run>`,
    `graphloom inspect <run>`.
 
-A `task.yaml` for `issue-fix` ([`examples/issue-fix-graphloom-task.yaml`](examples/issue-fix-graphloom-task.yaml)):
+A `task.yaml` for `issue-fix`, beside `plugins/` in that directory
+(modelled on [`examples/issue-fix-graphloom-task.yaml`](examples/issue-fix-graphloom-task.yaml),
+which works inside a checkout because `plugins/` sits beside it there):
 
 ```yaml
 graph: issue-fix
-repo: .
-config: plugins/issue-fix/profiles/graphloom.json
-request: "Fix hanahmily/graphloom#119."
+repo: ./widgets                  # the target repository, relative to this file
+config: profiles/widgets.json    # a copy of a shipped profile, adjusted
+request: "Fix acme/widgets#42."
 ```
 
 `graph` selects the plugin, `repo` the repository to work on, `config` the

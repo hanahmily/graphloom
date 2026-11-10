@@ -231,18 +231,20 @@ footer nav a:hover{color:var(--ink)}
 <span class="k">scripts/install.sh</span> --from release-out/0.0.0/graphloom-0.0.0-linux-x64.tar.gz</code></pre></li>
         <li><h3>Set up and check</h3><p>The installer runs <code>graphloom doctor</code> once; run these to configure and review.</p><pre><code><span class="k">graphloom</span> setup
 <span class="k">graphloom</span> doctor</code></pre></li>
-        <li><h3>Describe the task</h3><p>For <code>pr-review</code>, <code>graphloom task new</code> writes the task. For <code>issue-fix</code>, write <code>task.yaml</code> by hand (right) or let the <code>graphloom-run</code> skill write it.</p><pre><code><span class="k">graphloom</span> task new pr-review owner/repo#123</code></pre></li>
+        <li><h3>Link the graph</h3><p>Use a working directory of your own, not the target repository. A task finds its graph under <code>plugins/&lt;graph&gt;</code> beside it; link the installed version's real path, never <code>current</code>. Use <code>plugins/pr-review</code> the same way for reviews.</p><pre><code><span class="k">mkdir</span> -p ~/graphloom-work/plugins &amp;&amp; <span class="k">cd</span> ~/graphloom-work
+<span class="k">ln</span> -s "$(graphloom version --root)/examples/plugins/issue-fix" plugins/issue-fix</code></pre></li>
+        <li><h3>Describe the task</h3><p>For <code>pr-review</code>, <code>graphloom task new</code> writes the task and needs <code>--profile</code>: a name looked up in <code>profiles/</code> beside you and then in the bundle (it ships <code>banyandb</code>), or a path to a JSON file. For another repository, copy a shipped profile and adjust it. For <code>issue-fix</code>, write <code>task.yaml</code> by hand (right) or let the <code>graphloom-run</code> skill write it.</p><pre><code><span class="k">graphloom</span> task new pr-review owner/repo#123 --repo ./clone --profile banyandb</code></pre></li>
         <li><h3>Run, watch, inspect</h3><pre><code><span class="k">graphloom</span> run task.yaml
 <span class="k">graphloom</span> watch &lt;run&gt;    <span class="c"># follow the run</span>
 <span class="k">graphloom</span> inspect &lt;run&gt;  <span class="c"># look inside the run</span></code></pre></li>
       </ol>
       <div class="skills">
-        <p class="file">examples/issue-fix-graphloom-task.yaml</p>
+        <p class="file">task.yaml, beside plugins/</p>
         <pre><code><span class="k">graph</span>: issue-fix
-<span class="k">repo</span>: .
-<span class="k">config</span>: plugins/issue-fix/profiles/graphloom.json
-<span class="k">request</span>: "Fix hanahmily/graphloom#119."</code></pre>
-        <p><code>graph</code> selects the plugin, <code>repo</code> the repository to work on, <code>config</code> the graph's profile, and <code>request</code> what to do.</p>
+<span class="k">repo</span>: ./widgets
+<span class="k">config</span>: profiles/widgets.json
+<span class="k">request</span>: "Fix acme/widgets#42."</code></pre>
+        <p><code>graph</code> selects the plugin, <code>repo</code> the repository to work on (relative to this file), <code>config</code> a copy of one of the graph's shipped profiles, adjusted, and <code>request</code> what to do. <code>examples/issue-fix-graphloom-task.yaml</code> in the repository is a working example.</p>
         <h3>Drive it from your agent</h3>
         <p>GraphLoom ships agent skills for Claude Code, Codex and opencode; <code>graphloom skills install</code> installs them.</p>
         <table>
