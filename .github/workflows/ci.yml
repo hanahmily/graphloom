@@ -12,6 +12,9 @@ jobs:
     env:
       # Ensure workspace devDependencies (typescript, vitest) install under npm ci.
       NODE_ENV: development
+      # GitHub's hosted runners have 4 CPUs; the default of 6 test workers per package starves one, and vitest then
+      # fails the run with "Timeout calling onTaskUpdate" though every test passed.
+      GRAPHLOOM_TEST_WORKERS: "3"
     steps:
       - uses: actions/checkout@v4
 
