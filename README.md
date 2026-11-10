@@ -38,13 +38,14 @@ With reduced-motion enabled the recordings show their final frame.
 
 ## Get started
 
-1. **Install.** Releases are local builds for now and bundle their own Node; you need Linux and a logged-in Claude Code, Codex or Pi.
+1. **Install.** Releases bundle their own Node. You need Linux, an authenticated `gh`, and a logged-in Claude Code, Codex or Pi. The installer checks the release's signature against the signers file from the release tag.
    ```sh
-   git clone https://github.com/hanahmily/graphloom && cd graphloom
-   scripts/release.sh build 0.0.0 --unsigned
-   scripts/install.sh --from release-out/0.0.0/graphloom-0.0.0-linux-x64.tar.gz
+   gh release download v0.2.0 -R hanahmily/graphloom -p install.sh
+   curl -fsSLO https://raw.githubusercontent.com/hanahmily/graphloom/v0.2.0/release/allowed_signers
+   sh install.sh --require-signature --allowed-signers allowed_signers
    graphloom doctor
    ```
+   The `graphloom` command is installed in `~/.local/bin`; put that directory on your `PATH`. Later versions arrive through `graphloom upgrade` and a daily automatic check.
 2. **Start a review or a fix.** In a working directory of your own, link the graph and create the task:
    ```sh
    mkdir -p plugins && ln -s "$(graphloom version --root)/examples/plugins/pr-review" plugins/pr-review
