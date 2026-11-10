@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GraphLoom: AI review and fixes you can check, not redo</title>
+<meta name="description" content="GraphLoom is a graph-native harness for multi-agent coding work. Write the process as an executable TypeScript graph; GraphLoom runs coding agents through it with durable state, verified evidence, budgets and a recovering supervisor.">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="assets/mark-light.svg" type="image/svg+xml">
+<style>
+:root{--bg:#FFFFFF;--surface:#F6F8FA;--ink:#1F2328;--muted:#57606A;--line:#6E7781;--faint:#D0D7DE;--accent:#0F766E;--accent-hover:#0B5E58;--soft:#E3F2EF;--onaccent:#FFFFFF;--sans:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;color-scheme:light dark}
+@media (prefers-color-scheme:dark){:root{--bg:#0D1117;--surface:#161B22;--ink:#E6EDF3;--muted:#9198A1;--line:#7D8590;--faint:#30363D;--accent:#2DD4BF;--accent-hover:#5EEAD4;--soft:#0F2A27;--onaccent:#0D1117}}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.6 var(--sans);-webkit-font-smoothing:antialiased}
+a{color:var(--accent)}a:hover{color:var(--accent-hover)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:3px;border-radius:4px}
+code,pre{font-family:var(--mono);font-size:.9em}
+:not(pre)>code{background:var(--surface);border:1px solid var(--faint);border-radius:6px;padding:.08em .38em;overflow-wrap:anywhere}
+.skip{position:absolute;left:-9999px;top:8px;background:var(--accent);color:var(--onaccent);padding:8px 14px;border-radius:8px;z-index:10}
+.skip:focus{left:8px}
+.wrap{max-width:1120px;margin:0 auto;padding:0 24px}
+.top{border-bottom:1px solid var(--faint)}
+.top .wrap{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:64px;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:10px;color:var(--ink);text-decoration:none;font-weight:650;font-size:18px}
+.brand:hover{color:var(--ink)}
+.mark{display:block}
+.top nav{display:flex;gap:20px;flex-wrap:wrap}
+.top nav a{color:var(--muted);text-decoration:none;font-size:15px;padding:10px 0}
+.top nav a:hover{color:var(--ink);text-decoration:underline}
+.hero{padding:88px 0 72px}
+.hero .wrap{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,.9fr);gap:48px;align-items:center}
+.eyebrow{font:600 13px/1.4 var(--mono);color:var(--muted);margin:0 0 20px}
+.hero h1{display:flex;align-items:center;gap:16px;margin:0 0 20px;font-size:60px;line-height:1.05;letter-spacing:-.02em;font-weight:700}
+.pain{font-size:26px;line-height:1.3;margin:0 0 16px;font-weight:600}
+.author{font-size:18px;margin:0 0 20px;color:var(--ink)}
+.tagline{font-size:20px;line-height:1.3;margin:0 0 28px;font-weight:500}
+.tagline span{color:var(--accent);display:block}
+.lede{color:var(--muted);font-size:17px;max-width:38em;margin:0 0 20px}
+.btns{display:flex;gap:12px;flex-wrap:wrap}
+.btn{display:inline-flex;align-items:center;gap:8px;min-height:44px;padding:10px 20px;border-radius:10px;font-weight:600;text-decoration:none;border:1px solid transparent}
+.btn.primary{background:var(--accent);color:var(--onaccent)}
+.btn.primary:hover{background:var(--accent-hover);color:var(--onaccent)}
+.btn.ghost{border-color:var(--line);color:var(--ink)}
+.btn.ghost:hover{color:var(--ink);background:var(--surface)}
+.note{margin:24px 0 0;font-size:14px;color:var(--muted)}
+.art img{display:block;width:100%;height:auto}
+section{padding:80px 0;border-top:1px solid var(--faint)}
+h2{font-size:32px;line-height:1.2;letter-spacing:-.01em;margin:0 0 12px}
+.sub{color:var(--muted);max-width:44em;margin:0 0 40px;font-size:17px}
+h3{font-size:18px;margin:0 0 8px}
+figure{margin:0 0 48px}
+.diagram{overflow-x:auto;border:1px solid var(--faint);border-radius:16px;padding:8px}
+.diagram img{display:block;min-width:900px;width:100%;height:auto}
+figcaption{color:var(--muted);font-size:14px;margin-top:12px}
+.terms{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:24px;margin:0}
+.terms div{border-top:2px solid var(--accent);padding-top:14px}
+.terms dt{font-weight:650;margin-bottom:6px}
+.terms dd{margin:0;color:var(--muted);font-size:15px}
+.cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:24px}
+.card{border:1px solid var(--faint);border-radius:16px;padding:28px}
+.card header{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:6px}
+.card h3{font-family:var(--mono);font-size:20px;margin:0}
+.card .kind{font-size:13px;color:var(--muted)}
+.card>p{color:var(--muted);margin:0 0 24px}
+.track{list-style:none;margin:0;padding:0;position:relative}
+.track::before{content:"";position:absolute;left:11px;top:12px;bottom:12px;width:2px;background:var(--faint)}
+.track li{position:relative;padding:0 0 16px 40px;font-size:15px}
+.track li::before{content:"";position:absolute;left:5px;top:6px;width:14px;height:14px;border-radius:50%;background:var(--bg);border:2px solid var(--line)}
+.track li.key::before{border-color:var(--accent);background:var(--soft)}
+.track li.end::before{border-color:var(--accent);background:var(--accent)}
+.track li.round{font:600 12px/1 var(--mono);color:var(--muted);letter-spacing:.04em;text-transform:uppercase;padding:4px 0 12px 40px}
+.track li.round::before{display:none}
+.track b{font-weight:600}
+.meta{display:block;color:var(--muted);font-size:14px}
+.par{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px}
+.chip{font-size:13px;border:1px solid var(--faint);border-radius:999px;padding:2px 10px;background:var(--surface)}
+.tag{font:600 12px/1 var(--mono);padding:3px 6px;border-radius:5px;margin-left:6px;border:1px solid var(--line)}
+.tag.green{border-color:var(--accent);color:var(--accent)}
+.why{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:32px 48px}
+.why article{display:grid;grid-template-columns:40px minmax(0,1fr);gap:16px}
+.why .n{font:600 14px/38px var(--mono);width:40px;height:40px;text-align:center;border:1px solid var(--faint);border-radius:10px;color:var(--accent)}
+.why p{margin:0;color:var(--muted)}
+.agents{display:flex;gap:12px;flex-wrap:wrap;margin:0;padding:0;list-style:none}
+.agents li{font:600 15px/1 var(--mono);padding:12px 18px;border:1px solid var(--line);border-radius:10px}
+.qs{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:32px}
+.steps{counter-reset:s;list-style:none;margin:0;padding:0}
+.steps>li{counter-increment:s;position:relative;padding-left:44px;margin-bottom:28px}
+.steps>li::before{content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;border-radius:50%;border:1px solid var(--line);font:600 13px/26px var(--mono);text-align:center}
+.steps p{margin:0 0 10px;color:var(--muted)}
+pre{margin:0 0 12px;background:var(--surface);border:1px solid var(--faint);border-radius:10px;padding:14px 16px;overflow-x:auto;line-height:1.55;font-size:14px}
+pre .c{color:var(--muted)}pre .k{color:var(--accent)}
+.file{font:600 12px/1 var(--mono);color:var(--muted);margin:0 0 8px}
+.skills h3{margin-top:32px}
+.skills p{color:var(--muted);margin:0 0 12px}
+table{width:100%;border-collapse:collapse;font-size:15px}
+th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--faint);vertical-align:top}
+th{font-size:13px;color:var(--muted);font-weight:600}
+.status{border:1px solid var(--faint);border-radius:16px;padding:28px;display:grid;grid-template-columns:minmax(0,220px) minmax(0,1fr);gap:24px;background:var(--surface)}
+.status h2{font-size:22px}
+.badge{font:700 14px/1 var(--mono);display:inline-block;padding:8px 12px;border:1px solid var(--accent);color:var(--accent);border-radius:8px}
+.status ul{margin:0;padding-left:20px;color:var(--muted)}
+footer{border-top:1px solid var(--faint);padding:40px 0 56px;color:var(--muted);font-size:14px}
+footer .wrap{display:flex;justify-content:space-between;gap:24px;flex-wrap:wrap;align-items:center}
+footer nav{display:flex;gap:20px;flex-wrap:wrap}
+footer nav a{color:var(--muted);padding:10px 0}
+footer nav a:hover{color:var(--ink)}
+@media (max-width:880px){.hero .wrap,.cards,.qs{grid-template-columns:minmax(0,1fr)}.art{display:none}.terms{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:720px){.why,.status{grid-template-columns:minmax(0,1fr)}}
+@media (max-width:560px){.wrap{padding:0 16px}.terms{grid-template-columns:minmax(0,1fr)}section{padding:56px 0}.hero{padding:56px 0 48px}.hero h1{font-size:44px}.tagline{font-size:18px}.pain{font-size:21px}}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="#top"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/mark-dark.svg"><img class="mark" src="assets/mark-light.svg" alt="" width="28" height="28"></picture><span>GraphLoom</span></a>
+    <nav aria-label="Primary">
+      <a href="#how">How it works</a>
+      <a href="#graphs">Graphs</a>
+      <a href="#quickstart">Quickstart</a>
+      <a href="https://github.com/hanahmily/graphloom">GitHub</a>
+    </nav>
+  </div>
+</header>
+<main id="main">
+<div class="hero" id="top">
+  <div class="wrap">
+    <div>
+      <p class="eyebrow">Open source · Apache-2.0 · pre-1.0</p>
+      <h1><picture><source media="(prefers-color-scheme: dark)" srcset="assets/mark-dark.svg"><img class="mark" src="assets/mark-light.svg" alt="" width="56" height="56"></picture>GraphLoom</h1>
+      <p class="pain">You already let AI review your contributors' pull requests and draft fixes for your issues, and you still re-check every line it gives you.</p>
+      <p class="author">What I was missing was AI output that comes with proof I can check in a minute, instead of claims I have to redo.</p>
+      <p class="lede">GraphLoom runs coding agents (Claude Code, Codex or Pi, with your own logins, on your machine) through a fixed process, and it only hands you a result once the evidence for it has been checked. You write the process as an executable TypeScript graph.</p>
+      <p class="tagline">Write a graph in TypeScript. <span>Let the loom run its agents.</span></p>
+      <div class="btns">
+        <a class="btn primary" href="#quickstart">Get started</a>
+        <a class="btn ghost" href="https://github.com/hanahmily/graphloom">GitHub</a>
+      </div>
+      <p class="note">Linux only. Runs locally on your machine with your own Claude Code / Codex / Pi logins. No hosted service.</p>
+    </div>
+    <div class="art"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/weave-dark.svg"><img src="assets/weave-light.svg" alt="" width="430" height="244"></picture></div>
+  </div>
+</div>
+<section id="how" aria-labelledby="how-h">
+  <div class="wrap">
+    <h2 id="how-h">How a run works</h2>
+    <p class="sub">A run executes one task in an isolated Git worktree. The graph fixes the stages; executors do the jobs; validators decide what counts. The supervisor handles failures, and the operator makes the calls that need a human.</p>
+    <figure>
+      <div class="diagram" tabindex="0" role="region" aria-label="Diagram: how a run works (scrolls sideways on narrow screens)"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/run-dark.svg"><img src="assets/run-light.svg" alt="How a run works: task.yaml, graph plugin, stages, jobs on executors, evidence, validators, receipts, done. The supervisor loops failures back into the graph; the operator decides at stop-and-ask points and before delivery." width="1280" height="580"></picture></div>
+      <figcaption>Threads (agent jobs) are woven through a fixed warp (the graph's stages) into fabric (verified results).</figcaption>
+    </figure>
+    <dl class="terms">
+      <div><dt>Graph</dt><dd>A TypeScript plugin that defines the stages of a job (for example Fix → Review), what each stage must prove, and how to route. The graph is code, not a prompt list.</dd></div>
+      <div><dt>Run</dt><dd>One execution of a task (<code>task.yaml</code>) in an isolated Git worktree, with pinned inputs, recorded evidence and finite budgets: agent calls, jobs, time.</dd></div>
+      <div><dt>Receipts</dt><dd>A stage is accepted only when validators check the evidence. Agent claims alone don't count.</dd></div>
+      <div><dt>Supervisor</dt><dd>One recovery agent per run. It investigates failures, can repair the plugin with tested changes, and re-enters the graph. The stages and required outcomes stay fixed.</dd></div>
+      <div><dt>Executors</dt><dd>Sandboxed workers that do jobs: coding agents, commands (build, test), GitHub reads and writes.</dd></div>
+      <div><dt>Operator</dt><dd>You, in the loop by design. Runs stop and ask when a human decision is needed. Nothing is pushed or posted unless you enable it.</dd></div>
+    </dl>
+  </div>
+</section>
+<section id="inside" aria-labelledby="arch-h">
+  <div class="wrap">
+    <h2 id="arch-h">How it works inside</h2>
+    <p class="sub">The controller, plugin host, runner, executors and supervisor, with the architecture diagram and the design documents, are described in <a href="https://github.com/hanahmily/graphloom/blob/main/docs/overview.md">docs/overview.md</a>.</p>
+  </div>
+</section>
+<section id="graphs" aria-labelledby="graphs-h">
+  <div class="wrap">
+    <h2 id="graphs-h">Two graphs ship with it</h2>
+    <p class="sub">Use them as they are, or read them as examples of how to write your own.</p>
+    <div class="cards">
+      <article class="card">
+        <header><h3>issue-fix</h3><span class="kind">issue → local branch</span></header>
+        <p>Fixes an issue test-first and hands you a branch with a ready pull-request description. It does not push; opening the pull request is yours to do.</p>
+        <ol class="track">
+          <li><b>Issue</b></li>
+          <li><b>Plan</b></li>
+          <li class="key"><b>Regression test</b><span class="tag">RED</span><span class="meta">must fail first</span></li>
+          <li><b>Fix</b></li>
+          <li class="key"><b>Test passes</b><span class="tag green">GREEN</span></li>
+          <li><b>Independent review</b></li>
+          <li class="end"><b>Local branch</b><span class="meta">with a ready pull-request description</span></li>
+        </ol>
+      </article>
+      <article class="card">
+        <header><h3>pr-review</h3><span class="kind">pull request → one review</span></header>
+        <p>Reviews an incoming pull request in two rounds and posts one COMMENT review whose first line is the verdict. Posting needs a GitHub token you configure for the run.</p>
+        <ol class="track">
+          <li class="round">Round 1</li>
+          <li><b>Neutral change report</b></li>
+          <li class="key"><b>Questions and answers</b><span class="meta">First: “Is this change necessary?”, checked against the project's design principles.</span></li>
+          <li class="round">Round 2</li>
+          <li><b>Reviewers</b><span class="par"><span class="chip">correctness</span><span class="chip">maintainability</span><span class="chip">security</span></span></li>
+          <li class="key"><b>Independent verifier</b><span class="meta">on a different harness, confirms each finding</span></li>
+          <li class="end"><b>One COMMENT review</b><span class="meta">first line is the verdict</span></li>
+        </ol>
+      </article>
+    </div>
+  </div>
+</section>
+<section id="why" aria-labelledby="why-h">
+  <div class="wrap">
+    <h2 id="why-h">Why it's different</h2>
+    <p class="sub">GraphLoom treats a multi-agent job as a process you can read, bound and check.</p>
+    <div class="why">
+      <article><span class="n" aria-hidden="true">01</span><div><h3>Graphs are code</h3><p>The process is a TypeScript plugin: the stages, what each must prove, and how to route. Not a prompt list.</p></div></article>
+      <article><span class="n" aria-hidden="true">02</span><div><h3>Evidence over claims</h3><p>A stage is accepted only when validators check the recorded evidence. An agent saying it is done is not a receipt.</p></div></article>
+      <article><span class="n" aria-hidden="true">03</span><div><h3>Recovery, not give-up</h3><p>A supervisor investigates failures, can repair the plugin with tested changes, and re-enters the graph. Stages and required outcomes stay fixed.</p></div></article>
+      <article><span class="n" aria-hidden="true">04</span><div><h3>Bounded and inspectable</h3><p>Finite budgets for agent calls, jobs and time. Follow a run with <code>graphloom watch</code>; look inside it with <code>graphloom inspect</code>.</p></div></article>
+    </div>
+  </div>
+</section>
+<section id="agents" aria-labelledby="agents-h">
+  <div class="wrap">
+    <h2 id="agents-h">Works with your agents</h2>
+    <p class="sub">GraphLoom runs these coding agents as executors, on your machine, with your own logins.</p>
+    <ul class="agents"><li>Claude Code</li><li>Codex</li><li>Pi</li></ul>
+  </div>
+</section>
+<section id="quickstart" aria-labelledby="qs-h">
+  <div class="wrap">
+    <h2 id="qs-h">Quickstart</h2>
+    <p class="sub">Linux, with Claude Code, Codex or Pi already logged in on your machine. A release bundles its own Node.js; the local build needs any Node on <code>PATH</code> to fetch the pinned runtime, plus <code>git</code>, <code>tar</code>, <code>gzip</code>, <code>xz</code> and <code>sha256sum</code>.</p>
+    <div class="qs">
+      <ol class="steps">
+        <li><h3>Install</h3><p>Installable releases are local builds for now: none is published yet. Build one from a clone and install it. Use the version in the root <code>package.json</code>, currently <code>0.0.0</code>. <code>--unsigned</code> makes a development build, which is right for your own machine.</p><pre><code><span class="k">git</span> clone https://github.com/hanahmily/graphloom.git
+<span class="k">cd</span> graphloom
+<span class="k">scripts/release.sh</span> build 0.0.0 --unsigned
+<span class="k">scripts/install.sh</span> --from release-out/0.0.0/graphloom-0.0.0-linux-x64.tar.gz</code></pre></li>
+        <li><h3>Set up and check</h3><p>The installer runs <code>graphloom doctor</code> once; run these to configure and review.</p><pre><code><span class="k">graphloom</span> setup
+<span class="k">graphloom</span> doctor</code></pre></li>
+        <li><h3>Link the graph</h3><p>Use a working directory of your own, not the target repository. A task finds its graph under <code>plugins/&lt;graph&gt;</code> beside it; link the installed version's real path, never <code>current</code>. Use <code>plugins/pr-review</code> the same way for reviews.</p><pre><code><span class="k">mkdir</span> -p ~/graphloom-work/plugins &amp;&amp; <span class="k">cd</span> ~/graphloom-work
+<span class="k">ln</span> -s "$(graphloom version --root)/examples/plugins/issue-fix" plugins/issue-fix</code></pre></li>
+        <li><h3>Describe the task</h3><p>For <code>pr-review</code>, <code>graphloom task new</code> writes the task and needs <code>--profile</code>: a name looked up in <code>profiles/</code> beside you and then in the bundle (it ships <code>banyandb</code>), or a path to a JSON file. For another repository, copy a shipped profile and adjust it. For <code>issue-fix</code>, write <code>task.yaml</code> by hand (right) or let the <code>graphloom-run</code> skill write it.</p><pre><code><span class="k">graphloom</span> task new pr-review owner/repo#123 --repo ./clone --profile banyandb</code></pre></li>
+        <li><h3>Run, watch, inspect</h3><pre><code><span class="k">graphloom</span> run task.yaml
+<span class="k">graphloom</span> watch &lt;run&gt;    <span class="c"># follow the run</span>
+<span class="k">graphloom</span> inspect &lt;run&gt;  <span class="c"># look inside the run</span></code></pre></li>
+      </ol>
+      <div class="skills">
+        <p class="file">task.yaml, beside plugins/</p>
+        <pre><code><span class="k">graph</span>: issue-fix
+<span class="k">repo</span>: ./widgets
+<span class="k">config</span>: profiles/widgets.json
+<span class="k">request</span>: "Fix acme/widgets#42."</code></pre>
+        <p><code>graph</code> selects the plugin, <code>repo</code> the repository to work on (relative to this file), <code>config</code> a copy of one of the graph's shipped profiles, adjusted, and <code>request</code> what to do. <code>examples/issue-fix-graphloom-task.yaml</code> in the repository is a working example.</p>
+        <h3>Drive it from your agent</h3>
+        <p>GraphLoom ships agent skills for Claude Code, Codex and opencode; <code>graphloom skills install</code> installs them.</p>
+        <table>
+          <thead><tr><th scope="col">Skill</th><th scope="col">Use it to</th></tr></thead>
+          <tbody>
+            <tr><td><code>graphloom-setup</code></td><td>set up GraphLoom</td></tr>
+            <tr><td><code>graphloom-issue</code></td><td>turn a requirement into an issue sized for one run</td></tr>
+            <tr><td><code>graphloom-run</code></td><td>start a run</td></tr>
+            <tr><td><code>graphloom-watch</code></td><td>watch it cheaply</td></tr>
+            <tr><td><code>graphloom-triage</code></td><td>diagnose a stop</td></tr>
+            <tr><td><code>graphloom-deliver</code></td><td>ship the result</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+<section id="status" aria-labelledby="status-h">
+  <div class="wrap">
+    <div class="status">
+      <div><h2 id="status-h">Status</h2><span class="badge">pre-1.0</span></div>
+      <ul>
+        <li>Linux only.</li>
+        <li>Runs locally on your machine with your own Claude Code / Codex / Pi logins. No hosted service.</li>
+        <li>Installable releases are local builds for now.</li>
+        <li>Licensed under Apache-2.0.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+</main>
+<footer>
+  <div class="wrap">
+    <span>GraphLoom · Apache-2.0</span>
+    <nav aria-label="Project">
+      <a href="https://github.com/hanahmily/graphloom">GitHub</a>
+      <a href="https://github.com/hanahmily/graphloom/tree/main/docs">Docs</a>
+      <a href="https://github.com/hanahmily/graphloom/blob/main/CONTRIBUTING.md">CONTRIBUTING</a>
+      <a href="https://github.com/hanahmily/graphloom/blob/main/SECURITY.md">SECURITY</a>
+      <a href="https://github.com/hanahmily/graphloom/blob/main/CODE_OF_CONDUCT.md">CODE_OF_CONDUCT</a>
+      <a href="https://github.com/hanahmily/graphloom/blob/main/LICENSE">License</a>
+    </nav>
+  </div>
+</footer>
+</body>
+</html>

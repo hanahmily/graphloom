@@ -1,0 +1,294 @@
+# How GraphLoom works inside
+
+The [README](../README.md) says what GraphLoom does and how to start. This page
+holds the technical overview: how the pieces fit, configuration details, and an
+index of the design documents.
+
+## Architecture
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/architecture-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="assets/architecture-light.svg">
+  <img src="assets/architecture-light.svg" alt="GraphLoom architecture: the CLI talks to the controller, which holds durable state, receipts and budgets and talks to the plugin host that runs the graph plugin in its own process. The controller sends jobs to the runner, which dispatches them to sandboxed executors (coding-agent, command, github). Executors write evidence that the controller reads. A supervisor is attached to the controller." width="100%">
+</picture>
+
+The controller owns durable state, receipts and budgets. The graph plugin, which
+defines the stages of a job, what each must prove and how to route, runs in the
+plugin host, a separate process. The runner dispatches the controller's jobs to
+sandboxed executors (coding agents, commands such as build and test, GitHub reads
+and writes), which record evidence. Validators check the evidence, and a stage
+is accepted only when the check passes. One supervisor per run investigates
+failures, can repair the plugin with tested changes, and re-enters the graph; the
+stages and required outcomes stay fixed. Nothing is pushed or posted unless you
+enable it. The [core design](design-typescript-core.md) is authoritative.
+
+## How a run works
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/run-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="assets/run-light.svg">
+  <img src="assets/run-light.svg" alt="How a run works: task.yaml, graph plugin, stages, jobs on executors, evidence, validators, receipts, done. The supervisor loops failures back into the graph; the operator decides at stop-and-ask points and before delivery." width="100%">
+</picture>
+
+## Implementation status and development
+
+The [TypeScript core design](design-typescript-core.md) is authoritative.
+Active code lives under `packages/` (`sdk`, `controller`, `plugin-host`,
+`supervisor`, `runner`), built-in executor packages under `executors/` (`github`, `coding-agent`),
+and `apps/graphloom`. The SDK, isolated plugin host, durable controller lifecycle,
+the supervisor on Pi, Claude Code, or Codex, executor packages, and qualified
+repair workflows are implemented and covered by scripted integration tests. Live-provider qualification and the
+complete local-release scenarios remain outstanding. [Agent-host mode](design-agent-host.md) is newly designed and not implemented.
+
+```sh
+npm ci
+npm run build
+npm run typecheck
+npm test
+```
+
+See [CONTRIBUTING.md](../CONTRIBUTING.md) before opening a pull request.
+
+The local runtime requires Linux, Git, and util-linux `flock`. An installed
+release bundles its own Node.js; running from a clone, and development, need
+Node.js 22.19 or newer. Controller and repository locks use kernel locks held by a helper
+process; a controller exit releases them without deleting or reclaiming leases.
+
+## Select a graph
+
+Run an installed graph with `graphloom run task.yaml`:
+
+```yaml
+graph: hello
+repo: ./test-repo
+request: |
+  Create GREETING.txt containing exactly "Hello, GraphLoom!" followed by
+  one newline. Do not modify other files.
+```
+
+`hello` selects the operator-installed `plugins/hello/` bundle beside the task.
+It implements Write → Review in code. The controller creates an isolated Git
+worktree and preserves the source checkout. Successful runs deliver a local diff
+without automatic commit, push, or publication.
+
+`graphloom doctor` reports what this machine can run (Claude Code, Codex, Pi,
+`gh`, bubblewrap, and optionally Docker for graphs that run untrusted code in a
+container; `graphloom sandbox pull` fetches a sandbox image by digest before a run)
+with the next command for each gap, and `graphloom setup`
+writes the runner and supervisor configs from what it finds, asking for your
+consent to `allowUnrestricted` (`graphloom setup --yes` in scripts). `run`
+starts setup on a terminal when no runner config exists. To write it by hand,
+configure the job runner in `~/.config/graphloom/runner.json`, or point
+`GRAPHLOOM_RUNNER_CONFIG` at an operator-owned file. For Claude Code:
+
+```json
+{ "harness": "claude-code", "allowUnrestricted": true }
+```
+
+Claude Code must be installed and logged in. Optional `claude.command` and
+`claude.model` select its executable and model. For Pi, use `"harness": "pi"`
+with any provider and model Pi knows, for example
+`"pi": { "provider": "deepseek", "modelId": "deepseek-v4-pro" }`, and that
+provider's Pi credential (its environment variable, such as `DEEPSEEK_API_KEY`,
+or Pi's auth store). Codex (`"codex"`, installed and logged in) serves
+read-only jobs only, such as a plugin's code review; list it in `harnesses` next
+to the default. Keep credentials out of runner configuration.
+The same configuration is used by `resume`. Without runner configuration, or
+without the Claude Code or Codex command or Pi model it names, `run` and
+`resume` refuse to start. The [example guide](../examples/README.md) lists every setting.
+
+`allowUnrestricted` is required because coding agents can run shell commands
+with the operator's permissions. Claude's file-tool permission checks restrict
+file mutations to the job scope and deny shell commands for read-only jobs;
+writer shell commands still require trust. See the
+[permission and cancellation design](design-claude-live-mode.md).
+
+### The supervisor
+
+The supervisor (`~/.config/graphloom/supervisor.json`, or the file
+`GRAPHLOOM_SUPERVISOR_CONFIG` names; also written by `graphloom setup`) runs on
+one of three **harnesses**:
+
+- **Pi**, in-process, on any model Pi supports:
+  `{ "provider": "<pi provider>", "modelId": "<model>" }` with that provider's
+  Pi credential. For DeepSeek, `DEEPSEEK_API_KEY` and
+  `{ "provider": "deepseek", "modelId": "deepseek-v4-pro" }` are all it takes.
+- **Claude Code**, your own `claude` login (never an API key), under bwrap.
+- **Codex**, your own `codex` login (a ChatGPT login; a Codex home signed in
+  with an API key is refused), under bwrap.
+
+So Claude and OpenAI models each have two routes: Claude through Claude Code
+or through Pi with `ANTHROPIC_API_KEY`; OpenAI through Codex or through Pi with
+`OPENAI_API_KEY`. Gemini, DeepSeek, Kimi, MiniMax, and every other vendor run
+through Pi; a custom OpenAI-, Anthropic-, or Google-compatible endpoint is a
+provider in Pi's `models.json`. A Claude Code subscription or a Codex login
+alone is enough for automatic recovery.
+
+The per-harness form enables several and lists each one's models:
+
+```json
+{
+  "harnesses": ["pi", "claude-code", "codex"],
+  "pi": { "provider": "deepseek", "modelId": "deepseek-v4-pro" },
+  "claude": { "models": ["opus", "sonnet"] },
+  "codex": { "models": [{ "modelId": "gpt-5-codex", "thinkingLevel": "high" }] }
+}
+```
+
+A plugin may say which harness it prefers (`GraphDefinition.supervisor`); the
+operator's `harnesses` is the allowlist and fallback order, and `"select"`
+overrides the plugin. `graphloom run --supervisor <harness>` overrides both for
+one run. The harness is pinned when the run starts, and the repair reviewer
+uses the same one. `graphloom resume <run> --supervisor <harness> [--reason
+<text>]` moves a run to another enabled harness, keeping its logical session,
+budgets, and case file; `graphloom switch-model <run> <model> --reason
+<text>` changes the model within the pinned harness (`provider/model` for Pi, the model name for
+Claude Code and Codex). `graphloom check` and `graphloom doctor --task` report
+the harness a run would get, `graphloom doctor` runs each enabled harness's own
+probe and shows which vendor routes have a login or credential, and
+`graphloom stats` shows the supervisor's use per harness. See
+[supervisor harnesses](design-supervisor-harnesses.md) and
+[choosing a supervisor model](design-pi-supervisor.md#choosing-a-supervisor-model)
+for examples per vendor.
+
+### Knowing when a run stops
+
+`graphloom run` and `graphloom resume` take `--on-stop <command>` (or set
+`"notify": { "onStop": "<command>", "timeoutMs": 60000 }` in the runner config;
+the flag wins). The command runs through `sh -c` once, when the run leaves
+`running` (`succeeded`, `stopped` or `failed`), or with status `crashed` when the
+CLI itself dies with an error (a SIGKILL or power loss cannot fire it). It gets
+`GRAPHLOOM_RUN_ID`, `GRAPHLOOM_STATUS`, `GRAPHLOOM_STOP_REASON`,
+`GRAPHLOOM_STOP_RETRYABLE` (`true`, `false`, or empty) and `GRAPHLOOM_STATE_DIR`
+in its environment and the report JSON on stdin, and is killed after 60 seconds.
+Its failure is logged to stderr and never changes the run or the exit code.
+
+```sh
+graphloom run task.yaml --on-stop 'notify-send "graphloom $GRAPHLOOM_RUN_ID: $GRAPHLOOM_STATUS"'
+```
+
+From another shell, `graphloom wait <stateDir|runId> [--state-root <dir>]
+[--timeout <dur>] [--json]` blocks until the run is no longer `running`, reading
+its durable state and owner claim rather than the process table, then prints what
+`graphloom stats` prints. Exit 0: the run left `running` (read its status line).
+Exit 2: `--timeout` (`90s`, `10m`, `2h`) elapsed first. Exit 3: the state says
+`running` but its controller died without recording a stop; `graphloom resume`
+takes it over. `--until progress` also returns on each meaningful change (a stage
+accepted, a supervisor episode, a quota pause, a budget at 80%) with a cursor for
+the next `--since` ([agent skills](design-agent-skills.md)).
+
+`graphloom watch <stateDir|runId> [--dir <path>] [--until report|stop] [--timeout <dur>]
+[--heartbeat <dur>] [--notify <command>] [--json]` does the watching in code: it
+returns (or, with `--until stop`, keeps going) only to report an important move, a
+15-minute heartbeat, or something needing attention (a stop, a stall, a budget over
+80%, a repeated failure, a dead controller), in a message under 1 KB. `--notify`
+runs a shell command for each report with the message on stdin. Exit 0: a report;
+2: `--timeout` with nothing to report; 3: the controller died
+([agent skills](design-agent-skills.md#21-graphloom-watch)).
+
+## Agent-host mode (proposed)
+
+An existing coding-agent session can be the primary worker and supervisor, using
+GraphLoom tools for assignments, executors, evidence, and recovery. This mode needs
+no separate supervisor session, and retains separate sessions for independent review.
+The first adapter targets a Claude Code plugin; the existing headless Claude worker
+is not that plugin. See the [agent-host design](design-agent-host.md).
+
+## Extend and repair
+
+Plugins implement the public TypeScript SDK and run in separate processes.
+The [executor interface](design-executors.md) lets plugins reuse
+built-in executors such as GitHub or supply their own execution code without a
+controller release. The controller admits and tracks execution; executor code
+performs the actual operation. When an executor fails, the supervisor can retry
+it, switch to another pinned executor, or, with the `executorRepair` task grant,
+repair a run-local copy of its package.
+Repairable bundles include source, readable acceptance requirements, locked build
+dependencies, and tests. The supervisor coordinates isolated patches, regression
+checks, independent review, and recorded version transitions within the same run.
+Opaque dependencies retain explicit repair limits. Process separation contains
+crashes; filesystem and execution scopes require host enforcement.
+
+## Documentation
+
+- [Current core design](design-typescript-core.md): all decisions, contracts,
+  repair lifecycle, minimal example, verification, and implementation milestones.
+- [Architecture](architecture.md): runtime interaction overview.
+- [Domain glossary](../CONTEXT.md): project vocabulary.
+- [Roadmap](roadmap.md): entry point to the implementation sequence.
+- [TypeScript decision](adr/0002-typescript-repairable-plugins.md).
+- [Supervisor harnesses](design-supervisor-harnesses.md) (implemented, S1
+  to S6): the supervisor runs on Pi, Claude Code, or Codex behind one
+  contract, so a Claude Code subscription or a Codex login alone gets
+  automatic recovery; the plugin declares its preferred harness, the run pins
+  one, and `resume --supervisor` moves it.
+- [Pi supervisor](design-pi-supervisor.md): the Pi harness, and
+  choosing a supervisor model on any Pi provider.
+- [Run convergence design](design-run-convergence.md): candidate-anchored
+  freshness, correction escalation with an exit, supervisor repetition detection,
+  and adjudicated plan review.
+- [Agent–harness contract robustness](design-agent-contract-robustness.md):
+  plugin-declared result contracts applied generically by the controller,
+  boundary validation with in-turn correction, reference integrity, and
+  controller-owned acceptance accounting, from the first live BanyanDB run.
+- [Graph rehearsal](design-graph-rehearsal.md): a verification ladder —
+  static check, zero-token rehearsal on stand-in models through the real
+  harnesses, replay of recorded runs, a bounded real-model probe — and the
+  gate `run` climbs before spending a live run's budget. A rehearsal that is
+  kept (`--keep`, or any verdict other than `ready`) leaves
+  `$TMPDIR/graphloom-rehearsal-*`; `graphloom rehearse --help` says how to
+  remove it.
+- [Issue-fix graph](design-issue-fix-graph.md): one bug-fix graph for any
+  repository, driven by a JSON profile the task names with `config:`; ships
+  profiles for BanyanDB and for GraphLoom itself. It replaced the earlier
+  BanyanDB-only fix graph.
+- [PR-review graph](design-pr-review-graph.md) (implemented as the `pr-review`
+  example plugin, 0.23): first a
+  neutral, cited change report on an incoming pull request (schema, background
+  work, features, dependencies, config, interfaces, deletions; no findings or verdict) and
+  questions answered by a separate agent from the whole codebase, all in one
+  file. The first question is whether the change is necessary (is its problem
+  real on the base, does the fix fit the design, is there a simpler way); an
+  unnecessary change, confirmed by a checker, skips the rest (purpose, existing
+  equivalents, reusable libraries, shared logic, missing tests). No human is in a
+  run: one run reviews one head in two rounds. Round 1 is that report and Q&A;
+  its issues are posted to the PR and end the run. Without any, round 2, three
+  aspect reviewers with verified findings, runs in the same run, and the run posts
+  one `COMMENT` review whose first line is the verdict (`Review passed` or `Changes
+  requested: <n> open`). Later pushes continue from a per-PR ledger ref: ids
+  continue, each earlier item is re-checked (fixed, or still open with a link to its
+  comment), round 2 waits until round 1's earlier issues are fixed, and the verdict
+  counts the items still open.
+- [Code quality metrics](design-code-quality-metrics.md) (proposed):
+  one definition of cyclomatic complexity (< 10), nesting depth (≤ 3), CRAP
+  (threshold 30) and mutation survival for changed functions only, with
+  tools and confinement; issue-fix uses them as gates, pr-review as facts and
+  questions.
+- [Installable releases](design-release.md) (phases R0 to R5 implemented; no
+  release is published yet): a self-contained
+  release tarball with a bundled Node runtime and the SDK tarball on GitHub
+  Releases, versioned install directories with `install.sh`, `graphloom
+  upgrade`, `graphloom self`, and automatic updates, `graphloom doctor` and guided `graphloom setup`, runs that stay on
+  the version they started with until `resume --upgrade` migrates them, and the
+  local release procedure.
+- [Agent skills](design-agent-skills.md): [`skills/`](../skills) for driving
+  GraphLoom from Claude Code, Codex or opencode (setup, issue, run, watch,
+  triage, deliver), installed with `graphloom skills install` (`--agent
+  opencode` writes `~/.config/opencode/skills`), and `graphloom wait --until
+  progress` and `graphloom watch`.
+- [Run budgets](budgets.md): what recorded runs used (`graphloom stats`),
+  the profile defaults derived from them, budget layers, and what a raised
+  budget means.
+- [Example task](../examples/task.yaml) and [example guide](../examples/README.md).
+- [Loopx gate-repair study](research/loopx-gate-defect-handling.md) and
+  [issue-fix study](research/loopx-issue-fix-example.md).
+
+Earlier native-plugin and file-described designs are historical references, not
+authority for the TypeScript implementation.
+
+## Community
+
+- [Contributing](../CONTRIBUTING.md)
+- [Security policy](../SECURITY.md)
+- [Code of conduct](../CODE_OF_CONDUCT.md)
+- License: [Apache-2.0](../LICENSE)
