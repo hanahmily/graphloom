@@ -17,8 +17,9 @@ then visit <http://localhost:8000>.
 
 ## Publishing
 
-GitHub Pages can serve `site/` once the repository is public. Nothing here
-configures Pages or an Actions workflow; do that when the repository is public.
+`.github/workflows/pages.yml` publishes `site/` to GitHub Pages on every push to
+`main` that changes `site/` (or by hand, with "Run workflow"). There is no build
+step: the files are uploaded as they are.
 
 ## Keeping it in step
 
