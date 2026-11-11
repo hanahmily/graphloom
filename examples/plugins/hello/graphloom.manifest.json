@@ -12,14 +12,14 @@
     "node": ">=22",
     "module": "nodenext",
     "typescript": "^5.8.2",
-    "vitest": "^3.0.9"
+    "vitest": "^4.1.12"
   },
   "digests": {
-    "sourceTree": "dc3a6491c62b34e8ab37edc929ad34dd10cc72c20247f357b76dd1c830f64b49",
-    "packageLock": "d39d75a6d1578c5a3d3e4cf179a70bae07dcc45c5158fc3e09ccb533fc348de7",
+    "sourceTree": "7076e6d92e20d061c01416c5ab8deedeb6ad58a41c26a76e71c7b9ba248e6c81",
+    "packageLock": "502db28c17ac5822213e8ee63da8ee383c4a94c6877648c396905a3e7a3aac30",
     "files": {
-      "package.json": "622ff9c3e4db23d54d10b9f8bf9ab16b2cce58a2e8959e2d22d4088b12887c83",
-      "package-lock.json": "d39d75a6d1578c5a3d3e4cf179a70bae07dcc45c5158fc3e09ccb533fc348de7",
+      "package.json": "0a2e4d133a1b9b7697c4dacf4fd1d1a813ce0f597cf1f13e37d3f92aff69a38d",
+      "package-lock.json": "502db28c17ac5822213e8ee63da8ee383c4a94c6877648c396905a3e7a3aac30",
       "tsconfig.json": "d166142bd5d917d1eb7d3011cf6423c652f30e2989881deec6147a997bf41597",
       "src/constants.ts": "c11d5212794cfe7f714a75b7c50ed38ac6881c047fdcee8e41408a5e3874d8b0",
       "src/graph.ts": "b6a8c29d72e8f39b48768f4dfecc73a51cf3dcae138dd1aad38e328c04905a05",

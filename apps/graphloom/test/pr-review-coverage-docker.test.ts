@@ -474,9 +474,10 @@ describe("measured coverage, TypeScript, under real Docker", () => {
 
   it.skipIf(!hasDocker || !hasNpm)("attributes coverage-final.json statements by function line range, with the provider's version", () => {
     if (!ok) return;
-    expect(row("src/math.classify")).toMatchObject({ source: "measured", covered: 7, total: 9, unit: "line-statement", provider: `@vitest/coverage-v8@${vitestVersion}` });
-    // The declaration line runs when the module loads (v8 reports whole lines): one of the three statements, though the body never ran.
-    expect(row("src/math.unused")).toMatchObject({ source: "measured", covered: 1, total: 3 });
+    expect(row("src/math.classify")).toMatchObject({ source: "measured", covered: 4, total: 5, unit: "line-statement", provider: `@vitest/coverage-v8@${vitestVersion}` });
+    // Vitest 4's v8 provider maps coverage to statements (the AST), not whole lines: classify has five statements, four ran;
+    // the one statement of unused, in a body that never ran, is not covered.
+    expect(row("src/math.unused")).toMatchObject({ source: "measured", covered: 0, total: 1 });
   });
 
   it.skipIf(!hasDocker || !hasNpm)("changes no tracked file of the checkout: dependencies land in its ignored node_modules only", () => {
@@ -490,7 +491,7 @@ describe("measured coverage, TypeScript, under real Docker", () => {
     const dir = await fixture("ts-fail", { name: "fx", private: true, type: "module", devDependencies: { vitest: vitestVersion, "@vitest/coverage-v8": vitestVersion } }, true, { "src/fails.test.ts": 'import { expect, it } from "vitest";\n\nit("fails", () => {\n  expect(1).toBe(2);\n});\n' });
     const m = await measure({ work: dir, scratch: path.join(tmp, "fail-scratch"), records: recordsOf(INDEX), index: new Map(Object.entries(INDEX)), files, profile: profileWith({ metrics: { generated: [], sandbox: { typescript: { image: tsImage, cpus: 2, memory: "2g", wallClockMs: 300_000 } } } }) });
     expect(m.state.facts!.runs[0]).toMatchObject({ language: "typescript", ran: true, exit: 1 });
-    expect(m.state.outcomes!.get(`src/math.ts\u0000src/math.classify\u00001`)).toMatchObject({ source: "measured", covered: 7, total: 9 });
+    expect(m.state.outcomes!.get(`src/math.ts\u0000src/math.classify\u00001`)).toMatchObject({ source: "measured", covered: 4, total: 5 });
   }, 300_000);
 
   it.skipIf(!hasDocker || !hasNpm)("installs an independent nested project from its own lockfile, with no root package.json", async () => {
@@ -503,7 +504,7 @@ describe("measured coverage, TypeScript, under real Docker", () => {
     git(dir, "commit", "-q", "-m", "fixture");
     const nested = { "frontend/src/math.ts": INDEX["src/math.ts"]! };
     const m = await measure({ work: dir, scratch: path.join(tmp, "nested-scratch"), records: recordsOf(nested), index: new Map(Object.entries(nested)), files: [{ path: "frontend/src/math.ts", language: "typescript" }], profile: profileWith({ metrics: { generated: [], sandbox: { typescript: { image: tsImage, cpus: 2, memory: "2g", wallClockMs: 300_000 } } } }) });
-    expect(m.state.outcomes!.get("frontend/src/math.ts\u0000src/math.classify\u00001")).toMatchObject({ source: "measured", covered: 7, total: 9 });
+    expect(m.state.outcomes!.get("frontend/src/math.ts\u0000src/math.classify\u00001")).toMatchObject({ source: "measured", covered: 4, total: 5 });
     expect(git(dir, "status", "--porcelain")).toBe("");
   }, 300_000);
 

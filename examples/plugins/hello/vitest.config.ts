@@ -12,8 +12,7 @@ export default defineConfig({
     // Bounded parallelism: one test run must not exhaust the machine's memory
     // (every worker loads the full module graph). GRAPHLOOM_TEST_WORKERS overrides.
     maxWorkers: Number(process.env.GRAPHLOOM_TEST_WORKERS) || 6,
-    minWorkers: 1,
-    poolOptions: { forks: { execArgv: ["--max-old-space-size=2048"] } },
+    execArgv: ["--max-old-space-size=2048"],
     // Bundles are copied alone for repair qualification; only use the repo-root setup when present.
     globalSetup: existsSync(sharedSetup) ? [sharedSetup] : [],
     include: ["test/**/*.test.ts"],

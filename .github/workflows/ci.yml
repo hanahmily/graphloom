@@ -9,11 +9,12 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # A run takes about 20 minutes; vitest 4 has no RPC timeout, so a hung worker would otherwise hold the runner for hours.
+    timeout-minutes: 45
     env:
       # Ensure workspace devDependencies (typescript, vitest) install under npm ci.
       NODE_ENV: development
-      # GitHub's hosted runners have 4 CPUs; the default of 6 test workers per package starves one, and vitest then
-      # fails the run with "Timeout calling onTaskUpdate" though every test passed.
+      # GitHub's hosted runners have 4 CPUs; the default of 6 test workers per package would oversubscribe them.
       GRAPHLOOM_TEST_WORKERS: "3"
     steps:
       - uses: actions/checkout@v4
