@@ -238,13 +238,12 @@ footer nav a:hover{color:var(--ink)}
 <section id="quickstart" aria-labelledby="qs-h">
   <div class="wrap">
     <h2 id="qs-h">Quickstart</h2>
-    <p class="sub">Linux, with Claude Code, Codex or Pi already logged in on your machine. A release bundles its own Node.js; the local build needs any Node on <code>PATH</code> to fetch the pinned runtime, plus <code>git</code>, <code>tar</code>, <code>gzip</code>, <code>xz</code> and <code>sha256sum</code>.</p>
+    <p class="sub">Linux, with Claude Code, Codex or Pi already logged in on your machine. A release bundles its own Node.js; installing needs an authenticated <code>gh</code>, <code>curl</code>, <code>tar</code>, <code>gzip</code>, <code>sha256sum</code>, <code>flock</code> and <code>ssh-keygen</code>.</p>
     <div class="qs">
       <ol class="steps">
-        <li><h3>Install</h3><p>Installable releases are local builds for now: none is published yet. Build one from a clone and install it. Use the version in the root <code>package.json</code>, currently <code>0.0.0</code>. <code>--unsigned</code> makes a development build, which is right for your own machine.</p><pre><code><span class="k">git</span> clone https://github.com/hanahmily/graphloom.git
-<span class="k">cd</span> graphloom
-<span class="k">scripts/release.sh</span> build 0.0.0 --unsigned
-<span class="k">scripts/install.sh</span> --from release-out/0.0.0/graphloom-0.0.0-linux-x64.tar.gz</code></pre></li>
+        <li><h3>Install</h3><p>Download the installer from the <a href="https://github.com/hanahmily/graphloom/releases/latest">latest release</a>, with the signers file from its tag, and install. The installer downloads the release with <code>gh</code> and checks its signature. It puts <code>graphloom</code> in <code>~/.local/bin</code>; add that directory to <code>PATH</code>.</p><pre><code><span class="k">gh</span> release download v0.2.0 -R hanahmily/graphloom -p install.sh
+<span class="k">curl</span> -fsSLO https://raw.githubusercontent.com/hanahmily/graphloom/v0.2.0/release/allowed_signers
+<span class="k">sh</span> install.sh --require-signature --allowed-signers allowed_signers</code></pre></li>
         <li><h3>Set up and check</h3><p>The installer runs <code>graphloom doctor</code> once; run these to configure and review.</p><pre><code><span class="k">graphloom</span> setup
 <span class="k">graphloom</span> doctor</code></pre></li>
         <li><h3>Link the graph</h3><p>Use a working directory of your own, not the target repository. A task finds its graph under <code>plugins/&lt;graph&gt;</code> beside it; link the installed version's real path, never <code>current</code>. Use <code>plugins/pr-review</code> the same way for reviews.</p><pre><code><span class="k">mkdir</span> -p ~/graphloom-work/plugins &amp;&amp; <span class="k">cd</span> ~/graphloom-work
@@ -285,7 +284,7 @@ footer nav a:hover{color:var(--ink)}
       <ul>
         <li>Linux only.</li>
         <li>Runs locally on your machine with your own Claude Code / Codex / Pi logins. No hosted service.</li>
-        <li>Installable releases are local builds for now.</li>
+        <li>Signed releases on GitHub, starting with v0.2.0.</li>
         <li>Licensed under Apache-2.0.</li>
       </ul>
     </div>
