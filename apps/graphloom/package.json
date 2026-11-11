@@ -24,7 +24,7 @@
     "@graphloom/sdk": "0.2.0",
     "@graphloom/supervisor": "0.2.0",
     "typescript": "^5.8.2",
-    "vitest": "^3.0.9"
+    "vitest": "^4.1.12"
   },
   "devDependencies": {
     "@graphloom/testkit": "0.0.0"

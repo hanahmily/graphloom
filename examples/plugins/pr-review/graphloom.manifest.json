@@ -13,14 +13,14 @@
     "node": ">=22",
     "module": "nodenext",
     "typescript": "^5.8.2",
-    "vitest": "^3.0.9"
+    "vitest": "^4.1.12"
   },
   "digests": {
-    "sourceTree": "3ac8be356896c34856d4d7b1833e6d9a0660c8349312f1329e864468fbea0a5b",
-    "packageLock": "6f170a29e8c34454e4ff05044489dd4e61cdeeedb7fb98747b1b61623a44d718",
+    "sourceTree": "5a7ff116702e0aa152485afa5930de767c19f319f75794c698f765a1ac5efa4b",
+    "packageLock": "8a47d963ee043d68dd04debeedac4f9d4552e1cc558f882e35102cc003986c8d",
     "files": {
-      "package.json": "7c359ca4734f9d0bb8ff79df5ec365693be1203cc5164ffc375d57f69c7c7b55",
-      "package-lock.json": "6f170a29e8c34454e4ff05044489dd4e61cdeeedb7fb98747b1b61623a44d718",
+      "package.json": "1d788f5f1dd3030d81da06366dff2f59c73d335eba26954076860fef3b7fc75e",
+      "package-lock.json": "8a47d963ee043d68dd04debeedac4f9d4552e1cc558f882e35102cc003986c8d",
       "tsconfig.json": "d166142bd5d917d1eb7d3011cf6423c652f30e2989881deec6147a997bf41597",
       "profiles/banyandb.json": "7e40bfe0952a77cad2c33389fca3743202e42888e180b7a27aebed11ff858855",
       "tools/README.md": "91b5de1909d83fd98463dfaaba0ea006a616075b041dc426c5a8ebaa98ab9039",
@@ -36,7 +36,7 @@
       "tools/gometrics/testdata/gocyclo-expected.json": "9c6a7cc52edfce37fb13dec96efb4b8a789ff108b0a504b6571272b49049f6b8",
       "tools/repro/repro.sh": "e9a8cadc40d4307e1defe2f4c264ce988337cb5a0f59d82c1a0e348546b10288",
       "tools/repro/vitest-summary.mjs": "f33a171cee3f48c2878f0995527d8848253d81a14f3d4b77b916b9d193eecd86",
-      "tools/repro/vitest.config.mjs": "53ac87909585c2490dc3b7330ba13aeb1da346b8602d82ad54055de26d5e9685",
+      "tools/repro/vitest.config.mjs": "f5b9df55674e18d76032a7a18401ede5b0d8920b84f2a8b46dcea9741783b640",
       "vendor/diagram-design/LICENSE": "bb7e12e91fecef43024111123ff784cec6c485585561d8b552557c0173b3ed29",
       "vendor/diagram-design/SKILL.md": "83fd5aa46965ce2b14bd42ade80c065a4e17a9f83d2a9f4f275b47cd45d72666",
       "vendor/diagram-design/VENDORED.md": "52d53ef74ad56254739a29ca7b1b47a36c1ff1a9df954920892514dcc8b26e72",
