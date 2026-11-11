@@ -12,14 +12,14 @@
     "node": ">=22",
     "module": "nodenext",
     "typescript": "^5.8.2",
-    "vitest": "^3.0.9"
+    "vitest": "^4.1.12"
   },
   "digests": {
-    "sourceTree": "4b509779191096bcb7521fbd2dac3268d1739254546b33b4bf63c988f55c9630",
-    "packageLock": "bdad10e190e388ec0dec368adf25989b865f84ad0516a282e147bd6886b9ca40",
+    "sourceTree": "201fb14c4cd04c55e1d823dd08cc09338cb46b223de5a99d28210ef307b0b445",
+    "packageLock": "0930a166afeba08a1abb89c63ea3370a12b36c7c4aaebb0f117a37c2bbb14012",
     "files": {
-      "package.json": "6f644d65cf95fd3f8e7bc70e8bc8e436c732733b4dc2d6dd8c5cf0340ffa82b6",
-      "package-lock.json": "bdad10e190e388ec0dec368adf25989b865f84ad0516a282e147bd6886b9ca40",
+      "package.json": "95cb7127494722f02dd3aff0bdcff3baf97eeb11d31ad697943d8ec02dd8d7c3",
+      "package-lock.json": "0930a166afeba08a1abb89c63ea3370a12b36c7c4aaebb0f117a37c2bbb14012",
       "tsconfig.json": "ffed4b469e52e0642fabcb6a20f4ba178fce44e5e37567a0ee96571a150a1109",
       "src/constants.ts": "5b166097dd18743523753d9abaf0a9275cb90d7bd02ba939666bd63fabebba40",
       "src/graph.ts": "ef426b8bb729266be293ce6da99113d7c919cc01498b0fe6c37d3979358a9343",
