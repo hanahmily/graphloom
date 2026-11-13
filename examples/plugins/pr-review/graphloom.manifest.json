@@ -16,7 +16,7 @@
     "vitest": "^4.1.12"
   },
   "digests": {
-    "sourceTree": "cfb87fa0a3816efd31f7496bf17725b79ec6e722bbb8441fc8fe2438e2f7e8aa",
+    "sourceTree": "d740308f86aab2bd94e31ab8a425b4281a72b881584ba25f0e82f36fe6be833f",
     "packageLock": "1c4db8877866fa31766442fb8509745a7ef70c7c1e6c3fac51e3ba79080b02ff",
     "files": {
       "package.json": "f415ca0ad42881ac87aa319ec2439d0218511797377cb4252669b13f0e545c87",
@@ -85,7 +85,7 @@
       "src/html.ts": "23696de6fc485108bff2e6fb081c478969578d0ec69c1b0a253f9041bc983aa4",
       "src/htmlsvg.ts": "8516c3d13419eab655f9d1ddf4cfb8f386cdd49e6bfd0ffd497b64dfc96b6b70",
       "src/ids.ts": "197a3aba3c632fe5b448f00c6cdcc207ff5238840e6859ca98185abe8493a01d",
-      "src/incremental.ts": "3cbeb9aed06c8bcdf40a89f667bc634431466d73b09eb93c7f6351a0caf233a6",
+      "src/incremental.ts": "16411c627d8869e4840d7d32c034839a49c0c180357b4c18eafe806b3a8b1ea5",
       "src/index.ts": "202060f85ee904e841217074ee19c0bb5e3de87b83e87006ff9b56fe577f602e",
       "src/inventory.ts": "46c5db65903805751277146a19b13fba56e6e50386dbd66a1d175e512eef6e66",
       "src/large.ts": "df5668953dfd4a7523cab6e1149c4c6333ff30fb8f47c99a7748c139e24d6b14",
@@ -176,8 +176,8 @@
       "test/graph.test.ts": "9203700a742072550dad8aae13189bc4586a6eb1e096bdd1d921c5c13238a98c",
       "test/html.test.ts": "9a5952179b9a726d7ce6e1714fb97d1730f6d0f2ee0b18b11d094dcd5a93465d",
       "test/hunks.test.ts": "d952cbfebc71123522fa3589d46a84a512b7ff521772dfdcfd5861de31e0715e",
-      "test/incremental-rounds.test.ts": "4a61c7d7159665b62c38e063cb691d3aed2c3c8cbc46fc34e26b1c8a36d45cde",
-      "test/incremental.test.ts": "a58b2d81a96b07457d840c1eeee62fcca9d222618b8434d242a5ab9ae29fb8cf",
+      "test/incremental-rounds.test.ts": "0667c56c6b21e631cfbcf012f1a775479fa3553d168f1619cf5695207d74ea46",
+      "test/incremental.test.ts": "c3ce8e503acae48c95e6adf4e0edce2a3d979c01308aa6db4a0175b4faa5f64c",
       "test/large.test.ts": "a7df4a721d8ec2544b79b23abf9069f56e5ddc6cb3cf9b75b9e44bb664a9617e",
       "test/manifest.test.ts": "9e90ced32f3b76adf586b3965ad6350e4870f97727dcea13b1136ea781eaac9c",
       "test/necessity.test.ts": "ca04b5d680ac9693a50ff48e78b548ec64340d2e2f529f6d5542d64de2ab45da",

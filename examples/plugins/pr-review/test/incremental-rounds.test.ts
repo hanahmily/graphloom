@@ -251,7 +251,7 @@ describe("round 1 on a later head asks only about what changed", () => {
     expect(qaOf(sim).questions.filter((q) => q.carried !== undefined).map((q) => q.id)).toEqual(["N1", "Q1", "Q3"]);
     // The read of which base files differ ran once, over the cited files in order.
     const base = sim.evidence.flatMap((e) => ((e.payload as { command?: { id?: string; argv?: string[] } }).command?.id === "ledger-delta-base" ? [(e.payload as { command: { argv: string[] } }).command.argv.slice(4)] : []));
-    expect(base).toEqual([["9".repeat(40), "fedcba9876543210fedcba9876543210fedcba98", "pkg/schema/ttl_test.go", "pkg/timestamp/duration.go"]]);
+    expect(base).toEqual([["9".repeat(40), "fedcba9876543210fedcba9876543210fedcba98", "pkg/schema/ttl_test.go\npkg/timestamp/duration.go"]]);
   });
 });
 

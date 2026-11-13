@@ -2,14 +2,16 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { EvidenceRecord } from "@graphloom/sdk";
 import { afterAll, describe, expect, it } from "vitest";
 import type { FinalAnswer } from "../src/answers.js";
-import { baseDeltaCommand, carryNecessity, carryOf, changedAt, headDeltaCommand, incrementalLine, incrementalReads, mapLine, openIssueIds, parseBaseDelta, parseHeadDelta, parsePriorQa, priorFile, priorFileCommand, priorFileText, type CarryEnv, type HeadDelta, type IncrementalInput, type IncrementalPrior } from "../src/incremental.js";
+import { commandRuns, reportText } from "../src/evidence.js";
+import { commandInputProblem, createCommandExecutor } from "@graphloom/executor-command";
+import { baseDeltaCommand, pathList, carryNecessity, carryOf, changedAt, headDeltaCommand, incrementalLine, incrementalReads, mapLine, openIssueIds, parseBaseDelta, parseHeadDelta, parsePriorQa, priorFile, priorFileCommand, priorFileText, type CarryEnv, type HeadDelta, type IncrementalInput, type IncrementalPrior } from "../src/incremental.js";
 import { effectiveConclusion, necessityAnswer, necessityJson, type NecessityRecord } from "../src/necessity.js";
 import { effectivePacks } from "../src/packs.js";
 import { round1Record } from "../src/round1.js";
@@ -103,17 +105,57 @@ describe("the delta and prior-file commands, run on a real repository", () => {
     await git(dir, "add", "-A");
     await git(dir, "commit", "-q", "-m", "second");
     const h = await git(dir, "rev-parse", "HEAD");
-    const out = (await run(dir, headDeltaCommand(l, h, ["a.go", "b.go"]).argv)).stdout;
+    const report = path.join(dir, ".delta-report");
+    /** What the command writes to its report file, as the executor reads it. */
+    const viaReport = async (argv: readonly string[]): Promise<string> => {
+      await run(dir, argv, { GRAPHLOOM_REPORT_FILE: report });
+      return readFile(report, "utf8");
+    };
+    const out = await viaReport(headDeltaCommand(l, h, ["a.go", "b.go"]).argv);
     const d = parseHeadDelta(out);
     expect(d).toBeInstanceOf(Map);
     expect([...(d as HeadDelta)]).toEqual([["a.go", { whole: false, hunks: [{ oldStart: 3, oldCount: 1, newStart: 3, newCount: 1 }, { oldStart: 5, oldCount: 0, newStart: 6, newCount: 1 }] }]]);
     // No paths asked about: nothing is diffed (git would otherwise diff the whole tree).
-    expect(parseHeadDelta((await run(dir, headDeltaCommand(l, h, []).argv)).stdout)).toEqual(new Map());
-    await expect(run(dir, headDeltaCommand("9".repeat(40), h, ["a.go"]).argv)).rejects.toThrow();
+    expect(parseHeadDelta(await viaReport(headDeltaCommand(l, h, []).argv))).toEqual(new Map());
+    await expect(run(dir, headDeltaCommand("9".repeat(40), h, ["a.go"]).argv, { GRAPHLOOM_REPORT_FILE: report })).rejects.toThrow();
     // Whether a base file differs between two commits.
-    const both = (await run(dir, baseDeltaCommand(l, h, ["a.go", "b.go"]).argv)).stdout;
+    const both = await viaReport(baseDeltaCommand(l, h, ["a.go", "b.go"]).argv);
     expect([...parseBaseDelta(both)]).toEqual([["a.go", true], ["b.go", false]]);
-    await expect(run(dir, baseDeltaCommand(l, "9".repeat(40), ["a.go"]).argv)).rejects.toThrow();
+    await expect(run(dir, baseDeltaCommand(l, "9".repeat(40), ["a.go"]).argv, { GRAPHLOOM_REPORT_FILE: report })).rejects.toThrow();
+  });
+
+  it("keeps every file of a delta whose output is far past the executor's 8,192-byte stdout tail, and passes more than 58 paths, through the real executor", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "pr-review-wide-"));
+    dirs.push(dir);
+    await git(dir, "init", "-q", "-b", "main");
+    const names = Array.from({ length: 90 }, (_, n) => `pkg/area${String(n).padStart(2, "0")}/file.go`);
+    for (const n of names) {
+      await mkdir(path.join(dir, path.dirname(n)), { recursive: true });
+      await writeFile(path.join(dir, n), Array.from({ length: 30 }, (_, k) => `line ${k}`).join("\n") + "\n");
+    }
+    await git(dir, "add", "-A");
+    await git(dir, "commit", "-q", "-m", "first");
+    const l = await git(dir, "rev-parse", "HEAD");
+    for (const n of names) await writeFile(path.join(dir, n), Array.from({ length: 30 }, (_, k) => (k % 5 === 0 ? `CHANGED ${k}` : `line ${k}`)).join("\n") + "\n");
+    await git(dir, "add", "-A");
+    await git(dir, "commit", "-q", "-m", "second");
+    const h = await git(dir, "rev-parse", "HEAD");
+    const command = headDeltaCommand(l, h, names);
+    // More than 58 paths would have made 64+ arguments; as one argument it is valid input.
+    expect(command.argv.length).toBeLessThan(10);
+    expect(commandInputProblem({ commands: [command], env: {} })).toBeUndefined();
+    const executor = createCommandExecutor();
+    const result = (await executor.execute({ commands: [command], env: { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } }, { artifactDir: path.join(dir, ".art"), operationId: "op1", worktreePath: dir } as never)) as { evidence: Array<{ payload: { command: Record<string, unknown> } }> };
+    const outcome = result.evidence[0]!.payload.command;
+    // The stdout tail alone could not hold it: that is what the report file is for.
+    expect(String(outcome.stdoutTail).length).toBeLessThanOrEqual(8_192);
+    const ev = [{ ref: "e1", kind: "command", payload: { command: outcome } }] as EvidenceRecord[];
+    const run1 = commandRuns(ev)[0]!;
+    const text = reportText(run1);
+    expect(text.truncated).toBe(false);
+    expect(text.text.length).toBeGreaterThan(8_192);
+    const d = parseHeadDelta(text.text) as HeadDelta;
+    expect([...d.keys()].sort()).toEqual([...names].sort());
   });
 
   it("reads a file of the ledger commit in parts and joins them by their digest; a commit without the file says absent", async () => {
@@ -360,6 +402,8 @@ describe("reading the earlier Q&A, and when round 1 is a full round 1", () => {
     const third = incrementalReads(reads(qaText(), necessityText()), input());
     expect(third).toMatchObject({ state: "run", commands: [{ id: "ledger-delta" }] });
     expect((third as { commands: Array<{ argv: string[] }> }).commands[0]!.argv.slice(4)).toEqual([L, H, "pkg/quota/limit.go"]);
+    // The paths are one argument, so any number of them is within the command executor's 64 arguments.
+    expect(commandInputProblem({ commands: [headDeltaCommand(L, H, Array.from({ length: 150 }, (_, n) => `pkg/f${n}.go`))] })).toBeUndefined();
   });
 
   it("is usable with the delta read, and reads the base delta only when the bases differ", () => {
@@ -400,8 +444,22 @@ describe("reading the earlier Q&A, and when round 1 is a full round 1", () => {
     expect(full("", 128)).toContain("not in the review clone");
     expect(full(file("pkg/quota/limit.go", "@@ -1 +1 @@"))).toContain("cut");
     expect(full('diff --git "a/x" "b/x"\ngraphloom-delta-end\n')).toContain("quoted");
-    const many = Array.from({ length: 2001 }, (_, n) => `f${n}.go`);
-    expect(incrementalReads(reads(qaText(), necessityText()), input({ files: many }))).toMatchObject({ state: "full", reason: expect.stringContaining("2001 files") });
+    // A path list that cannot be one argument is decided before any command is dispatched, never a failed Fetch.
+    const many = Array.from({ length: 400 }, (_, n) => `pkg/some/where/f${n}.go`);
+    expect(incrementalReads(reads(qaText(), necessityText()), input({ files: many }))).toMatchObject({ state: "full", reason: expect.stringContaining("do not fit the one argument") });
+    expect(pathList(["a\nb"])).toBeUndefined();
+  });
+
+  it("is a full round 1 when a report holds only the tail of the delta or of the base check: a cut read is never taken for 'unchanged'", () => {
+    const cut = (e: EvidenceRecord): EvidenceRecord => {
+      const command = (e.payload as { command: Record<string, unknown> }).command;
+      return { ...e, payload: { command: { ...command, report: { text: String(command.stdoutTail).split("\n").slice(-2).join("\n"), truncated: true } } } } as EvidenceRecord;
+    };
+    const r = incrementalReads([...reads(qaText(), necessityText()), cut(deltaRun(`${file("pkg/quota/limit.go", "@@ -7 +7 @@")}\ngraphloom-delta-end\n`))], input({ base: LB }));
+    expect(r).toMatchObject({ state: "full", reason: expect.stringContaining("did not fit") });
+    const cited = qaText({ questions: [{ id: "Q1", type: "purpose", item: "R1", text: "t", origin: "required", stable: "purpose|item|a.go", answer: answer("Q1", { citations: [{ path: "pkg/a.go", tree: "base", start: 1, end: 2, quote: "q" }] }) }] });
+    const ev = [...reads(cited, necessityText()), deltaRun("graphloom-delta-end\n"), cut(ran(baseDeltaCommand(LB, HB, ["pkg/a.go", "pkg/timestamp/duration.go"]), "changed pkg/a.go\nsame pkg/timestamp/duration.go\n"))];
+    expect(incrementalReads(ev, input())).toMatchObject({ state: "full", reason: expect.stringContaining("did not fit") });
   });
 
   it("says in one line what was asked and carried, or why every question was asked", () => {

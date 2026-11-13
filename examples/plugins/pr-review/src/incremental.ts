@@ -116,21 +116,35 @@ export function parseBaseDelta(text: string): Map<string, boolean> {
 
 // ---- the commands ----
 
-const HEAD_DELTA =
-  'set -eu; l="$1"; h="$2"; shift 2; git -c core.hooksPath=/dev/null cat-file -e "$l^{commit}"; ' +
-  'if [ "$#" -gt 0 ]; then out=$(git -c core.hooksPath=/dev/null -c core.quotePath=false diff -U0 --no-color --no-ext-diff --no-textconv --no-renames "$l" "$h" -- "$@"); ' +
-  "printf '%s\\n' \"$out\" | grep -E '^(diff --git |@@ )' || true; fi; " +
-  `echo ${DELTA_END}`;
+/**
+ * The most characters the path list may take: one argument of a command (the executor allows 64 arguments of 4,096 characters each),
+ * the paths joined by newlines. A list that does not fit is a full round 1, decided before the command is dispatched.
+ */
+export const MAX_PATH_LIST_CHARS = 4_000;
 
-/** The hunks between L and H over `paths`, reduced to file and hunk headers (design §9.2). No repository code runs. */
-export const headDeltaCommand = (l: string, h: string, paths: readonly string[]): EnvironmentCommand => ({ id: COMMAND.delta, argv: ["sh", "-c", HEAD_DELTA, COMMAND.delta, l, h, ...paths] });
+/** The path list as the one argument the commands take, or undefined when it cannot be passed (too long, or a path with a newline). */
+export const pathList = (paths: readonly string[]): string | undefined => {
+  const joined = paths.join("\n");
+  return joined.length <= MAX_PATH_LIST_CHARS && !paths.some((p) => p.includes("\n") || p === "") ? joined : undefined;
+};
+
+// The output goes to the report file (the stdout tail holds only 8,192 bytes): a file the command executor cuts to its tail says so
+// (`truncated`), and a cut delta is never read, for the files it dropped would look unchanged.
+const HEAD_DELTA =
+  'set -eu; l="$1"; h="$2"; list="$3"; git -c core.hooksPath=/dev/null cat-file -e "$l^{commit}"; ' +
+  '{ if [ -n "$list" ]; then IFS=\'\n\'; set -f; set -- $list; unset IFS; out=$(GIT_LITERAL_PATHSPECS=1 git -c core.hooksPath=/dev/null -c core.quotePath=false diff -U0 --no-color --no-ext-diff --no-textconv --no-renames "$l" "$h" -- "$@"); ' +
+  "printf '%s\\n' \"$out\" | grep -E '^(diff --git |@@ )' || true; fi; " +
+  `echo ${DELTA_END}; } > "$GRAPHLOOM_REPORT_FILE"`;
+
+/** The hunks between L and H over `paths` (one newline-joined argument, see `pathList`), reduced to file and hunk headers (design §9.2). No repository code runs. */
+export const headDeltaCommand = (l: string, h: string, paths: readonly string[]): EnvironmentCommand => ({ id: COMMAND.delta, argv: ["sh", "-c", HEAD_DELTA, COMMAND.delta, l, h, pathList(paths) ?? ""] });
 
 const BASE_DELTA =
-  'set -eu; lb="$1"; hb="$2"; shift 2; git -c core.hooksPath=/dev/null cat-file -e "$lb^{commit}"; git -c core.hooksPath=/dev/null cat-file -e "$hb^{commit}"; ' +
-  'for p in "$@"; do if git -c core.hooksPath=/dev/null diff --quiet --no-ext-diff --no-textconv "$lb" "$hb" -- "$p"; then echo "same $p"; else echo "changed $p"; fi; done';
+  'set -eu; lb="$1"; hb="$2"; list="$3"; git -c core.hooksPath=/dev/null cat-file -e "$lb^{commit}"; git -c core.hooksPath=/dev/null cat-file -e "$hb^{commit}"; ' +
+  '{ printf \'%s\\n\' "$list" | while IFS= read -r p; do [ -n "$p" ] || continue; if GIT_LITERAL_PATHSPECS=1 git -c core.hooksPath=/dev/null diff --quiet --no-ext-diff --no-textconv "$lb" "$hb" -- "$p"; then echo "same $p"; else echo "changed $p"; fi; done; } > "$GRAPHLOOM_REPORT_FILE"';
 
-/** Whether each base path differs between the two bases. */
-export const baseDeltaCommand = (lb: string, hb: string, paths: readonly string[]): EnvironmentCommand => ({ id: COMMAND.deltaBase, argv: ["sh", "-c", BASE_DELTA, COMMAND.deltaBase, lb, hb, ...paths] });
+/** Whether each base path differs between the two bases (the paths as one newline-joined argument). */
+export const baseDeltaCommand = (lb: string, hb: string, paths: readonly string[]): EnvironmentCommand => ({ id: COMMAND.deltaBase, argv: ["sh", "-c", BASE_DELTA, COMMAND.deltaBase, lb, hb, pathList(paths) ?? ""] });
 
 /** Prints part `k` of a file of the ledger commit as ASCII-only JSON text, with a header the reader joins and checks (the shape `ledger-prior` uses). */
 const FILE_EXTRACT = String.raw`let s="";process.stdin.setEncoding("utf8");process.stdin.on("data",(d)=>{s+=d}).on("end",()=>{const r=s.replace(/[\u007f-￿]/g,(m)=>"\\u"+m.charCodeAt(0).toString(16).padStart(4,"0"));
@@ -339,6 +353,7 @@ export function incrementalReads(evidence: readonly EvidenceRecord[], i: Increme
   const cited = citedPaths(qa, necessity);
   const paths = [...new Set([...i.files, ...cited.head])].sort();
   if (paths.length > MAX_DELTA_FILES) return { state: "full", reason: `the delta would name ${paths.length} files, more than the ${MAX_DELTA_FILES} one read takes` };
+  if (pathList(paths) === undefined) return { state: "full", reason: `the delta's ${paths.length} file paths do not fit the one argument a command takes (${MAX_PATH_LIST_CHARS} characters)` };
   const headCommand = headDeltaCommand(qa.head, i.head, paths);
   const headRun = commandRuns(evidence, COMMAND.delta).filter((r) => sameArgv(r.command.argv, headCommand.argv)).at(-1);
   if (headRun === undefined) return { state: "run", commands: [headCommand], why: `read the delta between the last reviewed head ${qa.head.slice(0, 12)} and this one, as file and hunk headers` };
@@ -353,12 +368,15 @@ export function incrementalReads(evidence: readonly EvidenceRecord[], i: Increme
   if (!baseSame) {
     if (qa.base === undefined) return { state: "full", reason: "the earlier head's base is not recorded" };
     if (cited.base.length > MAX_BASE_PATHS) return { state: "full", reason: `the earlier answers cite ${cited.base.length} base files, more than the ${MAX_BASE_PATHS} one read takes` };
+    if (cited.base.length > 0 && pathList(cited.base) === undefined) return { state: "full", reason: `the ${cited.base.length} base paths the earlier answers cite do not fit the one argument a command takes (${MAX_PATH_LIST_CHARS} characters)` };
     if (cited.base.length > 0) {
       const baseCommand = baseDeltaCommand(qa.base, i.base, cited.base);
       const baseRun = commandRuns(evidence, COMMAND.deltaBase).filter((r) => sameArgv(r.command.argv, baseCommand.argv)).at(-1);
       if (baseRun === undefined) return { state: "run", commands: [baseCommand], why: "read which base files the earlier answers cite differ between the two bases" };
       if (!succeeded(baseRun.command)) return { state: "full", reason: `the base delta could not be read (${describeCommand(baseRun.command)})` };
-      baseChanged = parseBaseDelta(reportText(baseRun).text);
+      const baseText = reportText(baseRun);
+      if (baseText.truncated) return { state: "full", reason: "the base check did not fit one command report" };
+      baseChanged = parseBaseDelta(baseText.text);
     }
   }
   return { state: "usable", prior: { from: qa.head, fromBase: qa.base, qa, necessity, necessityHead: necessity.carried?.head ?? qa.head, delta, baseSame, baseChanged } };

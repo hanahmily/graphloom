@@ -2711,7 +2711,10 @@ and shown in its header ([§6.7](#67-delta-report)):
    every head, so it is never incremental).
 3. L's commit or Lb is not in the review clone, the diff fails, its output does
    not fit one command report or has a header the reader cannot parse, or it
-   names more than 2,000 files, or the earlier answers cite more than 300 base files while the bases differ.
+   cannot be told complete (the reports say when only their tail was kept), or the
+   paths to diff (the files, and the base files the earlier answers cite while the bases differ)
+   do not fit the one 4,000-character argument a command takes. Both reads write their output
+   to the report file, never the 8,192-byte stdout tail, and any doubt about completeness is a full round 1.
 4. The profile says `questions.incremental: false`.
 
 The commit mapping, as the delta report's "commits added, dropped or rewritten"
