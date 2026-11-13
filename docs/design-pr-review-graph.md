@@ -401,8 +401,17 @@ minutes. The first fields of the reporter's result are therefore a briefing, and
 the HTML report ([§6.11](#611-the-html-report)) shows only that on its one page;
 everything below it is the appendix.
 
-- **`whatsNew`:** 3 to 5 bullets, one for each new capability (not for each file
-  or refactor), each at most 240 characters with 1 to 4 cites.
+- **`whatsNew`:** 3 to 5 entries, one for each new capability (not for each file
+  or refactor): the **high-level changes**, `W1`…, in this order in both modes. An
+  entry has its bullet `text` (at most 240 characters, with 1 to 4 cites) and the
+  fields of its card on `review.html` ([§6.11](#611-the-html-report)): a `title`
+  (at most 80 characters, in the shape "area, what was done, how the mechanism
+  changed", for example "stream writes: report the first error when a batch stores
+  nothing"), an `overview` (one sentence of at most 240 characters: what the
+  situation was before and how it works now, or for a purely new capability what it
+  adds and where it hooks in), `coreFiles` (1 to 4 files that carry the change's
+  logic) and `feature` (the id `F1`… of the feature whose data-flow diagram belongs
+  to this change, or an empty string).
 - **`features`:** at most 3, each the path the data takes through a new feature,
   end to end, drawn as a data-flow diagram ([§6.10](#610-features-and-their-data-flow)).
 - **`check`:** five lists of at most 8 one-line entries, each with cites and each
@@ -417,7 +426,10 @@ everything below it is the appendix.
 
 The scope split, the hotspots and the open questions of the briefing are not the
 reporter's: plugin code computes them from the file list, the measurement records
-and the answers ([§6.11](#611-the-html-report)).
+and the answers ([§6.11](#611-the-html-report)). So are each change's **synced-along
+files** (the files its cites and its report items touch beyond its core files) and
+the **code excerpts** under its card, cut from the patches the plugin already holds
+([§6.11](#611-the-html-report)); both are written to `report.json` as `cards`.
 
 After the briefing, the report is analysis, not narration. It has three layers,
 and the sections above hold only the second:
@@ -509,7 +521,10 @@ see, relies on the reporter's prompt and on the checker.
    ```text
    purpose:  { text, source: "stated" | "inferred", quote }   quote "" when inferred
    overview: text                                              2 to 4 sentences
-   whatsNew: [{ text, cites: [cite] }]                         3 to 5 bullets
+   whatsNew: [{ text, cites: [cite],                           3 to 5 high-level changes (W1…)
+                title, overview,                             card title; one sentence, before and now
+                coreFiles: [path],                           1 to 4 files with the logic
+                feature }]                                   "F1"… or ""
    features: [{ name, summary, stages: [...], flows: [...] }]  at most 3 (§6.10)
    check:    { surfaces, behavior, compatibility, risks, tests }   each [{ text, cites: [cite] }], at most 8
    areas:    [{ id, label }]                                   large mode only; [] otherwise
@@ -556,7 +571,7 @@ see, relies on the reporter's prompt and on the checker.
    | `R3.s1.t2` | the transition's condition (`when`) is the one the code has at the cited line, and its effect is what the line does | required, from the cited file |
    | `R3.s1.r1` | the code at the cited line decides what `decision` says, from this state | required, from the cited file |
    | `R3.b1` | `before` is what the base code does in that case, `after` what the head code does | required, any changed file |
-   | `W1` | the cited code provides the capability the what's-new bullet names | required, from the cited files |
+   | `W1` | the cited code provides the capability the what's-new entry names, and its title and overview (the situation before, how it works now) are what the cited code and the diff show | required, from the cited files |
    | `F1` | the feature's summary is what the data path through its stages shows | required, from the stages' files |
    | `F1.s2` | the cited code is that stage of the data's path, of that kind | required, from the cited file |
    | `F1.f3` | the cited code moves the data from the one stage to the other, in that direction, as the label says | required, from the cited file |
@@ -576,7 +591,8 @@ see, relies on the reporter's prompt and on the checker.
    - the **purpose** or the **overview** is not shown; the briefing (the purpose)
      or the appendix (the overview) says the claim check could not support it,
      with the reason;
-   - a **what's-new bullet** or a **check entry** is dropped; a feature's
+   - a **what's-new entry** (with its card) or a **check entry** is dropped; a
+     feature dropped below leaves the `feature` of the entry that named it empty; a feature's
      **stage** is dropped with the flows that touch it, a **flow** alone, and a
      **feature** left with fewer than two stages or no flow, or whose own claim
      is unsupported, whole ([§6.10](#610-features-and-their-data-flow)).
@@ -593,8 +609,17 @@ see, relies on the reporter's prompt and on the checker.
 - **Summary:** the purpose and the overview are present and bounded (400 and
   900 characters). A `stated` purpose's quote matches the PR's title, body or
   a commit message, whitespace collapsed; an `inferred` one has no quote.
-- **Briefing:** `whatsNew` has 1 to 5 bullets (the prompt asks for 3 to 5) of
-  at most 240 characters, each with 1 to 4 cites; `features` at most 3, each with
+- **Briefing:** `whatsNew` has 1 to 5 entries (the prompt asks for 3 to 5) whose
+  text is at most 240 characters, each with 1 to 4 cites. Each entry's `title` is
+  1 to 80 characters on one line; its `overview` is one sentence of at most 240
+  characters (no line break, and no second sentence: a sentence end followed by a
+  capital letter is refused); `coreFiles` has 1 to 4 distinct paths, each a file of
+  the pull request (a rename by either name) that one of the entry's own cites
+  names, in large mode too (a cite may then lie outside the hunks, but its path
+  must still be a core file); `feature` is empty or `F<n>` for a feature of the
+  reporter's list, and no two entries name the same feature (an entry whose
+  feature the claim check dropped is left empty, and the final check does not
+  look the feature up); `features` at most 3, each with
   2 to 8 stages and 1 to 12 flows, unique stage ids, flows between two stages of
   their feature, and bounded labels ([§6.10](#610-features-and-their-data-flow));
   each `check` list at most 8 entries of at most 240 characters with 1 to 4 cites;
@@ -658,7 +683,7 @@ Contents: Briefing · Appendix (Necessity · Report · Measurements · Q&A)
 **Purpose** (stated: "replies with the first error when nothing was stored"): A write batch whose events all fail was acknowledged as a success; the callback now replies with the first error in that case.
 
 ## What's new
-- A write batch that stores nothing is answered with its first error instead of a success — banyand/stream/write_standalone.go:12-47
+- **W1** Stream writes: reply with the first error when a batch stores nothing. A batch whose events all failed was answered with a success; the callback now replies with an INTERNAL_ERROR carrying the first error. — banyand/stream/write_standalone.go:12-47 (core: banyand/stream/write_standalone.go; also changed: CHANGES.md, banyand/stream/write_standalone_test.go)
 
 ## Scope that matters
 - Production code: 4 files, +52 −9
@@ -965,7 +990,11 @@ into an area is something they ask for (see "Dive into an area" below).
    the head or the base that the pull request does not change, and lines the
    reporter read in the tree: the claim check verifies their quotes against that
    tree, and the deterministic rule that a cite lies in a hunk does not apply to
-   them. `areas` gives a short label for each area id. The reporter may open any file of the
+   them. Each what's-new entry also has its card fields ([§6.1](#61-template)): a
+   title, one sentence, 1 to 4 core files (each a changed file, and cited by that
+   entry) and the feature it draws; the excerpts and the synced-along files are
+   plugin-computed from the snapshot's patches, whether or not the reporter was
+   given them. `areas` gives a short label for each area id. The reporter may open any file of the
    head or the base read-only to confirm a claim, and every item cites the files
    and lines it rests on; those lines still lie in the file's hunks of the PR's
    diff, whether or not the patch was given to the reporter. An item is at most
@@ -1205,13 +1234,16 @@ an optional `#fragment` of letters, digits and `_.:-`). Every text that came
 from a model or the pull request is HTML-escaped. A deterministic check on the
 written bytes of both files enforces this, for the embedded diagram SVGs too (an
 allow-list of elements and attributes, `data-*` and `aria-*` by prefix, no `href`
-outside `<a>`, no `url(` that leaves the document). `review-appendix.html` uses
+outside `<a>`, no `url(` that leaves the document). The excerpts of the change cards
+are text in `<pre>`, escaped, in `<details>`; no element or attribute is added to the
+allow-list for them. `review-appendix.html` uses
 `<details>`, so its sections collapse without JavaScript. A diagram sits inline in
 an `overflow-x: auto` wrapper and scales to the container width. Light theme,
 readable on a laptop.
 
 **`review.html`, in this order, and nothing else.** It holds no prose paragraph and
-no list of text items: only short labels, numbers and badges. Anything longer is a
+no list of text items, with one exception: **one sentence for each change card**
+(item 3). Everything else is short labels, numbers and badges; anything longer is a
 tooltip (an SVG `<title>`, an HTML `title` attribute; no script) and is in the
 appendix.
 
@@ -1230,10 +1262,42 @@ appendix.
    plugin's own rule classifies as tests, `_test.go`, `*.test.ts`, `*.spec.ts`,
    and any file in a `test`, `tests` or `__tests__` directory; production code is
    the rest); and counts tiles for files, commits and checks.
-3. **Data-flow diagrams** ([§6.10](#610-features-and-their-data-flow)): one for each
-   feature, the skill's drawing or the plugin's fallback, with only the feature's
-   name as its caption (the summary, and the note when the plugin drew it, are the
-   caption's tooltip).
+3. **Changes:** one card for each high-level change the claim check left (`W1`…, the
+   `whatsNew` entries, in both modes; the report's `R` items are not cards). A card
+   has, in this order:
+   - its id and **title** (the reporter's, "area, what was done, how the mechanism
+     changed"), and **one sentence**, its `overview`: the situation before and how it
+     works now, or for a purely new capability what it adds and where it hooks in.
+     Title and sentence are the only prose of the page, escaped like any text, and
+     each is also checked as part of the change's claim (`W1`);
+   - the change's **data-flow diagram** ([§6.10](#610-features-and-their-data-flow))
+     when a feature names it (`feature`), the skill's drawing or the plugin's
+     fallback, with the feature's name as its caption (the summary, and the note when
+     the plugin drew it, are the caption's tooltip);
+   - its **core files** as chips (`coreFiles`, the must-read files: each a link to
+     the change's first cite in it on GitHub, or to the file at the head, or at the
+     base for a file the change deletes, when no cite of the change has lines in it), and under them a collapsed
+     `<details>` "also changed (N)" listing the **synced-along** files as small
+     links. Plugin code computes them: the files of the pull request that the change's
+     cites name, and the files cited by the report items that cite a core file, minus
+     the core files, in the file list's order, at most 30 listed with a count of the
+     rest;
+   - a collapsed `<details>` "cited code (N lines)" holding the **excerpts** of the
+     change's cites: for each cite inside a hunk of its file, the patch lines from the
+     first to the last line the cite's range covers on its side, in patch order, so
+     that the removed lines between them (base side) show beside the added and
+     context lines (head side), each with its line number and a `+`, `-` or space
+     mark, in a `<pre>`, under the cite's GitHub link. Bounds: at most 12 lines for
+     a cite, 36 for a card, 160 characters for a line; what is left out is said ("…
+     k more lines") and the link leads to it. A cite outside the hunks (large mode),
+     on a file with no patch text or on a file the pull request does not change has
+     no excerpt, only its link. The excerpts are cut by plugin code from the patches
+     of the snapshot when `report.json` is written, and stored there (`cards`), so
+     the renderer needs no patch and the page has no script.
+
+   A feature no change names keeps its own diagram after the cards, captioned with
+   its name, as before. A report whose claim check left no change has no card, and
+   shows the diagrams alone.
 4. **Risk map:** an SVG treemap of the areas (the areas of a large report; the
    report's sections otherwise), laid out by a squarified treemap implemented in
    plugin code (deterministic, no dependency). Each rectangle is sized by the lines
@@ -1265,8 +1329,9 @@ appendix.
    serious state, and dismissed findings are not shown), each linking to its
    finding in the appendix (`#f-<id>`).
 
-It holds no change item, no table, no list and no Q&A text. The text that used to
-be the briefing (the purpose, what is new with its `W` ids, the scope table, the
+It holds no change item, no table, no list and no Q&A text, and no prose beyond the
+change cards' title and sentence. The text that used to
+be the briefing (the purpose, what is new with its `W` ids, titles, sentences, core and synced-along files, the scope table, the
 verdict panel, the data flow with its stages and cites, the five check lists, the
 hotspots, the areas with the dive-in command, the open questions) is the first part
 of the appendix, in the same words.
@@ -3604,6 +3669,26 @@ What 0.11 does, where this document leaves it open:
   as before, so their size is bounded by what one command carries; a report or
   Q&A that does not fit still stops the run "incompatible task" and says so.
   (0.12 lifts this: [§6.6](#66-output), multi-part writes.)
+
+### Version 0.25: a card for each high-level change on `review.html`
+
+Round 1's first page had labels and tiles only, so a maintainer could not tell what the change was from it. It now
+has one card for each high-level change.
+
+- **Contract.** Each `whatsNew` entry of `change-report-v1` gains `title`, `overview` (one sentence), `coreFiles` (1 to 4)
+  and `feature` ([§6.1](#61-template)); all required, no other property. The prompts of the standard and the large reporter
+  ask for them, and the claim checker's `W` claim judges the title and the sentence against the cited code.
+- **Validation.** Bounds, one sentence, core files that are files of the pull request and are cited by the entry itself,
+  a feature id that exists and is named once ([§6.5](#65-deterministic-validation)).
+- **`report.json`.** A new `cards` array, written by plugin code: for each change, its core files, its synced-along files
+  and the bounded code excerpts cut from the snapshot's patches. Reports written by 0.24 have none and render without
+  cards.
+- **`review.html`.** The Changes section ([§6.11](#611-the-html-report)): card, diagram, core file chips, "also changed"
+  and "cited code" under `<details>`. The one sentence of each card is the only prose the page allows. The page stays
+  inert; the check on the written bytes is unchanged and still passes.
+- **Appendix and `review.md`.** The briefing's "What's new" shows each change's title, sentence and files.
+
+No step, name or order changes.
 
 ### Version 0.24: reproducing tests (part 2, first slice)
 
