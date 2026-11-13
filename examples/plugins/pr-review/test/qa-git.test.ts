@@ -286,18 +286,18 @@ describe("the ledger compare-and-swap (design 9.1)", () => {
     git(dir, ["init", "-q", "-b", "main"]);
     write(dir, { "x.txt": "x\n" });
     commit(dir, "base");
-    write(dir, { ".graphloom/review/qa.json": '{"qa":1}', ".graphloom/review/report.json": '{"report":1}' });
+    write(dir, { ".graphloom/review/qa.json": '{"qa":1}', ".graphloom/review/report.json": '{"report":1}', ".graphloom/review/necessity.json": '{"necessity":1}' });
     return dir;
   };
   const write1 = (dir: string, old: string, tag: string) => run(dir, ledgerWriteCommand(pr, old, JSON.stringify({ schema: "graphloom-pr-ledger-v1", tag }), `# ledger ${tag}\n`)!);
 
-  it("creates the ref from absent with a commit holding ledger.json, ledger.md, qa.json and report.json", () => {
+  it("creates the ref from absent with a commit holding ledger.json, ledger.md, necessity.json, qa.json and report.json", () => {
     const dir = setup();
     const r = write1(dir, "absent", "one");
     expect(r.code, r.stderr).toBe(0);
     const sha = git(dir, ["rev-parse", ref]);
     expect(r.stdout.trim()).toBe(`advanced ${sha}`);
-    expect(git(dir, ["ls-tree", "--name-only", sha]).split("\n")).toEqual(["ledger.json", "ledger.md", "qa.json", "report.json"]);
+    expect(git(dir, ["ls-tree", "--name-only", sha]).split("\n")).toEqual(["ledger.json", "ledger.md", "necessity.json", "qa.json", "report.json"]);
     expect(git(dir, ["show", `${sha}:ledger.json`])).toContain('"tag":"one"');
     expect(git(dir, ["show", `${sha}:qa.json`])).toBe('{"qa":1}');
     expect(git(dir, ["rev-list", "--count", sha])).toBe("1");

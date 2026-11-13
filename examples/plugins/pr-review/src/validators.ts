@@ -12,14 +12,16 @@ import { measurementState, type MeasurementState } from "./measurements.js";
 import { reportJson, reviewMarkdown } from "./output.js";
 import { parseProfile, ProfileError, type Profile } from "./profile.js";
 import type { PullRequest } from "./request.js";
-import { afterNecessity, answerContext, batchedAnswers, answerWrites, necessityFlow, qaContext, questionSet, questionerFlow, recordedNecessity, skippedWrites, type AnswerWrites, type QaContext } from "./qaflow.js";
+import { afterNecessity, answerContext, batchedAnswers, answerWrites, necessityFlow, qaContext, questionSet, questionerFlow, recordedNecessity, restFlow, skippedWrites, type AnswerWrites, type QaContext } from "./qaflow.js";
 import { answersFlow, type FinalAnswer } from "./answers.js";
 import { admissibleDecision, effectiveConclusion, necessityJson, NECESSITY_ID, ROUNDS_SKIP_REASON, roundsSkipJson, type NecessityRecord } from "./necessity.js";
 import { describeReasons, isLarge } from "./mode.js";
 import { requiredQuestions, statedPurposes } from "./questions.js";
 import { principlesRecord } from "./principles.js";
 import { htmlPagesFrom, htmlProblems } from "./html.js";
-import { writtenLedger } from "./ledger.js";
+import { ledgerRead, writtenLedger } from "./ledger.js";
+import { incrementalReads } from "./incremental.js";
+import { registryFromEvidence } from "./prior.js";
 import { codeReview, draftComposed, findingsProven, reviewPublished, round1Gated } from "./reviewvalidators.js";
 import { readParts, recordedAppendix, recordedHtml, recordedNecessityJson, recordedQa, recordedReport, sha256 } from "./parts.js";
 
@@ -93,20 +95,24 @@ export const headTree: Validator = profiled((input, profile) => {
   return passed(`the worktree holds exactly the head's tree ${facts.head.slice(0, 12)} on the pinned base ${facts.base.slice(0, 12)}, checked out with no hook and no global Git configuration; no repository code ran`);
 });
 
-export const reviewScope: Validator = {
-  evaluate(input) {
-    const run = commandRuns(input.evidence, COMMAND.ledger).at(-1);
-    if (run === undefined) return inconclusive("the pull request's ledger has not been read");
-    if (!succeeded(run.command)) return failed(`${describeCommand(run.command)}: ${outputTail(run.command)}`);
-    const ledger = parseLedger(reportText(run).text);
-    if (ledger === undefined) return failed("the ledger read printed neither a commit nor `absent`");
-    return passed(
-      ledger.present
-        ? `a prior ledger exists at ${ledger.sha.slice(0, 12)}; this version reports the whole pull request, since delta reports arrive with a later version`
-        : "no prior ledger: everything is new",
-    );
-  },
-};
+export const reviewScope: Validator = profiled((input, profile) => {
+  const run = commandRuns(input.evidence, COMMAND.ledger).at(-1);
+  if (run === undefined) return inconclusive("the pull request's ledger has not been read");
+  if (!succeeded(run.command)) return failed(`${describeCommand(run.command)}: ${outputTail(run.command)}`);
+  const ledger = parseLedger(reportText(run).text);
+  if (ledger === undefined) return failed("the ledger read printed neither a commit nor `absent`");
+  if (!ledger.present) return passed("no prior ledger: everything is new");
+  // Round 1 on a later head asks only about what the update changed, or is a full round 1 with a recorded reason (design §9.2).
+  const pr = evidencePull(input.evidence, profile);
+  const a = pr === undefined ? undefined : analyze(input.evidence, profile, pr);
+  if (pr === undefined || a === undefined || a.state !== "ready") return inconclusive("the pull request has not been read");
+  const read = ledgerRead(input.evidence);
+  const reads = incrementalReads(input.evidence, { ledger: read !== undefined && read.ledger.present ? read.ledger.sha : undefined, registry: registryFromEvidence(input.evidence), enabled: profile.questions.incremental && profile.rounds !== "review-only", head: pr.head, files: a.analysis.snapshot.files.map((f) => f.path), base: pinnedBase(input.evidence), node: process.execPath });
+  if (reads.state === "run") return inconclusive(`the earlier Q&A and the delta since the last reviewed head are not read yet (${reads.why})`);
+  if (reads.state === "full") return passed(`a prior ledger exists at ${ledger.sha.slice(0, 12)}; round 1 is a full round 1: ${reads.reason}`);
+  if (reads.state === "none") return passed("no prior ledger: everything is new");
+  return passed(`a prior ledger exists at ${ledger.sha.slice(0, 12)}; the Q&A of ${reads.prior.from.slice(0, 12)} and the delta since it were read (${reads.prior.delta.size} file(s) changed${reads.prior.baseSame ? "" : ", the base moved"}), so round 1 asks only about what changed and carries the rest; the report is still the whole pull request`);
+});
 
 /** The measurements as the evidence stands. */
 export function measurementsOf(evidence: readonly EvidenceRecord[], analysis: Analysis, profile: Profile): MeasurementState {
@@ -321,10 +327,10 @@ function answersState(input: ValidationInput, profile: Profile): AnswersState | 
     if (b.state !== "done") return { start, set, record: rec.record, pending: b.state };
     return { start, set, record: rec.record, final: [rec.record.final, ...b.final] };
   }
-  const flow = answersFlow(input.evidence, answerContext(start.ctx, afterNecessity(set)), start.ctx.base);
+  const flow = restFlow(input.evidence, start.ctx, afterNecessity(set));
   if (flow.state === "supervise") return { start, set, record: rec.record, failure: flow.reason };
   if (flow.state !== "done") return { start, set, record: rec.record, pending: flow.state };
-  return { start, set, record: rec.record, final: [rec.record.final, ...flow.final] };
+  return { start, set, record: rec.record, final: [rec.record.final, ...set.carried, ...flow.final] };
 }
 
 /** `rounds: review-only` (design §3.2): the Answers stage records the skipped Q&A and advances the ledger with no question. */

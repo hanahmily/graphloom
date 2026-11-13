@@ -21,6 +21,7 @@ import { changeMapSvg, crapBarSvg, stateDiagramSvg, type BarRow } from "./htmlsv
 import { brokenNote, effectiveConclusion, NECESSITY_ID, parseNecessityRecord, SKIPPED_NOTE, type NecessityRecord } from "./necessity.js";
 import { DIVE_COLUMNS, DIVE_COMMAND, DIVE_HEADING, DIVE_LINE, DIVE_TEXT, diveRow } from "./dive.js";
 import { hotspots, hotspotText, needAuthor, openQuestions, SCOPE_KINDS, SCOPE_TITLES, scopeText, type Scope } from "./scope.js";
+import { incrementalLine, type IncrementalNote } from "./incremental.js";
 import { describeReasons, type ModeReason } from "./mode.js";
 import { exceeds, LIMITS, originOf, type Metric } from "./metrics/crap.js";
 import { draftMarkdown, parseDraft, scopeLine, type Draft } from "./draft.js";
@@ -77,7 +78,9 @@ export interface QaDoc {
   necessity?: { skipped?: boolean; note?: string };
   /** The operator chose `rounds: review-only` (design §3.2): no question was asked or answered, and the pages say so. */
   roundsSkipped?: { reason: string; note: string };
-  questions: Array<{ id: string; type: string; item: string; symbol?: string; function?: string; text: string; origin: string; answer?: QaAnswer }>;
+  /** What a later head asked and carried, or why it asked everything (design §6.7). */
+  incremental?: IncrementalNote;
+  questions: Array<{ id: string; type: string; item: string; symbol?: string; function?: string; text: string; origin: string; carried?: { head: string }; answer?: QaAnswer }>;
 }
 
 export interface HtmlInput {
@@ -587,6 +590,7 @@ function qaHtml(r: ReportDoc, qa: QaDoc | undefined, g: Github): string {
   for (const q of asked) groups.set(q.item, [...(groups.get(q.item) ?? []), q]);
   const body = [
     qa.mode === "large" ? para(`Mode: large (${describeReasons(qa.modeReasons ?? [])}).`) : "",
+    qa.incremental !== undefined ? para(incrementalLine(qa.incremental)) : "",
     para(`${asked.length} question${asked.length === 1 ? "" : "s"}: ${count("answered")} answered, ${count("partially answered")} partially answered, ${count("needs author")} needs author.`),
     ...[...groups].map(([item, qs]) => {
       const it = items.get(item);
@@ -595,7 +599,7 @@ function qaHtml(r: ReportDoc, qa: QaDoc | undefined, g: Github): string {
           const status = q.answer?.status ?? "not answered";
           const open = status === "needs author";
           const where = q.symbol !== undefined ? ` <span class="muted">${esc(q.symbol)}</span>` : q.function !== undefined ? ` <span class="muted">${esc(q.function)}</span>` : "";
-          return details(`<strong>${esc(q.id)}</strong> <span class="muted">[${esc(q.type)}]</span> ${badge(STATUS_CLASS[status] ?? "grey", status)}${where} ${esc(clip(q.text, 160))}`, `<p class="q">${esc(q.text)}</p>${q.answer !== undefined ? answerHtml(q.answer, g) : para("Not answered.")}`, open, "qa", `q-${q.id}`);
+          return details(`<strong>${esc(q.id)}</strong> <span class="muted">[${esc(q.type)}]</span> ${badge(STATUS_CLASS[status] ?? "grey", status)}${q.carried !== undefined ? ` <span class="muted">carried from ${esc(q.carried.head.slice(0, 7))}</span>` : ""}${where} ${esc(clip(q.text, 160))}`, `<p class="q">${esc(q.text)}</p>${q.answer !== undefined ? answerHtml(q.answer, g) : para("Not answered.")}`, open, "qa", `q-${q.id}`);
         })
         .join("");
       return `<div class="qgroup"><h4>${item === "" ? "Other questions" : `<span class="rid">${esc(item)}</span> ${esc(clip(it?.text ?? "", 140))}`}</h4>${inner}</div>`;

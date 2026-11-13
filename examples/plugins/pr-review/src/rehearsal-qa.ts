@@ -92,6 +92,10 @@ export interface QaSpec {
   checks?: Array<(q: Question, a: Answer) => { verdict: "supported" | "partial" | "unsupported"; note: string; searches?: CheckVerdict["searches"] } | undefined>;
   /** The corrected answers after the checker's first round. */
   revise?: (q: Question, sym: SymbolDef | undefined, prev: Answer) => Answer;
+  /** Round 1 on a later head (design §9.3): only the questions this returns true for are asked; the others are carried, so the replies and canned checks leave them out. */
+  asked?: (q: Question) => boolean;
+  /** N1 is carried too: no N1 job runs, so the checker has no verdict for it. */
+  necessityCarried?: boolean;
 }
 
 export interface QaInput {
@@ -213,7 +217,8 @@ export function qaScenario(i: QaInput): QaScenario {
   const required = requiredQuestions({ view, groundwork, large }, stated);
   const asked = required.filter((r) => !(spec.omit ?? []).includes(r.type));
   const questionerOutput: QuestionerOutput = { purposes, questions: asked.map((r) => ({ key: r.key, type: r.type, item: r.item, symbol: r.symbol ?? "", text: r.text })) };
-  const questions = finalQuestions(required, questionerOutput, groundwork, large);
+  // A later head asks only some of them (design §9.3); the others are carried from an earlier head and have no reply here.
+  const questions = finalQuestions(required, questionerOutput, groundwork, large).filter((q) => spec.asked?.(q) ?? true);
   // The answerer and its checker.
   const manifest = base.manifests ?? { "go.mod": DEFAULT_GO_MOD };
   const deps = declaredDependencies(parseManifests(Object.entries(manifest).map(([p, t]) => `===== graphloom manifest ${p}\n${t}`).join("\n") + "\n# end\n").files);
@@ -263,7 +268,7 @@ export function qaScenario(i: QaInput): QaScenario {
     "questions-v1": [{ output: questionerOutput }],
     "answers-v1": large ? batches.map((b) => ({ output: { answers: batchAnswers(b) } })) : [{ output: { answers: first } }],
     // N1's rounds come first, then the other answers' (a run that skips them never asks for those).
-    "answer-check-v1": [...n1Rounds, ...(large ? batchRounds : rounds)].map((verdict) => ({ output: { verdicts: verdict } })),
+    "answer-check-v1": [...(spec.necessityCarried === true ? [] : n1Rounds), ...(large ? batchRounds : rounds)].map((verdict) => ({ output: { verdicts: verdict } })),
     ...(revised.length > 0 ? { "answers-revision-v1": [{ output: { answers: revised } }] } : {}),
   };
   // Canned outputs of the read-only commands, by id, for the commands the graph will run.

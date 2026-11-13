@@ -15,7 +15,7 @@
  */
 import type { EnvironmentCommand, EvidenceRecord } from "@graphloom/sdk";
 import { parseLedger, type Ledger } from "./commands.js";
-import { COMMAND, LEDGER_JSON_FILE, LEDGER_MD_FILE, LEDGER_MOVED, PART_BASE, QA_JSON, REPORT_JSON, ledgerRef } from "./constants.js";
+import { COMMAND, LEDGER_JSON_FILE, LEDGER_MD_FILE, LEDGER_MOVED, NECESSITY_JSON, PART_BASE, QA_JSON, REPORT_JSON, ledgerRef } from "./constants.js";
 import { commandRuns, isObject, reportText, succeeded, type CommandRun } from "./evidence.js";
 import type { FinalAnswer } from "./answers.js";
 import type { PurposeRecord, Question } from "./questions.js";
@@ -107,7 +107,10 @@ const WRITE_TAIL =
 d=$(git -c core.hooksPath=/dev/null hash-object -w ` +
   REPORT_JSON +
   String.raw`)
-tree=$(printf '100644 blob %s\tledger.json\n100644 blob %s\tledger.md\n100644 blob %s\tqa.json\n100644 blob %s\treport.json\n' "$a" "$b" "$c" "$d" | git -c core.hooksPath=/dev/null mktree)
+e=$(git -c core.hooksPath=/dev/null hash-object -w ` +
+  NECESSITY_JSON +
+  String.raw`)
+tree=$(printf '100644 blob %s\tledger.json\n100644 blob %s\tledger.md\n100644 blob %s\tnecessity.json\n100644 blob %s\tqa.json\n100644 blob %s\treport.json\n' "$a" "$b" "$e" "$c" "$d" | git -c core.hooksPath=/dev/null mktree)
 expect="$old"
 if [ "$old" = absent ]; then
   expect=$(git hash-object --stdin </dev/null | tr '0-9a-f' '0')

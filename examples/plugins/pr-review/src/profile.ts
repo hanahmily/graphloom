@@ -214,7 +214,7 @@ export interface ProfileData {
   environment: { checks: EnvironmentCommand[] };
   report?: { sections: SectionConfig[] };
   symbols?: { packs: SymbolPack[] };
-  questions?: { excludeRoots?: string[]; similarity?: number; maxCandidates?: number; designDocs?: string[]; principles?: { path: string; ref?: string } };
+  questions?: { excludeRoots?: string[]; similarity?: number; maxCandidates?: number; designDocs?: string[]; principles?: { path: string; ref?: string }; incremental?: boolean };
   metrics?: Partial<MetricsConfig>;
   context?: ContextRef[];
   privateRepos?: string[];
@@ -240,7 +240,7 @@ export interface Profile {
   sections: SectionConfig[];
   symbols: SymbolPack[];
   /** `principles`: the repository's design principles file and the ref to read it at (default: the task's base commit), see design §7.5.1. */
-  questions: { excludeRoots: string[]; similarity: number; maxCandidates: number; designDocs: string[]; principles?: { path: string; ref?: string } };
+  questions: { excludeRoots: string[]; similarity: number; maxCandidates: number; designDocs: string[]; principles?: { path: string; ref?: string }; /** A later head asks only about the code the update changed (design §9.3); `false` asks every question on every head. */ incremental: boolean };
   metrics: MetricsConfig;
   context: ContextRef[];
   privateRepos: string[];
@@ -767,11 +767,12 @@ export function parseProfile(config: unknown): Profile {
   const environment = checkEnvironment(p.environment);
   const sections = checkSections(p.report);
   const symbols = checkSymbols(p.symbols);
-  let questions: Profile["questions"] = { excludeRoots: [], similarity: 0.5, maxCandidates: 5, designDocs: [] };
+  let questions: Profile["questions"] = { excludeRoots: [], similarity: 0.5, maxCandidates: 5, designDocs: [], incremental: true };
   if (p.questions !== undefined) {
     need(isObject(p.questions), "questions must be an object");
     const q = p.questions as Record<string, unknown>;
-    onlyKeys(q, "questions", ["excludeRoots", "similarity", "maxCandidates", "designDocs", "principles"]);
+    onlyKeys(q, "questions", ["excludeRoots", "similarity", "maxCandidates", "designDocs", "principles", "incremental"]);
+    need(q.incremental === undefined || typeof q.incremental === "boolean", "questions.incremental must be true or false");
     need(q.excludeRoots === undefined || isStrings(q.excludeRoots), "questions.excludeRoots must be a list of paths");
     // They travel in one argument of each search command, which a command allows 4,096 characters.
     need(q.excludeRoots === undefined || (q.excludeRoots as string[]).join("\n").length <= 3_000, "questions.excludeRoots is too long: at most 3,000 characters in all");
@@ -789,7 +790,7 @@ export function parseProfile(config: unknown): Profile {
       need(pr.ref === undefined || (isString(pr.ref) && (pr.ref as string).length <= 200 && /^[A-Za-z0-9._/-]+$/.test(pr.ref as string) && !(pr.ref as string).startsWith("-") && !(pr.ref as string).includes("..")), "questions.principles.ref must be a git ref name (letters, digits, . _ / -; at most 200 characters)");
       principles = { path: pr.path as string, ...(pr.ref !== undefined ? { ref: pr.ref as string } : {}) };
     }
-    questions = { excludeRoots: (q.excludeRoots as string[] | undefined) ?? [], similarity: (q.similarity as number | undefined) ?? 0.5, maxCandidates: (q.maxCandidates as number | undefined) ?? 5, designDocs: (q.designDocs as string[] | undefined) ?? [], ...(principles !== undefined ? { principles } : {}) };
+    questions = { excludeRoots: (q.excludeRoots as string[] | undefined) ?? [], similarity: (q.similarity as number | undefined) ?? 0.5, maxCandidates: (q.maxCandidates as number | undefined) ?? 5, designDocs: (q.designDocs as string[] | undefined) ?? [], incremental: (q.incremental as boolean | undefined) ?? true, ...(principles !== undefined ? { principles } : {}) };
   }
   const metrics = checkMetrics(p.metrics, { generated: [], coverage: true, mutation: { enabled: true }, files: {} });
   const context = checkContext(p.context);
