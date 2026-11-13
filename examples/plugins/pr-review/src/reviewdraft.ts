@@ -14,6 +14,7 @@ import { composeDraft, draftJson, draftMarkdown, qaInputFrom, withReview, type D
 import { htmlPagesFrom, parseReportDoc } from "./html.js";
 import { partCommands, readParts, recordedNecessityJson, recordedQa, recordedRecord, recordedReport, type Written } from "./parts.js";
 import { ROUNDS_SKIP_NOTE } from "./necessity.js";
+import { pinnedBase } from "./commands.js";
 import { effectivePacks } from "./packs.js";
 import { registryFromEvidence } from "./prior.js";
 import type { Profile } from "./profile.js";
@@ -49,7 +50,7 @@ export function round1Computed(evidence: readonly EvidenceRecord[], analysis: An
   if (profile.rounds === "review-only") return { state: "ready", record: round1Skipped(pr.head) };
   const necessity = recordedNecessityJson(evidence);
   if (necessity.state === "failed") return { state: "pending", reason: `necessity.json does not read back: ${necessity.reason}` };
-  const record = round1Record({ head: pr.head, necessity: necessity.state === "read" ? necessity.value : undefined, qa: qa.value.json, files: analysis.snapshot.files, itemCites: itemCitesOf(report.value.json), packs: effectivePacks(profile), prior: registryFromEvidence(evidence).items });
+  const record = round1Record({ head: pr.head, necessity: necessity.state === "read" ? necessity.value : undefined, qa: qa.value.json, files: analysis.snapshot.files, itemCites: itemCitesOf(report.value.json), packs: effectivePacks(profile), prior: registryFromEvidence(evidence).items, github: { owner: pr.owner, repo: pr.repo, head: pr.head, base: pinnedBase(evidence) } });
   return record === undefined ? { state: "pending", reason: "qa.json is not a Q&A file" } : { state: "ready", record };
 }
 

@@ -15,7 +15,7 @@ import { analyze, evidencePull } from "../src/analysis.js";
 import { REHEARSAL_HEAD } from "../src/rehearsal.js";
 import { pinnedBase } from "../src/commands.js";
 import { recordedRound1, writtenDraftFiles } from "../src/reviewdraft.js";
-import { ROUND1_SCHEMA, type Round1Issue, type Round1Record } from "../src/round1.js";
+import { MAX_ITEM_TEXT, ROUND1_SCHEMA, type Round1Issue, type Round1Record } from "../src/round1.js";
 import { reviewPublished, round1Gated } from "../src/reviewvalidators.js";
 import { BANYANDB, candidateEvidence, profileOf, simulate, type FakeReview, type Simulation } from "./support.js";
 
@@ -77,9 +77,12 @@ describe("the review the Publish stage posts", () => {
   it("keeps every item's marker readable (a read cuts a body at 4,000 characters), and every comment inside what a review carries", () => {
     const long = entry("F1", { body: "x".repeat(20_000), suggestion: "y".repeat(5_000) });
     const plan = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([]), draft: draft([long]) });
-    expect(plan.comments[0]!.body.length).toBeLessThan(4_000);
+    expect(plan.comments[0]!.body.length).toBeLessThanOrEqual(MAX_ITEM_TEXT + 300);
+    expect(plan.comments[0]!.body.length).toBeLessThan(65_536 / 4);
     expect(plan.comments[0]!.body).not.toContain("```suggestion");
     expect(plan.comments[0]!.body.endsWith(findingMarker("F1"))).toBe(true);
+    // A read keeps the first 4,000 characters of a body, so a long body leads with its marker as well.
+    expect(commentIds([{ reviewId: 1, id: 77, body: plan.comments[0]!.body.slice(0, 4_000) + "…" }], 1).get("F1")).toBe(77);
     const many = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([]), draft: draft(Array.from({ length: 80 }, (_, i) => entry(`F${i + 1}`, { line: i + 1 }))) });
     expect(many.comments).toHaveLength(MAX_INLINE_COMMENTS);
     expect(many.items.filter((i) => !i.inline)).toHaveLength(30);
@@ -109,16 +112,16 @@ describe("the review the Publish stage posts", () => {
   });
 
   it("clips every posted body, round 1 and round 2, inline or not, before the marker, and keeps the whole text for the ledger", () => {
-    const long = "m".repeat(9_000);
+    const long = "m".repeat(20_000);
     const r1 = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([issue("Q1", { body: long, path: "pkg/a.go", line: 4, anchored: true }), issue("Q2", { body: long })]) });
     for (const x of r1.items) {
-      expect(x.body.length).toBeLessThan(4_000);
+      expect(x.body.length).toBeLessThanOrEqual(MAX_ITEM_TEXT + 300);
       expect(x.body.endsWith(findingMarker(x.id))).toBe(true);
       expect(x.full).toBe(long);
     }
-    expect(r1.comments[0]!.body.length).toBeLessThan(4_000);
+    expect(r1.comments[0]!.body.length).toBeLessThanOrEqual(MAX_ITEM_TEXT + 300);
     const r2 = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([]), draft: draft([entry("F1", { body: long })]) });
-    expect(r2.items[0]!.body.length).toBeLessThan(4_000);
+    expect(r2.items[0]!.body.length).toBeLessThanOrEqual(MAX_ITEM_TEXT + 300);
     expect(r2.items[0]!.full).toContain(long);
     expect(ledgerPatch({ head: HEAD }, r1, { reviewId: 1, url: null, how: "created" }, new Map()).items[0]!.body).toBe(long);
   });

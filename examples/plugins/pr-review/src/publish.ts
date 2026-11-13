@@ -16,8 +16,10 @@
  * which commit) or still open (with a link to its earlier comment). A still-open item is not posted again, unless its old thread is
  * outdated; it counts toward the verdict, so `Review passed` means no round-1 issue and no round-2 finding is open, earlier ones included.
  */
-import type { EnvironmentCommand, EvidenceRecord } from "@graphloom/sdk";
+import { MAX_EXECUTOR_INPUT_BYTES, type EnvironmentCommand, type EvidenceRecord } from "@graphloom/sdk";
 import { COMMAND, CREATE_PULL_REVIEW, GET_VIEWER, PART_BASE, PUBLISH_PATCH_FILE, PUBLISH_STAGE, ledgerRef } from "./constants.js";
+import { fitParts, type ItemParts } from "./answertext.js";
+import { clip, clipKeep, withoutFences } from "./escape.js";
 import { partCommands, readParts } from "./parts.js";
 import { anchored, severityLabel, type Draft, type DraftEntry } from "./draft.js";
 import { commandRuns, isObject, producer, succeeded, type CommandRun } from "./evidence.js";
@@ -41,17 +43,46 @@ export const PUBLISH_SCHEMA = "pr-review-publish-v1";
  */
 export const MAX_REVIEW_BODY = 40_000;
 export const MAX_INLINE_COMMENTS = 50;
-const MAX_ITEM_BODY = 3_800;
+/** What one item may take before it is shortened: its text (`MAX_ITEM_TEXT`) and, for a finding, its suggestion block. Far below the 65,536 characters GitHub accepts in a comment. */
+const MAX_ITEM_BODY = MAX_ITEM_TEXT + 2_000;
 /** The least text a compacted item keeps: a one-liner shorter than this says too little to act on. */
 const MIN_ONE_LINER = 80;
+/** Room kept in the executor input for what the plan does not measure (the idempotency key and the like). */
+const INPUT_MARGIN = 1_000;
 
 export const findingMarker = (id: string): string => `<!-- graphloom-finding: ${id} -->`;
+/** An item's posted body: its text, then its marker; a body past what a read keeps leads with the marker too, so the id is still found. */
+export function markedBody(id: string, text: string): string {
+  const m = findingMarker(id);
+  const body = `${text}\n\n${m}`;
+  return body.length > READ_WINDOW ? `${m}\n${body}` : body;
+}
+/** An item's text without its marker or markers. */
+export function unmarkedText(id: string, body: string): string {
+  const m = findingMarker(id);
+  const lead = body.startsWith(`${m}\n`) ? body.slice(m.length + 1) : body;
+  return (lead.endsWith(m) ? lead.slice(0, lead.length - m.length) : lead).trim();
+}
 /** The marker of this run's review of `head`: the head and a nonce of the run (its viewer read's operation), which a stranger cannot know. */
 export const reviewMarker = (head: string, nonce: string): string => `<!-- graphloom-review: ${head} ${nonce} -->`;
 /** The marker publication appends: the last thing in a body. Marker-looking text in an item's content is neutralized and never matches. */
 const MARKER = /<!-- graphloom-finding: ([A-Z][0-9]+) -->$/;
+/** The same marker as the first thing in a body: a read cuts a body at 4,000 characters, so a longer body also leads with it. */
+const LEADING_MARKER = /^<!-- graphloom-finding: ([A-Z][0-9]+) -->(?:\n|$)/;
+/** A body longer than this has lost its trailing marker when read back (the read keeps 4,000 characters). */
+const READ_WINDOW = 3_900;
 /** Content that looks like one of this graph's markers (or any HTML comment) is made inert, so it cannot be taken for a marker or hide text. */
 export const neutralize = (text: string): string => text.replace(/<!--/g, "&lt;!--");
+const SUGGESTION_OMITTED = "(suggested change omitted for size; see the report)";
+/** A posted text shortened to `n` characters: its fenced blocks (a suggestion) go whole, with a note, before its prose is cut at a sentence end or a word boundary; no fence is ever left open. */
+function shrinkPlain(text: string, n: number): string {
+  const noted = text.endsWith(SUGGESTION_OMITTED);
+  const w = noted ? { text: text.slice(0, text.length - SUGGESTION_OMITTED.length).trim(), dropped: true } : withoutFences(text);
+  if (!w.dropped) return clipKeep(text, n);
+  const room = n - SUGGESTION_OMITTED.length - 2;
+  return `${w.text.length <= room ? w.text : clipKeep(w.text, Math.max(1, room))}\n\n${SUGGESTION_OMITTED}`;
+}
+const neutralParts = (p: ItemParts): ItemParts => ({ ...p, head: neutralize(p.head), answer: neutralize(p.answer), cites: p.cites.map(neutralize), proposal: neutralize(p.proposal), ...(p.tail !== undefined ? { tail: neutralize(p.tail) } : {}) });
 
 export interface PublishItem {
   /** `N1`, `Q3` or `F3`: the id its marker carries. */
@@ -68,6 +99,8 @@ export interface PublishItem {
   inline: boolean;
   /** The item's whole text (without its marker) when `body` was compacted to a one-line text to fit the review body; the ledger records it. */
   full?: string;
+  /** The item's text as parts (an answer, its citations, its proposal), which a shortened item is cut by; not part of what is posted or recorded. */
+  parts?: ItemParts;
   /** What the ledger keeps of the item so a later head can find it again (design §9.1). */
   meta?: ItemMeta;
   /** An earlier head's item posted again, because its old thread is outdated. */
@@ -145,7 +178,6 @@ export interface ReviewPlan {
 }
 
 const oneLine = (s: string): string => s.replace(/\s+/g, " ").trim();
-const clip = (s: string, n: number): string => (s.length <= n ? s : `${s.slice(0, n - 1)}…`);
 
 /** The first line of the review: the verdict, and what is open. */
 export const verdictLine = (open: number): string => (open === 0 ? "Review passed" : `Changes requested: ${open} open`);
@@ -154,7 +186,7 @@ function findingBody(e: DraftEntry): { text: string; full?: string } {
   const aspects = e.aspects.length > 0 ? ` · ${e.aspects.join(", ")}` : "";
   const tags = [e.proof?.state === "non-behavioral" ? "non-behavioral" : e.proof?.state === "proven" ? "proven by a failing test" : undefined, e.principle !== undefined ? `breaks principle ${e.principle}` : undefined].filter((t): t is string => t !== undefined);
   const label = `**${e.severity !== undefined ? severityLabel(e.severity) : "[finding]"}**${aspects}${tags.length > 0 ? ` · ${tags.join(" · ")}` : ""}`;
-  const text = `${label}\n\n${clip(neutralize(e.body), MAX_ITEM_TEXT)}`;
+  const text = `${label}\n\n${clipKeep(neutralize(e.body), MAX_ITEM_TEXT)}`;
   const suggestion = e.suggestion !== undefined && e.anchored && e.side === "RIGHT" ? `\n\n\`\`\`suggestion\n${e.suggestion}\n\`\`\`` : "";
   const posted = text.length + suggestion.length <= MAX_ITEM_BODY - 60 ? `${text}${suggestion}` : text;
   // What was cut (the text, or a suggestion that did not fit) is kept whole for the ledger.
@@ -177,6 +209,8 @@ export function planReview(i: {
   /** What the ledger keeps of each new round-2 finding, by id. */
   meta?: ReadonlyMap<string, ItemMeta> | undefined;
   closed?: readonly ClosedFinding[] | undefined;
+  /** The executor input bound in bytes the whole create-pull-review input must fit (default: the executor input bound). */
+  maxInputBytes?: number | undefined;
 }): ReviewPlan {
   const issues = i.round1.issues;
   const priors = [...(i.prior ?? [])];
@@ -187,19 +221,20 @@ export function planReview(i: {
     .filter((l) => l.origin === "round2" && l.status === "open" && l.repost && l.place !== undefined && round === 2)
     .map((l) => {
       const text = neutralize(`**Still open** (first raised on ${l.item.head.slice(0, 7)}).\n\n${l.item.text ?? ""}`.trim());
-      const posted = clip(text, MAX_ITEM_TEXT);
+      const posted = clipKeep(text, MAX_ITEM_TEXT);
       const place = l.place!;
-      return { id: l.id, origin: "round2" as const, body: `${posted}\n\n${findingMarker(l.id)}`, ...(posted !== text ? { full: text } : {}), path: place.path, line: place.endLine, ...(place.endLine > place.line ? { startLine: place.line } : {}), side: place.side, inline: false, repost: true, meta: l.moved?.meta ?? metaOf(l.item) };
+      return { id: l.id, origin: "round2" as const, body: markedBody(l.id, posted), ...(posted !== text ? { full: text } : {}), path: place.path, line: place.endLine, ...(place.endLine > place.line ? { startLine: place.line } : {}), side: place.side, inline: false, repost: true, meta: l.moved?.meta ?? metaOf(l.item) };
     });
   const items: PublishItem[] =
     round === 1
       ? issues.filter((x) => !listed.has(x.id)).map((x) => {
           const text = neutralize(x.body);
-          const posted = clip(text, MAX_ITEM_TEXT);
-          return { id: x.id, origin: "round1" as const, body: `${posted}\n\n${findingMarker(x.id)}`, ...(posted !== text ? { full: text } : {}), ...(x.path !== undefined && x.line !== undefined ? { path: x.path, line: x.line } : {}), side: "RIGHT" as const, inline: false, ...(x.covers !== undefined ? { covers: x.covers } : {}), meta: { key: x.key ?? "", ...(x.path !== undefined ? { side: "RIGHT" as const } : {}) } };
+          const parts = x.parts !== undefined ? neutralParts(x.parts) : undefined;
+          const posted = text.length <= MAX_ITEM_TEXT ? text : parts !== undefined ? fitParts(parts, MAX_ITEM_TEXT) : clipKeep(text, MAX_ITEM_TEXT);
+          return { id: x.id, origin: "round1" as const, body: markedBody(x.id, posted), ...(posted !== text ? { full: text } : {}), ...(parts !== undefined ? { parts } : {}), ...(x.path !== undefined && x.line !== undefined ? { path: x.path, line: x.line } : {}), side: "RIGHT" as const, inline: false, ...(x.covers !== undefined ? { covers: x.covers } : {}), meta: { key: x.key ?? "", ...(x.path !== undefined ? { side: "RIGHT" as const } : {}) } };
         })
       : [
-          ...(i.draft?.comments ?? []).filter((c) => c.kind === "finding").map((e) => { const b = findingBody(e); return ({ id: e.id, origin: "round2" as const, body: `${b.text}\n\n${findingMarker(e.id)}`, ...(b.full !== undefined ? { full: b.full } : {}), path: e.path, line: e.line, ...(e.startLine !== undefined ? { startLine: e.startLine } : {}), side: e.side, inline: false, ...(i.meta?.has(e.id) ? { meta: i.meta.get(e.id)! } : {}) }); }),
+          ...(i.draft?.comments ?? []).filter((c) => c.kind === "finding").map((e) => { const b = findingBody(e); return ({ id: e.id, origin: "round2" as const, body: markedBody(e.id, b.text), ...(b.full !== undefined ? { full: b.full } : {}), path: e.path, line: e.line, ...(e.startLine !== undefined ? { startLine: e.startLine } : {}), side: e.side, inline: false, ...(i.meta?.has(e.id) ? { meta: i.meta.get(e.id)! } : {}) }); }),
           ...reposts,
         ];
   const anchoredIds = new Set<string>([
@@ -246,9 +281,9 @@ export function planReview(i: {
     pending = items.filter((x) => !x.inline);
   }
   if (size(pending) > budget) {
-    const textOf = (x: PublishItem): string => x.body.slice(0, x.body.length - findingMarker(x.id).length).trim();
+    const textOf = (x: PublishItem): string => unmarkedText(x.id, x.body);
     let limit = MAX_ITEM_BODY;
-    const compacted = (l: number): string[] => pending.map((x) => `${clip(oneLine(textOf(x)), l)} ${findingMarker(x.id)}`);
+    const compacted = (l: number): string[] => pending.map((x) => (x.parts !== undefined ? markedBody(x.id, fitParts(x.parts, l)) : `${clip(oneLine(textOf(x)), l)} ${findingMarker(x.id)}`));
     while (limit >= MIN_ONE_LINER && compacted(limit).reduce((n, b) => n + b.length + 2, 0) > budget) limit -= 50;
     if (limit < MIN_ONE_LINER) problem = `${pending.length} items fit neither inline nor as one-line texts in the review body (${pending.map((x) => x.id).join(", ")}): posting their ids only would hide what is requested`;
     else {
@@ -261,8 +296,40 @@ export function planReview(i: {
       });
     }
   }
-  const body = [...sections, ...pending.map((x) => x.body)].join("\n\n");
-  const comments = items.filter((x) => x.inline).map((x) => ({ path: x.path!, line: x.line!, side: x.side, ...(x.startLine !== undefined && x.startLine < x.line! ? { startLine: x.startLine } : {}), body: x.body }));
+  const assemble = (): { body: string; comments: ReviewPlan["comments"] } => ({
+    body: [...sections, ...items.filter((x) => !x.inline).map((x) => x.body)].join("\n\n"),
+    comments: items.filter((x) => x.inline).map((x) => ({ path: x.path!, line: x.line!, side: x.side, ...(x.startLine !== undefined && x.startLine < x.line! ? { startLine: x.startLine } : {}), body: x.body })),
+  });
+  // The executor takes at most `maxInputBytes` of JSON for the whole input: body, every inline comment and the envelope. Items,
+  // inline ones included, are shortened largest first by the rules of an item that does not fit (the proposal, the end of the
+  // answer at a sentence end or a word boundary with its note, citations last) until the input fits; none is dropped.
+  if (problem === undefined) {
+    const maxBytes = (i.maxInputBytes ?? MAX_EXECUTOR_INPUT_BYTES) - INPUT_MARGIN;
+    const inputBytes = (): number => {
+      const a = assemble();
+      return Buffer.byteLength(JSON.stringify(createInput({ ...i.pull, head: i.head }, { round, body: a.body, comments: a.comments } as ReviewPlan)), "utf8");
+    };
+    const exhausted = new Set<string>();
+    let bytes = inputBytes();
+    for (let guard = 0; bytes > maxBytes && guard < 10_000; guard += 1) {
+      const candidates = items.filter((x) => !exhausted.has(x.id));
+      const biggest = candidates.reduce<PublishItem | undefined>((m, x) => (m === undefined || Buffer.byteLength(x.body, "utf8") > Buffer.byteLength(m.body, "utf8") ? x : m), undefined);
+      if (biggest === undefined) break;
+      const text = unmarkedText(biggest.id, biggest.body);
+      const target = Math.floor(text.length * 0.85);
+      const shorter = biggest.parts !== undefined ? fitParts(biggest.parts, target) : target >= MIN_ONE_LINER ? shrinkPlain(text, target) : text;
+      if (shorter.length >= text.length) {
+        exhausted.add(biggest.id);
+        continue;
+      }
+      biggest.full ??= text;
+      biggest.body = markedBody(biggest.id, shorter);
+      // A parts item is cut from its parts, so the next cut starts from the whole again, not from this one.
+      bytes = inputBytes();
+    }
+    if (bytes > maxBytes) problem = `the review's input is ${bytes} bytes, over the ${maxBytes} the executor takes, with every one of its ${items.length} item${items.length === 1 ? "" : "s"} shortened as far as it goes: posting fewer items or ids only would hide what is requested`;
+  }
+  const { body, comments } = assemble();
   return { round, ...(i.round1.skipped !== undefined ? { round1Skipped: true as const } : {}), verdict, open, body, comments, items, firstLine, priors, closed: [...(i.closed ?? [])], ...(problem !== undefined ? { problem } : {}) };
 }
 
@@ -324,7 +391,7 @@ export function commentIds(items: readonly unknown[], reviewId: number): Map<str
   const out = new Map<string, number>();
   for (const c of items) {
     if (!isObject(c) || c.reviewId !== reviewId || typeof c.id !== "number" || typeof c.body !== "string") continue;
-    const m = MARKER.exec(c.body.trimEnd());
+    const m = MARKER.exec(c.body.trimEnd()) ?? LEADING_MARKER.exec(c.body);
     if (m !== null && !out.has(m[1]!)) out.set(m[1]!, c.id);
   }
   return out;
@@ -364,7 +431,7 @@ export function ledgerPatch(pr: Pick<PullRequest, "head">, plan: ReviewPlan, pos
     open: plan.open,
     reviewId: posted.reviewId,
     url: posted.url,
-    items: plan.items.map((x) => ({ id: x.id, origin: x.origin, path: x.path ?? null, /** The item's first line (a range's last is `endLine`; GitHub's own convention is the end, kept for the posted comment only). */ line: x.startLine ?? x.line ?? null, ...(x.line !== undefined ? { endLine: x.line } : {}), inline: x.inline, commentId: x.inline ? ids.get(x.id) ?? null : null, ...(x.full !== undefined ? { body: x.full } : {}), text: x.full ?? x.body.slice(0, x.body.length - findingMarker(x.id).length).trim(), ...(x.repost === true ? { repost: true } : {}), ...(x.covers !== undefined ? { covers: x.covers } : {}), ...(x.meta !== undefined ? { meta: x.meta } : {}) })),
+    items: plan.items.map((x) => ({ id: x.id, origin: x.origin, path: x.path ?? null, /** The item's first line (a range's last is `endLine`; GitHub's own convention is the end, kept for the posted comment only). */ line: x.startLine ?? x.line ?? null, ...(x.line !== undefined ? { endLine: x.line } : {}), inline: x.inline, commentId: x.inline ? ids.get(x.id) ?? null : null, ...(x.full !== undefined ? { body: x.full } : {}), text: x.full ?? unmarkedText(x.id, x.body), ...(x.repost === true ? { repost: true } : {}), ...(x.covers !== undefined ? { covers: x.covers } : {}), ...(x.meta !== undefined ? { meta: x.meta } : {}) })),
     priors: plan.priors.map((l) => ({ id: l.id, origin: l.origin, status: l.status, carried: l.carried, reason: l.reason, ...(l.outdated !== undefined ? { outdated: l.outdated } : {}), ...(l.moved !== undefined ? { moved: l.moved } : {}), ...(l.covered !== undefined && l.covered.length > 0 ? { covers: l.covered.map((c) => c.id) } : {}) })),
     closed: plan.closed.map((c) => ({ id: c.id, path: c.path, line: c.line, endLine: c.endLine, side: c.side, text: c.text, meta: c.meta })),
   };
@@ -590,7 +657,7 @@ export function publishPlan(evidence: readonly EvidenceRecord[], analysis: Analy
         return [f.id, findingMeta(e === undefined ? f : { ...f, path: e.path, side: e.side, startLine: e.startLine ?? e.line, endLine: e.line }, files)] as const;
       }),
   );
-  const closed = all.filter((f) => f.state === "dismissed").map((f): ClosedFinding => ({ id: f.id, path: f.path, line: f.startLine, endLine: f.endLine, side: f.side, text: clip(neutralize(f.content), MAX_ITEM_TEXT), meta: findingMeta(f, files) }));
+  const closed = all.filter((f) => f.state === "dismissed").map((f): ClosedFinding => ({ id: f.id, path: f.path, line: f.startLine, endLine: f.endLine, side: f.side, text: clipKeep(neutralize(f.content), MAX_ITEM_TEXT), meta: findingMeta(f, files) }));
   const prior = priorLines(registry, pr, round1.value, records, files, analysis.snapshot.threads);
   return { state: "ready", round1: round1.value, plan: planReview({ pull: pr, head: pr.head, nonce, round1: round1.value, draft: w.writes.draft, prior, meta, closed }) };
 }

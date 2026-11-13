@@ -8,6 +8,8 @@
  * from the ledger, at most 1,200 characters.
  */
 import { ASPECTS, DRAFT_ORDER, type Aspect } from "./aspects.js";
+import { citationLinks, composeParts, proposalText, type GithubPin, type ProposalLike } from "./answertext.js";
+import { clip } from "./escape.js";
 import { proofOf, type Proof } from "./proof.js";
 import { findingsOf, keptSuggestion, MAX_SWEEP_PASSES, SEVERITIES, type AspectRecord, type Finding, type Severity } from "./review.js";
 import type { ScopeRecord } from "./reviewscope.js";
@@ -19,7 +21,6 @@ export const MAX_SUMMARY_CHARS = 1_200;
 export type Verdict = "approve" | "comment" | "request-changes";
 
 const oneLine = (s: string): string => s.replace(/\s+/g, " ").trim();
-const clip = (s: string, n: number): string => (s.length <= n ? s : `${s.slice(0, n - 1)}…`);
 const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
 
 /** What a posted comment must not carry: a path inside `.graphloom/` (bookkeeping of this tool). */
@@ -198,7 +199,7 @@ function entryOf(members: readonly Finding[], files: readonly PullFile[], reason
 // ---- the Q&A items ----
 
 export interface QaInput {
-  questions: Array<{ id: string; type: string; item?: string; symbol?: string; functionPath?: string; text: string; answer?: { answer?: string; status?: string } }>;
+  questions: Array<{ id: string; type: string; item?: string; symbol?: string; functionPath?: string; text: string; answer?: { answer?: string; status?: string; citations?: Array<{ path: string; start: number; end: number; tree: string }>; inventory?: Array<{ name: string; version: string }>; proposal?: ProposalLike } }>;
   symbols: Array<{ id: string; path: string; startLine: number; endLine: number }>;
 }
 
@@ -218,7 +219,7 @@ export function qaInputFrom(json: string | undefined): QaInput | undefined {
   }
 }
 
-function questionEntries(qa: QaInput | undefined, cites: ItemCites, files: readonly PullFile[]): { selected: DraftEntry[]; rest: DraftEntry[] } {
+function questionEntries(qa: QaInput | undefined, cites: ItemCites, files: readonly PullFile[], github: GithubPin): { selected: DraftEntry[]; rest: DraftEntry[] } {
   const selected: DraftEntry[] = [];
   const rest: DraftEntry[] = [];
   for (const q of qa?.questions ?? []) {
@@ -236,7 +237,7 @@ function questionEntries(qa: QaInput | undefined, cites: ItemCites, files: reado
       side: "RIGHT",
       line: at.line,
       anchored: anchored(file, "RIGHT", at.line, at.line),
-      body: scrub(`${oneLine(q.text)}\n\n${q.answer.status === "needs author" ? "What was checked" : `Answer (${q.answer.status})`}: ${clip(oneLine(q.answer.answer ?? ""), 600)}`),
+      body: scrub(composeParts({ id: q.id, head: oneLine(q.text), label: q.answer.status === "needs author" ? "What was checked" : `Answer (${q.answer.status})`, answer: oneLine(q.answer.answer ?? ""), cites: citationLinks(q.answer.citations ?? [], github, q.answer.inventory ?? []), proposal: proposalText(q.answer.proposal) })),
     };
     (q.answer.status === "needs author" ? selected : rest).push(entry);
   }
@@ -277,7 +278,7 @@ export function composeDraft(i: DraftInput): Draft {
   const byAspect = (a: DraftEntry, b: DraftEntry): number => aspectIndex(a.aspects[0]!) - aspectIndex(b.aspects[0]!) || Number(a.id.slice(1)) - Number(b.id.slice(1));
   comments.sort(byAspect);
   judgment.sort(byAspect);
-  const q = questionEntries(i.qa, i.itemCites ?? {}, i.files);
+  const q = questionEntries(i.qa, i.itemCites ?? {}, i.files, { owner: i.pull.owner, repo: i.pull.repo, head: i.head, base: i.base });
   const dismissed = findings.filter((f) => f.state === "dismissed");
   const nits = i.records.reduce((n, r) => n + r.passes.reduce((m, p) => m + p.nits, 0), 0);
   const unsaturated = i.records.filter((r) => r.unsaturated).map((r) => r.aspect);
