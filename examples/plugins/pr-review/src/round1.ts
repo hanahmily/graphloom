@@ -10,6 +10,8 @@
  * The computation is a pure function over the two artifacts, recorded once as `round1.json`; the validator recomputes it.
  */
 import { isTestPath } from "./answers.js";
+import { clip } from "./escape.js";
+import { citationLinks, composeParts, proposalText, type GithubPin, type ItemParts, type ProposalLike } from "./answertext.js";
 import { anchored, scrub, type ItemCites } from "./draft.js";
 import type { FullPack } from "./packs.js";
 import { effectiveConclusion, brokenNote, parseNecessityRecord, NECESSITY_ID, ROUNDS_SKIP_REASON } from "./necessity.js";
@@ -41,6 +43,8 @@ export interface Round1Issue {
   status: string;
   /** The comment text, without its marker. */
   body: string;
+  /** The body as parts (the answer whole, its citations, its proposal), so that publishing shortens by them when the review body has no room. */
+  parts?: ItemParts;
   path?: string;
   line?: number;
   /** The place lies inside a hunk of the file's patch at the head; otherwise the issue goes in the review body. */
@@ -93,7 +97,6 @@ export interface Round1Record {
 export const round1Skipped = (head: string): Round1Record => ({ schema: ROUND1_SCHEMA, head, necessity: "skipped", issues: [], skipped: ROUNDS_SKIP_REASON });
 
 const oneLine = (s: string): string => s.replace(/\s+/g, " ").trim();
-const clip = (s: string, n: number): string => (s.length <= n ? s : `${s.slice(0, n - 1)}…`);
 const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
 
@@ -105,7 +108,7 @@ interface QaQuestion {
   symbol?: string;
   functionPath?: string;
   text: string;
-  answer?: { answer: string; status: string; none_found: boolean; citations: Array<{ path: string; start: number; end: number; tree: string }> };
+  answer?: { answer: string; status: string; none_found: boolean; citations: Array<{ path: string; start: number; end: number; tree: string }>; inventory: Array<{ name: string; version: string }>; proposal?: ProposalLike };
 }
 
 function qaOf(json: string): { questions: QaQuestion[]; symbols: Array<{ id: string; path: string; startLine: number; qualified: string }> } | undefined {
@@ -127,7 +130,7 @@ function qaOf(json: string): { questions: QaQuestion[]; symbols: Array<{ id: str
       ...(typeof q.functionPath === "string" ? { functionPath: q.functionPath } : {}),
       text: str(q.text),
       ...(a !== undefined && typeof a.status === "string"
-        ? { answer: { answer: str(a.answer), status: a.status, none_found: a.none_found === true, citations: (Array.isArray(a.citations) ? a.citations.filter(isObj) : []).map((c) => ({ path: str(c.path), start: Number(c.start) || 0, end: Number(c.end) || 0, tree: str(c.tree) })) } }
+        ? { answer: { answer: str(a.answer), status: a.status, none_found: a.none_found === true, citations: (Array.isArray(a.citations) ? a.citations.filter(isObj) : []).map((c) => ({ path: str(c.path), start: Number(c.start) || 0, end: Number(c.end) || 0, tree: str(c.tree) })), inventory: (Array.isArray(a.inventory) ? a.inventory.filter(isObj) : []).map((d) => ({ name: str(d.name), version: str(d.version) })), ...(isObj(a.proposal) ? { proposal: a.proposal as ProposalLike } : {}) } }
         : {}),
     };
   });
@@ -155,8 +158,12 @@ function outsideEquivalents(citations: ReadonlyArray<{ path: string; start: numb
  * Several symbols citing the same outside equivalent are one issue that lists them. Only issues that are solely an
  * `existing` issue merge: the first of a group (in question order) carries it and `covers` the rest.
  */
-/** The longest item text the review posts (publish clips beyond it), so a merged comment is built to fit it. */
-export const MAX_ITEM_TEXT = 1_800;
+/**
+ * The longest item text the review posts (publish shortens beyond it), so a merged comment is built to fit it. A maximal
+ * answer (4,000 characters), up to twelve citation links of about 250 characters, and a proposal of eight split functions fit
+ * whole, and it stays far under the 65,536 characters GitHub accepts in one comment.
+ */
+export const MAX_ITEM_TEXT = 12_000;
 const BODY_ROOM = MAX_ITEM_TEXT - 50;
 
 const equivText = (c: Round1Covered, n: number): string => c.equivalents.slice(0, n).map((e) => `\`${e.replace(/^dependency:/, "")}\``).join(", ");
@@ -226,6 +233,8 @@ function mergeSharedEquivalents(issues: Round1Issue[], outsideOf: ReadonlyMap<st
       return { issue: x, covered: { id: x.id, symbol: nameOf(x), equivalents: (outsideOf.get(x.id) ?? []).slice(0, 3), excerpt: clip(oneLine(q?.answer?.answer ?? ""), 200) } };
     });
     const fit = coveredBody(host.body, all.map((c) => c.covered));
+    const tail = fit.body.slice(host.body.length).trim();
+    if (host.parts !== undefined && tail !== "") host.parts = { ...host.parts, tail, tailIds: fit.covered.map((c) => c.id) };
     host.body = fit.body;
     host.covered = fit.covered;
     host.covers = fit.covered.map((c) => c.id);
@@ -249,6 +258,8 @@ export interface Round1Input {
   packs: readonly FullPack[];
   /** The round-1 issues earlier heads left open, as the ledger holds them (empty for a first run). */
   prior?: readonly PriorItem[];
+  /** The pinned commits a citation is linked at (the pull request and its head and base); without it citations are named, not linked. */
+  github?: GithubPin;
 }
 
 /**
@@ -296,14 +307,22 @@ export function round1Record(i: Round1Input): Round1Record | undefined {
     const sym = q.symbol !== undefined ? qa.symbols.find((s) => s.id === q.symbol) : undefined;
     const cite = i.itemCites[q.item];
     const at = sym !== undefined ? { path: sym.path, line: sym.startLine } : q.functionPath !== undefined ? { path: q.functionPath, line: 1 } : cite !== undefined ? { path: cite.path, line: cite.start } : undefined;
-    const cited = a.citations.filter((c) => c.path !== "").slice(0, 3).map((c) => `\`${c.path}${c.start > 0 ? `:${c.start}` : ""}\``);
     if (outside.length > 0) outsideOf.set(q.id, outside);
+    const parts: ItemParts = {
+      id: q.id,
+      head: scrub(`**${kinds.map((k) => ROUND1_LABEL[k]).join("; ")}** (${q.id}). ${oneLine(q.text)}`),
+      label: a.status === "needs author" ? "What was checked" : `Answer (${a.status})`,
+      answer: scrub(oneLine(a.answer)),
+      cites: citationLinks(a.citations, i.github, a.inventory).map(scrub),
+      proposal: scrub(proposalText(a.proposal)),
+    };
     issues.push({
       id: q.id,
       key: q.stable,
       kinds,
       status: a.status,
-      body: scrub(`**${kinds.map((k) => ROUND1_LABEL[k]).join("; ")}** (${q.id}). ${oneLine(q.text)}\n\n${a.status === "needs author" ? "What was checked" : `Answer (${a.status})`}: ${clip(oneLine(a.answer), 600)}${cited.length > 0 && (kinds.includes("existing") || kinds.includes("missing-test")) ? `\n\nSee ${cited.join(", ")}.` : ""}`),
+      body: composeParts(parts),
+      parts,
       ...(at !== undefined ? place(at.path, at.line) : { anchored: false }),
     });
   }

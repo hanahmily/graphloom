@@ -2535,12 +2535,20 @@ head and the event is always `COMMENT`.
    - each item ends with its marker, `<!-- graphloom-finding: N1 -->`,
      `Q3` or `F3`, and the body's second line is
      `<!-- graphloom-review: <head sha> <nonce> -->`, which marks the head and this run
-     (the nonce is the operation id of the stage's viewer read, so a stranger cannot know it). Every posted
-     body, round 1's and round 2's, inline or not, is clipped before its marker is
-     appended (a read cuts a body at 4,000 characters), the whole text is kept for the
-     ledger, and the input fits an executor's 256,000 bytes. Marker-looking text in an
-     item's content is neutralized (`<!--` becomes `&lt;!--`), and an id is read back
-     only from the marker that ends a comment's body.
+     (the nonce is the operation id of the stage's viewer read, so a stranger cannot know it). Since 0.26.1 a
+     round-1 issue carries its **whole answer**, then **every citation** as a link to the
+     file at the pinned commit of its tree (head or base; a dependency as `name@version`
+     text), then the proposal when the answer has one (a split, a test outline or an
+     assertion, as the Q&A shows it); nothing is clipped to a few hundred characters. An
+     item may take at most 12,000 characters (`MAX_ITEM_TEXT`): a maximal answer (4,000
+     characters), a dozen citation links and a proposal fit whole, and GitHub accepts
+     65,536 in one comment. A longer posted body, round 1's or round 2's, inline or not,
+     is shortened at a sentence end, else at a word boundary, never inside a word, before
+     its marker is appended; the whole text is kept for the ledger and the input fits an
+     executor's 256,000 bytes. A read cuts a body at 4,000 characters, so a body longer
+     than that also leads with its marker, and an id is read back from the marker that
+     starts or ends a comment's body. Marker-looking text in an item's content is
+     neutralized (`<!--` becomes `&lt;!--`).
 2. **Reconcile before posting** (core design: reconcile ambiguous effects before
    retrying). The stage first reads who the credential is (`graphloom.github/get-viewer`,
    `GET /user`), then the pull request's reviews (`list-pull-reviews`, paged by
@@ -2560,9 +2568,14 @@ head and the event is always `COMMENT`.
    from its marker. A missing id is never recorded as null: the comments are read again
    (at most three whole reads), then the supervisor gets the missing item ids.
    Items not inline are never reduced to ids: when they do not all fit the body, an
-   anchored one moves inline, the rest shrink evenly to one-line texts with their markers,
-   and the ledger keeps each compacted item's whole text; if even that cannot fit, the
-   stage escalates instead of posting.
+   anchored one moves inline, the rest shrink evenly with their markers, and the ledger
+   keeps each shortened item's whole text; if even that cannot fit, the stage escalates
+   instead of posting. A round-1 issue is shortened by what matters least first: the
+   proposal's detail (cut, then replaced by a note), then the end of the answer, cut at
+   a sentence end, else a word boundary, followed by `(answer shortened; the full answer
+   is in the report's Q&A, <id>)`; its citation links stay in preference to the proposal
+   and, only when even one link per line is too much, all but the first are counted
+   (`and <n> more in the report's Q&A, <id>`). Nothing is cut without saying so.
 4. **Record.** The review id and the ids are evidence (the executor's and the
    reads' results) and are written to the ledger by `ledger-published`: one
    more commit that sets `reviewId` (and `reviewed`, `round1`, `verdict`,
@@ -3829,6 +3842,18 @@ code and the earlier issues are the only ones whose answers can differ.
   ([§6.7](#67-delta-report), [§19](#19-deferred-items)).
 - **Ledger:** each ledger commit now also holds `necessity.json`, so the next
   head can carry N1. A ledger from before has none and falls back once.
+
+### Version 0.26.1: whole answers in the posted review
+
+The maintainer saw a posted review whose Q21 answer stopped mid-sentence, with its
+citations and its proposal gone. Round 1 clipped every answer to 600 characters, then
+publication clipped each item again, both mid-word, and only `existing` and
+`missing-test` issues named up to three bare paths. Now a round-1 issue (and the
+draft's question entry) carries the whole answer, every citation as a link at the
+pinned commit, and the proposal ([§8.5](#85-publish)); an item may take 12,000
+characters; a shortening is at a sentence end or a word boundary and says so; a body
+longer than 4,000 characters leads with its marker too, because the reads of a review's
+comments keep only 4,000. No step, name or order changes.
 
 ### Version 0.24: reproducing tests (part 2, first slice)
 
