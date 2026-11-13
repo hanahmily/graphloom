@@ -256,4 +256,9 @@ describe("a suggestion block is atomic when a posted body shrinks", () => {
     expect(out).not.toContain("```");
     expect(clipKeep(text, text.length)).toBe(text);
   });
+
+  it("clipKeep never retreats to a sentence end inside an earlier block", () => {
+    const text = `Intro\n\`\`\`js\n// A sentence.\n\`\`\`\n${"tail ".repeat(30)}`;
+    for (let n = 20; n < text.length; n += 1) expect(unclosed(clipKeep(text, n)), `n=${n}`).toBe(false);
+  });
 });

@@ -75,12 +75,18 @@ export function withoutFences(text: string): { text: string; dropped: boolean } 
  */
 export function clipKeep(text: string, n: number): string {
   if (text.length <= n) return text;
-  const inside = fencedBlocks(text).find(([s, e]) => s < n && e > n - 1);
-  if (inside !== undefined) {
-    const before = text.slice(0, inside[0]).trimEnd();
+  const beforeBlock = (s: number): string => {
+    const before = text.slice(0, s).trimEnd();
     return before.length <= n - 1 ? (before === "" ? "…" : `${before}…`) : clipKeep(before, n);
-  }
+  };
+  const blocks = fencedBlocks(text);
+  const inside = blocks.find(([s, e]) => s < n && e > n - 1);
+  if (inside !== undefined) return beforeBlock(inside[0]);
   const c = cutAt(text, Math.max(0, n - 1));
+  // cutAt may retreat to a boundary inside an earlier block: check where the cut actually falls.
+  const at = c.text.length;
+  const back = blocks.find(([s, e]) => s < at && e > at);
+  if (back !== undefined) return beforeBlock(back[0]);
   return c.sentence ? c.text : `${c.text}…`;
 }
 
