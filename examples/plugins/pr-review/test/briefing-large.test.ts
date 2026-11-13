@@ -19,6 +19,11 @@ describe("the briefing in large mode (design 6.1, 6.9, 6.10)", () => {
     const a = assignmentOf(reporters[0]!);
     expect(a).toContain("The first fields of your result are a briefing");
     expect(a).toContain('"whatsNew" (3 to 5 bullets');
+    for (const field of ['"title"', '"overview"', '"coreFiles"', '"feature"']) expect(a).toContain(field);
+    // The checker judges each change's title and sentence as part of its W claim.
+    const checkers = sim.jobs.filter((j) => j.resultSchema === "claim-check-v1");
+    expect(checkers.length).toBeGreaterThan(0);
+    expect(assignmentOf(checkers[0]!)).toContain("Its card says:");
     expect(a).toContain('"features" (at most 3');
     expect(a).toContain('"check" (five lists');
     expect(a).toContain('"areas": one entry for each area id in the digest');

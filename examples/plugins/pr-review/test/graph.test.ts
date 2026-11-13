@@ -139,7 +139,7 @@ describe("the report scenario, end to end through the graph", () => {
     const written = sim.written!;
     const json = JSON.parse(written.json) as Record<string, unknown>;
     expect(json.schema).toBe("pr-change-report-v1");
-    expect(Object.keys(json).sort()).toEqual(["briefing", "checks", "commits", "facts", "files", "measurements", "mode", "notes", "pull", "removed", "removedParts", "schema", "scope", "sections", "summary"]);
+    expect(Object.keys(json).sort()).toEqual(["briefing", "cards", "checks", "commits", "facts", "files", "measurements", "mode", "notes", "pull", "removed", "removedParts", "schema", "scope", "sections", "summary"]);
     expect(written.markdown).toMatch(/^# apache\/skywalking-banyandb#7 at 0123456789ab \(base fedcba987654\)\nContents: Briefing · Appendix \(Report · Measurements · Q&A\)/);
     expect(written.markdown).toMatch(/\n# Briefing\n[\s\S]*\n# Appendix\n[\s\S]*\n## Report\n[\s\S]*\n## Measurements\n[\s\S]*\n## Q&A\n/);
     expect(written.markdown).not.toMatch(/verdict|severity|request-changes|\bapprove\b/i);

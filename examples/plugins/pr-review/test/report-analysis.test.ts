@@ -78,7 +78,7 @@ const report = (over: Partial<ReporterOutput> = {}, item: ReportItem = change())
   }),
   notes: [],
   ...emptyBriefing(),
-  whatsNew: [{ text: "Reports a failed batch.", cites: [at("CHANGES.md", 4)] }],
+  whatsNew: [{ text: "Reports a failed batch.", cites: [at("CHANGES.md", 4)], title: "Changelog: notes the failed-batch reply", overview: "The changelog did not mention it; now it does.", coreFiles: ["CHANGES.md"], feature: "" }],
   ...over,
 });
 const problems = (r: ReporterOutput, c: ReportContext = ctx): string[] => reportProblems(r, c);

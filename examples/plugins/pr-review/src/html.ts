@@ -11,6 +11,7 @@
  * and its files on GitHub at the pinned head and base, and to the other of the two report files. `htmlProblems` enforces that on the written bytes.
  */
 import { CHECK_LISTS, CHECK_TITLES, type Bullet, type FinalBriefing, type FinalFeature } from "./briefing.js";
+import type { ChangeCard } from "./cards.js";
 import { featureSvg } from "./flowlayout.js";
 import { stateIds, type DiagramsDoc, type DrawnDiagram } from "./diagrams.js";
 import type { FinalItem, RemovedItem, RemovedPart, StateEntry } from "./report.js";
@@ -47,6 +48,8 @@ export interface ReportDoc {
   removedParts: RemovedPart[];
   /** The briefing fields the claim check left standing (design §6.1). */
   briefing: FinalBriefing;
+  /** The change cards' data, computed by plugin code when `report.json` was written (design §6.11); absent in a report written before 0.25. */
+  cards?: ChangeCard[];
   /** The lines added and deleted by kind of file, counted by plugin code (design §6.1). */
   scope: Scope;
   /** The drawings of the diagram job (design §6.10): the skill's embedded SVGs, or the plugin's note. */
@@ -308,7 +311,9 @@ function overviewHtml(r: ReportDoc): string {
 }
 
 function whatsNewHtml(b: FinalBriefing, g: Github): string {
-  return b.whatsNew.length === 0 ? para("None stated.") : `<ul class="plain new">${b.whatsNew.map((w, n) => `<li id="W${n + 1}"><span class="rid">W${n + 1}</span> ${esc(w.text)} ${citesHtml(w.cites, g)}</li>`).join("")}</ul>`;
+  return b.whatsNew.length === 0
+    ? para("None stated.")
+    : `<ul class="plain new">${b.whatsNew.map((w, n) => `<li id="W${n + 1}"><span class="rid">W${n + 1}</span> <strong>${esc(w.title ?? "")}</strong> ${w.overview !== undefined ? esc(w.overview) : ""} <span class="muted">Capability:</span> ${esc(w.text)} ${citesHtml(w.cites, g)}${w.coreFiles !== undefined && w.coreFiles.length > 0 ? ` <span class="muted">core: ${w.coreFiles.map((p) => `<code>${esc(p)}</code>`).join(" ")}</span>` : ""}</li>`).join("")}</ul>`;
 }
 
 function scopeHtml(sc: Scope): string {
@@ -577,7 +582,7 @@ function qaHtml(r: ReportDoc, qa: QaDoc | undefined, g: Github): string {
   const asked = qa.questions.filter((q) => q.id !== NECESSITY_ID);
   const count = (s: string): number => asked.filter((q) => q.answer?.status === s).length;
   // The items the questions are about: the report's, and in a large report the high-level changes (W1…, the briefing's bullets).
-  const items = new Map([...r.sections.flatMap((s) => s.items).map((i) => [i.id, i] as const), ...r.briefing.whatsNew.map((w, n) => [`W${n + 1}`, w] as const)]);
+  const items = new Map<string, { text: string; cites: Bullet["cites"] }>([...r.sections.flatMap((s) => s.items).map((i) => [i.id, i] as const), ...r.briefing.whatsNew.map((w, n) => [`W${n + 1}`, w] as const)]);
   const groups = new Map<string, typeof asked>();
   for (const q of asked) groups.set(q.item, [...(groups.get(q.item) ?? []), q]);
   const body = [

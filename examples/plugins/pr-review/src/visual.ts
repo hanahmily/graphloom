@@ -8,7 +8,8 @@
  * anything longer is a tooltip (an SVG `<title>`, an HTML `title` attribute) and is in the appendix, which stays the
  * full detail. Plugin code only, deterministic, no script: every text goes through `esc`.
  */
-import { CHECK_LISTS, type CheckList } from "./briefing.js";
+import { CHECK_LISTS, type CheckList, type FinalFeature } from "./briefing.js";
+import type { ChangeCard, Excerpt } from "./cards.js";
 import type { DrawnDiagram } from "./diagrams.js";
 import type { Draft } from "./draft.js";
 import { clip, esc } from "./escape.js";
@@ -151,16 +152,70 @@ function verdictSection(i: HtmlInput, l: VisualLinks): string {
 
 // ---- 3. data-flow diagrams ----
 
-function flowsSection(r: ReportDoc): string {
+/** One feature's data-flow diagram with its name as the only caption; the summary, and the reason a drawing is the plugin's own, are in the tooltip (and in the appendix). */
+function flowFigure(r: ReportDoc, f: FinalFeature, k: number): string {
+  const d: DrawnDiagram | undefined = r.diagrams?.features[f.id];
+  const svg = d?.via === "diagram-design" ? d.svg : featureSvg(f, `fl${k + 1}`);
+  const tip = d?.via === "plugin" ? `${f.summary} (${d.note})` : f.summary;
+  return `<div class="flow" id="${esc(f.id)}"><div class="cap" title="${esc(tip)}"><span class="rid">${esc(f.id)}</span> ${esc(clip(f.name, 80))}</div><div class="scroll">${svg}</div></div>`;
+}
+
+const lineMark = { add: "+", del: "-", ctx: " " } as const;
+
+/** One cite's excerpt: its GitHub link, the patch lines it covers with their numbers and marks in a `<pre>`, and what the bounds left out. */
+function excerptHtml(e: Excerpt, l: VisualLinks): string {
+  const width = String(Math.max(...e.lines.map((x) => x.line))).length;
+  const pre = e.lines.map((x) => `<span class="l ${x.kind}">${esc(`${lineMark[x.kind]} ${String(x.line).padStart(width, " ")}  ${x.text}`)}</span>`).join("");
+  const base = e.cite.side === "base" ? ' <span class="muted">(base side)</span>' : "";
+  return `<div class="ex"><div class="exh">${l.cite(e.cite)}${base}</div><pre>${pre}</pre>${e.more > 0 ? `<div class="muted">… ${e.more} more line${e.more === 1 ? "" : "s"}, at the link</div>` : ""}</div>`;
+}
+
+/** A change's card (design §6.11): id and title, its one sentence, its diagram, core files, the files synced along, and the cited code. */
+function changeCard(r: ReportDoc, c: ChangeCard, n: number, l: VisualLinks): string {
+  const cites = r.briefing.whatsNew[n]?.cites ?? [];
+  const feature = c.feature === "" ? undefined : r.briefing.features.find((f) => f.id === c.feature);
+  const fileCite = (path: string, lines: boolean): { path: string; side: "head" | "base"; start: number; end: number } => {
+    const own = lines ? cites.find((x) => x.path === path && x.start >= 1) : undefined;
+    if (own !== undefined) return own;
+    const removed = r.files.find((f) => f.path === path)?.status === "removed";
+    return { path, side: removed ? "base" : "head", start: 0, end: 0 };
+  };
+  const core = c.core.map((p) => `<span class="corechip" title="core file: carries the change's logic">${l.cite(fileCite(p, true))}</span>`).join("");
+  const alsoCount = c.synced.length + c.syncedMore;
+  const also =
+    alsoCount === 0
+      ? ""
+      : `<details class="also"><summary>also changed (${alsoCount})</summary><div class="chips">${c.synced.map((p) => `<span class="corechip sm">${l.cite(fileCite(p, false))}</span>`).join("")}${c.syncedMore > 0 ? `<span class="muted">+${c.syncedMore} more</span>` : ""}</div></details>`;
+  const shown = c.excerpts.reduce((a, e) => a + e.lines.length, 0);
+  const total = shown + c.excerpts.reduce((a, e) => a + e.more, 0) + c.excerptsMore;
+  const code =
+    c.excerpts.length === 0
+      ? ""
+      : `<details class="code"><summary>cited code (${total} line${total === 1 ? "" : "s"})</summary>${c.excerpts.map((e) => excerptHtml(e, l)).join("")}${c.excerptsMore > 0 ? `<div class="muted">… ${c.excerptsMore} more lines of other cites, at their links</div>` : ""}</details>`;
+  return [
+    `<div class="chg" id="${esc(c.id)}"><div class="ch"><span class="rid">${esc(c.id)}</span> <span class="ct" title="${esc(c.title)}">${esc(clip(c.title, 120))}</span></div>`,
+    `<p class="co">${esc(clip(c.overview, 240))}</p>`,
+    feature === undefined ? "" : flowFigure(r, feature, r.briefing.features.indexOf(feature)),
+    `<div class="chips">${core}</div>`,
+    also,
+    code,
+    `</div>`,
+  ].join("");
+}
+
+/**
+ * The Changes section: one card for each high-level change the claim check left (design §6.11), each with the diagram of
+ * the feature it names. A feature no change names keeps its diagram after the cards; a report with no card (the claim
+ * check left no change, or one written before 0.25) shows the diagrams alone, under the old heading.
+ */
+function flowsSection(r: ReportDoc, l: VisualLinks): string {
   const fs = r.briefing.features;
-  const figures = fs.map((f, k) => {
-    const d: DrawnDiagram | undefined = r.diagrams?.features[f.id];
-    const svg = d?.via === "diagram-design" ? d.svg : featureSvg(f, `fl${k + 1}`);
-    // The only caption is the name; the summary, and the reason a drawing is the plugin's own, are in the tooltip (and in the appendix).
-    const tip = d?.via === "plugin" ? `${f.summary} (${d.note})` : f.summary;
-    return `<div class="flow" id="${esc(f.id)}"><div class="cap" title="${esc(tip)}"><span class="rid">${esc(f.id)}</span> ${esc(clip(f.name, 80))}</div><div class="scroll">${svg}</div></div>`;
-  });
-  return `<section class="vis" id="flows"><h2>Data flow</h2>${figures.length === 0 ? tile("grey", "no new feature", "the report names no new feature with a data path") : figures.join("")}</section>`;
+  const cards = r.cards ?? [];
+  const drawn = new Set(cards.map((c) => c.feature).filter((x) => x !== ""));
+  const loose = fs.map((f, k) => ({ f, k })).filter(({ f }) => !drawn.has(f.id) || cards.length === 0);
+  const figures = loose.map(({ f, k }) => flowFigure(r, f, k));
+  if (cards.length === 0) return `<section class="vis" id="flows"><h2>Data flow</h2>${figures.length === 0 ? tile("grey", "no new feature", "the report names no new feature with a data path") : figures.join("")}</section>`;
+  return `<section class="vis" id="changes"><h2>Changes</h2>${cards.map((c, n) => changeCard(r, c, n, l)).join("")}${figures.length > 0 ? `<h3>Other data flows</h3>${figures.join("")}` : ""}</section>`;
 }
 
 // ---- 4. the risk map ----
@@ -393,10 +448,14 @@ function reviewSection(d: Draft | undefined, l: VisualLinks): string {
 
 /** The sections of `review.html` after the header strip, in order: verdict and scope, data flow, risk map, questions and, when the review layer ran, the review. */
 export function visualSections(i: HtmlInput, l: VisualLinks): string[] {
-  return [verdictSection(i, l), flowsSection(i.report), riskSection(i.report, l, i.review), questionsSection(i, l), reviewSection(i.review, l)].filter((x) => x !== "");
+  return [verdictSection(i, l), flowsSection(i.report, l), riskSection(i.report, l, i.review), questionsSection(i, l), reviewSection(i.review, l)].filter((x) => x !== "");
 }
 
 export const VISUAL_CSS = `
+.chg{border:1px solid var(--line);border-radius:8px;padding:8px 12px 10px;margin:10px 0;background:#fcfdfe}.ch{font-weight:600}.ct{font-size:15px}.co{margin:4px 0 6px;font-size:14px}
+.chips{display:flex;flex-wrap:wrap;gap:4px 6px;margin:6px 0}.corechip{display:inline-block;border:1px solid #b0c4d8;background:#eef4fa;border-radius:4px;padding:0 6px;font-size:12px}.corechip.sm{background:var(--greybg);border-color:var(--line)}
+details.also,details.code{margin:4px 0}details.also>summary,details.code>summary{cursor:pointer;color:var(--muted);font-size:12px}
+.ex{margin:6px 0}.exh{font-size:12px}.ex pre{margin:2px 0;font-size:12px;line-height:1.35;white-space:pre}.ex .l{display:block}.ex .l.add{background:#e6f4ec}.ex .l.del{background:#fbe4e2}
 .vh h1 a{color:inherit;text-decoration:none}.vh h1 .title{white-space:nowrap}
 section.vis{background:var(--card);border:1px solid var(--line);border-radius:8px;margin:12px 0;padding:10px 14px 14px}
 section.vis>h2{display:block;margin:0 0 8px}section.vis h3{display:block;margin:10px 0 4px;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
