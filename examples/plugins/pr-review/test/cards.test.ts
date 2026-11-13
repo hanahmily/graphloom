@@ -202,4 +202,19 @@ describe("the change cards of review.html", () => {
     expect(old).toContain("<h2>Data flow</h2>");
     expect(old).not.toContain('class="chg"');
   });
+
+  it("links every cite of the change, also one on an unchanged file (large mode) and one past the excerpt budget", () => {
+    const big = `@@ -1,40 +1,40 @@\n${Array.from({ length: 40 }, (_, i) => `+line ${i + 1}`).join("\n")}`;
+    const fs = [file("pkg/big.go", big)];
+    const cites = [at("pkg/big.go", 1, 12), at("pkg/big.go", 13, 24), at("pkg/big.go", 25, 36), at("pkg/big.go", 37, 40), at("pkg/unchanged.go", 7, 9)];
+    const withUnchanged = change(cites, { coreFiles: ["pkg/big.go"] });
+    const briefing = { whatsNew: [withUnchanged], features: [], check: { surfaces: [], behavior: [], compatibility: [], risks: [], tests: [] }, areas: [] };
+    const cards = buildCards(briefing, fs, []);
+    expect(cards[0]!.excerptsMore).toBeGreaterThan(0);
+    const page = renderReviewHtml({ report: doc([withUnchanged], { briefing, files: [{ path: "pkg/big.go", status: "modified", additions: 40, deletions: 0 }], cards, mode: "large" }) });
+    const card = page.slice(page.indexOf('<div class="chg" id="W1">'), page.indexOf("</section>", page.indexOf('<div class="chg" id="W1">')));
+    const links = card.slice(card.indexOf('<div class="chips cl">'), card.indexOf("</div>", card.indexOf('<div class="chips cl">')));
+    for (const [path, range] of [["pkg/big.go", "L1-L12"], ["pkg/big.go", "L25-L36"], ["pkg/big.go", "L37-L40"], ["pkg/unchanged.go", "L7-L9"]]) expect(links).toContain(`/blob/${REHEARSAL_HEAD}/${path}#${range}"`);
+    expect(htmlProblems(page, GITHUB)).toEqual([]);
+  });
 });

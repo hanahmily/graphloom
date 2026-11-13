@@ -1282,6 +1282,8 @@ appendix.
      cites name, and the files cited by the report items that cite a core file, minus
      the core files, in the file list's order, at most 30 listed with a count of the
      rest;
+   - a row of **links to every cite of the change** (`path:line`, at the pinned head or
+     base on GitHub), whether or not an excerpt of it is shown below;
    - a collapsed `<details>` "cited code (N lines)" holding the **excerpts** of the
      change's cites: for each cite inside a hunk of its file, the patch lines from the
      first to the last line the cite's range covers on its side, in patch order, so

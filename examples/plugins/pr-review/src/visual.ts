@@ -197,6 +197,8 @@ function changeCard(r: ReportDoc, c: ChangeCard, n: number, l: VisualLinks): str
     `<p class="co">${esc(clip(c.overview, 240))}</p>`,
     feature === undefined ? "" : flowFigure(r, feature, r.briefing.features.indexOf(feature)),
     `<div class="chips">${core}</div>`,
+    // Every cite of the change is a link, whether or not an excerpt of it is shown (an unchanged file of a large report, a cite past the excerpt budget).
+    cites.length === 0 ? "" : `<div class="chips cl">${cites.map((x) => `<span class="corechip sm" title="cited by this change">${l.cite(x)}</span>`).join("")}</div>`,
     also,
     code,
     `</div>`,

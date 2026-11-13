@@ -16,7 +16,7 @@
     "vitest": "^4.1.12"
   },
   "digests": {
-    "sourceTree": "9b9a3fb21d9817ef4a38ae15384b051cf3c026d99930a16f8245f324ed61affa",
+    "sourceTree": "ae60e47c5c56e7cea6d300eee21e38ed166a6a0ecd38fcd7227c84ecbdce11cd",
     "packageLock": "807278176163d0cf9380116958f7a8086a5023f36b864591328e3eff6b172beb",
     "files": {
       "package.json": "daba225d9a05e04fb0cb39f964f1cc8bbb9757b4dc25f68e186456c5a923dd57",
@@ -154,14 +154,14 @@
       "src/treemap.ts": "bf92e7a65ccede1f6dc2a2ba719ec580d57b9ca6586a64b57ac68776e577d97e",
       "src/treequotes.ts": "6bd09220894b486e1d11ed9e4520885c793f94a95b22f6d5eb3ccf4e7bbe8be7",
       "src/validators.ts": "41b01ecf82b31a984a3072f82fc3c054ab6e602678fdcee88d6b96beeaa22c81",
-      "src/visual.ts": "0ef768f1f9ee32af60df1d0db8da2d476edd66e901cdd3780dbb213c854f9c29",
+      "src/visual.ts": "aba6911bdbc1af40f7717cccb09a2b0092a51cd3b6f9b3086701d3544adc4b5c",
       "src/write.ts": "9018145e2a9a54ab15365779fb208b336348bed05eefabb644da75b5c2657778",
       "test/areas.test.ts": "460c09c1dffccc40ae05f7846bfa0ba6c0394b11c9bfd9414bbd790929d6644e",
       "test/assignments-fit.test.ts": "7db5dfd1ce21ebcdda5212f1438bb9654c68f84c518dd31f2f1e56592ece74a0",
       "test/base-metrics.test.ts": "900b61e77854ae06e7de1b4b98b506962e9ee069dc83489b3fc6f9c27d74bd10",
       "test/briefing-large.test.ts": "bf0a6c31bd75a8fc1222a86a0554bd83b4da1671d12804f519d4ea140ae77f09",
       "test/briefing.test.ts": "dc1bcc0472a8cab6786d3a2c50d830a7de7eb24e9bf954946be38d24914364f7",
-      "test/cards.test.ts": "7951b2f4b9dffb9e49b39ba80e0b1a7f70d722a3e56bf5d3ee444fd13a735b8b",
+      "test/cards.test.ts": "590b409d1bae001bb22ea124fc27e68de7582c9a32606159d4fe702ac0fa864a",
       "test/claims.test.ts": "da8e83123542bb4ca302cacac7e648d24c305b2e3b5faf588382ed0068a6eb81",
       "test/coverage.test.ts": "36e0db3bcb3cd9c863c5fed78950361b8d7bca8f26e27f52604b71581240a41a",
       "test/crap.test.ts": "e2494e348e47ee1a6e5022d6745ba02b186cd3d74c95711148b37ef1de002eea",
