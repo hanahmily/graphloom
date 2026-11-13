@@ -11,13 +11,17 @@ import {
   checkLines,
   emptyBriefing,
   featureLines,
+  MAX_CHANGE_SENTENCE_CHARS,
+  MAX_CHANGE_TITLE_CHARS,
   MAX_CHECK_PER_LIST,
+  MAX_CORE_FILES,
   MAX_FEATURES,
   MAX_FLOWS,
   MAX_STAGES,
   MAX_WHATS_NEW,
   whatsNewLines,
   type Briefing,
+  type Change,
   type Feature,
 } from "../src/briefing.js";
 import type { Cite } from "../src/cites.js";
@@ -28,6 +32,9 @@ const file = (path: string, patch: string | null): PullFile => pullFile({ path, 
 const PATCH = "@@ -10,3 +10,5 @@ func f() {\n a\n-old\n+new\n+newer\n+newest\n b";
 const files = [file("pkg/a.go", PATCH), file("pkg/b.go", PATCH), file("img/logo.png", null)];
 const at = (path: string, start: number, end = start, side: "head" | "base" = "head"): Cite => ({ path, side, start, end, symbol: "" });
+
+/** A high-level change with valid card fields; its core file is the first file its cites name. */
+const chg = (text: string, cites: Cite[], over: Partial<Change> = {}): Change => ({ text, cites, title: "Retention: adds a policy per group", overview: "Groups kept data forever before; now a policy decides how long.", coreFiles: [cites[0]?.path ?? "pkg/a.go"], feature: "", ...over });
 
 const feature = (over: Partial<Feature> = {}): Feature => ({
   name: "Retention sweep",
@@ -45,7 +52,7 @@ const feature = (over: Partial<Feature> = {}): Feature => ({
 });
 const valid = (over: Partial<Briefing> = {}): Briefing => ({
   ...emptyBriefing(),
-  whatsNew: [{ text: "Adds a retention policy.", cites: [at("pkg/a.go", 11, 12)] }],
+  whatsNew: [chg("Adds a retention policy.", [at("pkg/a.go", 11, 12)])],
   features: [feature()],
   ...over,
 });
@@ -55,7 +62,7 @@ describe("the briefing fields of the reporter's contract", () => {
   const output = (over: Record<string, unknown> = {}) => ({
     purpose: { text: "t", source: "inferred", quote: "" },
     overview: "One.",
-    whatsNew: [{ text: "Adds a thing.", cites: [{ path: "pkg/a.go", side: "head", start: 11, end: 11, symbol: "" }] }],
+    whatsNew: [{ text: "Adds a thing.", cites: [{ path: "pkg/a.go", side: "head", start: 11, end: 11, symbol: "" }], title: "Things: adds one", overview: "There was no thing; now there is one.", coreFiles: ["pkg/a.go"], feature: "" }],
     features: [],
     check: { surfaces: [], behavior: [], compatibility: [], risks: [], tests: [] },
     areas: [],
@@ -95,23 +102,23 @@ describe("deterministic validation of the briefing", () => {
   it("wants a what's-new bullet, at most five, each cited and bounded", () => {
     expect(problems(valid({ whatsNew: [] })).join(" ")).toMatch(/whatsNew is empty/);
     expect(problems(valid({ whatsNew: [] }), {}, true)).toEqual([]);
-    const six = Array.from({ length: MAX_WHATS_NEW + 1 }, (_, i) => ({ text: `Adds ${i}.`, cites: [at("pkg/a.go", 11)] }));
+    const six = Array.from({ length: MAX_WHATS_NEW + 1 }, (_, i) => chg(`Adds ${i}.`, [at("pkg/a.go", 11)]));
     expect(problems(valid({ whatsNew: six })).join(" ")).toMatch(/6 bullets, more than 5/);
-    expect(problems(valid({ whatsNew: [{ text: "x".repeat(241), cites: [at("pkg/a.go", 11)] }, { text: "No cite.", cites: [] }] })).join(" ")).toMatch(/241 characters[\s\S]*cites nothing/);
+    expect(problems(valid({ whatsNew: [chg("x".repeat(241), [at("pkg/a.go", 11)]), chg("No cite.", [])] })).join(" ")).toMatch(/241 characters[\s\S]*cites nothing/);
   });
 
   it("keeps a bullet's cites in the diff, on the side they name, as an item's cites must be", () => {
-    expect(problems(valid({ whatsNew: [{ text: "Out.", cites: [at("pkg/a.go", 90)] }] })).join(" ")).toMatch(/line\(s\) 90 on the head side are outside the file's hunks/);
-    expect(problems(valid({ whatsNew: [{ text: "Not a file.", cites: [at("pkg/zzz.go", 11)] }] })).join(" ")).toMatch(/pkg\/zzz.go, which is not a file of the pull request/);
-    expect(problems(valid({ whatsNew: [{ text: "Whole file.", cites: [at("pkg/a.go", 0)] }] })).join(" ")).toMatch(/cite the lines/);
+    expect(problems(valid({ whatsNew: [chg("Out.", [at("pkg/a.go", 90)])] })).join(" ")).toMatch(/line\(s\) 90 on the head side are outside the file's hunks/);
+    expect(problems(valid({ whatsNew: [chg("Not a file.", [at("pkg/zzz.go", 11)])] })).join(" ")).toMatch(/pkg\/zzz.go, which is not a file of the pull request/);
+    expect(problems(valid({ whatsNew: [chg("Whole file.", [at("pkg/a.go", 0)])] })).join(" ")).toMatch(/cite the lines/);
   });
 
   it("allows a file the pull request does not change, and lines outside its hunks, in a large report, where the claim check verifies the quote in the tree", () => {
-    const b = valid({ whatsNew: [{ text: "Reads a hop.", cites: [at("pkg/other.go", 40, 41), at("pkg/a.go", 90)] }] });
+    const b = valid({ whatsNew: [chg("Reads a hop.", [at("pkg/other.go", 40, 41), at("pkg/a.go", 90)], { coreFiles: ["pkg/a.go"] })] });
     expect(problems(b).length).toBeGreaterThan(0);
     expect(problems(b, { large: true })).toEqual([]);
-    expect(problems(valid({ whatsNew: [{ text: "Bad range.", cites: [at("pkg/other.go", 0)] }] }), { large: true }).join(" ")).toMatch(/not a file of the pull request/);
-    expect(problems(valid({ whatsNew: [{ text: "Escapes.", cites: [at("../etc/passwd", 1)] }] }), { large: true }).join(" ")).toMatch(/not a file of the pull request/);
+    expect(problems(valid({ whatsNew: [chg("Bad range.", [at("pkg/other.go", 0)])] }), { large: true }).join(" ")).toMatch(/not a file of the pull request/);
+    expect(problems(valid({ whatsNew: [chg("Escapes.", [at("../etc/passwd", 1)])] }), { large: true }).join(" ")).toMatch(/not a file of the pull request/);
   });
 
   it("bounds a feature: at most three, two to eight stages, one to twelve flows", () => {
@@ -174,8 +181,8 @@ describe("the briefing once the claim check has spoken", () => {
   const unsupported = (...ids: string[]): Map<string, string> => new Map(ids.map((id) => [id, "unsupported: the code does not show it"]));
   const full = valid({
     whatsNew: [
-      { text: "Adds a retention policy.", cites: [at("pkg/a.go", 11)] },
-      { text: "Adds a metric.", cites: [at("pkg/b.go", 12)] },
+      chg("Adds a retention policy.", [at("pkg/a.go", 11)]),
+      chg("Adds a metric.", [at("pkg/b.go", 12)]),
     ],
     check: { ...emptyBriefing().check, risks: [{ text: "Retries without a bound.", cites: [at("pkg/b.go", 12)] }, { text: "Drops errors.", cites: [at("pkg/b.go", 13)] }] },
   });
@@ -225,7 +232,7 @@ describe("the briefing as text", () => {
   const r = assembleBriefing(valid({ check: { ...emptyBriefing().check, surfaces: [{ text: "Adds the retention_days flag.", cites: [at("pkg/a.go", 11, 12)] }] } }), new Map()).briefing;
 
   it("lists what is new, one bullet each with its cites", () => {
-    expect(whatsNewLines(r)).toEqual(["## What's new", "- **W1** Adds a retention policy. — pkg/a.go:11-12", ""]);
+    expect(whatsNewLines(r)).toEqual(["## What's new", "- **W1** Retention: adds a policy per group: Groups kept data forever before; now a policy decides how long. Capability: Adds a retention policy. — pkg/a.go:11-12 (core: pkg/a.go)", ""]);
   });
 
   it("lists each feature's stages and flows with their cites", () => {
@@ -241,5 +248,98 @@ describe("the briefing as text", () => {
     expect(text).toMatch(/### New surfaces[^\n]*\n- Adds the retention_days flag\. — pkg\/a\.go:11-12/);
     expect(text).toMatch(/### Tests added, and what they cover\n- None\./);
     expect((text.match(/^### /gm) ?? []).length).toBe(5);
+  });
+});
+
+describe("the card fields of a high-level change (0.25)", () => {
+  const shape = (o: unknown): string[] => validateResultShape(o, CHANGE_REPORT_SCHEMA as unknown as Record<string, unknown>);
+  const output = (w: Record<string, unknown>) => ({
+    purpose: { text: "t", source: "inferred", quote: "" },
+    overview: "One.",
+    whatsNew: [{ text: "Adds a thing.", cites: [{ path: "pkg/a.go", side: "head", start: 11, end: 11, symbol: "" }], title: "Things: adds one", overview: "There was none; now there is one.", coreFiles: ["pkg/a.go"], feature: "", ...w }],
+    features: [],
+    check: { surfaces: [], behavior: [], compatibility: [], risks: [], tests: [] },
+    areas: [],
+    sections: [],
+    notes: [],
+  });
+  const one = (over: Partial<Change>, ctx: { large?: boolean } = {}, final = false): string[] => problems(valid({ whatsNew: [chg("Adds a retention policy.", [at("pkg/a.go", 11, 12)], over)] }), ctx, final);
+
+  it("requires title, overview, coreFiles and feature on every entry, and refuses any other property", () => {
+    expect(shape(output({}))).toEqual([]);
+    for (const field of ["title", "overview", "coreFiles", "feature"]) {
+      const o = output({});
+      delete (o.whatsNew[0] as Record<string, unknown>)[field];
+      expect(shape(o).join(" ")).toMatch(new RegExp(field));
+    }
+    expect(shape(output({ severity: "P1" })).join(" ")).toMatch(/severity/);
+    // The check entries stay plain bullets: a card field there is refused.
+    const o = output({});
+    (o.check as Record<string, unknown>).risks = [{ text: "x", cites: [], title: "no" }];
+    expect(shape(o).join(" ")).toMatch(/title/);
+  });
+
+  it("asks the reporter for the fields, with their bounds", () => {
+    for (const word of ['"title"', '"overview"', '"coreFiles"', '"feature"', "ONE sentence", "before and how it works now", `${MAX_CORE_FILES}`, `${MAX_CHANGE_TITLE_CHARS}`, `${MAX_CHANGE_SENTENCE_CHARS}`]) expect(BRIEFING_PROMPT).toContain(word);
+  });
+
+  it("accepts a valid card, and bounds the title", () => {
+    expect(one({})).toEqual([]);
+    expect(one({ title: "" }).join(" ")).toMatch(/the title is empty/);
+    expect(one({ title: "t".repeat(MAX_CHANGE_TITLE_CHARS + 1) }).join(" ")).toMatch(/title is 81 characters, more than 80/);
+    expect(one({ title: "two\nlines" }).join(" ")).toMatch(/one line/);
+  });
+
+  it("wants the overview to be one bounded sentence", () => {
+    expect(one({ overview: "" }).join(" ")).toMatch(/overview is empty/);
+    expect(one({ overview: `${"x".repeat(MAX_CHANGE_SENTENCE_CHARS)}y` }).join(" ")).toMatch(/241 characters, more than 240/);
+    expect(one({ overview: "It did one thing. Now it does another." }).join(" ")).toMatch(/ONE sentence/);
+    expect(one({ overview: "It did one thing\nand now another." }).join(" ")).toMatch(/ONE sentence/);
+    // A version number, a path and a lower-case continuation are not a second sentence.
+    expect(one({ overview: "v1.2 reads pkg/a.go and e.g. retries; now it stops at the first error." })).toEqual([]);
+  });
+
+  it("wants 1 to 4 distinct core files, each a file of the pull request that the entry's own cites name", () => {
+    expect(one({ coreFiles: [] }).join(" ")).toMatch(/coreFiles is empty/);
+    expect(one({ coreFiles: ["pkg/a.go", "pkg/a.go"] }).join(" ")).toMatch(/appears twice/);
+    expect(one({ coreFiles: ["pkg/a.go", "pkg/b.go", "img/logo.png", "pkg/c.go", "pkg/d.go"] }).join(" ")).toMatch(/5 core files, more than 4/);
+    expect(one({ coreFiles: ["pkg/zzz.go"] }).join(" ")).toMatch(/"pkg\/zzz.go" is not a file of the pull request/);
+    expect(one({ coreFiles: ["pkg/b.go"] }).join(" ")).toMatch(/"pkg\/b.go" is not named by any cite of this entry/);
+    // Large mode keeps the rule: a file the pull request does not change cannot be a core file.
+    expect(one({ coreFiles: ["pkg/other.go"] }, { large: true }).join(" ")).toMatch(/not a file of the pull request/);
+    expect(one({ coreFiles: ["pkg/a.go"] }, { large: true })).toEqual([]);
+  });
+
+  it("wants a feature id that exists and is named by one change only; the final check does not look it up", () => {
+    const withFeature = (...ids: string[]): Briefing => valid({ whatsNew: ids.map((f, i) => chg(`Adds ${i}.`, [at("pkg/a.go", 11)], { feature: f })) });
+    expect(problems(withFeature("F1"))).toEqual([]);
+    expect(problems(withFeature("F2")).join(" ")).toMatch(/feature F2 does not exist \(features has 1 entry\)/);
+    expect(problems(withFeature("retention")).join(" ")).toMatch(/is "" or the id of a feature/);
+    expect(problems(withFeature("F1", "F1")).join(" ")).toMatch(/also named by another change/);
+    expect(problems(valid({ features: [], whatsNew: [chg("Adds.", [at("pkg/a.go", 11)], { feature: "F2" })] }), {}, true)).toEqual([]);
+  });
+
+  it("puts the title and the sentence in the entry's claim, for the claim check", () => {
+    const [w1] = briefingTargets(valid());
+    expect(w1!.id).toBe("W1");
+    expect(w1!.text).toContain("Retention: adds a policy per group");
+    expect(w1!.text).toContain("Groups kept data forever before; now a policy decides how long.");
+    expect(w1!.quotes).toBe("required");
+  });
+
+  it("leaves a dropped feature's reference empty, so no card names a diagram that is gone", () => {
+    const b = valid({ whatsNew: [chg("Adds a retention policy.", [at("pkg/a.go", 11)], { feature: "F1" })] });
+    expect(assembleBriefing(b, new Map()).briefing.whatsNew[0]!.feature).toBe("F1");
+    const r = assembleBriefing(b, new Map([["F1", "unsupported"]]));
+    expect(r.briefing.whatsNew[0]!.feature).toBe("");
+    expect(problems({ ...b, whatsNew: r.briefing.whatsNew, features: [] }, {}, true)).toEqual([]);
+  });
+
+  it("shows the title, the sentence and the files in the plain-text what's new", () => {
+    const r = assembleBriefing(valid(), new Map()).briefing;
+    const [heading, line] = whatsNewLines(r, [{ core: ["pkg/a.go"], synced: ["pkg/b.go"], syncedMore: 2 }]);
+    expect(heading).toBe("## What's new");
+    expect(line).toContain("**W1** Retention: adds a policy per group: Groups kept data forever before; now a policy decides how long.");
+    expect(line).toContain("(core: pkg/a.go; also changed: pkg/b.go, and 2 more)");
   });
 });

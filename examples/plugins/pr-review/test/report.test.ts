@@ -36,7 +36,7 @@ function valid(extra: ReportItem[] = []): ReporterOutput {
     ...extra,
   );
   for (const s of secs) s.none = s.items.length === 0;
-  return { purpose: { text: "Lets writers keep the first error of a batch.", source: "stated", quote: "keep the first error of a batch" }, overview: "The change keeps the first error of a batch. It renames a file.", sections: secs, notes: [], ...emptyBriefing(), whatsNew: [{ text: "Edits pkg/a.go.", cites: [cite("pkg/a.go", "head", 11, 12, "new")] }] };
+  return { purpose: { text: "Lets writers keep the first error of a batch.", source: "stated", quote: "keep the first error of a batch" }, overview: "The change keeps the first error of a batch. It renames a file.", sections: secs, notes: [], ...emptyBriefing(), whatsNew: [{ text: "Edits pkg/a.go.", cites: [cite("pkg/a.go", "head", 11, 12, "new")], title: "Package a: edits it", overview: "It was as before; now it is edited.", coreFiles: ["pkg/a.go"], feature: "" }] };
 }
 
 const problems = (r: ReporterOutput): string[] => reportProblems(r, ctx);
@@ -236,7 +236,7 @@ describe("the assembled report (design 6.4)", () => {
     const big: ReportContext = { ...ctx, files: many, facts: [] };
     const secs = sections.map((s) => ({ id: s.id, none: s.id !== "other", items: [] as ReportItem[] }));
     secs.find((s) => s.id === "other")!.items = [item("All the docs.", many.map((f) => cite(f.path, "head", 1, 1)))];
-    const r: ReporterOutput = { ...valid(), whatsNew: [{ text: "Adds the docs.", cites: [cite("docs/f0.md", "head", 1, 1)] }], sections: secs };
+    const r: ReporterOutput = { ...valid(), whatsNew: [{ text: "Adds the docs.", cites: [cite("docs/f0.md", "head", 1, 1)], title: "Docs: adds them", overview: "There were no docs; now there are.", coreFiles: ["docs/f0.md"], feature: "" }], sections: secs };
     expect(reportProblems(r, big)).toEqual([]);
     const final = assembleReport(r, new Map([["R1", "unsupported"]]), big);
     expect(final.sections.find((s) => s.id === "other")!.items.length).toBeLessThanOrEqual(MAX_ITEMS_PER_SECTION);

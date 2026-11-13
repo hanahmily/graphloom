@@ -268,7 +268,7 @@ describe("the large report is validated and checked like a report, with the high
     const files = ["pkg/a.go", "docs/guide.md"].map((path) => pullFile({ path, status: "added", previousPath: null, additions: 1, deletions: 0, sha: null, patch: "@@ -0,0 +1 @@\n+x := 1", patchOmitted: false })!);
     const fact = { id: "D1", section: "other", path: "docs/guide.md", side: "head" as const, line: 1, text: "File routed to this section: docs/guide.md added" };
     const cite = { path: "pkg/a.go", side: "head" as const, start: 1, end: 1, symbol: "" };
-    const report = { purpose: { text: "t", source: "inferred" as const, quote: "" }, overview: "One.", sections: sections.map((s, i) => ({ id: s.id, none: i !== 0, items: i === 0 ? [{ text: "adds a", cites: [cite], facts: [], state: [], behavior: [] }] : [] })), notes: [], ...emptyBriefing(), whatsNew: [{ text: "Adds a.", cites: [cite] }] };
+    const report = { purpose: { text: "t", source: "inferred" as const, quote: "" }, overview: "One.", sections: sections.map((s, i) => ({ id: s.id, none: i !== 0, items: i === 0 ? [{ text: "adds a", cites: [cite], facts: [], state: [], behavior: [] }] : [] })), notes: [], ...emptyBriefing(), whatsNew: [{ text: "Adds a.", cites: [cite], title: "Package a: adds a", overview: "There was no a; now there is.", coreFiles: ["pkg/a.go"], feature: "" }] };
     const ctx = { sections, files, facts: [fact] };
     expect(reportProblems(report, ctx).join("|")).toMatch(/changed file\(s\) no item cites: docs\/guide.md/);
     expect(reportProblems(report, ctx).join("|")).toMatch(/detector fact\(s\) no item of their section lists/);

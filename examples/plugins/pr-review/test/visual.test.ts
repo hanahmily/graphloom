@@ -132,11 +132,27 @@ describe("review.html of a large-mode run", () => {
   const qa = JSON.parse(sim.qa!.json) as { questions: Array<{ id: string; type: string; item: string; text: string; answer?: { status: string } }> };
 
   it("has the four visual sections after the header strip, in order, and passes the inertness check", () => {
-    const at = ["<header", "<h2>Verdict and scope</h2>", "<h2>Data flow</h2>", "<h2>Risk map</h2>", "<h2>Questions</h2>"].map((s) => html.indexOf(s));
+    const at = ["<header", "<h2>Verdict and scope</h2>", "<h2>Changes</h2>", "<h2>Risk map</h2>", "<h2>Questions</h2>"].map((s) => html.indexOf(s));
     expect(at.every((n) => n > 0)).toBe(true);
     expect([...at].sort((a, b) => a - b)).toEqual(at);
     expect(htmlProblems(html, GITHUB)).toEqual([]);
-    expect(html).not.toMatch(/<(script|link|img|iframe|ul|ol|table|details|pre)\b/);
+    expect(html).not.toMatch(/<(script|link|img|iframe|ul|ol|table)\b/);
+  });
+
+  it("has one card for each high-level change (W1…), with the reporter's sentence, core files of the pull request and bounded cited code", () => {
+    const changes = report.briefing.whatsNew;
+    expect(changes.length).toBeGreaterThan(0);
+    expect(report.cards!.map((c) => c.id)).toEqual(changes.map((_, n) => `W${n + 1}`));
+    const paths = new Set(report.files.map((f) => f.path));
+    for (const [n, c] of report.cards!.entries()) {
+      expect(c.overview).toBe(changes[n]!.overview);
+      expect(c.core.length).toBeGreaterThan(0);
+      for (const p of c.core) expect(paths.has(p), p).toBe(true);
+      expect(c.excerpts.reduce((a, e) => a + e.lines.length, 0)).toBeLessThanOrEqual(36);
+      for (const e of c.excerpts) expect(e.lines.length).toBeLessThanOrEqual(12);
+      expect(html).toContain(`<div class="chg" id="W${n + 1}">`);
+    }
+    expect(html).toContain('<details class="code">');
   });
 
   it("is deterministic", () => {
@@ -278,7 +294,7 @@ describe("the reason cards under the risk map", () => {
 
   it("styles the target card, runs no script and passes the inertness check; only in-page fragments are new", () => {
     expect(html).toContain(".rcard:target{outline");
-    expect(html).not.toMatch(/<(script|ul|ol|table|details|pre)\b/);
+    expect(html).not.toMatch(/<(script|ul|ol|table)\b/);
     expect(htmlProblems(html, github)).toEqual([]);
     const page = (href: string): string => `<!doctype html><html><body><a href="${href}">x</a></body></html>`;
     expect(htmlProblems(page("#area-A1"), github)).toEqual([]);

@@ -2,6 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { checkLines, featureLines, whatsNewLines } from "./briefing.js";
+import { buildCards } from "./cards.js";
 import type { Fact } from "./detectors.js";
 import type { DiagramsDoc } from "./diagrams.js";
 import { coverageNotes, renderMeasurements, notRunReasons, type MeasurementState } from "./measurements.js";
@@ -54,6 +55,7 @@ export function reportJson(i: OutputInput): string {
     summary: i.final.summary,
     scope: scopeFor(i),
     briefing: i.final.briefing,
+    cards: buildCards(i.final.briefing, i.snapshot.files, i.final.sections.flatMap((s) => s.items)),
     sections: i.final.sections,
     notes: i.final.notes,
     removed: i.final.removed,
@@ -125,6 +127,7 @@ export function reviewMarkdown(i: OutputInput): string {
   const added = i.snapshot.files.reduce((n, f) => n + f.additions, 0);
   const deleted = i.snapshot.files.reduce((n, f) => n + f.deletions, 0);
   const b = i.final.briefing;
+  const cards = buildCards(b, i.snapshot.files, i.final.sections.flatMap((s) => s.items));
   return [
     `# ${i.pr.owner}/${i.pr.repo}#${i.pr.number} at ${head}${i.base !== undefined ? ` (base ${i.base.slice(0, 12)})` : ""}`,
     "Contents: Briefing · Appendix (Report · Measurements · Q&A)",
@@ -135,7 +138,7 @@ export function reviewMarkdown(i: OutputInput): string {
     "",
     purposeLine(i.final.summary, i.final.removedParts),
     "",
-    ...whatsNewLines(b),
+    ...whatsNewLines(b, cards),
     "## Scope that matters",
     ...SCOPE_KINDS.map((k) => `- ${SCOPE_TITLES[k]}: ${scopeText(scope[k])}`),
     "",

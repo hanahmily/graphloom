@@ -10,7 +10,7 @@
  * assembly that drops what the check could not support, and their plain-text rendering for `review.md`.
  */
 import type { ClaimTarget } from "./claims.js";
-import { CITE_SCHEMA, citeProblem, type Cite } from "./cites.js";
+import { CITE_SCHEMA, citeProblem, findFile, type Cite } from "./cites.js";
 import type { RemovedPart } from "./report.js";
 import type { PullFile } from "./snapshot.js";
 
@@ -22,6 +22,10 @@ export const MAX_CHECK_PER_LIST = 8;
 export const MAX_BULLET_CHARS = 240;
 export const MAX_BULLET_CITES = 4;
 export const MAX_AREA_LABELS = 40;
+/** A change card (design §6.1, §6.11): the title's and the one sentence's bounds, and how many core files a change names. */
+export const MAX_CHANGE_TITLE_CHARS = 80;
+export const MAX_CHANGE_SENTENCE_CHARS = 240;
+export const MAX_CORE_FILES = 4;
 const MAX_NAME_CHARS = 80;
 const MAX_SUMMARY_CHARS = 300;
 const MAX_STAGE_LABEL_CHARS = 60;
@@ -47,6 +51,18 @@ export const CHECK_TITLES: Record<CheckList, string> = {
 export interface Bullet {
   text: string;
   cites: Cite[];
+}
+
+/**
+ * A high-level change (`W1`…), one for each new capability: the bullet, and the fields of its card on `review.html`. The
+ * `overview` is one sentence; `coreFiles` are the files that carry the logic; `feature` is the id (`F1`…) of the feature
+ * whose data-flow diagram belongs to it, or empty.
+ */
+export interface Change extends Bullet {
+  title: string;
+  overview: string;
+  coreFiles: string[];
+  feature: string;
 }
 
 export interface Stage {
@@ -80,7 +96,7 @@ export interface AreaLabel {
 }
 
 export interface Briefing {
-  whatsNew: Bullet[];
+  whatsNew: Change[];
   features: Feature[];
   check: Check;
   areas: AreaLabel[];
@@ -94,10 +110,11 @@ export const emptyBriefing = (): Briefing => ({ whatsNew: [], features: [], chec
 const text = { type: "string" };
 const strict = (required: string[], properties: Record<string, unknown>): Record<string, unknown> => ({ type: "object", additionalProperties: false, required, properties });
 const BULLET_SCHEMA = strict(["text", "cites"], { text, cites: { type: "array", items: CITE_SCHEMA } });
+const CHANGE_SCHEMA = strict(["text", "cites", "title", "overview", "coreFiles", "feature"], { text, cites: { type: "array", items: CITE_SCHEMA }, title: text, overview: text, coreFiles: { type: "array", items: text }, feature: text });
 
 /** The properties the briefing adds to `change-report-v1`. */
 export const BRIEFING_PROPERTIES: Record<string, unknown> = {
-  whatsNew: { type: "array", items: BULLET_SCHEMA },
+  whatsNew: { type: "array", items: CHANGE_SCHEMA },
   features: {
     type: "array",
     items: strict(["name", "summary", "stages", "flows"], {
@@ -115,7 +132,7 @@ export const BRIEFING_REQUIRED: string[] = ["whatsNew", "features", "check", "ar
 /** What the reporter is told of the briefing fields: what each is for, and its bounds. */
 export const BRIEFING_PROMPT = [
   `The first fields of your result are a briefing. A maintainer must grasp what this pull request does, and what to check in it, in two minutes. Write them first and for that reader; sections, items and lifecycles are the appendix they open afterwards, and they are not a substitute for the briefing. Be short and concrete: say what the code does, never how large the diff is.`,
-  `- "whatsNew" (3 to ${MAX_WHATS_NEW} bullets, at most ${MAX_BULLET_CHARS} characters each): one bullet for each new capability, in the words a maintainer uses for it ("adds a retention policy for stream groups"), never one for each file or refactor. Each cites (1 to ${MAX_BULLET_CITES} places) the code that provides it.`,
+  `- "whatsNew" (3 to ${MAX_WHATS_NEW} bullets, at most ${MAX_BULLET_CHARS} characters each): one bullet for each new capability, in the words a maintainer uses for it ("adds a retention policy for stream groups"), never one for each file or refactor. Each cites (1 to ${MAX_BULLET_CITES} places) the code that provides it. Each entry is also the card of that high-level change on the maintainer's first page, so it has: "title" (at most ${MAX_CHANGE_TITLE_CHARS} characters, in the shape "module or area, what was done, how the mechanism changed", for example "stream writes: report the first error when a batch stores nothing"); "overview" (ONE sentence, at most ${MAX_CHANGE_SENTENCE_CHARS} characters: what the situation was before and how it works now; for a purely new capability, what it adds and where it hooks in; the claim check judges it against the code, so say only what the cited code shows); "coreFiles" (1 to ${MAX_CORE_FILES} paths of changed files that carry the change's logic, the files a reviewer must read; every one must also be named by one of this entry's cites; leave out tests, docs, generated and mechanical files that merely follow the change); and "feature" (the id, "F1" for the first entry of "features" and so on, of the feature whose data-flow diagram belongs to this change, each feature to at most one change; "" when none).`,
   `- "features" (at most ${MAX_FEATURES}, the most important new capabilities; [] when the pull request adds none, for example a pure fix or refactor): the path the data takes through the feature, end to end, for a data-flow diagram. name (at most ${MAX_NAME_CHARS} characters), summary (one or two sentences, at most ${MAX_SUMMARY_CHARS}), stages (2 to ${MAX_STAGES}: id, a short name unique in the feature (letters, digits, "_" and "-", starting with a letter), label (at most ${MAX_STAGE_LABEL_CHARS} characters; what a maintainer calls it), kind ("source": where the data enters, "process": code that transforms or routes it, "transport": a hop over a wire or a queue, "store": where it is kept, "external": a system outside the repository, "sink": where it leaves or is consumed), and cite: a place that shows the stage) and flows (1 to ${MAX_FLOWS}: from and to (stage ids), label (what moves, a few words, at most ${MAX_FLOW_LABEL_CHARS} characters), cite: where the code moves it). Follow the data from where it enters to where it is stored or leaves; do not list components that only sit beside the path. Every stage and every flow is checked against the code as a claim of its own, and one that is not supported is dropped.`,
   `- "check" (five lists, at most ${MAX_CHECK_PER_LIST} entries each, one line of at most ${MAX_BULLET_CHARS} characters with its cites, each entry checked as a claim; [] for a list with nothing to say): "surfaces" (new public APIs, RPCs, proto messages, CLI commands and flags, configuration), "behavior" (changes to the behavior of EXISTING code paths, not new code), "compatibility" (wire format, on-disk or schema format, mixed-version operation), "risks" (concurrency, retries, rate limiting, unbounded memory or resources, error handling that drops data) and "tests" (the tests and end-to-end tests added, and what they cover). Say what the code does and where; leave verdicts to the maintainer.`,
 ].join("\n");
@@ -136,6 +153,41 @@ function bulletProblems(b: Bullet, files: readonly PullFile[], at: string, probl
   if (b.cites.length === 0) problems.push(`${at}: it cites nothing; every entry cites the code`);
   else if (b.cites.length > MAX_BULLET_CITES) problems.push(`${at}: ${b.cites.length} cites, more than ${MAX_BULLET_CITES}`);
   for (const c of b.cites) citeProblem(c, files, at, problems, true, tree);
+}
+
+/** A second sentence: a sentence end followed by a capital letter, a backtick, a quote or a bracket. */
+const SECOND_SENTENCE = /[.!?]\s+[A-Z`"'(]/;
+
+/** The card fields of one high-level change (design §6.5): title, one sentence, core files cited by the entry, a feature id used once. */
+function changeProblems(w: Change, files: readonly PullFile[], at: string, problems: string[], feature: { count: number; used: Set<string>; final: boolean }): void {
+  if (w.title.trim() === "") problems.push(`${at}: the title is empty`);
+  else if (w.title.length > MAX_CHANGE_TITLE_CHARS) problems.push(`${at}: the title is ${w.title.length} characters, more than ${MAX_CHANGE_TITLE_CHARS}`);
+  else if (/[\r\n]/.test(w.title)) problems.push(`${at}: the title is one line`);
+  if (w.overview.trim() === "") problems.push(`${at}: the overview is empty; one sentence on what the situation was before and how it works now`);
+  else {
+    if (w.overview.length > MAX_CHANGE_SENTENCE_CHARS) problems.push(`${at}: the overview is ${w.overview.length} characters, more than ${MAX_CHANGE_SENTENCE_CHARS}`);
+    if (/[\r\n]/.test(w.overview) || SECOND_SENTENCE.test(w.overview.trim())) problems.push(`${at}: the overview is ONE sentence on one line (before and now, joined with a semicolon or "and now")`);
+  }
+  if (w.coreFiles.length === 0) problems.push(`${at}: coreFiles is empty; name the 1 to ${MAX_CORE_FILES} changed files that carry this change's logic`);
+  else if (w.coreFiles.length > MAX_CORE_FILES) problems.push(`${at}: ${w.coreFiles.length} core files, more than ${MAX_CORE_FILES}`);
+  const seen = new Set<string>();
+  for (const path of w.coreFiles) {
+    const file = findFile(files, path);
+    if (file === undefined) {
+      problems.push(`${at}: core file ${JSON.stringify(path)} is not a file of the pull request`);
+      continue;
+    }
+    if (seen.has(file.path)) problems.push(`${at}: core file ${JSON.stringify(path)} appears twice`);
+    seen.add(file.path);
+    if (!w.cites.some((c) => findFile(files, c.path) === file)) problems.push(`${at}: core file ${JSON.stringify(path)} is not named by any cite of this entry; cite the code in it, or leave it out of coreFiles`);
+  }
+  if (w.feature !== "") {
+    const m = /^F([1-9][0-9]*)$/.exec(w.feature);
+    if (m === null) problems.push(`${at}: feature ${JSON.stringify(w.feature)} is "" or the id of a feature ("F1" for the first entry of features)`);
+    else if (!feature.final && Number(m[1]) > feature.count) problems.push(`${at}: feature ${w.feature} does not exist (features has ${feature.count} entr${feature.count === 1 ? "y" : "ies"})`);
+    else if (feature.used.has(w.feature)) problems.push(`${at}: feature ${w.feature} is also named by another change; a feature's diagram belongs to one change`);
+    feature.used.add(w.feature);
+  }
 }
 
 function labelProblem(value: string, max: number, at: string, what: string, problems: string[]): void {
@@ -160,7 +212,11 @@ export function briefingProblems(b: Briefing, ctx: BriefingContext, final = fals
   const tree = ctx.large === true;
   if (b.whatsNew.length > MAX_WHATS_NEW) problems.push(`whatsNew has ${b.whatsNew.length} bullets, more than ${MAX_WHATS_NEW}`);
   if (!final && b.whatsNew.length === 0) problems.push("whatsNew is empty: give one bullet for each new capability (3 to 5), or one for the change itself");
-  b.whatsNew.forEach((w, i) => bulletProblems(w, ctx.files, `whatsNew ${i + 1}`, problems, tree));
+  const featureUse = { count: b.features.length, used: new Set<string>(), final };
+  b.whatsNew.forEach((w, i) => {
+    bulletProblems(w, ctx.files, `whatsNew ${i + 1}`, problems, tree);
+    changeProblems(w, ctx.files, `whatsNew ${i + 1}`, problems, featureUse);
+  });
   if (b.features.length > MAX_FEATURES) problems.push(`features has ${b.features.length} entries, more than ${MAX_FEATURES}`);
   b.features.forEach((f, i) => {
     const at = `feature ${i + 1}`;
@@ -223,7 +279,7 @@ const collapse = (s: string): string => s.replace(/\s+/g, " ").trim();
 /** The claims of the briefing fields, in the order the checker is shown them. */
 export function briefingTargets(b: Briefing): ClaimTarget[] {
   const out: ClaimTarget[] = [];
-  b.whatsNew.forEach((w, i) => out.push({ id: whatsNewClaimId(i + 1), text: `What is new: ${collapse(w.text)}`, cites: w.cites, quotes: "required" }));
+  b.whatsNew.forEach((w, i) => out.push({ id: whatsNewClaimId(i + 1), text: `What is new, "${collapse(w.title)}": ${collapse(w.text)} Its card says: ${collapse(w.overview)} (the situation before, and how it works now; the card's core files: ${w.coreFiles.join(", ")})`, cites: w.cites, quotes: "required" }));
   b.features.forEach((f, i) => {
     const label = new Map(f.stages.map((s) => [s.id, s.label] as const));
     out.push({
@@ -249,7 +305,7 @@ export interface FinalFeature extends Feature {
 }
 
 export interface FinalBriefing {
-  whatsNew: Bullet[];
+  whatsNew: Change[];
   features: FinalFeature[];
   check: Check;
   areas: AreaLabel[];
@@ -265,7 +321,7 @@ export function assembleBriefing(b: Briefing, removed: ReadonlyMap<string, strin
   const drop = (id: string, kind: RemovedPart["kind"], label: string, reason: string): void => {
     parts.push({ id, kind, item: "", label, reason });
   };
-  const whatsNew = b.whatsNew.filter((w, i) => {
+  const changes = b.whatsNew.filter((w, i) => {
     const why = removed.get(whatsNewClaimId(i + 1));
     if (why !== undefined) drop(whatsNewClaimId(i + 1), "whatsNew", w.text, why);
     return why === undefined;
@@ -313,6 +369,9 @@ export function assembleBriefing(b: Briefing, removed: ReadonlyMap<string, strin
       return why === undefined;
     });
   }
+  // A change whose feature did not stand draws no diagram: its reference is left empty, not dangling.
+  const standing = new Set(features.map((f) => f.id));
+  const whatsNew = changes.map((w) => (w.feature === "" || standing.has(w.feature) ? w : { ...w, feature: "" }));
   return { briefing: { whatsNew, features, check, areas: b.areas }, parts };
 }
 
@@ -329,8 +388,17 @@ export function briefingCite(c: Cite): string {
 const bulletLine = (b: Bullet): string => `- ${oneLine(b.text)} — ${b.cites.map(briefingCite).join(", ")}`;
 
 /** "What's new" for `review.md`: one bullet for each new capability. */
-export function whatsNewLines(b: FinalBriefing): string[] {
-  return ["## What's new", ...(b.whatsNew.length === 0 ? ["- None stated."] : b.whatsNew.map((w, n) => `- **W${n + 1}** ${oneLine(w.text)} — ${w.cites.map(briefingCite).join(", ")}`)), ""];
+export function whatsNewLines(b: FinalBriefing, cards: ReadonlyArray<{ core: readonly string[]; synced: readonly string[]; syncedMore: number }> = []): string[] {
+  const files = (n: number): string => {
+    const c = cards[n];
+    if (c === undefined) return `(core: ${b.whatsNew[n]!.coreFiles.join(", ")})`;
+    return `(core: ${c.core.join(", ")}${c.synced.length > 0 ? `; also changed: ${c.synced.join(", ")}${c.syncedMore > 0 ? `, and ${c.syncedMore} more` : ""}` : ""})`;
+  };
+  return [
+    "## What's new",
+    ...(b.whatsNew.length === 0 ? ["- None stated."] : b.whatsNew.map((w, n) => `- **W${n + 1}** ${oneLine(w.title)}: ${oneLine(w.overview)} Capability: ${oneLine(w.text)} — ${w.cites.map(briefingCite).join(", ")} ${files(n)}`)),
+    "",
+  ];
 }
 
 /** The data flow of each new feature as text: its stages, then its flows, each with its cite. */

@@ -21,7 +21,7 @@ const appendixOf = (sim: Simulation): string => {
   return h.value;
 };
 /** The sections of review.html, in the order the design gives: pictures only. */
-const VISUAL = ["<h2>Verdict and scope</h2>", "<h2>Data flow</h2>", "<h2>Risk map</h2>", "<h2>Questions</h2>"];
+const VISUAL = ["<h2>Verdict and scope</h2>", "<h2>Changes</h2>", "<h2>Risk map</h2>", "<h2>Questions</h2>"];
 /** The text of the briefing, which review-appendix.html holds now that review.html is visual. */
 const BRIEFING = ["<h2>Briefing</h2>", "<h2>Data flow per new feature</h2>", "<h2>What you need to check</h2>", "<h2>Hotspots</h2>", "<h2>Areas</h2>", "<h2>Open questions</h2>"];
 const APPENDIX = ["<h2>Summary</h2>", "<h2>Necessity</h2>", "<h2>Change map</h2>", "<h2>Change items</h2>", "<h2>Measurements</h2>", "<h2>Q&amp;A</h2>", "<h2>Removed by the claim check, and notes</h2>"];
@@ -45,21 +45,33 @@ describe("review.html, the visual report of a standard report (design 6.11)", ()
 
   it("has the visual sections in the approved order, and nothing else", () => {
     expect(inOrder(html, VISUAL)).toBe(true);
-    expect(headings(html).map((h) => h.replace(/<\/?h2>/g, ""))).toEqual(["Verdict and scope", "Data flow", "Risk map", "Questions"]);
+    expect(headings(html).map((h) => h.replace(/<\/?h2>/g, ""))).toEqual(["Verdict and scope", "Changes", "Risk map", "Questions"]);
     expect(html.startsWith("<!doctype html>")).toBe(true);
     for (const gone of ["<h2>Briefing</h2>", "<h2>What you need to check</h2>", "<h2>Hotspots</h2>", "<h2>Areas</h2>", "<h2>Open questions</h2>", "<h2>Change items</h2>", "<h2>Necessity</h2>"]) expect(html).not.toContain(gone);
   });
 
-  it("renders no text list, table, paragraph or fold: only tiles, diagrams, labels and badges", () => {
-    expect(html).not.toMatch(/<(ul|ol|li|table|thead|tbody|tr|td|th|pre|details|summary|blockquote|q)[\s>]/);
-    expect(html).not.toMatch(/<p[\s>](?![^<]*class="sub")/);
+  it("renders no text list, table or paragraph: only tiles, diagrams, labels and badges, and per change card one sentence and its folds (design 6.11)", () => {
+    expect(html).not.toMatch(/<(ul|ol|li|table|thead|tbody|tr|td|th|blockquote|q)[\s>]/);
+    // The one paragraph besides the header's is the card's sentence; the only folds are the cards' file list and cited code.
+    expect(html).not.toMatch(/<p[\s>](?![^<]*class="(sub|co)")/);
+    expect([...html.matchAll(/<details class="(also|code)">/g)].length).toBeGreaterThan(0);
+    expect(html.replace(/<details class="(also|code)">/g, "").replace(/<\/?(details|summary|pre)[\s>]/g, "")).not.toMatch(/<(details|summary|pre)[\s>]/);
     // The reason cards under the risk map (one line of at most 200 characters for each entry, its cites as links) are the one place cites show.
     expect(html.replace(/<div class="rcards">.*?<\/section>/s, "")).not.toContain('class="cites"');
     expect(html).not.toContain("Stages and flows, with their cites");
   });
 
   it("puts text beyond a short label only in a tooltip: every visible text node is short", () => {
-    const body = html.slice(html.indexOf("<body>")).replace(/<span class="rt"[^>]*>[^<]*<\/span>/g, "");
+    // The card's title and sentence are the one prose allowed, bounded (design 6.11); its code is code.
+    const sentences = [...html.matchAll(/<p class="co">([^<]*)<\/p>/g)].map((m) => m[1]!);
+    expect(sentences.length).toBeGreaterThan(0);
+    for (const t of sentences) expect(t.length).toBeLessThanOrEqual(240);
+    const body = html
+      .slice(html.indexOf("<body>"))
+      .replace(/<span class="rt"[^>]*>[^<]*<\/span>/g, "")
+      .replace(/<p class="co">[^<]*<\/p>/g, "")
+      .replace(/<span class="ct"[^>]*>[^<]*<\/span>/g, "")
+      .replace(/<pre>.*?<\/pre>/gs, "");
     // The SVG of a diagram carries its own labels (each at most 60 characters); everything else is a tile, a chip or a legend entry.
     const visible = [...body.replace(/<(desc|title)\b[^>]*>[^<]*<\/\1>/g, "").matchAll(/>([^<>]+)</g)].map((m) => m[1]!.replace(/&[a-z#0-9]+;/g, "x").trim()).filter((t) => t !== "");
     expect(visible.length).toBeGreaterThan(20);
@@ -80,7 +92,7 @@ describe("review.html, the visual report of a standard report (design 6.11)", ()
   });
 
   it("shows N1 as a large tile, the principles as a grid, the scope as one stacked bar, and the counts as tiles", () => {
-    const verdict = html.slice(html.indexOf("<h2>Verdict and scope</h2>"), html.indexOf("<h2>Data flow</h2>"));
+    const verdict = html.slice(html.indexOf("<h2>Verdict and scope</h2>"), html.indexOf("<h2>Changes</h2>"));
     expect(verdict).toMatch(/<a class="tile (ok|warn|bad|grey) big" href="review-appendix.html#q-N1" title="[^"]*"><small>N1: is it necessary\?<\/small><strong>(necessary|questionable|unnecessary|needs author)<\/strong><\/a>/);
     expect(verdict).toContain("<h3>Principles</h3>");
     expect(verdict).toContain("<h3>Scope</h3>");
@@ -89,7 +101,7 @@ describe("review.html, the visual report of a standard report (design 6.11)", ()
   });
 
   it("draws each feature's data flow as an inline SVG with its name as the only caption; the stages and cites are in the appendix", () => {
-    const flow = html.slice(html.indexOf("<h2>Data flow</h2>"), html.indexOf("<h2>Risk map</h2>"));
+    const flow = html.slice(html.indexOf("<h2>Changes</h2>"), html.indexOf("<h2>Risk map</h2>"));
     expect(flow).toContain("<svg");
     expect(flow).toContain('<span class="rid">F1</span> Nightly retention sweep</div>');
     for (const label of ["retention_days flag", "Group retention_days", "Nightly sweep", "robfig/cron scheduler"]) expect(flow).toContain(label);
@@ -221,7 +233,7 @@ describe("review.html of a large report", () => {
   });
 
   it("draws the feature's data flow", () => {
-    const flow = html.slice(html.indexOf("<h2>Data flow</h2>"), html.indexOf("<h2>Risk map</h2>"));
+    const flow = html.slice(html.indexOf("<h2>Changes</h2>"), html.indexOf("<h2>Risk map</h2>"));
     expect(flow).toContain("pkg/alpha rules");
     expect(flow).toContain("pkg/beta applier");
     expect(flow).toContain("applies Alpha1");
@@ -418,7 +430,7 @@ function report(over: Partial<ReportDoc> = {}): ReportDoc {
     notes: [],
     removed: [],
     removedParts: [],
-    briefing: { whatsNew: [{ text: "Counts stored events.", cites: [{ path: "pkg/a.go", side: "head", start: 3, end: 3, symbol: "" }] }], features: [], check: { surfaces: [], behavior: [], compatibility: [], risks: [], tests: [] }, areas: [] },
+    briefing: { whatsNew: [{ text: "Counts stored events.", cites: [{ path: "pkg/a.go", side: "head", start: 3, end: 3, symbol: "" }], title: "Counts: stored events are counted", overview: "Nothing counted stored events; now a counter does.", coreFiles: ["pkg/a.go"], feature: "" }], features: [], check: { surfaces: [], behavior: [], compatibility: [], risks: [], tests: [] }, areas: [] },
     scope: { production: { files: 1, added: 4, deleted: 1 }, tests: { files: 0, added: 0, deleted: 0 }, docs: { files: 0, added: 0, deleted: 0 }, generated: { files: 0, added: 0, deleted: 0 } },
     measurements: { none: "no function was added or modified" },
     ...over,
@@ -506,7 +518,7 @@ describe("hostile text (design 12.1)", () => {
     ],
     notes: [evil],
     briefing: {
-      whatsNew: [{ text: evil, cites: [{ path: `a/"><script>x</script>.go`, side: "head", start: 1, end: 1, symbol: "" }] }],
+      whatsNew: [{ text: evil, cites: [{ path: `a/"><script>x</script>.go`, side: "head", start: 1, end: 1, symbol: "" }], title: evil, overview: evil, coreFiles: [`a/"><script>x</script>.go`], feature: "" }],
       features: [
         {
           id: "F1",

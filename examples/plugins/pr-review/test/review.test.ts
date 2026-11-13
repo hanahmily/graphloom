@@ -151,7 +151,7 @@ describe("the review layer, entered in the same run when round 1 found no issue"
     expect(html.value).toContain("<span class=\"fh\">correctness</span>");
     expect(html.value).toMatch(/<span class="key"><span class="sw bad"><\/span>confirmed 1<\/span><span class="key"><span class="sw warn"><\/span>disputed 0<\/span><span class="key"><span class="sw grey"><\/span>unproven 1<\/span>/);
     expect(html.value).not.toContain("#f-F2");
-    expect(html.value).not.toMatch(/<(details|ul|table|pre)\b/);
+    expect(html.value).not.toMatch(/<(ul|table)\b/);
     expect(htmlProblems(html.value, { owner: "apache", repo: "skywalking-banyandb", head: REHEARSAL_HEAD, base: REHEARSAL_MERGE_BASE })).toEqual([]);
     // The appendix holds the findings in text, by severity with the P1 that stands open, and in full with the draft; each has the id a tile links to.
     expect(appendix.value).toMatch(/<h3>P1 <span class="muted">\(1\)<\/span><\/h3><details open class="qa">/);

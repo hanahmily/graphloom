@@ -24,7 +24,7 @@ import { baseTargets, withOutcome, withUnknownCoverage } from "./measurements.js
 import { goFunctionCoverage, parseCoverageReport } from "./metrics/coverage.js";
 import type { FileIndex, MetricsRecord } from "./metrics/record.js";
 import { largeContext } from "./large.js";
-import type { Bullet, Briefing, Feature } from "./briefing.js";
+import type { Bullet, Briefing, Change, Feature } from "./briefing.js";
 import { treeQuotePlan } from "./treequotes.js";
 import { isTestFile } from "./scope.js";
 import { partitionAreas, type Partition } from "./areas.js";
@@ -537,10 +537,23 @@ function retentionFeatures(files: readonly PullFile[]): Feature[] {
 function briefingFor(core: Core, features: Feature[], partition: Partition | undefined): Briefing {
   const items = core.sections.flatMap((s) => s.items.map((item) => ({ section: s.id, item })));
   const bullet = (i: ReportItem): Bullet => ({ text: i.text.slice(0, 220), cites: i.cites.slice(0, 2) });
+  // The one sentence of a card: the item's first sentence (the second starts at a capital letter after a full stop), cut to the bound.
+  const sentence = (t: string): string => {
+    const first = t.split(/(?<=[.!?])\s+(?=[A-Z`"'(])/)[0]!.replace(/\s+/g, " ").trim();
+    return first.length <= 240 ? first : `${first.slice(0, 239)}…`;
+  };
+  const change = (i: ReportItem, n: number): Change => ({
+    ...bullet(i),
+    title: `${i.text.replace(/\s+/g, " ").trim().slice(0, 70)}`,
+    overview: sentence(i.text),
+    coreFiles: [...new Set(i.cites.slice(0, 2).map((c) => c.path))].slice(0, 1),
+    // The first feature's diagram belongs to the first change.
+    feature: n === 0 && features.length > 0 ? "F1" : "",
+  });
   const pick = (ids: readonly string[], n: number): Bullet[] => items.filter((x) => ids.includes(x.section)).slice(0, n).map((x) => bullet(x.item));
   const news = items.filter((x) => x.section !== "other" && x.section !== "claims").slice(0, 3);
   return {
-    whatsNew: (news.length > 0 ? news : items.slice(0, 1)).map((x) => bullet(x.item)),
+    whatsNew: (news.length > 0 ? news : items.slice(0, 1)).map((x, n) => change(x.item, n)),
     features,
     check: {
       surfaces: pick(["interfaces", "config"], 2),

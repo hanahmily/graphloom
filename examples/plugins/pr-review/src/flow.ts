@@ -83,7 +83,9 @@ function salvage(output: unknown): ReporterOutput | undefined {
   for (const l of CHECK_LISTS) check[l] = bullets(rawCheck[l]);
   const areas = list(output.areas).flatMap((a) => (isObject(a) && typeof a.id === "string" ? [{ id: a.id, label: string(a.label) }] : []));
   return {
-    whatsNew: bullets(output.whatsNew),
+    whatsNew: list(output.whatsNew).flatMap((b) =>
+      isObject(b) && typeof b.text === "string" && Array.isArray(b.cites) ? [{ text: b.text, cites: b.cites.flatMap(cite), title: string(b.title), overview: string(b.overview), coreFiles: strings(b.coreFiles), feature: string(b.feature) }] : [],
+    ),
     features,
     check,
     areas,
