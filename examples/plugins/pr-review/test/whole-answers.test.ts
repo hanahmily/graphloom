@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 import { fitParts, type ItemParts } from "../src/answertext.js";
-import { clip, cutAt } from "../src/escape.js";
+import { clip, clipKeep, cutAt } from "../src/escape.js";
 import { effectivePacks } from "../src/packs.js";
 import { parsePatch } from "../src/patch.js";
 import { createInput, planReview, findingMarker, MAX_INLINE_COMMENTS } from "../src/publish.js";
@@ -225,5 +225,35 @@ describe("the whole executor input is bounded in bytes", () => {
     const r = make(50, () => prose(2_000));
     const p = planReview({ pull: PULL, head: HEAD, nonce: "op1", round1: r, maxInputBytes: 5_000 });
     expect(p.problem).toMatch(/^the review's input is \d+ bytes, over the \d+ the executor takes/);
+  });
+});
+
+describe("a suggestion block is atomic when a posted body shrinks", () => {
+  const unclosed = (s: string): boolean => (s.match(/^\s*```/gm) ?? []).length % 2 === 1;
+
+  it("keeps each suggestion whole or drops it with a note, never cut inside its fence, in 50 large findings", () => {
+    const entries = Array.from({ length: 50 }, (_, i) => ({ id: `F${i + 1}`, kind: "finding", aspects: ["correctness"], severity: "P2", proof: { state: "non-behavioral" }, path: "pkg/a.go", side: "RIGHT", line: i + 1, anchored: true, body: prose(3_950), suggestion: `const x = ${"1 + ".repeat(240)}1;` }));
+    const p = planReview({ pull: PULL, head: HEAD, nonce: "op1", round1: { schema: "pr-review-round1-v1", head: HEAD, necessity: "necessary", issues: [] } as unknown as Round1Record, draft: { comments: entries, summary: "s" } as never });
+    expect(p.problem).toBeUndefined();
+    expect(Buffer.byteLength(JSON.stringify(createInput(PULL, p)), "utf8")).toBeLessThanOrEqual(MAX_EXECUTOR_INPUT_BYTES);
+    expect(p.comments).toHaveLength(MAX_INLINE_COMMENTS);
+    for (const c of [...p.comments.map((x) => x.body), p.body]) expect(unclosed(c)).toBe(false);
+    let dropped = 0;
+    for (const x of p.items) {
+      if (x.body.includes("(suggested change omitted for size; see the report)")) {
+        dropped += 1;
+        expect(x.body).not.toContain("```suggestion");
+        expect(x.full).toContain("```suggestion");
+      }
+    }
+    expect(dropped).toBeGreaterThan(0);
+  });
+
+  it("clipKeep drops a block it would cut, whole", () => {
+    const text = `${"word ".repeat(20)}\n\n\`\`\`suggestion\nconst x = 1;\nconst y = 2;\n\`\`\``;
+    const out = clipKeep(text, 130);
+    expect(unclosed(out)).toBe(false);
+    expect(out).not.toContain("```");
+    expect(clipKeep(text, text.length)).toBe(text);
   });
 });

@@ -19,7 +19,7 @@
 import { MAX_EXECUTOR_INPUT_BYTES, type EnvironmentCommand, type EvidenceRecord } from "@graphloom/sdk";
 import { COMMAND, CREATE_PULL_REVIEW, GET_VIEWER, PART_BASE, PUBLISH_PATCH_FILE, PUBLISH_STAGE, ledgerRef } from "./constants.js";
 import { fitParts, type ItemParts } from "./answertext.js";
-import { clip, clipKeep } from "./escape.js";
+import { clip, clipKeep, withoutFences } from "./escape.js";
 import { partCommands, readParts } from "./parts.js";
 import { anchored, severityLabel, type Draft, type DraftEntry } from "./draft.js";
 import { commandRuns, isObject, producer, succeeded, type CommandRun } from "./evidence.js";
@@ -73,6 +73,15 @@ const LEADING_MARKER = /^<!-- graphloom-finding: ([A-Z][0-9]+) -->(?:\n|$)/;
 const READ_WINDOW = 3_900;
 /** Content that looks like one of this graph's markers (or any HTML comment) is made inert, so it cannot be taken for a marker or hide text. */
 export const neutralize = (text: string): string => text.replace(/<!--/g, "&lt;!--");
+const SUGGESTION_OMITTED = "(suggested change omitted for size; see the report)";
+/** A posted text shortened to `n` characters: its fenced blocks (a suggestion) go whole, with a note, before its prose is cut at a sentence end or a word boundary; no fence is ever left open. */
+function shrinkPlain(text: string, n: number): string {
+  const noted = text.endsWith(SUGGESTION_OMITTED);
+  const w = noted ? { text: text.slice(0, text.length - SUGGESTION_OMITTED.length).trim(), dropped: true } : withoutFences(text);
+  if (!w.dropped) return clipKeep(text, n);
+  const room = n - SUGGESTION_OMITTED.length - 2;
+  return `${w.text.length <= room ? w.text : clipKeep(w.text, Math.max(1, room))}\n\n${SUGGESTION_OMITTED}`;
+}
 const neutralParts = (p: ItemParts): ItemParts => ({ ...p, head: neutralize(p.head), answer: neutralize(p.answer), cites: p.cites.map(neutralize), proposal: neutralize(p.proposal), ...(p.tail !== undefined ? { tail: neutralize(p.tail) } : {}) });
 
 export interface PublishItem {
@@ -308,7 +317,7 @@ export function planReview(i: {
       if (biggest === undefined) break;
       const text = unmarkedText(biggest.id, biggest.body);
       const target = Math.floor(text.length * 0.85);
-      const shorter = biggest.parts !== undefined ? fitParts(biggest.parts, target) : target >= MIN_ONE_LINER ? clipKeep(text, target) : text;
+      const shorter = biggest.parts !== undefined ? fitParts(biggest.parts, target) : target >= MIN_ONE_LINER ? shrinkPlain(text, target) : text;
       if (shorter.length >= text.length) {
         exhausted.add(biggest.id);
         continue;

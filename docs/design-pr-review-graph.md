@@ -2574,7 +2574,7 @@ head and the event is always `COMMENT`.
    and the JSON around them, is also measured in UTF-8 bytes against the executor's
    input bound (256,000, less a margin of 1,000): when it is over, items, inline ones
    included, are shortened largest first until it fits, and when none can shrink further
-   the plan carries a `problem` and the stage escalates. A round-1 issue is shortened by what matters least first: the
+   the plan carries a `problem` and the stage escalates. A fenced block, a suggestion, is atomic: a shrinking item drops it whole first, with `(suggested change omitted for size; see the report)`, and only then has its prose cut; no posted text keeps an unclosed fence. A round-1 issue is shortened by what matters least first: the
    proposal's detail (cut, then replaced by a note), then the end of the answer, cut at
    a sentence end, else a word boundary, followed by `(answer shortened; the full answer
    is in the report's Q&A, <id>)`; its citation links stay in preference to the proposal

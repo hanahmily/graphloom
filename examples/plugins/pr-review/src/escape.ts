@@ -36,9 +36,50 @@ export function clip(text: string, n: number): string {
   return `${c.text}…`;
 }
 
-/** Like `clip`, but the text keeps its own line breaks: for posted text that is already structured. */
+/** The fenced code blocks of a text as `[start, end)` offsets (a block left open runs to the end), by lines that begin with three backticks. */
+export function fencedBlocks(text: string): Array<[number, number]> {
+  const out: Array<[number, number]> = [];
+  let open: number | undefined;
+  let at = 0;
+  for (const line of text.split("\n")) {
+    if (/^\s*```/.test(line)) {
+      if (open === undefined) open = at;
+      else {
+        out.push([open, at + line.length]);
+        open = undefined;
+      }
+    }
+    at += line.length + 1;
+  }
+  if (open !== undefined) out.push([open, text.length]);
+  return out;
+}
+
+/** The text with every fenced block removed (whole, never cut), and whether any was. */
+export function withoutFences(text: string): { text: string; dropped: boolean } {
+  const blocks = fencedBlocks(text);
+  if (blocks.length === 0) return { text, dropped: false };
+  let out = "";
+  let from = 0;
+  for (const [s, e] of blocks) {
+    out += text.slice(from, s);
+    from = e;
+  }
+  out += text.slice(from);
+  return { text: out.replace(/\n{3,}/g, "\n\n").trim(), dropped: true };
+}
+
+/**
+ * Like `clip`, but the text keeps its own line breaks: for posted text that is already structured. A fenced code block is
+ * atomic: a cut that would fall inside one drops the block whole (and what follows it), so no fence is left open.
+ */
 export function clipKeep(text: string, n: number): string {
   if (text.length <= n) return text;
+  const inside = fencedBlocks(text).find(([s, e]) => s < n && e > n - 1);
+  if (inside !== undefined) {
+    const before = text.slice(0, inside[0]).trimEnd();
+    return before.length <= n - 1 ? (before === "" ? "…" : `${before}…`) : clipKeep(before, n);
+  }
   const c = cutAt(text, Math.max(0, n - 1));
   return c.sentence ? c.text : `${c.text}…`;
 }
