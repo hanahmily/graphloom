@@ -1138,6 +1138,16 @@ export function hugeRehearsal(config: unknown): { scenario: RehearsalScenario; h
   return { scenario: { ...built, commands: commandsOf }, headFiles };
 }
 
+/**
+ * The `incremental-round1` scenario (design §16): the `LIMIT_PULL` change (two new functions, `Limit` and `Burst`) with a clean Q&A
+ * and review replies. A test runs it on an earlier head's ledger with a delta; `over` says which questions that head asks (the others
+ * are carried, so the replies and canned checks leave them out) and may change the answers.
+ */
+export function incrementalRehearsal(config: unknown, over: Pick<QaSpec, "asked" | "necessityCarried" | "answer"> = {}): RehearsalScenario {
+  const profile = parseProfile(config);
+  return withReview(build(profile, LIMIT_PULL, { toolId: "static-go-1", qa: { purposes: LIMIT_PULL.qa!.purposes!, base: CLEAN_ROUND1.base!, ...over, answer: over.answer !== undefined ? (q, sym, record, dflt) => over.answer!(q, sym, record, CLEAN_ROUND1.answer!(q, sym, record, dflt)) : CLEAN_ROUND1.answer! } }).scenario, { total: 1, path: "pkg/quota/limit.go" });
+}
+
 /** The scenarios, for the profile the run is described with (design §16). */
 /**
  * A scenario with the review layer's replies added (design §16, `review-layer`): the replies are used when round 1 finds no issue
@@ -1240,6 +1250,8 @@ export function rehearsal(config: unknown): GraphRehearsal {
       // The review layer (design §8): three aspect reviewers over one Go file; a confirmed P1, a refuted P2 (the checker's dismissal), a confirmed non-behavioral P2, and the draft.
       // Round 1 finds no issue (the purpose is stated, no dependency lacks a source, every answer is plain and cites a covering test), so the same run continues into the review layer and publishes round 2.
       "review-layer": withReview(build(profile, COMPLEX_PULL, { toolId: "static-go-1", qa: CLEAN_ROUND1 }).scenario, { total: 1, path: "pkg/schema/ttl.go" }),
+      // Round 1 on a later head (design §9.3, 0.26): two new functions (Limit, Burst) with a clean Q&A, so a test can run it on an earlier head's ledger and a delta.
+      "incremental-round1": incrementalRehearsal(config),
     },
   };
 }

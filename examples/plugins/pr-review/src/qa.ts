@@ -12,6 +12,7 @@
 import type { FinalAnswer } from "./answers.js";
 import type { Groundwork } from "./groundwork.js";
 import { brokenNote, effectiveConclusion, NECESSITY_ID, ROUNDS_SKIP_NOTE, ROUNDS_SKIP_REASON, SKIPPED_NOTE, supportedBreaks, type NecessityRecord } from "./necessity.js";
+import { incrementalLine, type IncrementalNote } from "./incremental.js";
 import { describeReasons, type ReviewMode } from "./mode.js";
 import type { PurposeRecord, Question } from "./questions.js";
 import { needAuthor, openQuestions } from "./scope.js";
@@ -40,6 +41,8 @@ export interface QaInput {
   mode?: ReviewMode;
   /** Large mode: how many batches of questions the answerer worked through. */
   batches?: number;
+  /** How this head's round 1 went when an earlier head's ledger exists: what was asked and carried, or why it was a full round (design §6.7). */
+  incremental?: IncrementalNote;
 }
 
 /**
@@ -74,6 +77,7 @@ export function qaJson(i: QaInput): string {
   return JSON.stringify({
     schema: QA_FILE_SCHEMA,
     mode: (i.mode ?? { mode: "standard" }).mode,
+    ...(i.incremental !== undefined ? { incremental: i.incremental } : {}),
     ...(i.mode?.mode === "large" ? { modeReasons: i.mode.reasons, ...(i.batches !== undefined ? { batches: i.batches } : {}) } : {}),
     pull: { owner: i.pr.owner, repo: i.pr.repo, number: i.pr.number, head: i.pr.head, ...(i.base !== undefined ? { base: i.base } : {}) },
     symbols: i.groundwork.symbols.map((s) => ({
@@ -90,13 +94,13 @@ export function qaJson(i: QaInput): string {
       tests: (i.groundwork.testMap.get(s.id) ?? []).length,
     })),
     purposes: i.purposes,
-    ...(i.necessity !== undefined ? { necessity: { conclusion: effectiveConclusion(i.necessity.final), ...(supportedBreaks(i.necessity.final).length > 0 ? { principlesBroken: supportedBreaks(i.necessity.final) } : {}), ...(i.necessity.principles !== undefined ? { principles: i.necessity.principles } : {}), decision: i.necessity.decision, skipped: i.skipped === true, ...(i.skipped === true ? { note: SKIPPED_NOTE } : {}), detail: i.necessity.final.necessity } } : {}),
+    ...(i.necessity !== undefined ? { necessity: { conclusion: effectiveConclusion(i.necessity.final), ...(supportedBreaks(i.necessity.final).length > 0 ? { principlesBroken: supportedBreaks(i.necessity.final) } : {}), ...(i.necessity.principles !== undefined ? { principles: i.necessity.principles } : {}), decision: i.necessity.decision, ...(i.necessity.carried !== undefined ? { carried: i.necessity.carried } : {}), skipped: i.skipped === true, ...(i.skipped === true ? { note: SKIPPED_NOTE } : {}), detail: i.necessity.final.necessity } } : {}),
     inventory: { dependencies: inv.dependencies, packages: inv.packages.length, truncated: inv.truncated },
     weakTest: WEAK_TEST_NOTE,
     questions: i.questions.map((q) => {
       const a = answers.get(q.id);
       const { question: _id, ...rest } = a ?? ({} as Partial<FinalAnswer>);
-      return { id: q.id, type: q.type, item: q.item, ...(q.symbol !== undefined ? { symbol: q.symbol } : {}), ...(q.fn !== undefined ? { function: q.fn } : {}), ...(q.fnPath !== undefined ? { functionPath: q.fnPath } : {}), text: q.text, origin: q.origin, ...(q.stable !== undefined ? { stable: q.stable } : {}), ...(a !== undefined ? { answer: rest } : {}) };
+      return { id: q.id, type: q.type, item: q.item, ...(q.symbol !== undefined ? { symbol: q.symbol } : {}), ...(q.fn !== undefined ? { function: q.fn } : {}), ...(q.fnPath !== undefined ? { functionPath: q.fnPath } : {}), text: q.text, origin: q.origin, ...(q.stable !== undefined ? { stable: q.stable } : {}), ...(q.carried !== undefined ? { carried: { head: q.carried } } : {}), ...(a !== undefined ? { answer: rest } : {}) };
     }),
   });
 }
@@ -121,7 +125,7 @@ function proposalLines(a: FinalAnswer): string[] {
 
 function questionLines(q: Question, a: FinalAnswer | undefined): string[] {
   const mark = a?.status === "needs author" ? " ▶ needs author" : "";
-  const lines = [`- **${q.id} [${q.type}]${mark}** ${oneLine(q.text)}`];
+  const lines = [`- **${q.id} [${q.type}]${mark}**${q.carried !== undefined ? ` (carried from ${q.carried.slice(0, 7)})` : ""} ${oneLine(q.text)}`];
   if (a === undefined) return [...lines, "  **A — not answered.**"];
   lines.push(`  **A — ${a.status}${a.proposal.kind === "split" && a.status === "answered" ? " (proposal)" : ""}.** ${oneLine(a.answer)}`, evidenceLine(a), ...proposalLines(a));
   if (a.notes.length > 0) lines.push(`  Note: ${a.notes.join("; ")}.`);
@@ -134,11 +138,13 @@ const COMPACT: ReadonlySet<string> = new Set(["existing-reuse-common"]);
 /** The Q&A part of `review.md` (design §7.4). */
 export function renderQa(i: QaInput): string {
   const asked = i.questions.filter((q) => q.id !== NECESSITY_ID);
-  if (i.skipped === true) return ["# Q&A", `${NECESSITY_ID} is answered above, under Necessity.`, SKIPPED_NOTE, ""].join("\n");
+  const since = i.incremental !== undefined ? [incrementalLine(i.incremental)] : [];
+  if (i.skipped === true) return ["# Q&A", ...since, `${NECESSITY_ID} is answered above, under Necessity.`, SKIPPED_NOTE, ""].join("\n");
   const answers = new Map(i.answers.map((a) => [a.question, a] as const));
   const by = (s: FinalAnswer["status"]): number => i.answers.filter((a) => a.question !== NECESSITY_ID && a.status === s).length;
   const lines = [
     "# Q&A",
+    ...since,
     ...(i.mode?.mode === "large" ? [`Mode: large (${describeReasons(i.mode.reasons)}): the questions follow the large-mode rules (asked per high-level change, W1…: its purpose when the pull request does not state it, one question on whether the codebase already has it, a library can do it or common logic exists, and which tests cover it)${i.batches !== undefined ? `, answered in ${i.batches} batch(es) of at most 15 questions` : ""}.`] : []),
     ...(i.necessity !== undefined ? [`${NECESSITY_ID} (necessity) is answered above, under Necessity: ${effectiveConclusion(i.necessity.final)}; ${i.necessity.decision.reason}.`] : []),
     `${asked.length} question${asked.length === 1 ? "" : "s"} (${asked.filter((q) => q.origin === "required").length} required, ${asked.filter((q) => q.origin === "added").length} added by the questioner): ${by("answered")} answered, ${by("partially answered")} partially answered, ${by("needs author")} needs author. Weak-test questions: ${WEAK_TEST_NOTE}.`,
@@ -252,6 +258,7 @@ export function renderNecessity(r: NecessityRecord): string {
     ...(a.check.searches.length > 0 ? [`The checker's own searches: ${a.check.searches.map((s) => searchLine(s, 60)).join("; ")}.`] : []),
     ...(a.notes.length > 0 ? [`Note: ${a.notes.join("; ")}.`] : []),
     ...(a.history.length > 1 ? [`Statements before the ${a.check.verdict === "downgraded" ? "downgrade" : "correction"}: ${a.history.map((h, k) => `${k === 0 ? "first" : "corrected"}: "${short(oneLine(h.answer), 160)}"`).join("; ")}.`] : []),
+    ...(r.carried !== undefined ? [`Carried from ${r.carried.head.slice(0, 7)}: nothing this answer cites changed since, so N1 was not asked again (design §9.3).`] : []),
     ...(r.decision.action === "ask-all" && r.decision.override === true ? ["Override: the operator asked for every question, so none was skipped."] : []),
     "",
   ];

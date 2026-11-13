@@ -117,6 +117,8 @@ export interface Question {
   key: string;
   /** The stable key the ledger keeps (design §9.4): the question's type and subject, set once the run's questions are known. */
   stable?: string;
+  /** Set when a later head carried the earlier answer to this question instead of asking it again: the head it was answered on (design §9.3). */
+  carried?: string;
 }
 
 export interface QuestionInputs {

@@ -11,6 +11,7 @@ import type { EnvironmentCommand, EvidenceRecord } from "@graphloom/sdk";
 import { analyze, type Analysis } from "./analysis.js";
 import { ANSWER_KIND, answerProblems, answersFlow, NECESSITY_KIND, verificationOutcome, verificationPlan, type AnswerContext, type AnswersFlow, type FinalAnswer } from "./answers.js";
 import { pinnedBase } from "./commands.js";
+import { carryNecessity, carryOf, incrementalReads, openIssueIds, type Carried, type CarriedNecessity, type CarryEnv, type IncrementalNote, type IncrementalReads } from "./incremental.js";
 import { isLarge, questionsMode, type ReviewMode } from "./mode.js";
 import { COMMAND, QUESTION_BATCH_SIZE, REVIEW_DIR } from "./constants.js";
 import { commandRuns, succeeded, type CommandRun } from "./evidence.js";
@@ -48,6 +49,8 @@ export interface QaContext {
   principles?: PrinciplesContext;
   /** What earlier runs left in the ledger (design §9): the ids to continue from and the posted items; empty for a first run. */
   prior: PriorRegistry;
+  /** Round 1 on a later head (design §9.3): no earlier ledger, a full round 1 with its reason, or the earlier Q&A and the delta to plan the carrying with. */
+  incremental: Exclude<IncrementalReads, { state: "run" }>;
 }
 
 export type QaContextState =
@@ -77,7 +80,21 @@ export function qaContext(evidence: readonly EvidenceRecord[], profile: Profile,
   const symbols = g.groundwork.symbols.map((s) => ({ ...s, ...(itemOfSymbol(s, view.items) !== undefined ? { item: itemOfSymbol(s, view.items)! } : {}) }));
   const groundwork: Groundwork = { ...g.groundwork, symbols };
   const mode = questionsMode(a.analysis.snapshot.mode, groundwork.symbols.filter((s) => s.change === "new").length, profile.limits);
-  return { state: "ready", ctx: { analysis: a.analysis, mode, pr, base, view, groundwork, pinned: pinnedTexts(a.analysis.snapshot.pull, a.analysis.snapshot.commits), packs: effectivePacks(profile), refs: g.refs, prior: registryFromEvidence(evidence), designDocs: profile.questions.designDocs, context: profile.context, ...(principles !== undefined ? { principles } : {}) } };
+  const registry = registryFromEvidence(evidence);
+  const read = ledgerRead(evidence);
+  const reads = incrementalReads(evidence, { ledger: read !== undefined && read.ledger.present ? read.ledger.sha : undefined, registry, enabled: profile.questions.incremental && profile.rounds !== "review-only", head: pr.head, files: a.analysis.snapshot.files.map((f) => f.path), base, node: process.execPath });
+  // Fetch reads the earlier Q&A and the delta before it passes. A ledger value later than Fetch's (the compare-and-swap lost a race, and the operator
+  // resumed) has none of that read: until its registry is loaded nothing is said of it, and after, the round is a full one.
+  const loaded = read === undefined || !read.ledger.present || priorState(evidence, read.ledger.sha).state === "read";
+  const incremental: QaContext["incremental"] =
+    !loaded
+      ? { state: "none" }
+      : reads.state === "run"
+        ? { state: "full", reason: "the ledger moved after Fetch read it, and the earlier Q&A of its new latest commit was not read" }
+        : reads.state === "usable" && (isLarge(mode) || reads.prior.qa.mode !== mode.mode)
+      ? { state: "full", reason: isLarge(mode) ? "large mode asks per high-level change, whose subjects the briefing rewrites every head" : `the earlier Q&A was of ${reads.prior.qa.mode} mode and this head's is ${mode.mode}` }
+      : reads;
+  return { state: "ready", ctx: { analysis: a.analysis, mode, pr, base, view, groundwork, pinned: pinnedTexts(a.analysis.snapshot.pull, a.analysis.snapshot.commits), packs: effectivePacks(profile), refs: g.refs, prior: registry, incremental, designDocs: profile.questions.designDocs, context: profile.context, ...(principles !== undefined ? { principles } : {}) } };
 }
 
 /** The questioner's flow: its result checked by the deterministic rules. */
@@ -94,6 +111,8 @@ export interface QuestionSet {
   rejected: string[];
   /** N1 concluded unnecessary and the checker supports it: no other question is asked (design §7.5). */
   skipped: boolean;
+  /** The earlier answers a later head carried instead of asking again (design §9.3), as they read at this head; N1's is in `necessity.json`. */
+  carried: FinalAnswer[];
 }
 
 /**
@@ -101,11 +120,60 @@ export interface QuestionSet {
  * N1, the necessity question, is always first; when it is skipped past, it is the only one.
  */
 export function questionSet(ctx: QaContext, output: QuestionerOutput | undefined, skipped = false): QuestionSet {
-  if (skipped) return { questions: [{ ...necessityQuestion(), stable: "necessity|N1" }], purposes: [], rejected: [], skipped: true };
+  if (skipped) return { questions: [{ ...necessityQuestion(), stable: "necessity|N1" }], purposes: [], rejected: [], skipped: true, carried: [] };
   const { stated, rejected } = statedPurposes(output, ctx.view, ctx.pinned, isLarge(ctx.mode));
   const required = requiredQuestions({ view: ctx.view, groundwork: ctx.groundwork, large: isLarge(ctx.mode) }, stated);
   const purposes: PurposeRecord[] = changeItems(ctx.view, isLarge(ctx.mode)).map((i) => stated.get(i.id) ?? { item: i.id, status: "asked" });
-  return { questions: continued(ctx, [necessityQuestion(), ...finalQuestions(required, output, ctx.groundwork, isLarge(ctx.mode))]), purposes, rejected, skipped: false };
+  const { questions, carried } = withCarried(ctx, continued(ctx, [necessityQuestion(), ...finalQuestions(required, output, ctx.groundwork, isLarge(ctx.mode))]));
+  return { questions, purposes, rejected, skipped: false, carried };
+}
+
+/** What the carry rule reads of this head (design §9.3); undefined when round 1 is not incremental. */
+export function carryEnvOf(ctx: QaContext): CarryEnv | undefined {
+  if (ctx.incremental.state !== "usable") return undefined;
+  return {
+    prior: ctx.incremental.prior,
+    openIds: openIssueIds(ctx.prior.items),
+    symbols: ctx.groundwork.symbols,
+    items: [...ctx.view.items, ...(ctx.view.changes ?? [])],
+    dependencies: ctx.groundwork.inventory.dependencies.map((d) => `${d.name}@${d.version}`),
+    principles: JSON.stringify(ctx.principles !== undefined ? principlesRecord(ctx.principles) : null),
+    pinned: ctx.pinned,
+  };
+}
+
+/** N1's earlier answer when this head carries it instead of asking N1 again (design §9.3, item 4). */
+export function carriedNecessityOf(ctx: QaContext): CarriedNecessity | undefined {
+  const env = carryEnvOf(ctx);
+  if (env === undefined) return undefined;
+  const r = carryNecessity(env);
+  return "record" in r ? r : undefined;
+}
+
+/** The questions with each carried one marked, wording and answer those recorded, and the carried answers in question order. */
+function withCarried(ctx: QaContext, questions: Question[]): { questions: Question[]; carried: FinalAnswer[] } {
+  const env = carryEnvOf(ctx);
+  if (env === undefined) return { questions, carried: [] };
+  const n1 = carriedNecessityOf(ctx);
+  const carried: FinalAnswer[] = [];
+  const out = questions.map((q): Question => {
+    if (q.type === "necessity") return n1 !== undefined ? { ...q, carried: n1.head } : q;
+    const r: Carried | { why: string } = carryOf(q, env);
+    if (!("answer" in r)) return q;
+    carried.push(r.answer);
+    return { ...q, text: r.text, carried: r.head };
+  });
+  return { questions: out, carried };
+}
+
+/** How this head's round 1 went when an earlier ledger exists (design §6.7): what was asked and what was carried, or why every question was asked. */
+export function incrementalNote(ctx: QaContext, set: QuestionSet): IncrementalNote | undefined {
+  const inc = ctx.incremental;
+  if (inc.state === "none") return undefined;
+  if (inc.state === "full") return { full: inc.reason };
+  const open = openIssueIds(ctx.prior.items);
+  const asked = set.questions.filter((q) => q.carried === undefined);
+  return { from: inc.prior.from, to: ctx.pr.head, asked: asked.length, rechecks: asked.filter((q) => open.has(q.id)).length, carried: set.questions.length - asked.length };
 }
 
 /** The first head cite's path of each report item and high-level change: the subject a question about it keeps from head to head. */
@@ -133,13 +201,21 @@ export const answerContext = (ctx: QaContext, questions: readonly Question[]): A
 export const necessityContext = (ctx: QaContext): AnswerContext => ({ ...answerContext(ctx, [necessityQuestion()]), principles: ctx.principles?.applicable ?? [] });
 
 /** N1's checked answer with its decision and the principles file it was judged against: what `necessity.json` records. */
-export const necessityRecordOf = (ctx: QaContext, final: FinalAnswer, askAll: boolean): NecessityRecord => ({ final, decision: necessityDecision(final, askAll), ...(ctx.principles !== undefined ? { principles: principlesRecord(ctx.principles) } : {}) });
+export const necessityRecordOf = (ctx: QaContext, final: FinalAnswer, askAll: boolean): NecessityRecord => ({ final, decision: necessityDecision(final, askAll), ...(ctx.principles !== undefined ? { principles: principlesRecord(ctx.principles) } : {}), ...(carriedNecessityOf(ctx) !== undefined ? { carried: carriedNecessityOf(ctx)!.record.carried! } : {}) });
 
 /** The questions the answerer answers after N1: every one but N1, which has its own flow and its own answerer job. */
-export const afterNecessity = (set: QuestionSet): Question[] => set.questions.filter((q) => q.type !== "necessity");
+export const afterNecessity = (set: QuestionSet): Question[] => set.questions.filter((q) => q.type !== "necessity" && q.carried === undefined);
+
+/** The answers flow over the questions this head asks; with none to ask (everything is carried) it is done, and no job runs. */
+export function restFlow(evidence: readonly EvidenceRecord[], ctx: QaContext, rest: readonly Question[], retryable?: (r: CommandRun) => boolean): AnswersFlow {
+  return rest.length === 0 ? { state: "done", final: [], refs: [] } : answersFlow(evidence, answerContext(ctx, rest), ctx.base, retryable);
+}
 
 /** N1's flow: its answerer, the verification of its citations, and the checker (design §7.5), over the necessity contract. */
 export function necessityFlow(evidence: readonly EvidenceRecord[], ctx: QaContext, retryable?: (r: CommandRun) => boolean): AnswersFlow {
+  // A later head carries N1's earlier answer when the delta does not touch what it rests on (design §9.3): no job runs.
+  const carried = carriedNecessityOf(ctx);
+  if (carried !== undefined) return { state: "done", final: [carried.record.final], refs: [] };
   return answersFlow(evidence, necessityContext(ctx), ctx.base, retryable, NECESSITY_KIND, COMMAND.citeNecessity);
 }
 
@@ -164,7 +240,7 @@ export const necessityRecordCommands = (record: NecessityRecord): EnvironmentCom
 /** `qa.json`, the Q&A part and the Necessity part of `review.md` the answers recompute to. */
 export function qaOutputs(ctx: QaContext, set: QuestionSet, answers: FinalAnswer[], necessity?: NecessityRecord): { json: string; markdown: string; verdict: string; open: string; necessity?: string } {
   const large = isLarge(ctx.mode) && !set.skipped;
-  const input: QaInput = { pr: ctx.pr, base: ctx.base, view: ctx.view, groundwork: ctx.groundwork, purposes: set.purposes, questions: set.questions, answers, skipped: set.skipped, mode: ctx.mode, ...(large ? { batches: answerBatches(afterNecessity(set)).length } : {}), ...(necessity !== undefined ? { necessity } : {}) };
+  const input: QaInput = { pr: ctx.pr, base: ctx.base, view: ctx.view, groundwork: ctx.groundwork, purposes: set.purposes, questions: set.questions, answers, skipped: set.skipped, mode: ctx.mode, ...(incrementalNote(ctx, set) !== undefined ? { incremental: incrementalNote(ctx, set)! } : {}), ...(large ? { batches: answerBatches(afterNecessity(set)).length } : {}), ...(necessity !== undefined ? { necessity } : {}) };
   return { json: qaJson(input), markdown: renderQa(input), ...briefingQa(input), ...(necessity !== undefined ? { necessity: renderNecessity(necessity) } : {}) };
 }
 

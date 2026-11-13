@@ -120,7 +120,10 @@ previous runs left ([§9.1](#91-where-the-ledger-lives)).
 - **`Review on owner/repo#N at <sha>.`** (written by `graphloom task new`,
   [§3.1](#31-task); `Report on …` still parses and means the same). The run:
   1. Fetch, Report, Questions and Answers: **round 1**, the report and the
-     Q&A ([§6](#6-the-change-report), [§7](#7-questions-and-answers)).
+     Q&A ([§6](#6-the-change-report), [§7](#7-questions-and-answers)). On a
+     later head the Q&A is **incremental**: it re-checks the earlier open
+     issues and asks only about the code the update changed; everything else
+     is carried ([§9.3](#93-re-checking-earlier-findings)).
   2. **Round 1 gate** (stage `round1`): plugin code computes round 1's issues
      from `necessity.json` and `qa.json` and records them as `round1.json`
      ([§9.4](#94-rounds)).
@@ -250,7 +253,7 @@ meaning and parser (review-kit, [§14](#14-sharing-code-with-issue-fix)).
 | `environment` | Only `checks` (`git`, the bundled `ocr` via `scripts/ocr-path.sh`, the harness CLIs). **`prepare` and `pinnedFiles` are refused**: preparation would run contributor code in the unconfined worktree. Setup that a coverage run needs (code generation the repository does not commit) is `metrics.sandbox.<language>.setup` instead, which runs inside the Docker sandbox ([§12.2](#122-confinement)) |
 | `report` | The section template, each section's meaning in this repository, and its detectors ([§6.2](#62-profile-mapping), [§6.3](#63-detectors)) |
 | `symbols` | Language packs: file globs, definition patterns, test-file and test-name patterns ([§7.2](#72-deterministic-groundwork)). The plugin ships packs for Go and TypeScript as data, and a profile may add or override them |
-| `questions` | `excludeRoots` (generated code only; the search covers the whole base tree, vendored directories included), `similarity` (default 0.5), `maxCandidates` per query (5) ([§7.2](#72-deterministic-groundwork)); and `designDocs`, repository-relative globs of the design and architecture documents that N1's answerer and checker read first, beside the `context` documents ([§7.5](#75-the-necessity-question-n1)). BanyanDB's are `docs/concept/{tsdb,clustering,persistence-storage,storage-and-format,data-model,rotation}.md`, `docs/design/README.md` and the two `docs/design/0.12.0` pages on the write stream (`streaming-api`, `measure-batch-v2`); and `principles`, `{ "path": "<repo-relative .md>", "ref": "<git ref>" }`, the project's design principles file and the ref to read it at (`ref` optional, a git ref name matching `^[A-Za-z0-9._/-]+$`, at most 200 characters, default the task's base commit; [§7.5.1](#751-project-design-principles)). BanyanDB's is `skills/design-principles/SKILL.md` |
+| `questions` | `excludeRoots` (generated code only; the search covers the whole base tree, vendored directories included), `similarity` (default 0.5), `maxCandidates` per query (5) ([§7.2](#72-deterministic-groundwork)); and `designDocs`, repository-relative globs of the design and architecture documents that N1's answerer and checker read first, beside the `context` documents ([§7.5](#75-the-necessity-question-n1)). BanyanDB's are `docs/concept/{tsdb,clustering,persistence-storage,storage-and-format,data-model,rotation}.md`, `docs/design/README.md` and the two `docs/design/0.12.0` pages on the write stream (`streaming-api`, `measure-batch-v2`); and `principles`, `{ "path": "<repo-relative .md>", "ref": "<git ref>" }`, the project's design principles file and the ref to read it at (`ref` optional, a git ref name matching `^[A-Za-z0-9._/-]+$`, at most 200 characters, default the task's base commit; [§7.5.1](#751-project-design-principles)). BanyanDB's is `skills/design-principles/SKILL.md`; and `incremental` (default `true`): `false` makes every head ask every question, as a first run does ([§9.3](#93-re-checking-earlier-findings)) |
 | `metrics` | Per language: `files`, and the tools' `argv` for static metrics, coverage and mutation (defaults: [metrics §3](design-code-quality-metrics.md#3-tools)). Also `generated` globs; `coverage` (run the PR's tests for coverage under untrusted confinement, **default true**); `mutation.enabled` (**default true**; needs coverage) and `mutation.timeBudgetMs` (default 30 min); and `sandbox`, the Docker sandbox's image digest per language with its `cpus`, `memory`, `pids`, `tmp` and `wallClockMs`, its `readOnly` mounts (named host directories of tools and offline caches, `~/…` for the operator's home) and, for Go, its `setup` commands (sandboxed code generation run in the checkout before the tests, [§12.2](#122-confinement)) and its `buildTags` (the Go build tags the coverage `go test` compiles with, `-tags=a,b`: those the repository's own CI passes; each `[A-Za-z0-9_.]+`, none twice, at most 16; never applied to setup) and its `ginkgoLabelFilter` (a Ginkgo label-filter expression, `[A-Za-z0-9_.\-!&|() ,/]+`, at most 200 characters, the `--label-filter` the repository's CI passes; given only to the touched packages whose tests import Ginkgo, [§12.2](#122-confinement)). `go test`'s own `-timeout` is not a profile key: it follows `wallClockMs` less two minutes BanyanDB's protobuf and mock code is generated this way. A profile may turn either run off. Thresholds may be tightened, never loosened |
 | `context` | issue-fix's [context documents](design-issue-fix-graph.md#context-documents) |
 | `issues` | Where linked issues live. `Fixes`/`Closes` references are read with `get-issue` |
@@ -334,16 +337,25 @@ the profile has `checks`. "Unless round 1 found issues" means: unless the
 recorded round-1 issues ([§9.4](#94-rounds)) are not empty; Review and Draft
 then pass on that, and the run publishes round 1 and ends.
 
+On a later head ([§9.3](#93-re-checking-earlier-findings)) the Questions and
+Answers requirements below hold for the questions the delta scope puts in play:
+a question the ledger answered and the update did not touch is **carried**, with
+its recorded answer, evidence and checker verdict and the head it was answered
+on, and is not asked, answered or checked again. Which questions are carried is
+recomputed by the validators from the prior Q&A and the delta, so a `qa.json`
+that carries a question the rule would ask, or asks one the rule carries,
+fails `answers-complete`.
+
 | Stage | Requirement | Statement (abridged; full text names the profile's values) | Evidence | Validator |
 |---|---|---|---|---|
 | Fetch | `pr-snapshot` | The PR's metadata, every changed file with its patch, every commit, review, review comment and thread (with resolution), and the head's check runs were read completely, for head `<sha>` | GitHub read results | `pr-snapshot` |
 | Fetch | `head-checked-out` | The worktree holds exactly the head's tree, its base is the merge base, and no repository code ran to produce it | `checkout-command-v1` | `head-tree` |
-| Fetch | `prior-ledger` | The PR's ledger was read, or recorded absent, and the delta scope follows from it | command report | `review-scope` |
+| Fetch | `prior-ledger` | The PR's ledger was read, or recorded absent; when it holds a Q&A of an earlier head, that Q&A, its necessity record and the delta since that head (the hunks between the two heads, and whether each base file the earlier answers cite differs between the two bases) were read, or the reason a full round 1 is needed was recorded ([§9.2](#92-mapping-a-new-head-to-the-last-reviewed-one)) | command report | `review-scope` |
 | Report | `change-report` | Every template section is present, with cited items or an explicit "None". Every citation is inside the PR's diff. Every changed file and every detector fact is cited. No item carries a severity, finding or verdict (the contract has no such field). Every report opens with a briefing the reporter writes (what is new, the data flow of each new feature, what to check, [§6.1](#61-template), [§6.10](#610-features-and-their-data-flow)), and `review.html` (the briefing) and `review-appendix.html` are written beside `review.md` ([§6.11](#611-the-html-report)); an artifact too large for one command is written in parts ([§6.6](#66-output)) | `change-report-v1`, `report-write` | `change-report` |
 | Report | `measurements` | For every function the PR adds or modifies, complexity and nesting were measured by the pinned tools over the head tree, and coverage (on by default) and then mutation (on by default, at covered sites only) were measured in the Docker sandbox over a checkout of the head, or carry a not-run reason (switched off by the profile, Docker unavailable, image missing, a dependency not cached, no vitest coverage provider, no coverage). Every value recomputes from its evidence ([metrics §5](design-code-quality-metrics.md#5-records-and-recomputation)) | `graphloom-metrics-v1` command reports | `measurements` |
 | Report | `claims-checked` | An independent `<report-checker>` judged every report item against the diff, and every item left is `supported` with matching quotes | `claim-check-v1` | `claims-checked` |
-| Questions | `questions-complete` | N1, the necessity question, was asked first ([§7.5](#75-the-necessity-question-n1)): its three parts have their evidence, an independent checker verified every cited design statement, trace step and the conclusion, and N1's checked answer and decision are recorded in `necessity.json`. When N1 concluded `unnecessary`, the checker supports it and the operator did not ask for every question, N1 is the only question required and the skip is recorded. Otherwise every required question was asked ([§7.1](#71-questions)): purpose for each change item whose purpose the PR text does not state (a stated purpose recorded with a matching quote instead); `existing-reuse-common` for each new symbol, one question with one answer (in large mode, for each high-level change instead, [§7.6](#76-questions-in-large-mode)); `missing-test` for each new or modified symbol with no mapped test; and one question per value over a metric limit and per surviving mutant. Every changed function has a measurement record or a not-run reason | `necessity-v1`, `answer-check-v1`, `necessity-write`, `questions-v1`, search and test-map reports | `questions-complete` (`independence: separate-reviewer`: N1's check is its latest review) |
-| Answers | `answers-complete` | N1 has its recorded answer first (alone, with the skip recorded in the Q&A, when it was skipped past). Every other question has an answer from the `<answerer>`, with evidence (citations, the searches run, each re-run by the plugin with the count it measured, quotes) and a status of `answered`, `partially answered` or `needs author`. Every "none found" answer lists its whole-repository searches and the dependency inventory. Every cited metric equals its record. Every proposal cites line ranges inside its function. `review.md`, `report.json` and `qa.json` are written | `answers-v1`, `qa-write` | `answers-complete` |
+| Questions | `questions-complete` | N1, the necessity question, was asked first ([§7.5](#75-the-necessity-question-n1)): its three parts have their evidence, an independent checker verified every cited design statement, trace step and the conclusion, and N1's checked answer and decision are recorded in `necessity.json`. When N1 concluded `unnecessary`, the checker supports it and the operator did not ask for every question, N1 is the only question required and the skip is recorded. Otherwise every required question was asked, or on a later head carried ([§9.3](#93-re-checking-earlier-findings)) ([§7.1](#71-questions)): purpose for each change item whose purpose the PR text does not state (a stated purpose recorded with a matching quote instead); `existing-reuse-common` for each new symbol, one question with one answer (in large mode, for each high-level change instead, [§7.6](#76-questions-in-large-mode)); `missing-test` for each new or modified symbol with no mapped test; and one question per value over a metric limit and per surviving mutant. Every changed function has a measurement record or a not-run reason | `necessity-v1`, `answer-check-v1`, `necessity-write`, `questions-v1`, search and test-map reports | `questions-complete` (`independence: separate-reviewer`: N1's check is its latest review) |
+| Answers | `answers-complete` | N1 has its recorded answer first (alone, with the skip recorded in the Q&A, when it was skipped past). Every other question that is not carried has an answer from the `<answerer>`, with evidence (citations, the searches run, each re-run by the plugin with the count it measured, quotes) and a status of `answered`, `partially answered` or `needs author`. Every "none found" answer lists its whole-repository searches and the dependency inventory. Every cited metric equals its record. Every proposal cites line ranges inside its function. `review.md`, `report.json` and `qa.json` are written | `answers-v1`, `qa-write` | `answers-complete` |
 | Answers | `answers-grounded` | An independent `<answer-checker>` verified N1's cited design statements, trace steps and conclusion, and re-checked every cited equivalent, library, duplicate and covering test, and every "none found" claim, against the trees. Every answer left is `supported` or `partial`. An answer still unsupported after one correction is `needs author`, with both statements recorded | `claim-check-v1` | `answers-grounded` |
 | Round 1 | `round1-gated` | Round 1 is decided by plugin code from `necessity.json` and `qa.json`, with no model and no human, and recorded as `round1/round1.json` (`pr-review-round1-v1`): N1's conclusion when it is not `necessary`; every `needs author` and every partially answered question; every answer that found an existing equivalent, a reusable library or common logic outside the code the pull request changes (an equivalent inside a changed file is the change itself, [§9.4](#94-rounds)), and every missing-test answer that cites no covering test, even when fully answered. Each issue has its id (`N1`, `Q3`), kinds, status, text and, when its place lies inside a hunk at the head, its anchor. The record recomputes from the recorded Q&A | `round1-v1` | `round1-gated` |
 | Review | `code-review` | Unless round 1 found issues (no human is asked: the stage is entered in the same run): for each aspect (correctness, maintainability, security), the latest read-only `<reviewer-aspect>` pass reviewed every file in scope with that aspect's rule file, every rule group `ocr delegate rule` returned for it has source `custom` and that file's rule text, and the pass gave a status for every open prior finding of the aspect. Every pass started a fresh session seeded with `review.md` only, and the scope record says so. Each aspect's sweep saturated or ran four passes. Every finding has a verdict from its `<verifier-aspect>`, in a fresh session on a harness different from its reviewer's | `pr-code-review-v1`, `ocr-rule-groups` command reports, `pr-finding-verification-v1` | `open-code-review` |
@@ -816,17 +828,27 @@ parts could be posted as a PR comment by a later version, using the existing
 
 ### 6.7 Delta report
 
-On a later head, Fetch maps the head to the last **reported** one
-([§9.2](#92-mapping-a-new-head-to-the-last-reviewed-one)). The run then writes:
+On a later head, Fetch reads the delta since the last reviewed head
+([§9.2](#92-mapping-a-new-head-to-the-last-reviewed-one)). What the report does
+with it, since 0.26:
 
-- the **full current report**, written and checked as above;
-- a **"Since last report (L → H)"** section first, derived deterministically:
-  - commits added, dropped or rewritten, by patch-id;
-  - detector facts present at H and not at L, and the reverse;
-  - full-report items whose citations intersect the delta scope, marked
-    *new* or *changed*.
-
-This costs no extra model call.
+- **The report is still written in full for the head.** The reporter, the claim
+  check and the diagrams run as on a first head, and `report.json`, `review.md`,
+  `review.html` and `review-appendix.html` hold the whole current report. The
+  `change-report` requirement is about the head (every changed file and detector
+  fact cited, a briefing of the head); an earlier report cannot satisfy it, and
+  a reporter that wrote only the delta needs a merge contract the report does not
+  have. A delta-only reporter job is deferred ([§19](#19-deferred-items)).
+- **The Q&A is where the delta applies.** Its header says so, as one
+  deterministic line, derived from the delta and the carry rule, with no model
+  call: `Since the last review (L → H): <a> asked (new or changed code), <r> of
+  them re-checks of earlier issues, <c> carried from earlier heads.` Each carried
+  question is marked `carried from <head7>` in `review.md` and the appendix, and
+  `qa.json` records `carried: { head }` (N1's too, in `qa.json`, `necessity.json` and `review.md`). A full round 1 (no usable prior) says why
+  instead: `Every question was asked: <reason>.`
+- **Not implemented:** the commits added, dropped or rewritten since L, and the
+  detector facts present at H and not at L, as a section of the report. They need
+  the commit mapping of [§9.2](#92-mapping-a-new-head-to-the-last-reviewed-one).
 
 ### 6.8 Measurements
 
@@ -2574,7 +2596,7 @@ again, and Publish posts. A failure recorded before that resume predates it and 
 ## 9. Incremental re-review
 
 A run reviews one head and ends ([§2](#2-the-run-two-rounds-and-no-human)); what a
-later run does with the earlier runs' ledger is this section. **Status (0.22):**
+later run does with the earlier runs' ledger is this section. **Status (0.26):**
 a run reads the ledger whole in Fetch (`ledger-prior`, in parts: a registry past one command
 report's 65,536 bytes is read as several `ledger-prior-<k>` commands, each printing a header with the part
 count and the digest of the whole and its slice of the registry's ASCII JSON, joined and checked
@@ -2582,15 +2604,17 @@ against the digest) and uses it three ways.
 **Continuity:** `Q<n>` and `F<n>` continue across heads, and the same issue on
 a new head maps to its earlier id by a stable key
 ([§9.1](#91-where-the-ledger-lives)). **Re-checking:** every earlier open item
-is judged on the new head, round 1's by the Q&A it runs as usual and round 2's
+is judged on the new head, round 1's by asking its question again, with the
+questions about code the update changed and nothing else (0.26: the Q&A is
+incremental), and round 2's
 by the aspect reviewers and their verifiers
 ([§9.3](#93-re-checking-earlier-findings), [§9.4](#94-rounds)); closed items are
 never raised again. **Reporting:** the posted review lists each earlier item as
 fixed (in which commit) or still open (with a link to its comment), counts the
 open ones in its verdict ([§8.5](#85-publish)), and the ledger records each
 item's status per head. Not implemented: the commit and file mapping of
-[§9.2](#92-mapping-a-new-head-to-the-last-reviewed-one) (round 2's scope on a
-new head is the same as on a first), the rerun of a proven finding's test
+[§9.2](#92-mapping-a-new-head-to-the-last-reviewed-one) for round 2 (round 2's scope on a
+new head is the same as on a first; round 1 uses the tree delta of 9.2), the rerun of a proven finding's test
 (0.24 records a test and its run but does not rerun it on a later head), a verifier's judgment of an author's
 dispute, and the threads' own resolution state as an input.
 
@@ -2599,7 +2623,7 @@ dispute, and the threads' own resolution state as an input.
 The ledger lives at **a Git ref in the operator's review clone**,
 `refs/graphloom/pr-review/<owner>/<repo>/<N>/ledger`. The ref points at a commit
 whose tree holds `ledger.json` (`graphloom-pr-ledger-v1`), `ledger.md`, and
-the latest `report.json` and `qa.json`. Each run adds one commit.
+the latest `report.json`, `qa.json` and (since 0.26) `necessity.json`. Each run adds one commit.
 
 - **Durable:** `graphloom delete` removes only the run's worktree, branch and
   state ([core §2](design-typescript-core.md#2-task-and-operator-experience)).
@@ -2638,25 +2662,65 @@ before.
 
 ### 9.2 Mapping a new head to the last reviewed one
 
-**Not implemented in 0.22.** A later run reviews the whole scope of its head as a first
-run does, and re-checks the earlier items against it ([§9.3](#93-re-checking-earlier-findings)); the
-delta report and the unmatched-commit scope below are later work.
+**Status (0.26):** the **delta scope** below is implemented and drives round 1's
+incremental Q&A ([§9.3](#93-re-checking-earlier-findings)). The commit and file
+mapping after it is not: round 2 reviews the whole scope of its head, as on a first
+run.
 
-L is the last head with base Lb: the last reported head for the deltas, the
-last reviewed head for the review scope. H is the new head with base Hb. The
-first rule that applies is recorded:
+L is the last head the ledger holds, the head of the `qa.json` its latest commit
+carries; H is the new head. Lb and Hb are their bases (the merge bases the runs
+pinned). Fetch records, in the review clone, with no repository code and no
+hook, two reads:
 
-1. No ledger, or L's objects are missing: everything is new.
-2. **Commits:** `git patch-id --stable` over `Lb..L` and `Hb..H`, as
-   `git range-diff` pairs them. The scope is the hunks of `Hb...H` that
-   intersect the unmatched commits. This covers appends, rebases and
-   reordering.
-3. **Files** (squashed, or fewer than half of L's commits matched): per-file
-   patch-ids of `Lb...L` against `Hb...H`. Changed files are in scope, whole.
-4. Otherwise, everything is new.
+1. **The head delta:** `git diff -U0 --no-renames L H` over the files H's change
+   touches and the files L's answers cite, reduced to its file headers and hunk
+   headers (`@@ -a,b +c,d @@`).
+2. **The base delta:** for each base-tree path L's answers cite, whether it differs
+   between Lb and Hb (the same base: none does).
 
-A merge of the base branch adds nothing, because the scope is always taken
-from `Hb...H`.
+The scope is what those say, and plugin code reads it, never a model:
+
+- A range of lines is **changed** when a hunk touches it. For a range at H, a
+  hunk's new side overlaps it, or a deletion lies inside it or on its edge. For
+  a range at L, a hunk's old side does. A file with a header and no hunk (binary
+  or mode only), and a file added or deleted whole, is changed whole.
+- A base citation is changed when its file differs between Lb and Hb. A
+  dependency citation is changed when the declared dependencies differ.
+- A line at L maps to its line at H by the offsets of the hunks before it, so a
+  carried citation keeps its line numbers true at H.
+
+Rebasing, merging the base or squashing do not need a separate rule: the diff
+is between the two trees, so what the update changed in a file the pull request
+touches is changed whichever commits carried it. A base that moved can make a
+file the pull request touches show upstream hunks; those are asked about, never
+skipped, so the cost is more questions, not a missed change. A force-push with
+no common history leaves most of the files changed, which asks most questions.
+
+**The scope is usable unless** any of these holds, in which case it is not
+used and **round 1 is a full round 1** (every question asked, as for a first
+run). The reason is recorded (a first head, item 1, says nothing) in `qa.json` (`incremental: { full: "<reason>" }`)
+and shown in its header ([§6.7](#67-delta-report)):
+
+1. There is no ledger, or it lists no head: this is a first head, and nothing is said of it. (A
+   `ledger.json` that cannot be read stops the run in Fetch, as it always did.)
+2. The ledger's latest commit holds no `qa.json` and `necessity.json` of L
+   (a ledger written before 0.26 has no `necessity.json`; a `qa.json` of another head
+   than the ledger's latest, or one more than 64 parts of 30,000 characters long, is as good as none), L's Q&A was skipped
+   (`rounds: review-only`), or L's Q&A and H's are not of one mode
+   (large mode asks per high-level change, whose subjects the briefing rewrites
+   every head, so it is never incremental).
+3. L's commit or Lb is not in the review clone, the diff fails, its output does
+   not fit one command report or has a header the reader cannot parse, or it
+   cannot be told complete (the reports say when only their tail was kept), or the
+   paths to diff (the files, and the base files the earlier answers cite while the bases differ)
+   do not fit the one 4,000-character argument a command takes. Both reads write their output
+   to the report file, never the 8,192-byte stdout tail, and any doubt about completeness is a full round 1.
+4. The profile says `questions.incremental: false`.
+
+The commit mapping, as the delta report's "commits added, dropped or rewritten"
+and round 2's scope would use it (`git patch-id --stable` over `Lb..L` and
+`Hb..H`, as `git range-diff` pairs them; per-file patch-ids when fewer than
+half of L's commits match) is later work ([§19](#19-deferred-items)).
 
 ### 9.3 Re-checking earlier findings
 
@@ -2678,14 +2742,53 @@ non-behavioral findings were what 0.21 posted), and with no recorded anchor it i
 outcome (`open` or `fixed`, and `how`: the reviewer, the verifier, the file leaving the change, or
 carried).
 
-**Round 1** is not a second mechanism: a later head's round 1 runs as usual and each earlier open
-round-1 issue is then `fixed` (its question is now answered with no blocking category, or its
-subject is gone: no question with that id remains) or still open (it is still an issue on this
-head). When N1 is judged unnecessary and the other questions are skipped, an earlier issue about
-one of them is left open, not re-checked. `round1.json` records this as `prior`. The author's
-replies on the issue's earlier GitHub thread (from the snapshot's review threads, other than the
-first author's) are given to the answer checker, as untrusted data, in the assignment for that
-question (and for N1), so it can check what they claim against the code; they decide nothing.
+**Round 1** on a later head is **incremental** (0.26) when the delta scope is usable
+([§9.2](#92-mapping-a-new-head-to-the-last-reviewed-one)); otherwise it is a full round 1 and
+each earlier open round-1 issue is judged against it, as in 0.22. Incremental round 1 asks
+three kinds of question and carries the rest:
+
+1. **Re-check of the earlier open issues, and nothing else of theirs.** Each earlier open round-1
+   issue (N1 when N1 was an issue; the questions an issue stood for through `covers` too)
+   is asked again on the new head, whatever the delta says, in the same answerer and
+   answer-checker jobs as any question. The author's replies on the issue's earlier GitHub
+   thread (from the snapshot's review threads, other than the first author's) are given to the
+   answer checker, as untrusted data, in the assignment for that question (and for N1), so it
+   can check what they claim against the code; they decide nothing. The outcome is as before:
+   `fixed` (its question is now answered with no blocking category, or its subject is gone: no
+   question with that id remains) or still open, recorded as `prior` in `round1.json`.
+2. **New and changed code.** A required question is asked when the ledger holds no answered
+   record of it (a new symbol, a new measured function or change item: its stable key is not in
+   L's Q&A), or when its **subject** is changed at H: the symbol's lines, the file of a measured
+   function (a closure has no lines of its own), or any place the change item cites. New
+   questions follow the normal rules and can produce new round-1 issues.
+3. **Carried.** A question that is in neither group is carried: L's `qa.json` holds it by the same
+   stable key, without a `#` suffix (two questions of one key are told apart only by order, which
+   does not survive a rewrite, so they are always asked), with status `answered`; it was not an
+   open round-1 issue; and **no citation of its answer is changed** (head citations by the old
+   side of the head delta, base citations by the base delta, dependency citations by the declared
+   dependencies). A question whose cited code is changed is in scope for group 2 instead. The
+   carried question keeps its recorded text, answer, evidence, citations (their head lines
+   mapped to H), searches and checker verdict, with `carried: { head }` naming the head it was
+   answered on (kept through later heads). It is not answered or checked again, and it is
+   not re-verified: it was verified at that head, and the code it cites is byte-for-byte
+   unchanged.
+4. **N1** follows the same rule from `necessity.json`: it is carried when it concluded
+   `necessary`, asked every question, no citation of any of its parts is changed, the design
+   principles file it judged against is the same commit, and the pull request's text still holds
+   every quote it used; otherwise N1 is asked again (always when N1 was an issue).
+   The Questions stage then records the carried record in `necessity.json` marked
+   `carried: { head }`, and no N1 job runs. An N1 that was `unnecessary` with the other
+   questions skipped was an issue, so it is re-asked; when it is now `necessary`, no other
+   question has a recorded answer, so each is asked (group 2), which is a full Q&A.
+
+The questioner still runs once on every head: it decides which purposes the pull request's text
+states and phrases the questions, which carries no answer; an asked question takes its wording,
+a carried one keeps its recorded text. The asked set is empty when nothing is new, changed or
+open; then no answerer or checker job runs. Round 1's issues are computed as always from the whole
+`qa.json`, carried answers included, by plugin code: a carried answer can become an issue only by
+the deterministic rules of [§9.4](#94-rounds) (for example, an equivalent it names now lies in a
+file the pull request changes). A question the ledger holds that H no longer asks (its subject is
+gone) is not in `qa.json`, and an earlier issue about it is `fixed`.
 
 | This head says | Result | Review body says |
 |---|---|---|
@@ -2760,19 +2863,24 @@ reviews one head.
 3. **No issue: round 2 in the same run.** Review, Draft and Publish run, and the
    review posted is round 2's: the draft's postable findings, with the verdict
    `Review passed` when there are none.
-4. **A later run, on a new head.** It reads the ledger, continues its ids and runs round 1 on
-   the new head as usual, then re-checks every earlier round-1 issue
-   ([§9.3](#93-re-checking-earlier-findings)). **Round 2 runs only when no round-1 issue,
-   earlier or new, is open.** When it runs, it re-checks the earlier round-2 findings and reviews the
-   head; when it does not, the earlier findings are carried, still open. The review posted says
-   what became of each earlier item, and its verdict is `Review passed` only when no round-1
-   issue is open and no round-2 postable finding is open, counting the earlier ones still open:
-   otherwise `Changes requested: <n> open`. A still-open item is not posted again.
+4. **A later run, on a new head.** It reads the ledger and continues its ids. Round 1 is
+   incremental when the delta scope is usable ([§9.2](#92-mapping-a-new-head-to-the-last-reviewed-one)):
+   it re-checks the earlier open round-1 issues and asks only about the code the update changed,
+   and carries the other answered questions ([§9.3](#93-re-checking-earlier-findings)); with no
+   usable scope it is a full round 1. Either way the gate is the same: **round 2 runs only when no
+   round-1 issue, earlier or new, is open.** That includes a head whose earlier head already passed
+   round 1 and ran round 2: it asks the delta's questions only, then round 2. When round 2 runs, it
+   re-checks the earlier round-2 findings and reviews the head; when it does not, the earlier findings
+   are carried, still open. The review posted says what became of each earlier item, and its verdict is
+   `Review passed` only when no round-1 issue is open and no round-2 postable finding is open, counting
+   the earlier ones still open: otherwise `Changes requested: <n> open`. A still-open item is not posted
+   again.
 
 The three-pass cap of the earlier version, "from round
 `review.discoveryRounds + 1` on only new proven P0 and P1 findings in scope are
-posted", is not applied (there are no proven findings yet). Q&A is
-not limited by rounds: every new symbol is always asked about and answered.
+posted", is not applied (there are no proven findings yet). The Q&A of a first
+head, and of a later head with no usable delta scope, is not limited by rounds:
+every new symbol is asked about and answered. On a later head every new or changed one is.
 
 ## 10. Draft format, edits, and comment style
 
@@ -3462,7 +3570,8 @@ publish flow is covered by those tests.
 | `necessity-principles` | A modified function; the repository's principles skill (`rehearsal-fixtures.ts`) has three principles, two of which apply to the changed file | N1 gives each applicable principle a `preserves` verdict, the checker supports both, N1 is `necessary`; the third principle is listed as not applying |
 | `necessity-principle-broken` | As above, N1 says `offline-idempotent` is broken and the checker supports it | N1 is `questionable`, naming `offline-idempotent`; every other question is asked |
 | `necessity-principle-unsupported` | As above, but the checker does not support the break | N1 stays `necessary`; review.md shows both the break and the checker's note |
-| `report-delta` | Seeded ledger with a report at L; rebased with one new commit | A since-L section with that commit's facts and items, then the full report |
+| `report-delta` | Seeded ledger with a report at L; rebased with one new commit | A since-L section with that commit's facts and items, then the full report (not implemented: [§6.7](#67-delta-report)) |
+| `incremental-round1` | The `LIMIT_PULL` change: two new functions, `Limit` and `Burst`, a clean Q&A and review replies (`incrementalRehearsal`, `src/rehearsal.ts`). `test/incremental-rounds.test.ts` runs it on a real ledger repository an earlier head left, with the delta and the earlier Q&A as a later head's Fetch reads them, and says which questions the head asks | Earlier issue fixed: only the re-check (Q1) and the questions on Burst, the code the update added, are asked, N1 and Q2 are carried (marked with the earlier head), and round 2 runs in the same run. Earlier issue still open: the same asked set, no round 2, `Changes requested: 1 open` with Q1 still open. A delta on Limit's lines asks Limit's questions only, after an earlier head that passed round 1 and ran round 2. A delta that touches nothing cited asks nothing: no answerer or checker job. A moved base with a changed cited base file asks the questions that cite it. A carried mark the delta does not support fails `answers-complete`. Full round 1, with the reason in `qa.json` and the Q&A header: the profile opts out, no `necessity.json`, an unreadable or cut delta, another mode |
 | `answer-finds-existing-helper` | The PR adds `ParseTTL`; the base has `ParseDuration`, outside any path the PR touches | `existing-reuse-common` answered with `ParseDuration`'s `path:line`, its call sites and the search; checker `supported`; status `answered`, not posted |
 | `answer-no-library-with-whole-repo-search` | The PR adds a back-off helper; no declared dependency or internal package provides one | `existing-reuse-common` answered "none found" (partially, while a dependency has no source here), listing the name, signature and token searches over the whole base tree and every go.mod entry with its source status; checker `supported` |
 | `answer-checker-contradicts` | The answerer says "none found"; the base has an equivalent in a vendored directory | The checker's own search finds it → `unsupported` → one correction; the corrected answer cites it. A second unsupported reply becomes `needs author`, with both statements recorded |
@@ -3691,6 +3800,35 @@ has one card for each high-level change.
 - **Appendix and `review.md`.** The briefing's "What's new" shows each change's title, sentence and files.
 
 No step, name or order changes.
+
+### Version 0.26: round 1 on a later head is incremental
+
+The maintainer's decision, after a round 1 that reported issues and a pull
+request that was then updated: the next run no longer runs the whole round 1
+again. The reasons: the whole Q&A on every head is slow and costly; most of it
+repeats answers about code the update did not touch, which the author has
+already seen and cannot act on; and the questions about the update's own
+code and the earlier issues are the only ones whose answers can differ.
+
+- **What a later head asks** ([§9.3](#93-re-checking-earlier-findings)): the
+  earlier open round-1 issues, alone and with the author's replies for the
+  checker; the questions about code that is new or changed since the last
+  reviewed head; N1 only when it was an issue or the delta touches what it
+  cites. Everything else the ledger answered is carried, marked with the head
+  it was answered on. The same holds when round 1 had passed earlier: the
+  head asks the delta's questions and then runs round 2.
+- **Delta scope** ([§9.2](#92-mapping-a-new-head-to-the-last-reviewed-one)): a
+  tree diff of the two heads, read by plugin code. A question is carried only
+  when no citation of its answer is changed, so a carried answer is the same
+  answer the cited bytes would give.
+- **The gate is unchanged:** round 2 runs in the same run only when no round-1
+  issue, earlier or new, is open, and plugin code decides it from `qa.json`.
+- **Falls back to a full round 1** when there is no usable prior or the profile
+  says `questions.incremental: false`; the reasons are in 9.2.
+- **Report:** still the whole report; the delta applies to the Q&A
+  ([§6.7](#67-delta-report), [§19](#19-deferred-items)).
+- **Ledger:** each ledger commit now also holds `necessity.json`, so the next
+  head can carry N1. A ledger from before has none and falls back once.
 
 ### Version 0.24: reproducing tests (part 2, first slice)
 
@@ -4249,6 +4387,14 @@ settles something this document left open:
   a choice among the harnesses the runner config makes available.
 
 ## 19. Deferred items
+
+- **A delta-only report, and the commit mapping.** A later head still writes
+  the whole report ([§6.7](#67-delta-report)): reusing the earlier items needs a
+  reporter contract that returns only new and changed items and a plugin merge
+  that keeps the rest with their citations mapped to the head, and the
+  deterministic "commits added, dropped or rewritten" and "detector facts since
+  L" lines need the patch-id commit mapping
+  ([§9.2](#92-mapping-a-new-head-to-the-last-reviewed-one)).
 
 - **Thread replies.** The status of earlier comments goes in the review body
   ([§9.3](#93-re-checking-earlier-findings)). Replying inside the threads

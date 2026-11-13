@@ -243,6 +243,7 @@ describe("a ledger too large for one command", () => {
     mkdirSync(path.join(dir, ".graphloom/review"), { recursive: true });
     writeFileSync(path.join(dir, ".graphloom/review/qa.json"), '{"qa":1}');
     writeFileSync(path.join(dir, ".graphloom/review/report.json"), '{"report":1}');
+    writeFileSync(path.join(dir, ".graphloom/review/necessity.json"), '{"necessity":1}');
     return dir;
   };
 
@@ -260,7 +261,7 @@ describe("a ledger too large for one command", () => {
     const r = run(dir, big.write);
     expect(r.code, r.stderr).toBe(0);
     const sha = git(dir, ["rev-parse", ref]);
-    expect(git(dir, ["ls-tree", "--name-only", sha]).split("\n")).toEqual(["ledger.json", "ledger.md", "qa.json", "report.json"]);
+    expect(git(dir, ["ls-tree", "--name-only", sha]).split("\n")).toEqual(["ledger.json", "ledger.md", "necessity.json", "qa.json", "report.json"]);
     expect(spawnSync("git", ["show", `${sha}:ledger.json`], { cwd: dir, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }).stdout).toBe(json);
     expect(spawnSync("git", ["show", `${sha}:ledger.md`], { cwd: dir, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }).stdout).toBe(markdown);
     expect(writtenLedger(big.write.argv)).toMatchObject({ ref, old: "absent", files: { json: sha256(json), markdown: sha256(markdown) } });

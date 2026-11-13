@@ -327,11 +327,13 @@ export interface NecessityRecord {
   decision: NecessityDecision;
   /** The design principles file read for this run (design §7.5.1), when the profile names one. */
   principles?: PrinciplesRecord;
+  /** Set when a later head carried this record from the head it was answered on instead of asking N1 again (design §9.3). */
+  carried?: { head: string };
 }
 
 /** `necessity.json` (`pr-necessity-v1`). */
 export function necessityJson(r: NecessityRecord): string {
-  return JSON.stringify({ schema: NECESSITY_JSON_SCHEMA, question: { id: NECESSITY_ID, text: NECESSITY_TEXT }, conclusion: effectiveConclusion(r.final), ...(brokenNote(r.final) !== "" ? { conclusionNote: brokenNote(r.final) } : {}), decision: r.decision, ...(r.principles !== undefined ? { principles: { ...r.principles, verdicts: r.final.necessity?.principles ?? [], checks: r.final.check.principles ?? [], broken: supportedBreaks(r.final) } } : {}), answer: r.final });
+  return JSON.stringify({ schema: NECESSITY_JSON_SCHEMA, question: { id: NECESSITY_ID, text: NECESSITY_TEXT }, conclusion: effectiveConclusion(r.final), ...(r.carried !== undefined ? { carried: r.carried } : {}), ...(brokenNote(r.final) !== "" ? { conclusionNote: brokenNote(r.final) } : {}), decision: r.decision, ...(r.principles !== undefined ? { principles: { ...r.principles, verdicts: r.final.necessity?.principles ?? [], checks: r.final.check.principles ?? [], broken: supportedBreaks(r.final) } } : {}), answer: r.final });
 }
 
 /** The record a `necessity.json` text holds, or undefined when it is not one. */
@@ -342,14 +344,14 @@ export function parseNecessityRecord(json: string): NecessityRecord | undefined 
   } catch {
     return undefined;
   }
-  const o = value as { schema?: unknown; decision?: { action?: unknown; reason?: unknown; override?: unknown }; principles?: Record<string, unknown>; answer?: Partial<FinalAnswer> } | null;
+  const o = value as { schema?: unknown; carried?: { head?: unknown }; decision?: { action?: unknown; reason?: unknown; override?: unknown }; principles?: Record<string, unknown>; answer?: Partial<FinalAnswer> } | null;
   if (o === null || typeof o !== "object" || o.schema !== NECESSITY_JSON_SCHEMA) return undefined;
   const a = o.answer;
   if (a === undefined || a === null || typeof a !== "object" || a.question !== NECESSITY_ID || typeof a.necessity !== "object" || a.necessity === null || typeof a.check !== "object" || a.check === null) return undefined;
   const d = o.decision;
   if (d === undefined || d === null || (d.action !== "skip" && d.action !== "ask-all") || typeof d.reason !== "string") return undefined;
   const { verdicts: _v, checks: _c, broken: _b, ...recorded } = o.principles ?? {};
-  return { final: a as FinalAnswer, decision: d as NecessityDecision, ...(o.principles !== undefined ? { principles: recorded as unknown as PrinciplesRecord } : {}) };
+  return { final: a as FinalAnswer, decision: d as NecessityDecision, ...(typeof o.carried?.head === "string" ? { carried: { head: o.carried.head } } : {}), ...(o.principles !== undefined ? { principles: recorded as unknown as PrinciplesRecord } : {}) };
 }
 
 /**
