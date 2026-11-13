@@ -2570,7 +2570,11 @@ head and the event is always `COMMENT`.
    Items not inline are never reduced to ids: when they do not all fit the body, an
    anchored one moves inline, the rest shrink evenly with their markers, and the ledger
    keeps each shortened item's whole text; if even that cannot fit, the stage escalates
-   instead of posting. A round-1 issue is shortened by what matters least first: the
+   instead of posting. The whole input of the executor call, body, every inline comment
+   and the JSON around them, is also measured in UTF-8 bytes against the executor's
+   input bound (256,000, less a margin of 1,000): when it is over, items, inline ones
+   included, are shortened largest first until it fits, and when none can shrink further
+   the plan carries a `problem` and the stage escalates. A round-1 issue is shortened by what matters least first: the
    proposal's detail (cut, then replaced by a note), then the end of the answer, cut at
    a sentence end, else a word boundary, followed by `(answer shortened; the full answer
    is in the report's Q&A, <id>)`; its citation links stay in preference to the proposal

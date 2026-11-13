@@ -16,7 +16,7 @@
  * which commit) or still open (with a link to its earlier comment). A still-open item is not posted again, unless its old thread is
  * outdated; it counts toward the verdict, so `Review passed` means no round-1 issue and no round-2 finding is open, earlier ones included.
  */
-import type { EnvironmentCommand, EvidenceRecord } from "@graphloom/sdk";
+import { MAX_EXECUTOR_INPUT_BYTES, type EnvironmentCommand, type EvidenceRecord } from "@graphloom/sdk";
 import { COMMAND, CREATE_PULL_REVIEW, GET_VIEWER, PART_BASE, PUBLISH_PATCH_FILE, PUBLISH_STAGE, ledgerRef } from "./constants.js";
 import { fitParts, type ItemParts } from "./answertext.js";
 import { clip, clipKeep } from "./escape.js";
@@ -47,6 +47,8 @@ export const MAX_INLINE_COMMENTS = 50;
 const MAX_ITEM_BODY = MAX_ITEM_TEXT + 2_000;
 /** The least text a compacted item keeps: a one-liner shorter than this says too little to act on. */
 const MIN_ONE_LINER = 80;
+/** Room kept in the executor input for what the plan does not measure (the idempotency key and the like). */
+const INPUT_MARGIN = 1_000;
 
 export const findingMarker = (id: string): string => `<!-- graphloom-finding: ${id} -->`;
 /** An item's posted body: its text, then its marker; a body past what a read keeps leads with the marker too, so the id is still found. */
@@ -198,6 +200,8 @@ export function planReview(i: {
   /** What the ledger keeps of each new round-2 finding, by id. */
   meta?: ReadonlyMap<string, ItemMeta> | undefined;
   closed?: readonly ClosedFinding[] | undefined;
+  /** The executor input bound in bytes the whole create-pull-review input must fit (default: the executor input bound). */
+  maxInputBytes?: number | undefined;
 }): ReviewPlan {
   const issues = i.round1.issues;
   const priors = [...(i.prior ?? [])];
@@ -283,8 +287,40 @@ export function planReview(i: {
       });
     }
   }
-  const body = [...sections, ...pending.map((x) => x.body)].join("\n\n");
-  const comments = items.filter((x) => x.inline).map((x) => ({ path: x.path!, line: x.line!, side: x.side, ...(x.startLine !== undefined && x.startLine < x.line! ? { startLine: x.startLine } : {}), body: x.body }));
+  const assemble = (): { body: string; comments: ReviewPlan["comments"] } => ({
+    body: [...sections, ...items.filter((x) => !x.inline).map((x) => x.body)].join("\n\n"),
+    comments: items.filter((x) => x.inline).map((x) => ({ path: x.path!, line: x.line!, side: x.side, ...(x.startLine !== undefined && x.startLine < x.line! ? { startLine: x.startLine } : {}), body: x.body })),
+  });
+  // The executor takes at most `maxInputBytes` of JSON for the whole input: body, every inline comment and the envelope. Items,
+  // inline ones included, are shortened largest first by the rules of an item that does not fit (the proposal, the end of the
+  // answer at a sentence end or a word boundary with its note, citations last) until the input fits; none is dropped.
+  if (problem === undefined) {
+    const maxBytes = (i.maxInputBytes ?? MAX_EXECUTOR_INPUT_BYTES) - INPUT_MARGIN;
+    const inputBytes = (): number => {
+      const a = assemble();
+      return Buffer.byteLength(JSON.stringify(createInput({ ...i.pull, head: i.head }, { round, body: a.body, comments: a.comments } as ReviewPlan)), "utf8");
+    };
+    const exhausted = new Set<string>();
+    let bytes = inputBytes();
+    for (let guard = 0; bytes > maxBytes && guard < 10_000; guard += 1) {
+      const candidates = items.filter((x) => !exhausted.has(x.id));
+      const biggest = candidates.reduce<PublishItem | undefined>((m, x) => (m === undefined || Buffer.byteLength(x.body, "utf8") > Buffer.byteLength(m.body, "utf8") ? x : m), undefined);
+      if (biggest === undefined) break;
+      const text = unmarkedText(biggest.id, biggest.body);
+      const target = Math.floor(text.length * 0.85);
+      const shorter = biggest.parts !== undefined ? fitParts(biggest.parts, target) : target >= MIN_ONE_LINER ? clipKeep(text, target) : text;
+      if (shorter.length >= text.length) {
+        exhausted.add(biggest.id);
+        continue;
+      }
+      biggest.full ??= text;
+      biggest.body = markedBody(biggest.id, shorter);
+      // A parts item is cut from its parts, so the next cut starts from the whole again, not from this one.
+      bytes = inputBytes();
+    }
+    if (bytes > maxBytes) problem = `the review's input is ${bytes} bytes, over the ${maxBytes} the executor takes, with every one of its ${items.length} item${items.length === 1 ? "" : "s"} shortened as far as it goes: posting fewer items or ids only would hide what is requested`;
+  }
+  const { body, comments } = assemble();
   return { round, ...(i.round1.skipped !== undefined ? { round1Skipped: true as const } : {}), verdict, open, body, comments, items, firstLine, priors, closed: [...(i.closed ?? [])], ...(problem !== undefined ? { problem } : {}) };
 }
 

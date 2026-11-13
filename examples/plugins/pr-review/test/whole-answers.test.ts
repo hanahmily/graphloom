@@ -6,7 +6,8 @@ import { fitParts, type ItemParts } from "../src/answertext.js";
 import { clip, cutAt } from "../src/escape.js";
 import { effectivePacks } from "../src/packs.js";
 import { parsePatch } from "../src/patch.js";
-import { planReview, findingMarker } from "../src/publish.js";
+import { createInput, planReview, findingMarker, MAX_INLINE_COMMENTS } from "../src/publish.js";
+import { MAX_EXECUTOR_INPUT_BYTES } from "@graphloom/sdk";
 import { MAX_ITEM_TEXT, round1Record, type Round1Record } from "../src/round1.js";
 import type { PullFile } from "../src/snapshot.js";
 
@@ -174,5 +175,55 @@ describe("clip", () => {
     expect(clip("alpha beta gamma delta", 14)).toBe("alpha beta…");
     expect(clip("alpha beta", 40)).toBe("alpha beta");
     expect(cutAt("a very long single token", 3).text).toBe("a");
+  });
+});
+
+describe("the whole executor input is bounded in bytes", () => {
+  const PATCH_BIG = `@@ -0,0 +1,80 @@\n${Array.from({ length: 80 }, (_, n) => `+line ${n}`).join("\n")}`;
+  const BIG: PullFile[] = [{ path: "pkg/schema/ttl.go", status: "added", previousPath: null, additions: 80, deletions: 0, patch: PATCH_BIG, patchOmitted: false, parsed: parsePatch(PATCH_BIG) }];
+  const make = (n: number, text: (i: number) => string): Round1Record => {
+    const symbols = Array.from({ length: n }, (_, i) => ({ id: `S${i + 1}`, path: "pkg/schema/ttl.go", startLine: i + 1, qualified: `f${i}` }));
+    const questions = Array.from({ length: n }, (_, i) => ({ id: `Q${i + 1}`, item: "R1", symbol: `S${i + 1}`, stable: `k${i}`, type: "split-function", text: `Should f${i} be split?`, answer: { answer: text(i), status: "partially answered", none_found: false, citations: CITES.slice(0, 3).map((c, k) => ({ ...c, path: `pkg/f${i}/c${k}.go` })), inventory: [], proposal: SPLIT } }));
+    return withoutN1(round1Record({ head: HEAD, necessity: undefined, qa: JSON.stringify({ schema: "pr-qa-v1", symbols, questions }), files: BIG, itemCites: {}, packs: [], github: GITHUB })!);
+  };
+  const bytes = (p: ReturnType<typeof planReview>): number => Buffer.byteLength(JSON.stringify(createInput(PULL, p)), "utf8");
+
+  it("fits 50 inline items of about 6,000 characters, shortened at boundaries with the note, citations kept", () => {
+    const r = make(50, () => `${prose(2_000)} ${prose(2_000)} ${prose(1_900)}`);
+    // Unbounded, this is over the executor's limit.
+    const unbounded = planReview({ pull: PULL, head: HEAD, nonce: "op1", round1: r, maxInputBytes: 100_000_000 });
+    expect(unbounded.comments).toHaveLength(MAX_INLINE_COMMENTS);
+    expect(bytes(unbounded)).toBeGreaterThan(MAX_EXECUTOR_INPUT_BYTES);
+    const p = planReview({ pull: PULL, head: HEAD, nonce: "op1", round1: r });
+    expect(p.problem).toBeUndefined();
+    expect(p.comments).toHaveLength(MAX_INLINE_COMMENTS);
+    expect(bytes(p)).toBeLessThanOrEqual(MAX_EXECUTOR_INPUT_BYTES);
+    const shortened = p.items.filter((x) => x.full !== undefined);
+    expect(shortened.length).toBeGreaterThan(0);
+    for (const x of shortened) {
+      expect(x.body).toContain(`(answer shortened; the full answer is in the report's Q&A, ${x.id})`);
+      const kept = /Answer \(partially answered\): (.*?) \(answer shortened/s.exec(x.body)![1]!;
+      expect(kept.endsWith("plainly."), kept.slice(-40)).toBe(true);
+      const n = Number(x.id.slice(1)) - 1;
+      for (let k = 0; k < 3; k += 1) expect(x.body).toContain(`/pkg/f${n}/c${k}.go`);
+    }
+  });
+
+  it("measures bytes, not characters: multi-byte text is shortened though its characters would fit", () => {
+    const cjk = (n: number): string => "保留期按段设置。".repeat(Math.ceil(n / 8)).slice(0, n);
+    const r = make(50, () => cjk(3_900));
+    const chars = r.issues.reduce((n, x) => n + x.body.length, 0);
+    expect(chars).toBeLessThan(MAX_EXECUTOR_INPUT_BYTES);
+    const p = planReview({ pull: PULL, head: HEAD, nonce: "op1", round1: r });
+    expect(p.problem).toBeUndefined();
+    expect(bytes(p)).toBeLessThanOrEqual(MAX_EXECUTOR_INPUT_BYTES);
+    expect(p.items.some((x) => x.full !== undefined)).toBe(true);
+    for (const x of p.items.filter((y) => y.full !== undefined)) expect(x.body).toContain("answer shortened");
+  });
+
+  it("says why when the input cannot fit even with every item shortened as far as it goes", () => {
+    const r = make(50, () => prose(2_000));
+    const p = planReview({ pull: PULL, head: HEAD, nonce: "op1", round1: r, maxInputBytes: 5_000 });
+    expect(p.problem).toMatch(/^the review's input is \d+ bytes, over the \d+ the executor takes/);
   });
 });
