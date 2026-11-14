@@ -10,7 +10,7 @@ export const GRAPH_ID = "pr-review";
  * and Draft; 0.21 adds the round-1 gate (Round 1) and Publish, and removes
  * every human touchpoint. Checks arrive with a later version.
  */
-export const GRAPH_VERSION = "0.26.3";
+export const GRAPH_VERSION = "0.26.4";
 
 export const FETCH_STAGE = "fetch";
 export const REPORT_STAGE = "report";

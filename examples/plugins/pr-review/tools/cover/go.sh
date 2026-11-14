@@ -190,7 +190,11 @@ failures() {
     pend && /^FAIL +[^ ]/ { print "timeout " $2 " " d (tests != "" ? " " tests : ""); pend = 0 }
     END { if (pend) print "timeout - " d (tests != "" ? " " tests : "") }
   ' "$tmp/clean" | head -n 5 | cut -c1-400
-  sed -n 's/^\([^ ][^ ]*\.go:[0-9][0-9]*\(:[0-9][0-9]*\)\{0,1\}: .*\)$/build-error \1/p' "$tmp/clean" | head -n 1 | cut -c1-312
+  # Go's own refusal when go.mod asks for a newer Go than the image has (GOTOOLCHAIN=local) comes before any compiler error.
+  {
+    sed -n 's/^\(go: .*requires go >= [^ ]* (running go [^ ;]*; GOTOOLCHAIN=local)\)$/build-error \1/p' "$tmp/clean" | head -n 1
+    sed -n 's/^\([^ ][^ ]*\.go:[0-9][0-9]*\(:[0-9][0-9]*\)\{0,1\}: .*\)$/build-error \1/p' "$tmp/clean" | head -n 1
+  } | head -n 1 | cut -c1-312
 }
 
 modroot() {

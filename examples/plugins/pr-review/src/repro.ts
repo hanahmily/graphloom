@@ -16,6 +16,7 @@ import type { EnvironmentCommand } from "@graphloom/sdk";
 import { MAX_EXECUTOR_INPUT_BYTES } from "@graphloom/sdk";
 import { reportText, type CommandRun } from "./evidence.js";
 import { secretFindings } from "./secrets.js";
+import { toolchainMismatch, toolchainSentence } from "./toolchain.js";
 import { writeChunks } from "./write.js";
 
 export const REPRO_REPORT = "graphloom-repro-v1";
@@ -244,7 +245,11 @@ export function judgeRun(finding: { id: string; path: string }, repro: Repro, la
   if (parsed.runs.length !== 2) return unproven("inconclusive (the test did not run twice)");
   const [a, b] = parsed.runs as [ReproRunReport, ReproRunReport];
   const kinds = new Set(record.runs);
-  if (kinds.has("build-failed")) return unproven("inconclusive (build failed)");
+  if (kinds.has("build-failed")) {
+    // A build that never started because the image's Go is older than go.mod asks for says so, not "build failed" (design §8.2).
+    const old = parsed.runs.map((r) => toolchainMismatch(r.message ?? "")).find((t) => t !== undefined);
+    return unproven(old !== undefined ? `the sandbox toolchain is older than the repository requires (${toolchainSentence(old)})` : "inconclusive (build failed)");
+  }
   if (kinds.has("timeout")) return unproven("inconclusive (timeout)");
   if (kinds.has("killed")) return unproven("inconclusive (killed)");
   if (a.outcome === "passed" && b.outcome === "passed") return unproven("test does not fail");

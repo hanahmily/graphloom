@@ -18,6 +18,7 @@ import { commandRuns, isObject, latestFile, outputTail, reportText, type Command
 import { formatSpec, goFunctionCoverage, parseCoverageReport, parseSpec, tsFunctionCoverage, type CoverageSpecFunction } from "./metrics/coverage.js";
 import { languageOf, type Coverage, type FunctionIndexEntry, type Language, type MetricsRecord } from "./metrics/record.js";
 import { SANDBOX_LIMITS, type Profile, type SandboxMount, type SandboxSetupStep } from "./profile.js";
+import { toolchainMismatch, toolchainSentence, type ToolchainMismatch } from "./toolchain.js";
 import { writeChunks } from "./write.js";
 
 /** The image TypeScript coverage runs in unless a profile pins another: `node:22-bookworm-slim`, by digest (a tag is never run). */
@@ -358,6 +359,7 @@ export interface CoverageInput {
   afterRef: string | undefined;
 }
 
+const TOOLCHAIN_REASON = (t: ToolchainMismatch): string => `the sandbox toolchain is older than the repository requires: ${toolchainSentence(t)}`;
 const NOT_RUN = (reason: string): { reason: string } => ({ reason: oneLine(reason) });
 
 function entryOf(index: ReadonlyMap<string, readonly FunctionIndexEntry[]>, r: MetricsRecord): { entry: FunctionIndexEntry; all: readonly FunctionIndexEntry[] } | undefined {
@@ -548,8 +550,13 @@ function attribute(part: Part, run: CommandRun, input: CoverageInput, outcomes: 
   if (parsed.language !== part.language) return { facts, problem: `${part.command.id}: the report is for ${parsed.language}, not ${part.language}` };
   if (parsed.setupFail !== undefined) {
     const f = parsed.setupFail;
+    const old = toolchainMismatch(f.text);
+    if (old !== undefined) return none(TOOLCHAIN_REASON(old));
     return none(`setup failed: ${f.id} exited ${f.exit}${f.text !== "" ? ` (${f.text})` : ""}`);
   }
+  // Go stopped before building anything because the image's Go is older than go.mod asks for: nothing was measured.
+  const old = parsed.exit !== undefined && parsed.exit !== 0 && parsed.language === GO ? toolchainMismatch(parsed.buildError ?? "") : undefined;
+  if (old !== undefined) return none(TOOLCHAIN_REASON(old));
   facts.ran = true;
   if (parsed.exit !== undefined) facts.exit = parsed.exit;
   facts.tests = parsed.tests.slice(0, 12);

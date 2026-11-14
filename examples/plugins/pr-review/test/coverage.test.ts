@@ -431,7 +431,7 @@ describe("coverage-measured (through the graph)", () => {
 
   it("writes the measured row, the measured CRAP and the Coverage sentence, and recomputes them in the validators", () => {
     expect(sim.written!.markdown).toContain("| `schema.ParseTTL` pkg/schema/ttl.go:6 | added | 12 (over the limit of 10) | 4 (over the limit of 3) | 40% (8/20 statements, measured) | 43.1 (at or over the threshold of 30) | not run: mutation not available in this version |");
-    expect(sim.written!.markdown).toMatch(/Coverage \(go\): measured with go test -coverprofile -covermode=set over the touched packages, -timeout=1680s from the start of the run \(the sandbox.s wall clock less a margin for setup and profile collection\), the packages whose tests use Ginkgo run with -ginkgo\.label-filter="!slow" \(the repository.s own CI filter; plain test packages without it\), in the Docker sandbox \(image golang@sha256:670bb5aa5349…, no network, read-only dependency caches\) over a prepared checkout of the head, statement coverage by function line range; the tests passed\./);
+    expect(sim.written!.markdown).toMatch(/Coverage \(go\): measured with go test -coverprofile -covermode=set over the touched packages, -timeout=1680s from the start of the run \(the sandbox.s wall clock less a margin for setup and profile collection\), the packages whose tests use Ginkgo run with -ginkgo\.label-filter="!slow" \(the repository.s own CI filter; plain test packages without it\), in the Docker sandbox \(image golang@sha256:957952ae74dc…, no network, read-only dependency caches\) over a prepared checkout of the head, statement coverage by function line range; the tests passed\./);
     const json = JSON.parse(sim.written!.json) as { measurements: { tools: string; records: Array<{ coverage: unknown; crap: number }> } };
     expect(json.measurements.tools).toBe("static+coverage");
     expect(json.measurements.records[0]).toMatchObject({ coverage: { source: "measured", covered: 8, total: 20, unit: "statement" }, crap: 43.1 });
@@ -721,6 +721,21 @@ esac
     expect(coverageNotes(built)[0]).toContain("first build error: pkg/a/a.go:12:5: undefined: foo");
     const ok = run([]);
     expect(ok.report).not.toMatch(/^(failed|build-error) /m);
+  });
+
+  it("says the sandbox's Go is older than go.mod's, instead of a build failure, and measures nothing", () => {
+    const text = "graphloom-coverage-v1 go\nexit 1\nfail go test wrote no coverage profile for module . (exit 1)\nbuild-error go: go.mod requires go >= 1.26.11 (running go 1.26.10; GOTOOLCHAIN=local)\nseen pkg/a/a.go\n";
+    const facts = doneOf(coverageState(input({ evidence: [diff, ...ready("go"), goRun(text)] }))).facts;
+    const reason = "the sandbox toolchain is older than the repository requires: the sandbox's Go 1.26.10 is older than go.mod's 1.26.11; update metrics.sandbox.go.image";
+    expect(facts.runs[0]).toMatchObject({ ran: false, reason });
+    expect(coverageNotes(facts)[0]).toContain(`not run (${reason})`);
+    const setup = doneOf(coverageState(input({ evidence: [diff, ...ready("go"), goRun("graphloom-coverage-v1 go\nsetup-fail gen 1 go: go.mod requires go >= 1.26.11 (running go 1.26.10; GOTOOLCHAIN=local)\n")] }))).facts;
+    expect(setup.runs[0]).toMatchObject({ ran: false, reason: expect.stringContaining("older than go.mod's 1.26.11") });
+  });
+
+  it("go.sh reports Go's toolchain refusal as the build error, before any compiler error", () => {
+    const refusal = run([], { out: "go: go.mod requires go >= 1.26.11 (running go 1.26.10; GOTOOLCHAIN=local)\\n", rc: 1 });
+    expect(refusal.report).toContain("build-error go: go.mod requires go >= 1.26.11 (running go 1.26.10; GOTOOLCHAIN=local)\n");
   });
 
   it("feeds the failures into coverage facts and review.md's sentence, from the recorded report", () => {
