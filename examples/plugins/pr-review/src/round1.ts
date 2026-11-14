@@ -11,7 +11,7 @@
  */
 import { isTestPath } from "./answers.js";
 import { clip } from "./escape.js";
-import { citationLinks, composeParts, proposalText, type GithubPin, type ItemParts, type ProposalLike } from "./answertext.js";
+import { citationLinks, composeParts, fitParts, proposalText, type GithubPin, type ItemParts, type ProposalLike } from "./answertext.js";
 import { anchored, scrub, type ItemCites } from "./draft.js";
 import type { FullPack } from "./packs.js";
 import { effectiveConclusion, brokenNote, parseNecessityRecord, NECESSITY_ID, ROUNDS_SKIP_REASON } from "./necessity.js";
@@ -62,7 +62,7 @@ export interface Round1Covered {
   excerpt: string;
 }
 
-/** An `existing-reuse-common` answer set aside, not an issue: every equivalent it names lies in code the pull request changes. */
+/** An `existing-reuse-common` answer set aside, not an issue: it found nothing to reuse, or every equivalent it names lies in code the pull request changes. */
 export interface Round1Noted {
   id: string;
   key: string;
@@ -108,7 +108,7 @@ interface QaQuestion {
   symbol?: string;
   functionPath?: string;
   text: string;
-  answer?: { answer: string; status: string; none_found: boolean; citations: Array<{ path: string; start: number; end: number; tree: string }>; inventory: Array<{ name: string; version: string }>; proposal?: ProposalLike };
+  answer?: { answer: string; status: string; none_found: boolean; reusable?: boolean; citations: Array<{ path: string; start: number; end: number; tree: string }>; inventory: Array<{ name: string; version: string }>; proposal?: ProposalLike };
 }
 
 function qaOf(json: string): { questions: QaQuestion[]; symbols: Array<{ id: string; path: string; startLine: number; qualified: string }> } | undefined {
@@ -130,7 +130,7 @@ function qaOf(json: string): { questions: QaQuestion[]; symbols: Array<{ id: str
       ...(typeof q.functionPath === "string" ? { functionPath: q.functionPath } : {}),
       text: str(q.text),
       ...(a !== undefined && typeof a.status === "string"
-        ? { answer: { answer: str(a.answer), status: a.status, none_found: a.none_found === true, citations: (Array.isArray(a.citations) ? a.citations.filter(isObj) : []).map((c) => ({ path: str(c.path), start: Number(c.start) || 0, end: Number(c.end) || 0, tree: str(c.tree) })), inventory: (Array.isArray(a.inventory) ? a.inventory.filter(isObj) : []).map((d) => ({ name: str(d.name), version: str(d.version) })), ...(isObj(a.proposal) ? { proposal: a.proposal as ProposalLike } : {}) } }
+        ? { answer: { answer: str(a.answer), status: a.status, none_found: a.none_found === true, ...(typeof a.reusable === "boolean" ? { reusable: a.reusable } : {}), citations: (Array.isArray(a.citations) ? a.citations.filter(isObj) : []).map((c) => ({ path: str(c.path), start: Number(c.start) || 0, end: Number(c.end) || 0, tree: str(c.tree) })), inventory: (Array.isArray(a.inventory) ? a.inventory.filter(isObj) : []).map((d) => ({ name: str(d.name), version: str(d.version) })), ...(isObj(a.proposal) ? { proposal: a.proposal as ProposalLike } : {}) } }
         : {}),
     };
   });
@@ -139,6 +139,7 @@ function qaOf(json: string): { questions: QaQuestion[]; symbols: Array<{ id: str
 }
 
 const NOTED_REASON = "the equivalent it names is the code this pull request changes";
+const NOTED_NONE = "the answer found no equivalent, library or shared logic it could reuse";
 
 /**
  * The cited equivalents that lie outside the change, as `path:start` keys: a library's source, or a base or head file the
@@ -169,31 +170,39 @@ const BODY_ROOM = MAX_ITEM_TEXT - 50;
 const equivText = (c: Round1Covered, n: number): string => c.equivalents.slice(0, n).map((e) => `\`${e.replace(/^dependency:/, "")}\``).join(", ");
 
 /**
- * The host's body with one line per covered question, built to fit the posted item's budget: each excerpt shrunk evenly,
- * then one compact line per question (id, symbol, first equivalent), then ids only. A question that still does not fit is
- * left out of the result, never clipped away silently; the returned `covered` is exactly what the body names.
+ * The host's body followed by each covered question as the host is: its question, its whole answer and its citation links.
+ * Only when that does not fit the item's budget is each one shortened by the rule publication uses (`fitParts`: a sentence
+ * end or a word boundary, with the note that names the full answer in the report's Q&A); when even that leaves too little
+ * of each, one compact line per question names its id, symbol and first equivalent and points to the Q&A, then ids only. A
+ * question that still does not fit is left out of the result, never clipped away silently; the returned `covered` is
+ * exactly what the body names.
  */
-function coveredBody(hostBody: string, covered: readonly Round1Covered[]): { body: string; covered: Round1Covered[] } {
-  const head = (n: number): string => `${hostBody}\n\nThe same issue applies to ${n} more, each with its own answer:\n`;
-  const full = (c: Round1Covered, room: number): string => `- ${c.symbol} (${c.id}): ${equivText(c, 3)}${room > 0 && c.excerpt !== "" ? `: ${clip(c.excerpt, room)}` : ""}`;
+const MIN_SECTION = 500;
+function coveredBody(hostBody: string, covered: ReadonlyArray<{ covered: Round1Covered; parts: ItemParts }>): { body: string; covered: Round1Covered[] } {
+  const list = covered.map((c) => c.covered);
+  const head = (n: number, lead: string): string => `${hostBody}\n\nThe same issue applies to ${n} more${lead}:\n\n`;
+  const section = (c: { covered: Round1Covered; parts: ItemParts }, limit: number): string => {
+    const parts = { ...c.parts, head: `**${c.covered.symbol} (${c.covered.id})**. ${c.parts.head.replace(/^\*\*[^*]*\*\* \([^)]*\)\. /, "")}` };
+    return limit === Infinity ? composeParts(parts) : fitParts(parts, limit);
+  };
+  const whole = covered.map((c) => section(c, Infinity));
+  const lead = ", each with its own question and answer";
+  if (head(list.length, lead).length + whole.join("\n\n").length <= BODY_ROOM) return { body: head(list.length, lead) + whole.join("\n\n"), covered: list };
+  const share = Math.floor((BODY_ROOM - head(list.length, lead).length - 2 * (list.length - 1)) / list.length);
+  if (share >= MIN_SECTION) {
+    const shortened = covered.map((c) => section(c, share));
+    if (head(list.length, lead).length + shortened.join("\n\n").length <= BODY_ROOM) return { body: head(list.length, lead) + shortened.join("\n\n"), covered: list };
+  }
+  const compactLead = " (each answer is in the report's Q&A)";
   const compact = (c: Round1Covered, sym: number): string => `- ${clip(c.symbol, sym)} (${c.id}): ${equivText(c, 1)}`;
-  const tries: Array<(n: number) => string[]> = [
-    (n) => {
-      const fixed = covered.map((c) => full(c, 0).length + 1).reduce((a, b) => a + b, 0);
-      const room = Math.floor((BODY_ROOM - head(n).length - fixed) / n) - 2;
-      return room >= 20 ? covered.map((c) => full(c, room)) : [];
-    },
-    () => covered.map((c) => compact(c, 60)),
-    () => covered.map((c) => compact(c, 24)),
-  ];
-  for (const t of tries) {
-    const lines = t(covered.length);
-    if (lines.length > 0 && head(covered.length).length + lines.join("\n").length <= BODY_ROOM) return { body: head(covered.length) + lines.join("\n"), covered: [...covered] };
+  for (const sym of [60, 24]) {
+    const lines = list.map((c) => compact(c, sym));
+    if (head(list.length, compactLead).length + lines.join("\n").length <= BODY_ROOM) return { body: head(list.length, compactLead).replace(/:\n\n$/, ":\n") + lines.join("\n"), covered: list };
   }
   // Ids only, as many as fit.
   const kept: Round1Covered[] = [];
-  const ids = (list: readonly Round1Covered[]): string => `${hostBody}\n\nThe same issue also applies to: ${list.map((c) => c.id).join(", ")}.`;
-  for (const c of covered) {
+  const ids = (l: readonly Round1Covered[]): string => `${hostBody}\n\nThe same issue also applies to: ${l.map((c) => c.id).join(", ")}.`;
+  for (const c of list) {
     if (ids([...kept, c]).length > BODY_ROOM) break;
     kept.push(c);
   }
@@ -228,11 +237,11 @@ function mergeSharedEquivalents(issues: Round1Issue[], outsideOf: ReadonlyMap<st
   for (const g of groups) {
     const [host, ...rest] = [...g.members].sort((m, n) => idOrder(m.id, n.id));
     if (host === undefined || rest.length === 0) continue;
-    const all = rest.map((x): { issue: Round1Issue; covered: Round1Covered } => {
+    const all = rest.map((x): { issue: Round1Issue; covered: Round1Covered; parts: ItemParts } => {
       const q = qa.questions.find((z) => z.id === x.id);
-      return { issue: x, covered: { id: x.id, symbol: nameOf(x), equivalents: (outsideOf.get(x.id) ?? []).slice(0, 3), excerpt: clip(oneLine(q?.answer?.answer ?? ""), 200) } };
+      return { issue: x, covered: { id: x.id, symbol: nameOf(x), equivalents: (outsideOf.get(x.id) ?? []).slice(0, 3), excerpt: oneLine(q?.answer?.answer ?? "") }, parts: x.parts ?? { id: x.id, head: x.body, label: "Answer", answer: "", cites: [], proposal: "" } };
     });
-    const fit = coveredBody(host.body, all.map((c) => c.covered));
+    const fit = coveredBody(host.body, all);
     const tail = fit.body.slice(host.body.length).trim();
     if (host.parts !== undefined && tail !== "") host.parts = { ...host.parts, tail, tailIds: fit.covered.map((c) => c.id) };
     host.body = fit.body;
@@ -296,7 +305,11 @@ export function round1Record(i: Round1Input): Round1Record | undefined {
     if (a.status === "needs author") kinds.push("needs-author");
     if (a.status === "partially answered") kinds.push("partial");
     let outside: string[] = [];
-    if (q.type === "existing-reuse-common" && !a.none_found) {
+    if (q.type === "existing-reuse-common" && !a.none_found && a.reusable === false) {
+      // The answer says it found nothing to reuse (what it cites is related code, or a duplicate inside the change), so a headline
+      // that asserts an equivalent exists would contradict it (design §9.4).
+      noted.push({ id: q.id, key: q.stable, note: NOTED_NONE });
+    } else if (q.type === "existing-reuse-common" && !a.none_found) {
       outside = outsideEquivalents(a.citations, changedPaths);
       // No citation at all cannot show the equivalent is the changed code, so it stays an issue.
       if (outside.length > 0 || a.citations.every((c) => c.path === "")) kinds.push("existing");

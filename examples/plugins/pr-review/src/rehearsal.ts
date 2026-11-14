@@ -371,7 +371,7 @@ const CLEAN_ROUND1: QaSpec = {
   purposes: [{ section: "features", source: "body", quote: "which parses a retention such as 7d" }],
   answer: (q, _sym, _record, dflt) =>
     q.type === "missing-test" || q.type === "complexity-coverage"
-      ? { ...dflt, answer: "pkg/schema/ttl_test.go exercises ParseTTL with a table of units and ranges.", status: "answered", none_found: false, citations: [{ path: "pkg/schema/ttl_test.go", tree: "base", start: 1, end: 1, quote: "package schema" }], proposal: { kind: "none", splits: [], testFile: "", testName: "", cases: [], assertion: "" } }
+      ? { ...dflt, answer: "pkg/schema/ttl_test.go exercises ParseTTL with a table of units and ranges.", status: "answered", none_found: false, reusable: false, citations: [{ path: "pkg/schema/ttl_test.go", tree: "base", start: 1, end: 1, quote: "package schema" }], proposal: { kind: "none", splits: [], testFile: "", testName: "", cases: [], assertion: "" } }
       : dflt,
 };
 
@@ -774,6 +774,7 @@ const RETENTION_PULL: Pull = {
             ...dflt,
             answer: "`ParseDuration` (pkg/timestamp/duration.go:30) parses the same <n><unit> grammar and is called from 7 places, for example banyand/measure/flusher.go:52.",
             none_found: false,
+            reusable: true,
             status: "answered",
             citations: [
               { path: "pkg/timestamp/duration.go", tree: "base", start: 30, end: 42, quote: "func ParseDuration" },
@@ -859,6 +860,7 @@ const JITTER_PULL: Pull = {
       ...prev,
       answer: "`Jitter` (vendor/github.com/foo/jitter/jitter.go:12) spreads a duration by a fifth either way, as this one does; the vendored directory is searched too.",
       none_found: false,
+      reusable: true,
       status: "answered",
       citations: [{ path: "vendor/github.com/foo/jitter/jitter.go", tree: "base", start: 12, end: 18, quote: "func Jitter" }],
       searches: [{ pattern: "func Jitter", tree: "base", paths: [], ignoreCase: false, hits: 1 }],

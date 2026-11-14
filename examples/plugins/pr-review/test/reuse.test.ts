@@ -6,7 +6,7 @@
  * and one verdict, in standard mode for each new symbol and in large mode for each high-level change.
  */
 import { describe, expect, it } from "vitest";
-import { ANSWERS_SCHEMA, ANSWER_CHECK_SCHEMA, answerProblems, assemble, readAnswerCheck, unmeasuredAbsences, verificationPlan, type Answer, type AnswerContext, type FinalAnswer } from "../src/answers.js";
+import { ANSWERS_SCHEMA, ANSWER_CHECK_SCHEMA, answerProblems, assemble, inventoryLimitNote, readAnswerCheck, unmeasuredAbsences, verificationPlan, type Answer, type AnswerContext, type FinalAnswer } from "../src/answers.js";
 import { QUESTION_TYPES, REUSE_TYPE, finalQuestions, questionerProblems, requiredQuestions, type Question } from "../src/questions.js";
 import { planQuestioner } from "../src/qaprompts.js";
 import { coarsestChanges, highLevelId, type ReportView, type ViewItem } from "../src/reportview.js";
@@ -54,10 +54,18 @@ describe("one question, one answer", () => {
     expect(problems(answer({ none_found: false, searches: [], citations: [cite] }))).toEqual([]);
   });
 
-  it("makes a none-found answer 'partially answered' while a dependency has no source here, whichever of the three concerns it was about", () => {
+  it("keeps a none-found answer 'answered' while a dependency has no source here, and notes the limit on it instead", () => {
     const sourceless = ctxOf({ sourceless: true });
-    expect(problems(answer(), sourceless).join("|")).toMatch(/some declared dependency has no source available here, so a "none found" answer is "partially answered"/);
+    expect(problems(answer(), sourceless)).toEqual([]);
     expect(problems(answer({ status: "partially answered" }), sourceless)).toEqual([]);
+    expect(inventoryLimitNote(sourceless)).toBe("1 of 1 declared dependencies have no source available here, so the library check read only the others");
+    expect(inventoryLimitNote(ctxOf())).toBeUndefined();
+  });
+
+  it("takes reusable false on an answer that cites related code it cannot reuse, and refuses none_found with reusable", () => {
+    expect(problems(answer({ none_found: false, reusable: false, searches: [search("a")], citations: [] }))).toEqual([]);
+    expect(problems(answer({ none_found: false, reusable: true, searches: [search("a")], citations: [] })).join("|")).toMatch(/cites it/);
+    expect(problems(answer({ reusable: true })).join("|")).toMatch(/cannot also be reusable/);
   });
 
   it("re-runs the searches and verifies the citations of the one answer", () => {

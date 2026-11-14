@@ -226,20 +226,18 @@ describe("answer-no-library-with-whole-repo-search", () => {
     expect(qaOf(s2).inventory.dependencies[0]!.source).toBe("/home/u/go/pkg/mod/github.com/spf13/cobra@v1.9.1");
   });
 
-  it("makes the library answer partially answered while a dependency's source is unavailable: an answered one is sent back", () => {
-    const wrong = scenarioWith("answer-no-library-with-whole-repo-search", (s) => {
+  it("accepts an answered none-found library answer while a dependency's source is unavailable, and notes the limit on it", () => {
+    const answered = scenarioWith("answer-no-library-with-whole-repo-search", (s) => {
       const reply = s.results["answers-v1"]![0]!.output as { answers: Array<{ question: string; status: string }> };
       for (const a of reply.answers) if (a.question === q().id) a.status = "answered";
-      s.results["answers-v1"]!.push(structuredClone(s.results["answers-v1"]![0]!));
-      ((s.results["answers-v1"]![1]!.output as { answers: Array<{ question: string; status: string }> }).answers.find((a) => a.question === q().id)!).status = "partially answered";
     });
-    const s2 = simulate({ scenario: wrong });
-    const answerers = jobsOf(s2, "Answer the questions");
-    expect(answerers).toHaveLength(2);
-    expect(assignmentOf(answerers[1]!)).toMatch(/source available here, so a "none found" answer is "partially answered"/);
-    expect(answerers[1]).toMatchObject({ continueFrom: expect.any(String) });
-    expect(answerers[0]!.continueFrom).toBeUndefined();
+    const s2 = simulate({ scenario: answered });
+    expect(jobsOf(s2, "Answer the questions")).toHaveLength(1);
     expect(stopOf(s2)).toMatchObject({ reason: "answers accepted" });
+    const answer = qOf(s2, "existing-reuse-common")[0]!.answer as unknown as { status: string; notes: string[] };
+    expect(answer.status).toBe("answered");
+    expect(answer.notes).toEqual(["3 of 3 declared dependencies have no source available here, so the library check read only the others"]);
+    expect(s2.qa!.markdown).toContain("Note: 3 of 3 declared dependencies have no source available here");
   });
 });
 

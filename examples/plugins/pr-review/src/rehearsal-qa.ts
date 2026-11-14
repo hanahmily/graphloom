@@ -120,7 +120,7 @@ const dirOf = (p: string): string => (p.includes("/") ? p.slice(0, p.lastIndexOf
 
 function defaultAnswer(q: Question, sym: SymbolDef | undefined, record: MetricsRecord | undefined, hasDeps: boolean): Answer {
   const searches = (names: string[]): Answer["searches"] => names.map((pattern) => ({ pattern, tree: "base", paths: [], ignoreCase: false as const, hits: 0 }));
-  const base: Answer = { question: q.id, answer: "", status: "answered", none_found: false, citations: [], searches: [], inventory: [], metrics: [], proposal: { ...emptyProposal } };
+  const base: Answer = { question: q.id, answer: "", status: "answered", none_found: false, reusable: false, citations: [], searches: [], inventory: [], metrics: [], proposal: { ...emptyProposal } };
   const name = sym?.name ?? "the function";
   switch (q.type) {
     case "purpose":

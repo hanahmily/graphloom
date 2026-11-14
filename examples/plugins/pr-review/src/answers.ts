@@ -65,12 +65,13 @@ export const ANSWERS_SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["question", "answer", "status", "none_found", "citations", "searches", "inventory", "metrics", "proposal"],
+        required: ["question", "answer", "status", "none_found", "reusable", "citations", "searches", "inventory", "metrics", "proposal"],
         properties: {
           question: { type: "string" },
           answer: { type: "string" },
           status: { type: "string", enum: STATUSES },
           none_found: { type: "boolean" },
+          reusable: { type: "boolean" },
           citations: {
             type: "array",
             items: {
@@ -152,6 +153,11 @@ export interface Answer {
   answer: string;
   status: AnswerStatus;
   none_found: boolean;
+  /**
+   * An existing-reuse-common answer: whether it names an equivalent, library or shared logic outside the code the pull request
+   * changes that the change could use or should share (design §7.3). Absent in an answer recorded before 0.26.3.
+   */
+  reusable?: boolean;
   citations: Citation[];
   searches: Search[];
   inventory: Array<{ name: string; version: string }>;
@@ -274,11 +280,10 @@ function answerProblemsOf(a: Answer, q: Question, ctx: AnswerContext, dirs: read
       if (a.none_found) {
         const need = absenceNeed(q);
         if (baseSearches < need) out.push(`${at}: a "none found" answer lists the whole-repository searches that found nothing (${need} or more over the whole base tree, with no paths: names and variants, signatures, key tokens; a search scoped to paths is supplementary), not ${baseSearches}`);
-        const inv = ctx.groundwork.inventory;
-        if (a.status === "answered" && (inv.dependencies.some((d) => d.source === undefined) || inv.truncated.length > 0)) {
-          out.push(`${at}: ${inv.truncated.length > 0 ? "the dependency inventory is incomplete" : "some declared dependency has no source available here"}, so a "none found" answer is "partially answered", not "answered"`);
-        }
-      } else if (a.citations.length === 0 && a.status !== "needs author") out.push(`${at}: an answer that names an existing equivalent, library or duplicate cites it`);
+        if (a.reusable === true) out.push(`${at}: a "none found" answer cannot also be reusable: set none_found false when the answer names an equivalent, library or shared logic`);
+        // An unavailable dependency source is a limit of the inventory, recorded as a note on the answer (assemble), not a lower
+        // status; the answerer says "partially answered" itself when the answer relies on a dependency it could not read.
+      } else if (a.reusable !== false && a.citations.length === 0 && a.status !== "needs author") out.push(`${at}: an answer that names an existing equivalent, library or duplicate cites it`);
       break;
     case "split-function":
       if (a.status !== "answered") out.push(`${at}: a split-function answer is "answered" with a split proposal, never "${a.status}"`);
@@ -763,7 +768,33 @@ export function answersFlow(evidence: readonly EvidenceRecord[], ctx: AnswerCont
   if (measured.state === "missing") return { state: "verify", commands: measured.commands, answers: current };
   if (measured.state === "failed") return { state: "supervise", reason: measured.reason, refs: measured.refs };
   const measure = searchMeasurer(evidence, [...verificationPlan([...current.values()], ctx, base, idPrefix), ...checkerPlan], dirs);
-  return { state: "done", final: assemble(ctx.questions, current, original ?? current, reading, revised, measure, idNotes), refs: tail };
+  return { state: "done", final: assemble(ctx.questions, current, original ?? current, reading, revised, measure, withInventoryNotes(idNotes, ctx, current)), refs: tail };
+}
+
+/**
+ * A "none found" answer to an existing-reuse-common question, read while a declared dependency has no source here (or the
+ * inventory was cut short), carries that as a note, not as a lower status: the limit is the inventory's, and the answer
+ * stays as settled as its own searches make it (design §7.3).
+ */
+export function inventoryLimitNote(ctx: Pick<AnswerContext, "groundwork">): string | undefined {
+  const inv = ctx.groundwork.inventory;
+  const missing = inv.dependencies.filter((d) => d.source === undefined).length;
+  const parts = [
+    ...(missing > 0 ? [`${missing} of ${inv.dependencies.length} declared dependencies have no source available here, so the library check read only the others`] : []),
+    ...(inv.truncated.length > 0 ? [`the dependency inventory is incomplete (${inv.truncated.join("; ")})`] : []),
+  ];
+  return parts.length > 0 ? parts.join("; ") : undefined;
+}
+
+function withInventoryNotes(idNotes: ReadonlyMap<string, string[]>, ctx: AnswerContext, answers: ReadonlyMap<string, Answer>): Map<string, string[]> {
+  const out = new Map(idNotes);
+  const note = inventoryLimitNote(ctx);
+  if (note === undefined) return out;
+  for (const q of ctx.questions) {
+    const a = answers.get(q.id);
+    if (q.type === "existing-reuse-common" && a !== undefined && a.none_found) out.set(q.id, [...(out.get(q.id) ?? []), note]);
+  }
+  return out;
 }
 
 /** The answers as the Q&A holds them: what the checker did not support, after the one correction, is `needs author` with both statements. */

@@ -88,7 +88,7 @@ describe("the answer checker's and the answerer's ids are read tolerantly, and n
   });
 
   it("reads the answerer's answers keyed with the text after the id, and records it", () => {
-    const base = { answer: "a", status: "answered", none_found: false, citations: [], searches: [], inventory: [], metrics: [], proposal: { kind: "none", splits: [], testFile: "", testName: "", cases: [], assertion: "" } };
+    const base = { answer: "a", status: "answered", none_found: false, reusable: false, citations: [], searches: [], inventory: [], metrics: [], proposal: { kind: "none", splits: [], testFile: "", testName: "", cases: [], assertion: "" } };
     const out = { answers: questions.map((x) => ({ ...base, question: `${x.id} [${x.type}] ${x.text}` })) };
     const parsed = parseAnswers(out, new Set(questions.map((x) => x.id)));
     if ("problems" in parsed) throw new Error(parsed.problems.join(";"));
