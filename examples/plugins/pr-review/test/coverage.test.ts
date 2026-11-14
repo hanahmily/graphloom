@@ -614,7 +614,7 @@ case "$1" in
     echo "$*" >> "$ARGS"
     prof='mode: set\nexample.com/m/pkg/a/a.go:4.2,6.3 3 1\n'
     for a in "$@"; do case "$a" in -args) prof="\${PROF_INK:-$prof}" ;; esac; done
-    for a in "$@"; do case "$a" in -coverprofile=*) printf '%b' "$prof" > "\${a#-coverprofile=}" ;; esac; done
+    for a in "$@"; do case "$a" in -coverprofile=*) [ -n "\${NOPROF:-}" ] || printf '%b' "$prof" > "\${a#-coverprofile=}" ;; esac; done
     if [ -n "\${GOOUT:-}" ]; then printf '%b' "$GOOUT"; else echo "ok  	example.com/m/pkg/a	0.1s"; fi
     exit "\${GORC:-0}" ;;
 esac
@@ -623,7 +623,7 @@ esac
     );
   };
 
-  function run(setup: Array<{ id: string; argv: string[] }>, more: { buildTags?: string[]; out?: string; rc?: number; spec?: string; packages?: string[]; timeoutSeconds?: number; ginkgoLabelFilter?: string; ginkgoPkgs?: string[]; profInk?: string } = {}): { report: string; order: string[]; status: number | null; args: string[] } {
+  function run(setup: Array<{ id: string; argv: string[] }>, more: { buildTags?: string[]; out?: string; rc?: number; spec?: string; packages?: string[]; timeoutSeconds?: number; ginkgoLabelFilter?: string; ginkgoPkgs?: string[]; profInk?: string; noProfile?: boolean } = {}): { report: string; order: string[]; status: number | null; args: string[] } {
     const dir = mkdtempSync(path.join(os.tmpdir(), "gl-gosh-"));
     try {
       const bin = path.join(dir, "bin");
@@ -638,7 +638,7 @@ esac
       const rep = path.join(dir, "report.txt");
       const order = path.join(dir, "order.txt");
       writeFileSync(order, "");
-      const r = spawnSync("sh", [goSh, String(parts.length), ...parts], { cwd: work, encoding: "utf8", env: { PATH: `${bin}:${process.env.PATH}`, TMPDIR: dir, GRAPHLOOM_REPORT_FILE: rep, ORDER: order, ARGS: args, GORC: String(more.rc ?? 0), GINKGO_PKGS: (more.ginkgoPkgs ?? []).join(" "), ...(more.profInk !== undefined ? { PROF_INK: more.profInk } : {}), ...(more.out !== undefined ? { GOOUT: more.out } : {}) } });
+      const r = spawnSync("sh", [goSh, String(parts.length), ...parts], { cwd: work, encoding: "utf8", env: { PATH: `${bin}:${process.env.PATH}`, TMPDIR: dir, GRAPHLOOM_REPORT_FILE: rep, ORDER: order, ARGS: args, GORC: String(more.rc ?? 0), GINKGO_PKGS: (more.ginkgoPkgs ?? []).join(" "), ...(more.profInk !== undefined ? { PROF_INK: more.profInk } : {}), ...(more.out !== undefined ? { GOOUT: more.out } : {}), ...(more.noProfile === true ? { NOPROF: "1" } : {}) } });
       return { args: spawnSync("cat", [args], { encoding: "utf8" }).stdout.split("\n").filter(Boolean), report: spawnSync("cat", [rep], { encoding: "utf8" }).stdout, order: spawnSync("cat", [order], { encoding: "utf8" }).stdout.split("\n").filter(Boolean), status: r.status };
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -748,9 +748,30 @@ esac
     expect(done.facts.runs[0]).toMatchObject({ ran: true, buildError: expect.stringContaining("requires go >= 1.26.11") });
   });
 
+  it("gives each module that wrote no profile its own reason: a toolchain refusal, an offline dependency, and one that measured", () => {
+    const rec = (path: string, fn: string): MetricsRecord => ({ ...goRecord, path, function: fn });
+    const records = [rec("pkg/a/a.go", "a.F"), rec("mod2/pkg/b.go", "b.G"), rec("mod3/pkg/c.go", "c.H")];
+    const index = new Map<string, FunctionIndexEntry[]>([["pkg/a/a.go", [["a.F", 3, 16]]], ["mod2/pkg/b.go", [["b.G", 3, 16]]], ["mod3/pkg/c.go", [["c.H", 3, 16]]]]);
+    const state = (evidence: EvidenceRecord[]) => coverageState(input({ records, index, files: records.map((r) => ({ path: r.path, language: "go" as const })), evidence }));
+    const planned = state([diff, ...ready("go")]);
+    if (planned.state !== "run") throw new Error(`expected a plan, got ${planned.state}`);
+    const argv = coverageCommand({ id: "cover-go", script: "go.sh", spec: planned.plan.commands[0]!.spec }, "/plugin", 60_000).argv;
+    const dep = "go: example.com/dep@v1.0.0: module lookup disabled by GOPROXY=off";
+    const text = ["graphloom-coverage-v1 go", "exit 1", "fail go test wrote no coverage profile for module mod2 (exit 1)", "module-error mod2 go: go.mod requires go >= 1.26.11 (running go 1.26.10; GOTOOLCHAIN=local)",
+      "fail go test wrote no coverage profile for module mod3 (exit 1)", `module-error mod3 ${dep}`, "build-error pkg/z/z.go:1:1: some earlier compiler error", "B pkg/a/a.go:4.2,6.3 3 1", "seen pkg/a/a.go", ""].join("\n");
+    const done = doneOf(state([diff, ...ready("go"), goRun(text, { argv })]));
+    const [a, b, c] = records.map((r) => [...done.outcomes.entries()].find(([k]) => k.includes(r.path))![1]);
+    expect(a).toMatchObject({ source: "measured", covered: 3, total: 3 });
+    expect(b).toEqual({ reason: expect.stringContaining("the sandbox's Go 1.26.10 is older than go.mod's 1.26.11; update metrics.sandbox.go.image") });
+    expect(c).toEqual({ reason: expect.stringContaining(dep) });
+    expect(JSON.stringify(c)).not.toContain("older than");
+    expect(done.facts.runs[0]).toMatchObject({ ran: true });
+  });
+
   it("go.sh reports Go's toolchain refusal as the build error, before any compiler error", () => {
-    const refusal = run([], { out: "go: go.mod requires go >= 1.26.11 (running go 1.26.10; GOTOOLCHAIN=local)\\n", rc: 1 });
+    const refusal = run([], { out: "go: go.mod requires go >= 1.26.11 (running go 1.26.10; GOTOOLCHAIN=local)\\n", rc: 1, noProfile: true });
     expect(refusal.report).toContain("build-error go: go.mod requires go >= 1.26.11 (running go 1.26.10; GOTOOLCHAIN=local)\n");
+    expect(refusal.report).toContain("module-error . go: go.mod requires go >= 1.26.11 (running go 1.26.10; GOTOOLCHAIN=local)\n");
   });
 
   it("feeds the failures into coverage facts and review.md's sentence, from the recorded report", () => {
