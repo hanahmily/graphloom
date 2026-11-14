@@ -2519,13 +2519,27 @@ plus its fix run.
 **Unproven.** A behavioral finding is `unproven`, with one of these reasons:
 `no test`, `test does not fail`, `inconclusive (<kind>)`, `flaky`,
 `does not demonstrate` (the verifier), `sandbox unavailable` (Docker,
-image or dependency), `execution disabled by the profile`
+image or dependency), `the sandbox toolchain is older than the repository
+requires` (since 0.26.4, below), `execution disabled by the profile`
 (`review.repro.enabled: false`), or `repro budget exhausted`. It is never
 drafted as P0 or P1, never makes the verdict `request-changes`, and is listed
 under "Needs your judgment" with its reason and its test, if it has one. A
 profile that does not accept running PR code ([§12.2](#122-confinement))
 also turns `review.repro` off. Every behavioral finding is then unproven, and
 no finding can make the recommendation `request-changes`.
+
+**Sandbox toolchain older than `go.mod`.** The sandbox runs `GOTOOLCHAIN=local`
+with no network, so a `go.mod` whose `go` or `toolchain` line is newer than the
+image's Go builds nothing; Go says `go: go.mod requires go >= 1.26.11 (running go
+1.26.10; GOTOOLCHAIN=local)`. This is a fact about the profile's pinned image, not about
+the test. Plugin code reads that line from the failed run's message, compares the two
+versions (`1.26` equals `1.26.0`, a release candidate is older than its release) and, when
+the running one is older, makes the finding `unproven` with the reason `the sandbox
+toolchain is older than the repository requires (the sandbox's Go 1.26.10 is older than
+go.mod's 1.26.11; update metrics.sandbox.go.image)`, not `inconclusive (build failed)`.
+Coverage says the same ([§6.8](#68-measurements)). The run does not stop and no budget
+changes: the review degrades as before, with the right reason. The check cannot run
+before Fetch, because only the head's `go.mod` says what it needs.
 
 **Cost.** A Go run in the build cache that the coverage job warmed takes
 about 10 to 60 seconds, and a vitest run 5 to 30 seconds. Each run is capped
@@ -3213,7 +3227,7 @@ docker run --rm --pull never --name graphloom-<run>-<op> --label graphloom.run=<
     checked by the SDK's own docker-confinement rules, so a tag is refused when the profile is read. Defaults are
     `--cpus=4 --memory=8g` (swap equal), 512 processes, a 1 GiB `/tmp` and 30 minutes. The TypeScript default image is
     `node:22-bookworm-slim` by digest; Go has none unless the profile pins one, because the right image follows the
-    repository's `go.mod` (the BanyanDB profile pins `golang:1.26.10`, `golang@sha256:670bb5aa…`).
+    repository's `go.mod` (the BanyanDB profile pins `golang:1.26.11`, `golang@sha256:957952ae…`).
   - **Mounts and setup (profile data).** A repository whose tests need code that is not committed (BanyanDB's
     generated protobuf, `make generate`) would fail to build in a sandbox with no network, and the profile may not
     prepare the checkout on the host ([§3.2](#32-profile)). Two optional fields of `metrics.sandbox.<language>` solve
@@ -3311,7 +3325,15 @@ docker run --rm --pull never --name graphloom-<run>-<op> --label graphloom.run=<
   declare `@vitest/coverage-v8` at its vitest major (`not run (no vitest
   coverage provider)`; GraphLoom never installs it into the repository), or
   the image's toolchain is older than `go.mod` asks for
-  (`GOTOOLCHAIN=local`), the record says `not run` with that reason. Static
+  (`GOTOOLCHAIN=local`; since 0.26.4 the reason reads `the sandbox toolchain is
+  older than the repository requires: the sandbox's Go 1.26.10 is older than
+  go.mod's 1.26.11; update metrics.sandbox.go.image`, taken from Go's own
+  error line, which `go.sh` reports as the first build error, and the same
+  sentence is the reason of a failed setup command; when a PR touches several Go modules and only some need the newer Go, `go.sh`
+  reports each module that wrote no profile with its own first error (`module-error <dir> <line>`), and only the
+  functions of a module whose own error is the toolchain refusal get this reason; a module that failed for another reason
+  keeps that reason and its error line, and the others keep their measured coverage; a report from before 0.26.4 has no
+  `module-error` lines and keeps the single-error reading), the record says `not run` with that reason. Static
   metrics still run. No job falls back to running PR code outside the
   sandbox.
 
@@ -3986,6 +4008,26 @@ A maintainer read a live review of 62 issues and found three faults in what roun
   after whole answers, a merged issue would again be the only one that was not).
 - **Q104** says accessors exist on other types ("Equivalent accessors on the other allowances
   already exist"); whether that is a reusable equivalent is the answerer's `reusable`.
+
+No step, requirement, name, order or budget changes.
+
+### Version 0.26.4: the sandbox's Go must match go.mod
+
+A live review of apache/skywalking-banyandb reported every Go reproducing test as
+`unproven: inconclusive (build failed)`. The profile's pinned image (`golang@sha256:670bb5aa…`,
+pinned 2026-10-29) ships Go 1.26.10, while the repository's `go.mod` had moved to `go 1.26.11`. With
+`GOTOOLCHAIN=local` and no network nothing built, so reproducing tests and measured coverage and CRAP
+both degraded for every review, and nothing said why.
+
+- **Pin.** `metrics.sandbox.go.image` is `golang:1.26.11`,
+  `golang@sha256:957952ae74dc010608717144399a59a2c6e82ea03d63be1c7ff6577c5a135f93` (the same Debian-based
+  image variant as before, about 1.29 GB).
+- **Reason.** Plugin code (`toolchain.ts`) reads Go's `requires go >= X (running go Y; GOTOOLCHAIN=local)`
+  line and compares the versions. A reproducing test's finding is `unproven` with the toolchain reason
+  and coverage is `not run` with the same sentence ([§8.2](#82-reproducing-tests), [§6.8](#68-measurements)).
+- **Rejected:** a run stop (the review is still useful without proofs and measurements); an
+  environment check (only the head's `go.mod` says what it needs, and Fetch comes after
+  `graphloom check`); a second sandbox probe of `go version` (Go's own refusal already states both versions).
 
 No step, requirement, name, order or budget changes.
 

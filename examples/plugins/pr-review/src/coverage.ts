@@ -18,6 +18,7 @@ import { commandRuns, isObject, latestFile, outputTail, reportText, type Command
 import { formatSpec, goFunctionCoverage, parseCoverageReport, parseSpec, tsFunctionCoverage, type CoverageSpecFunction } from "./metrics/coverage.js";
 import { languageOf, type Coverage, type FunctionIndexEntry, type Language, type MetricsRecord } from "./metrics/record.js";
 import { SANDBOX_LIMITS, type Profile, type SandboxMount, type SandboxSetupStep } from "./profile.js";
+import { toolchainMismatch, toolchainSentence, type ToolchainMismatch } from "./toolchain.js";
 import { writeChunks } from "./write.js";
 
 /** The image TypeScript coverage runs in unless a profile pins another: `node:22-bookworm-slim`, by digest (a tag is never run). */
@@ -358,7 +359,14 @@ export interface CoverageInput {
   afterRef: string | undefined;
 }
 
-const NOT_RUN = (reason: string): { reason: string } => ({ reason: oneLine(reason) });
+const TOOLCHAIN_PREFIX = "the sandbox toolchain is older than the repository requires";
+const TOOLCHAIN_REASON = (t: ToolchainMismatch): string => `${TOOLCHAIN_PREFIX}: ${toolchainSentence(t)}`;
+/** The error of the innermost module that wrote no profile and holds the file. */
+const moduleErrorOf = (errors: ReadonlyArray<{ dir: string; text: string }>, path: string): { dir: string; text: string } | undefined =>
+  errors.filter((e) => e.dir === "." || path.startsWith(`${e.dir}/`)).sort((x, y) => y.dir.length - x.dir.length)[0];
+/** The modules `go.sh` reported as having written no coverage profile (`fail go test wrote no coverage profile for module <dir> (exit n)`). */
+const refusedModules = (fail: readonly string[]): string[] => fail.flatMap((f) => /no coverage profile for module (\S+) \(exit/.exec(f)?.[1] ?? []);
+const NOT_RUN =(reason: string): { reason: string } => ({ reason: oneLine(reason) });
 
 function entryOf(index: ReadonlyMap<string, readonly FunctionIndexEntry[]>, r: MetricsRecord): { entry: FunctionIndexEntry; all: readonly FunctionIndexEntry[] } | undefined {
   const all = index.get(r.path) ?? [];
@@ -548,8 +556,13 @@ function attribute(part: Part, run: CommandRun, input: CoverageInput, outcomes: 
   if (parsed.language !== part.language) return { facts, problem: `${part.command.id}: the report is for ${parsed.language}, not ${part.language}` };
   if (parsed.setupFail !== undefined) {
     const f = parsed.setupFail;
+    const old = toolchainMismatch(f.text);
+    if (old !== undefined) return none(TOOLCHAIN_REASON(old));
     return none(`setup failed: ${f.id} exited ${f.exit}${f.text !== "" ? ` (${f.text})` : ""}`);
   }
+  // A module whose go.mod asks for a newer Go than the image has built nothing; the modules that did build keep their coverage.
+  const old = parsed.exit !== undefined && parsed.exit !== 0 && parsed.language === GO ? toolchainMismatch(parsed.buildError ?? "") : undefined;
+  const refused = old === undefined ? [] : refusedModules(parsed.fail);
   facts.ran = true;
   if (parsed.exit !== undefined) facts.exit = parsed.exit;
   facts.tests = parsed.tests.slice(0, 12);
@@ -577,7 +590,25 @@ function attribute(part: Part, run: CommandRun, input: CoverageInput, outcomes: 
       continue;
     }
     const got = parsed.language === GO ? goFunctionCoverage(parsed, r.path, where.entry, where.all) : tsFunctionCoverage(parsed, r.path, where.entry, where.all);
-    outcomes.set(recordKey(r), "reason" in got ? NOT_RUN(got.reason) : got);
+    if (!("reason" in got)) {
+      outcomes.set(recordKey(r), got);
+      continue;
+    }
+    let reason = got.reason;
+    const own = parsed.language === GO ? moduleErrorOf(parsed.moduleErrors, r.path) : undefined;
+    if (own !== undefined) {
+      // The module's own first error: the toolchain refusal, or whatever else stopped it.
+      const t = toolchainMismatch(own.text);
+      reason = t !== undefined ? TOOLCHAIN_REASON(t) : `${got.reason}; first error: ${own.text}`;
+    } else if (old !== undefined && parsed.moduleErrors.length === 0 && (refused.length === 0 || refused.some((m) => m === "." || r.path.startsWith(`${m}/`)))) {
+      reason = TOOLCHAIN_REASON(old); // a report from before 0.26.4 has one global build error
+    }
+    outcomes.set(recordKey(r), NOT_RUN(reason));
+  }
+  const toolchain = part.records.map((r) => outcomes.get(recordKey(r))).filter((o) => o !== undefined && "reason" in o && o.reason.startsWith(TOOLCHAIN_PREFIX));
+  if (toolchain.length > 0 && toolchain.length === part.records.length) {
+    facts.ran = false;
+    facts.reason = (toolchain[0] as { reason: string }).reason;
   }
   return { facts };
 }

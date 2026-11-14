@@ -18,6 +18,7 @@
 //   fail <reason>            the command could not produce coverage at all
 //   failed <text>            a failing test or package of the test command: `--- FAIL: <Test>`, Ginkgo's `[FAIL] <spec>`, `FAIL <pkg>`
 //   build-error <text>       the first compiler error line of the test output
+//   module-error <dir> <text>   a Go module that wrote no coverage profile, with its own first error line (since 0.26.4)
 //   timeout <pkg> <d> [<TestA,TestB>]   a test binary that hit `go test -timeout` after <d> (`panic: test timed out after <d>`), with
 //                            the tests Go printed under `running tests:`
 //   setup <id> ok            a sandboxed setup command (profile metrics.sandbox.<language>.setup) that succeeded
@@ -60,6 +61,8 @@ export interface CoverageReport {
   failed: string[];
   /** The first compiler error the report names (`build-error`). */
   buildError: string | undefined;
+  /** Each module that wrote no profile, with its own first error line (`module-error`); empty in a report from before 0.26.4. */
+  moduleErrors: Array<{ dir: string; text: string }>;
   /** The test binaries that timed out, as the `timeout` lines name them. */
   timedOut: Array<{ package: string; after: string; tests: string[] }>;
   /** The coverage command could not produce coverage at all, and why. */
@@ -92,7 +95,7 @@ export function parseCoverageReport(text: string): CoverageReport | { error: str
   const lines = text.split("\n");
   const head = /^graphloom-coverage-v1 (go|typescript)$/.exec((lines[0] ?? "").trim());
   if (head === null) return { error: `the report does not start with "${COVERAGE_SCHEMA} go|typescript"` };
-  const report: CoverageReport = { language: head[1] as Language, exit: undefined, tests: [], notes: [], failed: [], buildError: undefined, timedOut: [], fail: [], setup: [], setupFail: undefined, provider: undefined, seen: new Set(), blocks: [], statements: [] };
+  const report: CoverageReport = { language: head[1] as Language, exit: undefined, tests: [], notes: [], failed: [], buildError: undefined, moduleErrors: [], timedOut: [], fail: [], setup: [], setupFail: undefined, provider: undefined, seen: new Set(), blocks: [], statements: [] };
   for (const raw of lines.slice(1)) {
     const line = raw.replace(/\r$/, "");
     const sp = line.indexOf(" ");
@@ -116,6 +119,11 @@ export function parseCoverageReport(text: string): CoverageReport | { error: str
       case "build-error":
         if (rest !== "" && report.buildError === undefined) report.buildError = rest;
         break;
+      case "module-error": {
+        const m = /^(\S+) (.+)$/.exec(rest);
+        if (m !== null) report.moduleErrors.push({ dir: m[1]!, text: m[2]! });
+        break;
+      }
       case "timeout": {
         const t = TIMEOUT_LINE.exec(rest);
         if (t !== null) report.timedOut.push({ package: t[1]!, after: t[2]!, tests: (t[3] ?? "").split(",").filter((x) => x !== "") });

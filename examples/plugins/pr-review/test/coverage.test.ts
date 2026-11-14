@@ -431,7 +431,7 @@ describe("coverage-measured (through the graph)", () => {
 
   it("writes the measured row, the measured CRAP and the Coverage sentence, and recomputes them in the validators", () => {
     expect(sim.written!.markdown).toContain("| `schema.ParseTTL` pkg/schema/ttl.go:6 | added | 12 (over the limit of 10) | 4 (over the limit of 3) | 40% (8/20 statements, measured) | 43.1 (at or over the threshold of 30) | not run: mutation not available in this version |");
-    expect(sim.written!.markdown).toMatch(/Coverage \(go\): measured with go test -coverprofile -covermode=set over the touched packages, -timeout=1680s from the start of the run \(the sandbox.s wall clock less a margin for setup and profile collection\), the packages whose tests use Ginkgo run with -ginkgo\.label-filter="!slow" \(the repository.s own CI filter; plain test packages without it\), in the Docker sandbox \(image golang@sha256:670bb5aa5349…, no network, read-only dependency caches\) over a prepared checkout of the head, statement coverage by function line range; the tests passed\./);
+    expect(sim.written!.markdown).toMatch(/Coverage \(go\): measured with go test -coverprofile -covermode=set over the touched packages, -timeout=1680s from the start of the run \(the sandbox.s wall clock less a margin for setup and profile collection\), the packages whose tests use Ginkgo run with -ginkgo\.label-filter="!slow" \(the repository.s own CI filter; plain test packages without it\), in the Docker sandbox \(image golang@sha256:957952ae74dc…, no network, read-only dependency caches\) over a prepared checkout of the head, statement coverage by function line range; the tests passed\./);
     const json = JSON.parse(sim.written!.json) as { measurements: { tools: string; records: Array<{ coverage: unknown; crap: number }> } };
     expect(json.measurements.tools).toBe("static+coverage");
     expect(json.measurements.records[0]).toMatchObject({ coverage: { source: "measured", covered: 8, total: 20, unit: "statement" }, crap: 43.1 });
@@ -614,7 +614,7 @@ case "$1" in
     echo "$*" >> "$ARGS"
     prof='mode: set\nexample.com/m/pkg/a/a.go:4.2,6.3 3 1\n'
     for a in "$@"; do case "$a" in -args) prof="\${PROF_INK:-$prof}" ;; esac; done
-    for a in "$@"; do case "$a" in -coverprofile=*) printf '%b' "$prof" > "\${a#-coverprofile=}" ;; esac; done
+    for a in "$@"; do case "$a" in -coverprofile=*) [ -n "\${NOPROF:-}" ] || printf '%b' "$prof" > "\${a#-coverprofile=}" ;; esac; done
     if [ -n "\${GOOUT:-}" ]; then printf '%b' "$GOOUT"; else echo "ok  	example.com/m/pkg/a	0.1s"; fi
     exit "\${GORC:-0}" ;;
 esac
@@ -623,7 +623,7 @@ esac
     );
   };
 
-  function run(setup: Array<{ id: string; argv: string[] }>, more: { buildTags?: string[]; out?: string; rc?: number; spec?: string; packages?: string[]; timeoutSeconds?: number; ginkgoLabelFilter?: string; ginkgoPkgs?: string[]; profInk?: string } = {}): { report: string; order: string[]; status: number | null; args: string[] } {
+  function run(setup: Array<{ id: string; argv: string[] }>, more: { buildTags?: string[]; out?: string; rc?: number; spec?: string; packages?: string[]; timeoutSeconds?: number; ginkgoLabelFilter?: string; ginkgoPkgs?: string[]; profInk?: string; noProfile?: boolean } = {}): { report: string; order: string[]; status: number | null; args: string[] } {
     const dir = mkdtempSync(path.join(os.tmpdir(), "gl-gosh-"));
     try {
       const bin = path.join(dir, "bin");
@@ -638,7 +638,7 @@ esac
       const rep = path.join(dir, "report.txt");
       const order = path.join(dir, "order.txt");
       writeFileSync(order, "");
-      const r = spawnSync("sh", [goSh, String(parts.length), ...parts], { cwd: work, encoding: "utf8", env: { PATH: `${bin}:${process.env.PATH}`, TMPDIR: dir, GRAPHLOOM_REPORT_FILE: rep, ORDER: order, ARGS: args, GORC: String(more.rc ?? 0), GINKGO_PKGS: (more.ginkgoPkgs ?? []).join(" "), ...(more.profInk !== undefined ? { PROF_INK: more.profInk } : {}), ...(more.out !== undefined ? { GOOUT: more.out } : {}) } });
+      const r = spawnSync("sh", [goSh, String(parts.length), ...parts], { cwd: work, encoding: "utf8", env: { PATH: `${bin}:${process.env.PATH}`, TMPDIR: dir, GRAPHLOOM_REPORT_FILE: rep, ORDER: order, ARGS: args, GORC: String(more.rc ?? 0), GINKGO_PKGS: (more.ginkgoPkgs ?? []).join(" "), ...(more.profInk !== undefined ? { PROF_INK: more.profInk } : {}), ...(more.out !== undefined ? { GOOUT: more.out } : {}), ...(more.noProfile === true ? { NOPROF: "1" } : {}) } });
       return { args: spawnSync("cat", [args], { encoding: "utf8" }).stdout.split("\n").filter(Boolean), report: spawnSync("cat", [rep], { encoding: "utf8" }).stdout, order: spawnSync("cat", [order], { encoding: "utf8" }).stdout.split("\n").filter(Boolean), status: r.status };
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -721,6 +721,57 @@ esac
     expect(coverageNotes(built)[0]).toContain("first build error: pkg/a/a.go:12:5: undefined: foo");
     const ok = run([]);
     expect(ok.report).not.toMatch(/^(failed|build-error) /m);
+  });
+
+  it("says the sandbox's Go is older than go.mod's, instead of a build failure, and measures nothing", () => {
+    const text = "graphloom-coverage-v1 go\nexit 1\nfail go test wrote no coverage profile for module . (exit 1)\nbuild-error go: go.mod requires go >= 1.26.11 (running go 1.26.10; GOTOOLCHAIN=local)\n";
+    const facts = doneOf(coverageState(input({ evidence: [diff, ...ready("go"), goRun(text)] }))).facts;
+    const reason = "the sandbox toolchain is older than the repository requires: the sandbox's Go 1.26.10 is older than go.mod's 1.26.11; update metrics.sandbox.go.image";
+    expect(facts.runs[0]).toMatchObject({ ran: false, reason });
+    expect(coverageNotes(facts)[0]).toContain(`not run (${reason})`);
+    const setup = doneOf(coverageState(input({ evidence: [diff, ...ready("go"), goRun("graphloom-coverage-v1 go\nsetup-fail gen 1 go: go.mod requires go >= 1.26.11 (running go 1.26.10; GOTOOLCHAIN=local)\n")] }))).facts;
+    expect(setup.runs[0]).toMatchObject({ ran: false, reason: expect.stringContaining("older than go.mod's 1.26.11") });
+  });
+
+  it("keeps the coverage of a module that built when another module's go.mod needs a newer Go", () => {
+    const other: MetricsRecord = { ...goRecord, path: "mod2/pkg/b.go", function: "b.G" };
+    const state = (evidence: EvidenceRecord[]) => coverageState(input({ records: [goRecord, other], index: new Map([...goIndex, ["mod2/pkg/b.go", [["b.G", 3, 16]]]]), files: [{ path: "pkg/a/a.go", language: "go" }, { path: "mod2/pkg/b.go", language: "go" }], evidence }));
+    const planned = state([diff, ...ready("go")]);
+    if (planned.state !== "run") throw new Error(`expected a plan, got ${planned.state}`);
+    const argv = coverageCommand({ id: "cover-go", script: "go.sh", spec: planned.plan.commands[0]!.spec }, "/plugin", 60_000).argv;
+    const text = "graphloom-coverage-v1 go\nexit 1\nfail go test wrote no coverage profile for module mod2 (exit 1)\nbuild-error go: go.mod requires go >= 1.26.11 (running go 1.26.10; GOTOOLCHAIN=local)\nB pkg/a/a.go:4.2,6.3 3 1\nseen pkg/a/a.go\n";
+    const done = doneOf(state([diff, ...ready("go"), goRun(text, { argv })]));
+    const values = [...done.outcomes.values()];
+    expect(values).toHaveLength(2);
+    expect(values.filter((v) => "source" in v)).toMatchObject([{ source: "measured", covered: 3, total: 3 }]);
+    expect(values.find((v) => "reason" in v)).toMatchObject({ reason: expect.stringContaining("the sandbox's Go 1.26.10 is older than go.mod's 1.26.11") });
+    expect(done.facts.runs[0]).toMatchObject({ ran: true, buildError: expect.stringContaining("requires go >= 1.26.11") });
+  });
+
+  it("gives each module that wrote no profile its own reason: a toolchain refusal, an offline dependency, and one that measured", () => {
+    const rec = (path: string, fn: string): MetricsRecord => ({ ...goRecord, path, function: fn });
+    const records = [rec("pkg/a/a.go", "a.F"), rec("mod2/pkg/b.go", "b.G"), rec("mod3/pkg/c.go", "c.H")];
+    const index = new Map<string, FunctionIndexEntry[]>([["pkg/a/a.go", [["a.F", 3, 16]]], ["mod2/pkg/b.go", [["b.G", 3, 16]]], ["mod3/pkg/c.go", [["c.H", 3, 16]]]]);
+    const state = (evidence: EvidenceRecord[]) => coverageState(input({ records, index, files: records.map((r) => ({ path: r.path, language: "go" as const })), evidence }));
+    const planned = state([diff, ...ready("go")]);
+    if (planned.state !== "run") throw new Error(`expected a plan, got ${planned.state}`);
+    const argv = coverageCommand({ id: "cover-go", script: "go.sh", spec: planned.plan.commands[0]!.spec }, "/plugin", 60_000).argv;
+    const dep = "go: example.com/dep@v1.0.0: module lookup disabled by GOPROXY=off";
+    const text = ["graphloom-coverage-v1 go", "exit 1", "fail go test wrote no coverage profile for module mod2 (exit 1)", "module-error mod2 go: go.mod requires go >= 1.26.11 (running go 1.26.10; GOTOOLCHAIN=local)",
+      "fail go test wrote no coverage profile for module mod3 (exit 1)", `module-error mod3 ${dep}`, "build-error pkg/z/z.go:1:1: some earlier compiler error", "B pkg/a/a.go:4.2,6.3 3 1", "seen pkg/a/a.go", ""].join("\n");
+    const done = doneOf(state([diff, ...ready("go"), goRun(text, { argv })]));
+    const [a, b, c] = records.map((r) => [...done.outcomes.entries()].find(([k]) => k.includes(r.path))![1]);
+    expect(a).toMatchObject({ source: "measured", covered: 3, total: 3 });
+    expect(b).toEqual({ reason: expect.stringContaining("the sandbox's Go 1.26.10 is older than go.mod's 1.26.11; update metrics.sandbox.go.image") });
+    expect(c).toEqual({ reason: expect.stringContaining(dep) });
+    expect(JSON.stringify(c)).not.toContain("older than");
+    expect(done.facts.runs[0]).toMatchObject({ ran: true });
+  });
+
+  it("go.sh reports Go's toolchain refusal as the build error, before any compiler error", () => {
+    const refusal = run([], { out: "go: go.mod requires go >= 1.26.11 (running go 1.26.10; GOTOOLCHAIN=local)\\n", rc: 1, noProfile: true });
+    expect(refusal.report).toContain("build-error go: go.mod requires go >= 1.26.11 (running go 1.26.10; GOTOOLCHAIN=local)\n");
+    expect(refusal.report).toContain("module-error . go: go.mod requires go >= 1.26.11 (running go 1.26.10; GOTOOLCHAIN=local)\n");
   });
 
   it("feeds the failures into coverage facts and review.md's sentence, from the recorded report", () => {

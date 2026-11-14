@@ -190,7 +190,11 @@ failures() {
     pend && /^FAIL +[^ ]/ { print "timeout " $2 " " d (tests != "" ? " " tests : ""); pend = 0 }
     END { if (pend) print "timeout - " d (tests != "" ? " " tests : "") }
   ' "$tmp/clean" | head -n 5 | cut -c1-400
-  sed -n 's/^\([^ ][^ ]*\.go:[0-9][0-9]*\(:[0-9][0-9]*\)\{0,1\}: .*\)$/build-error \1/p' "$tmp/clean" | head -n 1 | cut -c1-312
+  # Go's own refusal when go.mod asks for a newer Go than the image has (GOTOOLCHAIN=local) comes before any compiler error.
+  {
+    sed -n 's/^\(go: .*requires go >= [^ ]* (running go [^ ;]*; GOTOOLCHAIN=local)\)$/build-error \1/p' "$tmp/clean" | head -n 1
+    sed -n 's/^\([^ ][^ ]*\.go:[0-9][0-9]*\(:[0-9][0-9]*\)\{0,1\}: .*\)$/build-error \1/p' "$tmp/clean" | head -n 1
+  } | head -n 1 | cut -c1-312
 }
 
 modroot() {
@@ -282,6 +286,13 @@ for r in $(cut -d' ' -f1 "$tmp/pk" | sort -u); do
     awk -f "$here/goprofile.awk" -v mp="$mp" -v root="$r" "$tmp/spec.txt" "$tmp/c.$k" >> "$tmp/prof"
   else
     printf 'fail go test wrote no coverage profile for module %s (exit %s)\n' "$r" "$rc" >> "$tmp/fails"
+    # The module's own first error (Go's toolchain refusal, a compiler error, else the first line that is not a result line), so a
+    # report that covers several modules says which one stopped for what.
+    if [ -f "$tmp/f.$k" ]; then
+      me=$(sed -n 's/^build-error //p' "$tmp/f.$k" | head -n 1)
+      [ -n "$me" ] || me=$(grep -v -e '^ok' -e '^FAIL' -e '^---' -e '^===' -e '^#' -e '^?' -e '^exit status' -e '^ *$' "$tmp/clean" | head -n 1 | cut -c1-240)
+      [ -z "$me" ] || printf 'module-error %s %s\n' "$r" "$me" >> "$tmp/fails"
+    fi
   fi
 done
 

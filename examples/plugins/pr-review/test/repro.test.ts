@@ -125,6 +125,8 @@ describe("what a recorded run means for a finding (design §8.2)", () => {
     expect(judge([{ outcome: "failed", at: "other_test.go:6" }, { outcome: "failed", at: "other_test.go:6" }])).toMatchObject({ state: "unproven", reason: expect.stringContaining("not an assertion of the test") });
     expect(judge([{ outcome: "failed" }, { outcome: "failed" }])).toMatchObject({ state: "unproven", reason: expect.stringContaining("not an assertion of the test") });
     expect(judge([{ outcome: "build-failed" }, { outcome: "build-failed" }])).toMatchObject({ state: "unproven", reason: "inconclusive (build failed)" });
+    const old = "go: go.mod requires go >= 1.26.11 (running go 1.26.10; GOTOOLCHAIN=local)";
+    expect(judge([{ outcome: "build-failed", message: old }, { outcome: "build-failed", message: old }])).toMatchObject({ state: "unproven", reason: "the sandbox toolchain is older than the repository requires (the sandbox's Go 1.26.10 is older than go.mod's 1.26.11; update metrics.sandbox.go.image)" });
     expect(judge([{ outcome: "timeout" }, { outcome: "failed", at: 6 }])).toMatchObject({ state: "unproven", reason: "inconclusive (timeout)" });
     expect(judge([{ outcome: "killed" }, { outcome: "killed" }])).toMatchObject({ state: "unproven", reason: "inconclusive (killed)" });
     expect(judge(FAILED, { sha256: "0".repeat(64) })).toMatchObject({ state: "unproven", reason: expect.stringContaining("not of the recorded test") });
@@ -242,6 +244,10 @@ describe("a behavioral finding whose test does not prove it", () => {
   it("is inconclusive when the test does not build, and flaky when it fails once", () => {
     const build = run(scenario([passReply(1, [find({ repro: repro() })]), ...empty()], [confirmF1(demonstrates(false))], { "repro-F1": reproStub("F1", "go", GO_TEST, [{ outcome: "build-failed", message: "undefined: ParseTTL" }, { outcome: "build-failed" }]) }));
     expect(judgment(build)).toMatchObject({ reason: "unproven: inconclusive (build failed)" });
+    const old = "go: go.mod requires go >= 1.26.11 (running go 1.26.10; GOTOOLCHAIN=local)";
+    const toolchain = run(scenario([passReply(1, [find({ repro: repro() })]), ...empty()], [confirmF1(demonstrates(false))], { "repro-F1": reproStub("F1", "go", GO_TEST, [{ outcome: "build-failed", message: old }, { outcome: "build-failed", message: old }]) }));
+    expect(judgment(toolchain)).toMatchObject({ reason: expect.stringContaining("unproven: the sandbox toolchain is older than the repository requires (the sandbox's Go 1.26.10 is older than go.mod's 1.26.11") });
+    expect(draftOf(toolchain).recommended).not.toBe("request-changes");
     const flaky = run(scenario([passReply(1, [find({ repro: repro() })]), ...empty()], [confirmF1(demonstrates(false))], { "repro-F1": reproStub("F1", "go", GO_TEST, [{ outcome: "failed", at: 6 }, { outcome: "passed" }]) }));
     expect(judgment(flaky)).toMatchObject({ reason: "unproven: flaky" });
   });
