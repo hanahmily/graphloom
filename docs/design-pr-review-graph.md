@@ -376,6 +376,38 @@ part of Questions. That gives each agent's artifact its own receipt, and a
 failed answer is retried without asking the questions again. The stage list
 is fixed per plugin version, so it is in place from 0.1.
 
+### 5.1 Convergence after a reentry
+
+A supervisor reenters a stage when it has repaired what blocked it. The graph must
+then run that stage's own jobs again, not read the failure back from the evidence of the
+attempt that failed (the [convergence design](design-run-convergence.md) §4.1 gives
+issue-fix the same rule). Every call of the graph reasons from the same view of the
+evidence, made before any flow reads it:
+
+- **The live candidate.** A record made against a workspace other than the live one is
+  not seen, as a validator does not see it (`candidateEvidence`). A flow therefore never
+  finds a requirement done on evidence its validator would not accept. Environment
+  checks describe the machine and stay. A repair that writes into the worktree changes
+  the candidate, so after it every receipt is stale and the stages are earned again from
+  Fetch, with the checkout first.
+- **The stage's attempt.** The graph keeps, in its private state, each stage's attempt
+  number and the generation at which the graph first saw it (the first attempt of a
+  stage predates nothing). An agent result a stage's job recorded in an earlier
+  generation than the stage's current attempt began is not seen. A reentered stage
+  therefore dispatches its agents again (the answerer for N1 and the questions; the
+  reporter, the checkers and the diagram drawer for the report), and the corrections it
+  has spent count from none, so each attempt has its own two corrections before the
+  supervisor is asked again. A resume keeps the attempt and its start.
+- **Commands stand** while the candidate does: a search, a read or a write is the same
+  function of the candidate however often it runs, and is looked up by its exact
+  arguments. A reentry that left the candidate unchanged reuses them and the agent
+  results of every stage it did not reenter.
+
+The validators are unchanged. They see the candidate's evidence and replay a stage's
+flow over it, where a later passing result clears an earlier failure, so a fresh
+compliant result passes them although the failed attempt's results are still recorded.
+Nothing is deleted: the record keeps every result, and the supervisor reads all of it.
+
 ## 6. The change report
 
 ### 6.1 Template
@@ -3858,6 +3890,32 @@ pinned commit, and the proposal ([§8.5](#85-publish)); an item may take 12,000
 characters; a shortening is at a sentence end or a word boundary and says so; a body
 longer than 4,000 characters leads with its marker too, because the reads of a review's
 comments keep only 4,000. No step, name or order changes.
+
+### Version 0.26.2: a reentered stage starts its attempt fresh
+
+A live run on a pull request stopped with its corrections budget spent. N1's design
+explanation came back at 1,407 characters, then 814 against the bound of 800, so the
+stage escalated after two corrections. The supervisor's repair agents wrote valid
+explanations, and it reentered the stage, but the graph read the first attempt's three
+answers back, found the same 814 and escalated again with nothing run. A later
+reentry to Fetch did the same: the repair had changed the worktree, the validator
+no longer saw the earlier reads, and the graph still counted them as done. The
+supervisor read the pull request by hand and the budget ran out.
+
+- **Cause.** The graph's flows read all the evidence of the run, so an attempt's failure
+  outlived the attempt, and a flow and its validator disagreed on which evidence counted.
+- **Rule** ([§5.1](#51-convergence-after-a-reentry)): the graph reasons only from
+  evidence of the live candidate, less the agent results a stage recorded before its
+  current attempt began. Its private state records each stage's attempt and the
+  generation it began at. The corrections per attempt are the ones the evidence shows
+  from then on, so they are not a counter that can drift.
+- **Rejected:** a counter of corrections in private state (it would disagree with the
+  evidence after a resume that drops the state); dropping a reentered stage's commands
+  too (it would run every search again for a candidate that did not change).
+- **The correction text** already names every field past its limit with its length and the
+  limit (`N1: the design explanation is 814 characters, more than 800`), so it is unchanged.
+
+No step, requirement, name, order or budget changes.
 
 ### Version 0.24: reproducing tests (part 2, first slice)
 

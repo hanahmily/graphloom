@@ -27,6 +27,7 @@ import {
   type ValidationResult,
   type ValidatorBinding,
 } from "@graphloom/sdk";
+import { attemptEvidence, noteAttempt, readAttempts } from "./attempt.js";
 import { analyze, reportFlowOf, type Analysis } from "./analysis.js";
 import { checkoutCommand, GIT_ENV, GUARD_REFUSED, guardCommand, headTreeCommand, ledgerReadCommand, pinnedBase, reviewDirCommand } from "./commands.js";
 import {
@@ -340,7 +341,14 @@ export function createGraph(): GraphPlugin {
 
 const withPrivate = (decision: GraphDecision): GraphDecision => ({ ...decision, privateState: JSON.stringify({ v: 1 }) });
 
+/** One call of the graph: it reasons from the evidence of the live candidate and of the stages' current attempts (`attemptEvidence`), and keeps the attempts it has seen. */
 export function advancePullRequest(view: RunView): GraphDecision {
+  const attempts = noteAttempt(readAttempts(view.privateState), view);
+  const scoped: RunView = { ...view, evidence: attemptEvidence(view.evidence, view.candidateDigest, attempts) };
+  return { ...advance(scoped), privateState: JSON.stringify(attempts) };
+}
+
+function advance(view: RunView): GraphDecision {
   let profile: Profile;
   try {
     profile = parseProfile(view.config);

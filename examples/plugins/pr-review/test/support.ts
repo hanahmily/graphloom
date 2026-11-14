@@ -90,6 +90,12 @@ interface Options {
    * with lazy getters, as the plugin worker presents it), and record both answers in `compared`.
    */
   shadow?: { records: (records: EvidenceRecord[]) => EvidenceRecord[]; every: number; compared: Array<{ step: number; what: string; recorded: string; shadow: string }> };
+  /**
+   * Reentries a supervisor would make, one per `supervise` decision of the graph, in order: the run goes on with a new
+   * generation, the stage's attempt advanced, the receipts of that stage and every later one invalid, and, when the
+   * candidate changed (a repair wrote into the worktree), a new workspace digest. Every record also carries its generation.
+   */
+  reentries?: Array<{ stageId: string; changesCandidate?: boolean }>;
   /** Change a job's recorded result before the graph sees it. */
   tamper?: (job: JobSpec, evidence: EvidenceRecord[]) => EvidenceRecord[] | undefined;
 }
@@ -155,6 +161,12 @@ function* simulationSteps(options: Options = {}): Generator<undefined, Simulatio
   let qa: Simulation["qa"];
   let lastWork: string | undefined;
   let digest = "d0";
+  let workDigest = "d1";
+  let generation = 1;
+  let current = { stageId: "fetch", attempt: 1 };
+  const attempts = new Map<string, number>();
+  const reentries = [...(options.reentries ?? [])];
+  let privateState: string | undefined;
   for (let step = 0; step < (options.maxSteps ?? 60); step += 1) {
     yield;
     // Through Answers only: the stages up to Answers are accepted, and the run would decide round 1 next.
@@ -163,16 +175,18 @@ function* simulationSteps(options: Options = {}): Generator<undefined, Simulatio
       decisions.push(stop);
       return { decisions, jobs, evidence, receipts, final: stop, github, ...(written !== undefined ? { written } : {}), ...(qa !== undefined ? { qa } : {}) };
     }
+    if (options.reentries !== undefined) for (const e of evidence) if (e.generation === undefined) e.generation = generation;
     const view: RunView = {
       runId: "rehearsal-sim",
       task: { request: options.request ?? REHEARSAL_REQUEST },
-      current: { stageId: "fetch", attempt: 1 },
+      current,
       receipts,
       evidence,
       outstanding: [],
       budgets: { agentInvocations: 100, jobs: 100, decisions: 100, corrections: 12, ...(options.budgets ?? {}) },
       validatorBindings: [],
-      generation: 1,
+      ...(privateState !== undefined ? { privateState } : {}),
+      generation,
       stateRevision: step,
       activeVersion: "0.2.0",
       candidateDigest: digest,
@@ -187,6 +201,23 @@ function* simulationSteps(options: Options = {}): Generator<undefined, Simulatio
     }
     decisions.push(decision);
     const action = decision.action;
+    if (decision.privateState !== undefined) privateState = decision.privateState;
+    const reentry = action.type === "supervise" ? reentries.shift() : undefined;
+    if (reentry !== undefined) {
+      generation += 1;
+      attempts.set(reentry.stageId, (attempts.get(reentry.stageId) ?? 1) + 1);
+      current = { stageId: reentry.stageId, attempt: attempts.get(reentry.stageId)! };
+      const from = definition.stages.findIndex((st) => st.id === reentry.stageId);
+      const later = new Set(definition.stages.slice(from).map((st) => st.id));
+      for (const r of receipts) if (later.has(r.stageId)) r.valid = false;
+      if (reentry.changesCandidate === true) {
+        // A receipt rests on the workspace it was issued for, so a change to it makes every receipt stale.
+        for (const r of receipts) r.valid = false;
+        digest = `dr${generation}`;
+        workDigest = `dw${generation}`;
+      }
+      continue;
+    }
     if (action.type === "stop" || action.type === "supervise") return { decisions, jobs, evidence, receipts, final: decision, github, ...(written !== undefined ? { written } : {}), ...(qa !== undefined ? { qa } : {}) };
     if (action.type === "observe") {
       for (const p of action.observe.paths ?? []) {
@@ -221,7 +252,7 @@ function* simulationSteps(options: Options = {}): Generator<undefined, Simulatio
     if (job.purpose === "work") {
       lastWork = producer.operationId;
       // A job that changes the worktree changes the workspace digest, and its own evidence carries the new one.
-      digest = "d1";
+      digest = workDigest;
     }
     if (job.kind === "command" && job.executor !== undefined && job.stageId === PUBLISH_STAGE) {
       // The Publish stage's GitHub: the reviews of the pull request, the one write, and the comments of a review.
