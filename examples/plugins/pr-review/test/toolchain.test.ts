@@ -15,6 +15,11 @@ describe("the sandbox's Go against go.mod's", () => {
     expect(compareGoVersions("go1.26.11", "1.26.11")).toBe(0);
     expect(compareGoVersions("1.26rc1", "1.26")).toBeLessThan(0);
     expect(compareGoVersions("1.26rc1", "1.25.9")).toBeGreaterThan(0);
+    expect(compareGoVersions("1.27beta2", "1.27rc1")).toBeLessThan(0);
+    expect(compareGoVersions("1.27rc2", "1.27rc1")).toBeGreaterThan(0);
+    expect(compareGoVersions("1.27beta1", "1.27beta2")).toBeLessThan(0);
+    expect(compareGoVersions("1.27rc1", "1.27")).toBeLessThan(0);
+    expect(toolchainMismatch("go: go.mod requires go >= 1.27rc1 (running go 1.27beta2; GOTOOLCHAIN=local)")).toEqual({ required: "1.27rc1", running: "1.27beta2" });
     expect(compareGoVersions("latest", "1.26")).toBeUndefined();
     expect(parseGoVersion("go1.26.11")?.parts).toEqual([1, 26, 11]);
   });

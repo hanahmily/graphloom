@@ -11,15 +11,16 @@
 
 interface GoVersion {
   parts: [number, number, number];
-  /** A release candidate or beta (`1.26rc1`) sorts before its release. */
-  pre: number;
+  /** Betas, then release candidates, then the release: `[kind, n]` with beta 0, rc 1 and the release 2 (`1.27beta2` < `1.27rc1` < `1.27`). */
+  pre: [number, number];
 }
 
 /** A Go version as `go.mod` or `go version` writes it (`1.26`, `1.26.10`, `go1.26.11`, `1.26rc1`), or undefined. */
 export function parseGoVersion(text: string): GoVersion | undefined {
-  const m = /^(?:go)?(\d+)\.(\d+)(?:\.(\d+))?(?:(?:rc|beta)(\d+))?$/.exec(text.trim());
+  const m = /^(?:go)?(\d+)\.(\d+)(?:\.(\d+))?(?:(rc|beta)(\d+))?$/.exec(text.trim());
   if (m === null) return undefined;
-  return { parts: [Number(m[1]), Number(m[2]), Number(m[3] ?? 0)], pre: m[4] === undefined ? Number.POSITIVE_INFINITY : Number(m[4]) };
+  const pre: [number, number] = m[4] === undefined ? [2, 0] : [m[4] === "rc" ? 1 : 0, Number(m[5])];
+  return { parts: [Number(m[1]), Number(m[2]), Number(m[3] ?? 0)], pre };
 }
 
 /** Negative when `a` is older than `b`, zero when equal (`1.26` is `1.26.0`), positive when newer; undefined when either is not a Go version. */
@@ -28,7 +29,7 @@ export function compareGoVersions(a: string, b: string): number | undefined {
   const y = parseGoVersion(b);
   if (x === undefined || y === undefined) return undefined;
   for (const i of [0, 1, 2] as const) if (x.parts[i] !== y.parts[i]) return x.parts[i] - y.parts[i];
-  return x.pre === y.pre ? 0 : x.pre < y.pre ? -1 : 1;
+  return x.pre[0] !== y.pre[0] ? x.pre[0] - y.pre[0] : x.pre[1] - y.pre[1];
 }
 
 export interface ToolchainMismatch {
