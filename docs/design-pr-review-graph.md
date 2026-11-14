@@ -3329,7 +3329,8 @@ docker run --rm --pull never --name graphloom-<run>-<op> --label graphloom.run=<
   older than the repository requires: the sandbox's Go 1.26.10 is older than
   go.mod's 1.26.11; update metrics.sandbox.go.image`, taken from Go's own
   error line, which `go.sh` reports as the first build error, and the same
-  sentence is the reason of a failed setup command), the record says `not run` with that reason. Static
+  sentence is the reason of a failed setup command; when a PR touches several Go modules and only some need the newer Go, only the
+  functions of the modules that wrote no profile get this reason, and the others keep their measured coverage), the record says `not run` with that reason. Static
   metrics still run. No job falls back to running PR code outside the
   sandbox.
 

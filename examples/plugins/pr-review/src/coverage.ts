@@ -360,7 +360,9 @@ export interface CoverageInput {
 }
 
 const TOOLCHAIN_REASON = (t: ToolchainMismatch): string => `the sandbox toolchain is older than the repository requires: ${toolchainSentence(t)}`;
-const NOT_RUN = (reason: string): { reason: string } => ({ reason: oneLine(reason) });
+/** The modules `go.sh` reported as having written no coverage profile (`fail go test wrote no coverage profile for module <dir> (exit n)`). */
+const refusedModules = (fail: readonly string[]): string[] => fail.flatMap((f) => /no coverage profile for module (\S+) \(exit/.exec(f)?.[1] ?? []);
+const NOT_RUN =(reason: string): { reason: string } => ({ reason: oneLine(reason) });
 
 function entryOf(index: ReadonlyMap<string, readonly FunctionIndexEntry[]>, r: MetricsRecord): { entry: FunctionIndexEntry; all: readonly FunctionIndexEntry[] } | undefined {
   const all = index.get(r.path) ?? [];
@@ -554,9 +556,9 @@ function attribute(part: Part, run: CommandRun, input: CoverageInput, outcomes: 
     if (old !== undefined) return none(TOOLCHAIN_REASON(old));
     return none(`setup failed: ${f.id} exited ${f.exit}${f.text !== "" ? ` (${f.text})` : ""}`);
   }
-  // Go stopped before building anything because the image's Go is older than go.mod asks for: nothing was measured.
+  // A module whose go.mod asks for a newer Go than the image has built nothing; the modules that did build keep their coverage.
   const old = parsed.exit !== undefined && parsed.exit !== 0 && parsed.language === GO ? toolchainMismatch(parsed.buildError ?? "") : undefined;
-  if (old !== undefined) return none(TOOLCHAIN_REASON(old));
+  const refused = old === undefined ? [] : refusedModules(parsed.fail);
   facts.ran = true;
   if (parsed.exit !== undefined) facts.exit = parsed.exit;
   facts.tests = parsed.tests.slice(0, 12);
@@ -584,7 +586,12 @@ function attribute(part: Part, run: CommandRun, input: CoverageInput, outcomes: 
       continue;
     }
     const got = parsed.language === GO ? goFunctionCoverage(parsed, r.path, where.entry, where.all) : tsFunctionCoverage(parsed, r.path, where.entry, where.all);
-    outcomes.set(recordKey(r), "reason" in got ? NOT_RUN(got.reason) : got);
+    const refusedHere = old !== undefined && "reason" in got && (refused.length === 0 || refused.some((m) => m === "." || r.path.startsWith(`${m}/`)));
+    outcomes.set(recordKey(r), "reason" in got ? NOT_RUN(refusedHere ? TOOLCHAIN_REASON(old) : got.reason) : got);
+  }
+  if (old !== undefined && part.records.every((r) => "reason" in (outcomes.get(recordKey(r)) ?? { reason: "" }))) {
+    facts.ran = false;
+    facts.reason = oneLine(TOOLCHAIN_REASON(old));
   }
   return { facts };
 }

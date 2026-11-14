@@ -16,7 +16,7 @@
     "vitest": "^4.1.12"
   },
   "digests": {
-    "sourceTree": "09f9d425f9ba97e9557670234fa1b43c1c31f5308ac4362224bdb68f30415428",
+    "sourceTree": "cf95da791669e5e38b92b278dd3aebece729e62a48ad69365f6e2ce1ca7f2bbd",
     "packageLock": "1123e4e7d6011e4d012ec8a7d176b90952dd9efc98c832e27e3c856aad263108",
     "files": {
       "package.json": "9e894285d5a615abf6fa6f8c68c18185d991c43bb1543098a67592b048c02b56",
@@ -70,7 +70,7 @@
       "src/claims.ts": "cf570c0ea188b7858cce87a6e43bcee302b061d595170341b5418758afdb2762",
       "src/commands.ts": "ba0370e065e1b19561785a76b122c62b463bbaad93755a57815ea1e0660b5681",
       "src/constants.ts": "0f3a85a14fd651e339da46d2ba9ace5c1076d98849400f70a04b94866ab033b8",
-      "src/coverage.ts": "2bc607be52e4c457408740ca63ad50f599b1e027726102bf5b84db314a2d6ab5",
+      "src/coverage.ts": "7975d85f4b265ef6709b5e0cd248533f050f52bb97872f10db9a23236328b0cf",
       "src/detectors.ts": "84a4f0045cc3639c0e4494101341ee4697400c2367c80d838fc8cff609a2f3ba",
       "src/diagrams.ts": "60182fb25157fd4a3e1d25809c59fa8a130b0a8b2789cc1af9d8a33bf1b1755e",
       "src/diagramsvg.ts": "0d009642547214308d68ae86aad68cb984b10886342afdf53b743a544d54c965",
@@ -167,7 +167,7 @@
       "test/briefing.test.ts": "dc1bcc0472a8cab6786d3a2c50d830a7de7eb24e9bf954946be38d24914364f7",
       "test/cards.test.ts": "590b409d1bae001bb22ea124fc27e68de7582c9a32606159d4fe702ac0fa864a",
       "test/claims.test.ts": "da8e83123542bb4ca302cacac7e648d24c305b2e3b5faf588382ed0068a6eb81",
-      "test/coverage.test.ts": "58c6970dc4035adf2b15d52ed14af9a68c2a2be086c566523d7c87e548b1bebc",
+      "test/coverage.test.ts": "fb0c09f593aeb51a0165c44d8a292bdee5bcd4d3b21fd6bff1c9e805ebee5964",
       "test/crap.test.ts": "e2494e348e47ee1a6e5022d6745ba02b186cd3d74c95711148b37ef1de002eea",
       "test/detectors.test.ts": "cb780849cbe65e86cc7a536c7b98e995192a6c4fb1c92bb5c7c0f7aaf715d7dc",
       "test/diagrams.test.ts": "3fcca024a6407355d4878c911bc542fbec677509fbaaa0bea32a67c53e99a757",

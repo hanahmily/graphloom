@@ -724,13 +724,28 @@ esac
   });
 
   it("says the sandbox's Go is older than go.mod's, instead of a build failure, and measures nothing", () => {
-    const text = "graphloom-coverage-v1 go\nexit 1\nfail go test wrote no coverage profile for module . (exit 1)\nbuild-error go: go.mod requires go >= 1.26.11 (running go 1.26.10; GOTOOLCHAIN=local)\nseen pkg/a/a.go\n";
+    const text = "graphloom-coverage-v1 go\nexit 1\nfail go test wrote no coverage profile for module . (exit 1)\nbuild-error go: go.mod requires go >= 1.26.11 (running go 1.26.10; GOTOOLCHAIN=local)\n";
     const facts = doneOf(coverageState(input({ evidence: [diff, ...ready("go"), goRun(text)] }))).facts;
     const reason = "the sandbox toolchain is older than the repository requires: the sandbox's Go 1.26.10 is older than go.mod's 1.26.11; update metrics.sandbox.go.image";
     expect(facts.runs[0]).toMatchObject({ ran: false, reason });
     expect(coverageNotes(facts)[0]).toContain(`not run (${reason})`);
     const setup = doneOf(coverageState(input({ evidence: [diff, ...ready("go"), goRun("graphloom-coverage-v1 go\nsetup-fail gen 1 go: go.mod requires go >= 1.26.11 (running go 1.26.10; GOTOOLCHAIN=local)\n")] }))).facts;
     expect(setup.runs[0]).toMatchObject({ ran: false, reason: expect.stringContaining("older than go.mod's 1.26.11") });
+  });
+
+  it("keeps the coverage of a module that built when another module's go.mod needs a newer Go", () => {
+    const other: MetricsRecord = { ...goRecord, path: "mod2/pkg/b.go", function: "b.G" };
+    const state = (evidence: EvidenceRecord[]) => coverageState(input({ records: [goRecord, other], index: new Map([...goIndex, ["mod2/pkg/b.go", [["b.G", 3, 16]]]]), files: [{ path: "pkg/a/a.go", language: "go" }, { path: "mod2/pkg/b.go", language: "go" }], evidence }));
+    const planned = state([diff, ...ready("go")]);
+    if (planned.state !== "run") throw new Error(`expected a plan, got ${planned.state}`);
+    const argv = coverageCommand({ id: "cover-go", script: "go.sh", spec: planned.plan.commands[0]!.spec }, "/plugin", 60_000).argv;
+    const text = "graphloom-coverage-v1 go\nexit 1\nfail go test wrote no coverage profile for module mod2 (exit 1)\nbuild-error go: go.mod requires go >= 1.26.11 (running go 1.26.10; GOTOOLCHAIN=local)\nB pkg/a/a.go:4.2,6.3 3 1\nseen pkg/a/a.go\n";
+    const done = doneOf(state([diff, ...ready("go"), goRun(text, { argv })]));
+    const values = [...done.outcomes.values()];
+    expect(values).toHaveLength(2);
+    expect(values.filter((v) => "source" in v)).toMatchObject([{ source: "measured", covered: 3, total: 3 }]);
+    expect(values.find((v) => "reason" in v)).toMatchObject({ reason: expect.stringContaining("the sandbox's Go 1.26.10 is older than go.mod's 1.26.11") });
+    expect(done.facts.runs[0]).toMatchObject({ ran: true, buildError: expect.stringContaining("requires go >= 1.26.11") });
   });
 
   it("go.sh reports Go's toolchain refusal as the build error, before any compiler error", () => {
