@@ -1549,7 +1549,17 @@ whole base tree (`tree` `base`, no `paths`) counts toward the required number
 (three); a search scoped to
 paths, over the head or over a dependency is supplementary evidence, since it
 covers less than the repository. A dependency marked
-`source unavailable` makes the answer `partially answered`.
+`source unavailable` is a limit of the inventory, not of the answer (since 0.26.3): it
+does not lower the status. The plugin records it as a note on the answer
+("3 of 157 declared dependencies have no source available here, so the library check read
+only the others", or, when the inventory was cut short, "the dependency inventory is
+incomplete (…)"), which `qa.json` keeps in `notes` and `review.md` and `review.html` show
+under the answer. The answer is `partially answered` only when the answer itself relies on
+a dependency whose source the answerer could not read (a question about what a library does
+that its manifest does not say); the answerer decides that and says it, and no validator
+forces it. Round 1 raises an issue from a partially answered question ([§9.4](#94-rounds)),
+so a "none found" answer that fully settles its question is no longer an issue because a
+module cache was not mounted.
 
 The existence/reuse/common-logic question (`existing-reuse-common`, [§7.1](#71-questions))
 asks three things and has **one answer**: one statement that addresses all three
@@ -1557,9 +1567,19 @@ asks three things and has **one answer**: one statement that addresses all three
 status and its evidence as for every other question (citations, searches, inventory
 entries), and the checker judges the answer as a whole, with one verdict. A
 "none found" answer lists its whole-repository searches (three over the whole base
-tree) and, while a declared dependency has no source here, is `partially answered`.
+tree) and the note above while a declared dependency has no source here.
 There are no per-part statuses, histories or contracts: a question that has several
 concerns is still one question.
+
+An `existing-reuse-common` answer also carries `reusable` (`answers-v1`, since 0.26.3):
+true only when it names an equivalent, a library or shared logic **outside the code the
+pull request changes** that the change could use or should share; false when it found none,
+even if it cites related code that cannot be reused (a helper with another contract, a
+neighbour it was modelled on) or a duplicate inside the pull request itself. `none_found`
+keeps its meaning (the whole-repository searches found nothing, with the three searches that
+ground it); `reusable` is what round 1 reads ([§9.4](#94-rounds)). `none_found` true with
+`reusable` true contradicts itself and is sent back. An answer recorded before 0.26.3 has no
+`reusable` and is judged by its citations as it was.
 
 #### Ids
 
@@ -2576,7 +2596,8 @@ head and the event is always `COMMENT`.
      characters), a dozen citation links and a proposal fit whole, and GitHub accepts
      65,536 in one comment. A longer posted body, round 1's or round 2's, inline or not,
      is shortened at a sentence end, else at a word boundary, never inside a word, before
-     its marker is appended; the whole text is kept for the ledger and the input fits an
+     its marker is appended (a merged round-1 issue's covered answers are built by the same rule,
+     [§9.4](#94-rounds)); the whole text is kept for the ledger and the input fits an
      executor's 256,000 bytes. A read cuts a body at 4,000 characters, so a body longer
      than that also leads with its marker, and an id is read back from the marker that
      starts or ends a comment's body. Marker-looking text in an item's content is
@@ -2888,18 +2909,32 @@ reviews one head.
    - every question whose answer needs the author;
    - every partially answered question;
    - every answer that found an existing equivalent, a reusable library or
-     common logic (an `existing-reuse-common` answer that did not find "none")
-     **outside the code the pull request changes**, even when it is fully
-     answered. An answer counts only when at least one of its citations is a
-     declared library (tree `dependency`) or lies in a base or head file the
-     pull request does not add, modify, rename or delete. An answer whose
-     citations are all in changed files names the code the pull request moves or
-     adapts: it is not an issue, and `round1.json` records it under `noted` with
-     "the equivalent it names is the code this pull request changes". An answer
-     with no citation stays an issue. Questions (several new symbols) that cite
-     the same outside equivalent are **one** issue, which lists the symbols and
-     carries the other questions' ids in `covers`; plugin code decides all of
-     this from the structured citations, never a model;
+     common logic (an `existing-reuse-common` answer with `none_found` false and
+     `reusable` not false) **outside the code the pull request changes**, even when it
+     is fully answered. An answer that says it found nothing to reuse (`none_found`
+     true, or `reusable` false: the answer names no equivalent, library or shared logic,
+     though it may cite related code) is never an `existing` issue, so a headline
+     ("something equivalent already exists") never asserts what the answer denies;
+     `round1.json` records it under `noted` with "the answer found no equivalent, library or
+     shared logic it could reuse". Such an answer is still an issue for its own status
+     (`needs author`, `partially answered`), headed by that status alone. An answer counts
+     only when at least one of its citations is a declared library (tree `dependency`)
+     or lies in a base or head file the pull request does not add, modify, rename or
+     delete. An answer whose citations are all in changed files names the code the pull
+     request moves or adapts: it is not an issue, and `round1.json` records it under
+     `noted` with "the equivalent it names is the code this pull request changes". An
+     answer with no citation that does not say `reusable` false stays an issue. Questions
+     (several new symbols) that cite the same outside equivalent are **one** issue, which
+     lists the symbols and carries the other questions' ids in `covers`; plugin code decides
+     all of this from the structured fields and citations, never a model. A merged issue
+     is as whole as a single one (since 0.26.3): the host's question, answer and citation
+     links come first, then each covered question as `**`symbol` (Q9)**`, its question
+     text, its whole answer and its citation links. Only when the sections together
+     exceed the item's budget (`MAX_ITEM_TEXT`) is each answer shortened, by the rule of
+     [§8.5](#85-publish) (a sentence end, else a word boundary, with `(answer shortened;
+     the full answer is in the report's Q&A, <id>)`); when even that leaves under 500
+     characters for each, one line per question names its symbol, id and first equivalent
+     and points to the Q&A, then ids alone; no answer is cut with a bare ellipsis;
    - every `missing-test` question whose answer finds no covering test (it
      says none was found, or cites no test file by the effective language
      packs' `testFiles` convention, the one answer validation uses), even when it
@@ -3914,6 +3949,43 @@ supervisor read the pull request by hand and the budget ran out.
   too (it would run every search again for a candidate that did not change).
 - **The correction text** already names every field past its limit with its length and the
   limit (`N1: the design explanation is 814 characters, more than 800`), so it is unchanged.
+
+No step, requirement, name, order or budget changes.
+
+### Version 0.26.3: round 1's output says what the answers say
+
+A maintainer read a live review of 62 issues and found three faults in what round 1 wrote.
+
+1. **Merged issues clipped.** `mergeSharedEquivalents` listed each covered question as one
+   line with its answer cut at 200 characters, so Q9, Q44 and Q52 ended in
+   "(base sidx/query.go:509,…" with no word on where the rest was, one version after single
+   issues became whole. A merged issue now carries each covered question's text, whole answer
+   and citation links, and is shortened only when the item's budget forces it, by the same
+   sentence-end, word-boundary rule and the same note as publication ([§9.4](#94-rounds)).
+2. **A headline that denied its answer.** Q1, Q12, Q32, Q37, Q40, Q64, Q87 and Q90 say "No
+   equivalent … exists in the base" and were headed "something equivalent already exists". The
+   cause was the structured data, not the label: `none_found` is true only when the answer also
+   names nothing related, shared or duplicated, and these answers cite related code (a helper of
+   another type, a duplicate inside the pull request), so `none_found` was false. The rule
+   "`none_found` false with an outside citation is an `existing` issue" then fired. The answer
+   contract has a new `reusable` field, read by round 1 ([§7.3](#73-answers), [§9.4](#94-rounds)).
+3. **Boilerplate turned "none found" into "partially answered".** Q22, Q68, Q76, Q78, Q80,
+   Q82, Q93 and Q95 were partial only because 157 declared dependencies had no source here.
+   The validator rejected `answered` for every none-found answer while any source was missing,
+   and round 1 raises an issue from every partial answer. The limit is now a note
+   on the answer ([§7.3](#73-answers)); the answerer says `partially answered` when the answer
+   itself relies on a library it could not read.
+
+- **Rule.** Plugin code reads `reusable`, never the answer's prose. An answer recorded before
+  0.26.3 has no `reusable` and keeps the old rule.
+- **Rejected:** reading the first sentence of the answer for "No … exists" (a model's wording
+  is not a contract: "No function … exists in the base. … Equivalent helpers exist" would
+  decide by phrasing); forcing `partially answered` when an answer lists an inventory entry
+  (the answerer lists the entries it consulted, a manifest included, which does not mean it
+  relies on the unread source); keeping the 200-character clip with a pointer (one version
+  after whole answers, a merged issue would again be the only one that was not).
+- **Q104** says accessors exist on other types ("Equivalent accessors on the other allowances
+  already exist"); whether that is a reusable equivalent is the answerer's `reusable`.
 
 No step, requirement, name, order or budget changes.
 

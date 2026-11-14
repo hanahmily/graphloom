@@ -29,7 +29,7 @@ interface Q {
   item?: string;
   symbol?: string;
   text?: string;
-  answer?: { status: string; none_found?: boolean; answer?: string; citations?: Array<{ path: string; start: number; end: number; tree: string }> };
+  answer?: { status: string; none_found?: boolean; reusable?: boolean; answer?: string; citations?: Array<{ path: string; start: number; end: number; tree: string }> };
 }
 const qa = (questions: Q[], symbols: Array<{ id: string; path: string; startLine: number }> = [{ id: "S1", path: "pkg/schema/ttl.go", startLine: 3 }]): string =>
   JSON.stringify({ schema: "pr-qa-v1", symbols, questions: questions.map((q) => ({ item: "R1", text: `question ${q.id}`, ...q, answer: q.answer !== undefined ? { answer: "the answer", none_found: false, citations: [], ...q.answer } : undefined })) });
@@ -133,13 +133,102 @@ describe("round 1's issues, computed from necessity.json and qa.json", () => {
       expect(r.issues[0]!.body).toContain("`sym2` (Q2)");
       expect(r.prior).toEqual([expect.objectContaining({ id: "Q2", status: "open" })]);
     });
-    it("lists, for each question a merged issue covers, its own equivalent and answer", () => {
+    it("lists, for each question a merged issue covers, its own question, whole answer and citations", () => {
       const symbols = [1, 2, 3].map((n) => ({ id: `S${n}`, path: "pkg/schema/ttl.go", startLine: 3, qualified: `sym${n}` }));
       const withText = (q: Q, text: string): Q => ({ ...q, answer: { ...q.answer!, answer: text } });
       const qs = [reuse("Q1", [cite("pkg/a.go")], "S1"), withText(reuse("Q2", [cite("pkg/b.go", "base", 20)], "S2"), "b already merges rows"), reuse("Q3", [cite("pkg/a.go"), cite("pkg/b.go", "base", 20)], "S3")];
       const r = round1Record({ head: "h".repeat(40), necessity: necessity("necessary"), qa: qa(qs, symbols), files, itemCites: { R1: { path: "pkg/schema/ttl.go", start: 3, end: 3 } }, packs: PACKS })!;
       expect(r.issues[0]!.covered).toEqual([expect.objectContaining({ id: "Q2", symbol: "`sym2`", equivalents: ["pkg/b.go:20"], excerpt: "b already merges rows" }), expect.objectContaining({ id: "Q3", equivalents: ["pkg/a.go:10", "pkg/b.go:20"] })]);
-      expect(r.issues[0]!.body).toContain("- `sym2` (Q2): `pkg/b.go:20`: b already merges rows");
+      expect(r.issues[0]!.body).toContain("**`sym2` (Q2)**. question Q2\n\nAnswer (answered): b already merges rows\n\nCitations: `pkg/b.go:20-25` (base)");
+    });
+
+    describe("a merged issue carries each covered answer whole, as a single issue does (0.26.3)", () => {
+      // The shape of the live run's Q9, Q44 and Q52: a long answer with a parenthesised list of base paths that the old merge cut at 200 characters.
+      const longAnswer = (tag: string) => `${tag} already exists in the base, in two places. The first is the formatter at base sidx/query.go:509, which does the same grouping. The second is the helper at base trace/tracing.go:404 (base sidx/query.go:509, base trace/tracing.go:404, base measure/measure.go:179), which the others call. ${"It could be shared by moving it to a common package. ".repeat(6)}End of ${tag}.`;
+      const symbols = [1, 2, 3].map((n) => ({ id: `S${n}`, path: "pkg/schema/ttl.go", startLine: 3, qualified: `sym${n}` }));
+      const pinned = { owner: "o", repo: "r", number: 7, head: "a".repeat(40), base: "b".repeat(40) };
+      const build = (n: number, answerOf: (id: string) => string) => {
+        const syms = Array.from({ length: n }, (_, k) => ({ id: `S${k + 1}`, path: "pkg/schema/ttl.go", startLine: 3, qualified: `sym${k + 1}` }));
+        const qs = Array.from({ length: n }, (_, k) => ({ ...reuse(`Q${k + 1}`, [cite("pkg/timestamp/duration.go")], `S${k + 1}`), answer: { status: "answered", answer: answerOf(`Q${k + 1}`), citations: [cite("pkg/timestamp/duration.go"), cite(`pkg/own${k + 1}.go`, "base", 40 + k)] } }));
+        return round1Record({ head: "h".repeat(40), necessity: necessity("necessary"), qa: qa(qs, syms), files, itemCites: { R1: { path: "pkg/schema/ttl.go", start: 3, end: 3 } }, packs: PACKS, github: pinned } as never)!;
+      };
+
+      it("shows every covered question's text, its whole answer and its citation links, with no unexplained cut", () => {
+        void symbols;
+        const r = build(3, longAnswer);
+        const m = r.issues[0]!;
+        expect(m.covers).toEqual(["Q2", "Q3"]);
+        for (const id of ["Q2", "Q3"]) {
+          expect(m.body, id).toContain(`question ${id}`);
+          expect(m.body, id).toContain(longAnswer(id));
+          expect(m.body, id).toContain(`https://github.com/o/r/blob/${"b".repeat(40)}/pkg/own${id.slice(1)}.go#L4`);
+        }
+        expect(m.body).not.toContain("…");
+        expect(m.body).not.toContain("answer shortened");
+        expect(m.body.length).toBeLessThanOrEqual(MAX_ITEM_TEXT);
+      });
+
+      it("shortens only when the budget forces it, by the publish rule, saying where the full answer is", () => {
+        const huge = (id: string) => `${id} is described in many sentences. ${"A sentence that adds detail about the duplicated helper. ".repeat(60)}`;
+        const r = build(8, huge);
+        const m = r.issues[0]!;
+        expect(m.body.length).toBeLessThanOrEqual(MAX_ITEM_TEXT);
+        expect(m.covers).toHaveLength(7);
+        for (const id of m.covers!) {
+          expect(m.body, id).toContain(`(answer shortened; the full answer is in the report's Q&A, ${id})`);
+          // The cut is at a sentence end: the text before the note ends in a full stop, never mid-word.
+          expect(m.body, id).toMatch(new RegExp(`detail about the duplicated helper\\. \\(answer shortened; the full answer is in the report's Q&A, ${id}\\)`));
+        }
+        expect(m.body).not.toMatch(/…/);
+      });
+
+      it("keeps every covered id and its symbol when even the shortened answers cannot fit", () => {
+        const r = build(60, longAnswer);
+        const m = r.issues[0]!;
+        expect(m.body.length).toBeLessThanOrEqual(MAX_ITEM_TEXT);
+        expect(m.body).toContain("each answer is in the report's Q&A");
+        expect(m.body).not.toContain("…");
+        for (const id of m.covers!) expect(m.body).toContain(`(${id})`);
+      });
+    });
+
+    describe("an existing-reuse-common answer that found nothing to reuse is not headed 'something equivalent already exists' (0.26.3)", () => {
+      // The shape of the live run's Q1 and Q37: none_found false because related code is cited, but the answer says no equivalent exists.
+      const noneButRelated = (id: string, reusable?: boolean): Q => ({ id, type: "existing-reuse-common", symbol: "S1", answer: { status: "answered", none_found: false, ...(reusable !== undefined ? { reusable } : {}), answer: "No equivalent accessor exists in the base. The nearest helper works on other columns, so it cannot be called as is.", citations: [{ path: "pkg/encoding/bytes.go", start: 87, end: 94, tree: "base" }, { path: "pkg/query/retained_bytes.go", start: 109, end: 113, tree: "base" }] } });
+
+      it("is no issue and is noted when the answer says reusable false", () => {
+        const r = run([noneButRelated("Q1", false)]);
+        expect(r.issues).toEqual([]);
+        expect(r.noted).toEqual([{ id: "Q1", key: expect.any(String), note: "the answer found no equivalent, library or shared logic it could reuse" }]);
+      });
+
+      it("is an existing issue only when the answer says reusable true", () => {
+        const r = run([noneButRelated("Q1", true)]);
+        expect(r.issues.map((i) => [i.id, i.kinds])).toEqual([["Q1", ["existing"]]]);
+        expect(r.issues[0]!.body).toContain("**something equivalent already exists**");
+      });
+
+      it("keeps an answer recorded before 0.26.3, which has no reusable field, judged as it was", () => {
+        expect(ids(run([noneButRelated("Q1")]))).toEqual(["Q1"]);
+      });
+
+      it("heads a not-reusable answer that still needs the author with that reason alone", () => {
+        const q = noneButRelated("Q1", false);
+        q.answer!.status = "needs author";
+        const r = run([q]);
+        expect(r.issues.map((i) => i.kinds)).toEqual([["needs-author"]]);
+        expect(r.issues[0]!.body).toContain("**needs the author**");
+        expect(r.issues[0]!.body).not.toContain("equivalent already exists");
+      });
+
+      it("never merges a not-reusable answer into an equivalent issue, so no headline of a merged issue denies its answer", () => {
+        const cite = { path: "pkg/timestamp/duration.go", start: 30, end: 42, tree: "base" };
+        const symbols = [1, 2].map((n) => ({ id: `S${n}`, path: "pkg/schema/ttl.go", startLine: 3, qualified: `sym${n}` }));
+        const qs: Q[] = [{ id: "Q1", type: "existing-reuse-common", symbol: "S1", answer: { status: "answered", reusable: true, citations: [cite] } }, { id: "Q2", type: "existing-reuse-common", symbol: "S2", answer: { status: "answered", reusable: false, citations: [cite] } }];
+        const r = round1Record({ head: "h".repeat(40), necessity: necessity("necessary"), qa: qa(qs, symbols), files: FILES, itemCites: {}, packs: PACKS })!;
+        expect(ids(r)).toEqual(["Q1"]);
+        expect(r.issues[0]!.covers).toBeUndefined();
+      });
     });
 
     it("builds a merged body that fits the posted budget and names every covered question, in the body and in covers", () => {

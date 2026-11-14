@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 import { evidencePull } from "../src/analysis.js";
-import { answerProblems, functionOf, readAnswerCheck, verificationPlan, type Answer } from "../src/answers.js";
+import { answerProblems, functionOf, inventoryLimitNote, readAnswerCheck, verificationPlan, type Answer } from "../src/answers.js";
 import { GO_PACK, TS_PACK } from "../src/packs.js";
 import { nameVariants, nameWords, planFor, rareTokens, signaturePattern, signatureTypes, tokenPopulation, excludeSpecs } from "../src/queries.js";
 import { afterNecessity, answerContext, qaContext, questionSet, questionerFlow, type QaContext } from "../src/qaflow.js";
@@ -379,17 +379,16 @@ describe("the answer rules (design 7.3 checks)", () => {
     const one = answer("existing-reuse-common", { none_found: true });
     expect(problems(one).join("|")).toMatch(/3 or more over the whole base tree.*not 1/);
     const three = answer("existing-reuse-common", { none_found: true, searches: [1, 2, 3].map((n) => ({ pattern: `p${n}`, tree: "base", paths: [], ignoreCase: false as const, hits: 0 })) });
-    // A dependency of the fixture has no source here, so the none-found answer is partially answered.
+    // A dependency of the fixture has no source here: that is a note on the answer, not a reason to lower its status.
+    expect(problems(three)).toEqual([]);
     expect(problems({ ...three, status: "partially answered" })).toEqual([]);
-    const four = answer("existing-reuse-common", { none_found: true, searches: [1, 2, 3].map((n) => ({ pattern: `p${n}`, tree: "base", paths: [], ignoreCase: false as const, hits: 0 })) });
-    expect(problems(four).join("|")).toMatch(/source available here, so a "none found" answer is "partially answered"/);
-    expect(problems({ ...four, status: "partially answered" })).toEqual([]);
   });
 
-  it("makes a library answer partial while the inventory is incomplete, even when every source is available", () => {
+  it("keeps a none-found answer answered while the inventory is incomplete, and words the limit as a note", () => {
     const cut = { ...actx, groundwork: { ...actx.groundwork, inventory: { dependencies: [], packages: [], truncated: ["dependency manifests cut: 3 more manifests"] } } };
     const a = answer("existing-reuse-common", { none_found: true, searches: [1, 2, 3].map((n) => ({ pattern: `p${n}`, tree: "base", paths: [], ignoreCase: false as const, hits: 0 })) });
-    expect(answerProblems([a], cut, new Set([a.question])).join("|")).toMatch(/the dependency inventory is incomplete, so a "none found" answer is "partially answered"/);
+    expect(answerProblems([a], cut, new Set([a.question]))).toEqual([]);
+    expect(inventoryLimitNote(cut)).toBe("the dependency inventory is incomplete (dependency manifests cut: 3 more manifests)");
   });
 
   it("makes an answer name an equivalent it claims, with a citation, and an answer carry evidence", () => {
