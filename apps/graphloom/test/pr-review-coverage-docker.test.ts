@@ -7,6 +7,9 @@
  * and a vitest project built as temporary fixtures. Skipped (with a warning) where Docker, an image, the Go
  * toolchain, or an offline npm cache is missing; nothing here pulls on its own initiative except test setup,
  * which pulls the pinned images once, as a run's Fetch does.
+ *
+ * With GRAPHLOOM_REQUIRE_DOCKER_TESTS=1 (set by CI) nothing is skipped: each of those conditions fails the file with
+ * the message the skip would have warned. CI fills the two offline caches first (scripts/ci/warm-coverage-caches.sh).
  */
 import { spawnSync } from "node:child_process";
 import { chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -44,9 +47,20 @@ function haveImage(image: string): boolean {
   return spawnSync("docker", ["pull", image], { stdio: "ignore", timeout: 600_000 }).status === 0;
 }
 
-const hasDocker = dockerUp();
-const hasGo = spawnSync("go", ["version"], { encoding: "utf8" }).status === 0;
-const hasNpm = spawnSync("npm", ["--version"], { encoding: "utf8" }).status === 0;
+/** CI sets this: a prerequisite that is missing then fails the file instead of skipping its tests. */
+const required = process.env.GRAPHLOOM_REQUIRE_DOCKER_TESTS === "1";
+/** A skip that must not happen: fail with the message when required, warn with it otherwise. */
+function skipOrFail(message: string): void {
+  if (required) throw new Error(`${message} (GRAPHLOOM_REQUIRE_DOCKER_TESTS=1: this test must run, not skip)`);
+  console.warn(message);
+}
+const dockerFound = dockerUp();
+const goFound = spawnSync("go", ["version"], { encoding: "utf8" }).status === 0;
+const npmFound = spawnSync("npm", ["--version"], { encoding: "utf8" }).status === 0;
+// When required, the tests are never skipped by these; the setup below fails them with the reason instead.
+const hasDocker = required || dockerFound;
+const hasGo = required || goFound;
+const hasNpm = required || npmFound;
 let goImage: string | undefined;
 let tsImage: string | undefined;
 let goReady = false;
@@ -64,13 +78,19 @@ beforeAll(async () => {
     fallback: { runJob: async () => { throw new Error("not served"); } },
     stopGraceMs: 3_000,
   });
-  if (hasDocker) {
+  if (required && !dockerFound) skipOrFail("pr-review coverage docker tests skipped: Docker is not available");
+  if (required && !goFound) skipOrFail("pr-review coverage docker tests: go skipped (no Go toolchain or image)");
+  if (required && !npmFound) skipOrFail("pr-review coverage docker tests: typescript skipped (no npm or image)");
+  if (dockerFound) {
+    const missing = (name: string, image: string): void => skipOrFail(`pr-review coverage docker tests: ${name} skipped (image ${image} could not be pulled)`);
     goImage = (banyandb.metrics as { sandbox: { go: { image: string } } }).sandbox.go.image;
     tsImage = coverage.DEFAULT_TS_IMAGE;
-    goReady = hasGo && haveImage(goImage);
-    tsReady = hasNpm && haveImage(tsImage);
+    goReady = goFound && haveImage(goImage);
+    if (goFound && !goReady) missing("go", goImage);
+    tsReady = npmFound && haveImage(tsImage);
+    if (npmFound && !tsReady) missing("typescript", tsImage);
   }
-  if (!hasDocker) console.warn("pr-review coverage docker tests skipped: Docker is not available");
+  if (!dockerFound) console.warn("pr-review coverage docker tests skipped: Docker is not available");
   else if (!goReady || !tsReady) console.warn(`pr-review coverage docker tests: go ${goReady ? "ready" : "skipped (no Go toolchain or image)"}, typescript ${tsReady ? "ready" : "skipped (no npm or image)"}`);
 }, 900_000);
 
@@ -298,7 +318,7 @@ describe("measured coverage, Go, under real Docker", () => {
     const tidy = spawnSync("go", ["mod", "tidy"], { cwd: work, encoding: "utf8", env: { ...process.env, GOFLAGS: "-mod=mod", GOPROXY: "off", GOTOOLCHAIN: "local" } });
     if (tidy.status !== 0) {
       goReady = false;
-      console.warn(`pr-review coverage docker tests: the go fixture was skipped (go mod tidy offline failed: ${tidy.stderr.split("\n")[0]})`);
+      skipOrFail(`pr-review coverage docker tests: the go fixture was skipped (go mod tidy offline failed: ${tidy.stderr.split("\n")[0]})`);
       return;
     }
     await write(work, { "pkg/broken/broken.go": brokenSource!, "pkg/broken/broken_test.go": brokenTest! });
@@ -453,7 +473,7 @@ describe("measured coverage, TypeScript, under real Docker", () => {
     vitestVersion = (JSON.parse(await readFile(path.join(repoRoot, "node_modules/vitest/package.json"), "utf8")) as { version: string }).version;
     work = await fixture("ts-work", { name: "fx", private: true, type: "module", devDependencies: { vitest: vitestVersion, "@vitest/coverage-v8": vitestVersion } }, true);
     if (work === "") {
-      console.warn("pr-review coverage docker tests: the typescript fixture was skipped (the offline npm cache lacks vitest and @vitest/coverage-v8)");
+      skipOrFail("pr-review coverage docker tests: the typescript fixture was skipped (the offline npm cache lacks vitest and @vitest/coverage-v8)");
       return;
     }
     ok = true;
