@@ -1,6 +1,6 @@
 {
   "graphId": "issue-fix",
-  "version": "0.16.3",
+  "version": "0.16.5",
   "sdkProtocol": 1,
   "taskConfig": "required",
   "entryPoints": {
@@ -16,14 +16,14 @@
     "vitest": "^4.1.12"
   },
   "digests": {
-    "sourceTree": "840cf7abd2f0d57f61bf764fd03bcb72a34d2426f2d4cf1f03d1a14fbad1ea6c",
-    "packageLock": "3edc33fdc75a80f0cd8933cf794c0e85a55e0af7c769ff91160e329f1b4b9022",
+    "sourceTree": "c48437cdee0050663b5fd4fd16e442f62eb500bf087ebca59cfbe5bb5f70cc39",
+    "packageLock": "d0aa860342683b36251bd0b5809492e87ca44d48638008f24df1408ae9a18400",
     "files": {
-      "package.json": "760a46ce8c801a22d574c9e20712d81e37414f0caee8c0b5a8cfc389e45ce613",
-      "package-lock.json": "3edc33fdc75a80f0cd8933cf794c0e85a55e0af7c769ff91160e329f1b4b9022",
+      "package.json": "dab412a35c925d80935860f12864ddcbceaeb3285fea1aca9e205553637238b1",
+      "package-lock.json": "d0aa860342683b36251bd0b5809492e87ca44d48638008f24df1408ae9a18400",
       "tsconfig.json": "3bafb75902b6084b621c996ae838dbfb87088cf095ce411be9809ce79bf3916b",
-      "profiles/banyandb-ql.json": "aa687d99a6556ba05ec354092bc2cf04c04e1d96efc2afc61c05bbf4e6a3dafc",
-      "profiles/banyandb.json": "b15369f4f2ad04da48e8a04bc79b697505b124781c134da7683e3a9c04cf6f75",
+      "profiles/banyandb-ql.json": "535a62f5a993269744f8afd7b54d829bf6d8752e6a15c50d8b40c9ea4ae778b3",
+      "profiles/banyandb.json": "c00e6d09fd5c60ff06571d5320eb1f1ffa0525af023f5653aca4d65a5a6dec7f",
       "profiles/canopy.json": "3a3bc5a203aa177fef63b1ce9c967949b4a98914190c8ecadad1a73785b9c788",
       "profiles/graphloom.json": "a1fd2d7462389fac7594ae6d8d2083967871d433d2b6978703a61ae1c0eb4dc4",
       "scripts/ocr-path.sh": "93060417c7d5b7b417a2b68e9b78b49d95d63ccb7830672abab30ec78f3204c8",
@@ -35,7 +35,7 @@
       "src/evidence.ts": "93783022aa375f4ba1024da60e7cb34c4c0c2114341783e80e2db15145586a82",
       "src/final.ts": "4bc011007a06be8ec0547bfa3beb6a886bf859e685741e28c2ed7463be5a8612",
       "src/findings.ts": "93a90bafccca0a51db94620c1c886915a91c0de2aad75cbc107b61ddf408e964",
-      "src/graph.ts": "aa9299434839ef4e4ee45eed2e5cead4f4d41bd191f234c530ec9cd80bb199ab",
+      "src/graph.ts": "4e6e8d6b9734b7798c2e1a255ce7ede6d43f89c4a13c5f258c1657243c65409d",
       "src/index.ts": "96bde504da23994638b30e16e59a968351ef33629062b527a45aac68e995d52c",
       "src/issues.ts": "b0f98551a88a9ffed6d958907d1fe26f3f6658ebecb38e1ddd1bfcd4bdfb3d67",
       "src/ocr.ts": "a5c12554b5807ebdfa161720e2e89d395db0fda22707b72b2dc612a4ff96f941",
