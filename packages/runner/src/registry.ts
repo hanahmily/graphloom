@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import os from "node:os";
 import { lstat, mkdir, realpath } from "node:fs/promises";
-import { createInterface } from "node:readline";
+import { createInterface, type Interface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import {
@@ -25,7 +25,18 @@ import {
   type JobSpec,
   type ToolCallResult,
 } from "@graphloom/sdk";
-import { confineWorker, confinementUnsupported, findSandboxWorker, hasPrivateTmp, operatorGoSettings, rehearsalWritable } from "./confine.js";
+import {
+  BwrapStatus,
+  confineWorker,
+  confinementUnsupported,
+  findSandboxWorker,
+  hasPrivateTmp,
+  operatorGoSettings,
+  rehearsalWritable,
+  SANDBOX_SETUP_ATTEMPTS,
+  sandboxSetupBackoffMs,
+  sandboxSetupHitTransientMount,
+} from "./confine.js";
 import { digestExecutorSource } from "./digest.js";
 import { withDockerConfinement } from "./sandbox-docker.js";
 import { assertSandboxSupported, packageClosure, packageRootOf, sandboxNodeArgs } from "./sandbox.js";
@@ -766,36 +777,15 @@ export function createChildExecutorRunner(
           return;
         }
         const confinedLaunch = "infoFd" in launch;
-        const child = spawn(launch.command, launch.args, {
-          stdio: confinedLaunch ? ["pipe", "pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
-          cwd,
-          env: launch.env,
-        });
+        // The current start of the executor child. A confined launch whose sandbox setup failed on a host
+        // mount that changed under it (the command never ran) is started again; see `start` below.
+        let child!: ChildProcessWithoutNullStreams;
+        let rl!: Interface;
+        let attempt = 0;
+        let retryTimer: NodeJS.Timeout | undefined;
         // bubblewrap's init is pid 1 of the sandbox and reaps what the worker leaves behind; the worker is its child.
         let sandboxInit: number | undefined;
-        if (confinedLaunch) {
-          const info = child.stdio[3];
-          if (info !== null && info !== undefined && "setEncoding" in info) {
-            const infoLines = createInterface({ input: info as NodeJS.ReadableStream, crlfDelay: Infinity });
-            infoLines.once("line", (line) => {
-              try {
-                const pid = (JSON.parse(line) as { "child-pid"?: unknown })["child-pid"];
-                if (typeof pid === "number") sandboxInit = pid;
-              } catch {
-                /* the stop then falls back to the grace kill */
-              }
-              infoLines.close();
-            });
-          }
-        }
-        const stderr: string[] = [];
-        child.stderr.setEncoding("utf8");
-        child.stderr.on("data", (c: string) => {
-          stderr.push(c);
-        });
-        child.stdin.on("error", () => undefined);
-
-        const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
+        let stderr: string[] = [];
         let settled = false;
         let timedOut = false;
         let graceTimer: NodeJS.Timeout | undefined;
@@ -817,6 +807,7 @@ export function createChildExecutorRunner(
           settled = true;
           rl.close();
           clearTimeout(timer);
+          clearTimeout(retryTimer);
           clearTimeout(graceTimer);
           ctx.signal?.removeEventListener("abort", onAbort);
           child.stdin.end();
@@ -861,7 +852,7 @@ export function createChildExecutorRunner(
         const children = ctx.children;
         const toolNames = new Set((pinned.tools ?? []).map((t) => t.name));
 
-        rl.on("line", (line) => {
+        const onLine = (line: string) => {
           // Lines buffered before the job settled must not start work after it.
           if (settled) return;
           let msg: {
@@ -934,16 +925,7 @@ export function createChildExecutorRunner(
             return;
           }
           finish(failed(msg.message ?? "executor child error"), msg.kind !== "error");
-        });
-
-        child.on("error", (err) => {
-          finish(failed(`executor child spawn failed: ${err.message}`), false);
-        });
-        child.on("exit", (code) => {
-          if (!settled) {
-            finish(timedOut ? timedOutResult() : failed(`executor child exited (code=${String(code)}): ${stderr.join("")}`), false);
-          }
-        });
+        };
 
         const req = {
           kind: "execute",
@@ -959,15 +941,79 @@ export function createChildExecutorRunner(
           ...(children !== undefined && pinned.tools !== undefined ? { tools: toolView(pinned) } : {}),
           ...(children !== undefined ? { usage: true } : {}),
         };
-        send(req);
-        // Without a controller port nothing more is sent; closing stdin lets the worker exit.
-        if (children === undefined) child.stdin.end();
+        const exited = (code: number | null) => {
+          const restarts =
+            attempt > 1
+              ? ` (the sandbox was started ${attempt} times; the earlier starts failed in setup on a host mount that changed under them, before the executor ran)`
+              : "";
+          finish(timedOut ? timedOutResult() : failed(`executor child exited (code=${String(code)})${restarts}: ${stderr.join("")}`), false);
+        };
+        const start = () => {
+          attempt += 1;
+          sandboxInit = undefined;
+          const ownStderr: string[] = [];
+          stderr = ownStderr;
+          const status = new BwrapStatus();
+          const current = spawn(launch.command, launch.args, {
+            stdio: confinedLaunch ? ["pipe", "pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
+            cwd,
+            env: launch.env,
+          }) as ChildProcessWithoutNullStreams;
+          child = current;
+          if (confinedLaunch) {
+            status.read(current.stdio[3] as NodeJS.ReadableStream | null, (pid) => {
+              if (child === current) sandboxInit = pid;
+            });
+          }
+          current.stderr.setEncoding("utf8");
+          current.stderr.on("data", (c: string) => {
+            ownStderr.push(c);
+          });
+          current.stdin.on("error", () => undefined);
+          rl = createInterface({ input: current.stdout, crlfDelay: Infinity });
+          rl.on("line", onLine);
+          current.on("error", (err) => {
+            finish(failed(`executor child spawn failed: ${err.message}`), false);
+          });
+          current.on("exit", (code) => {
+            if (settled) return;
+            if (!confinedLaunch || code === 0 || timedOut || attempt >= SANDBOX_SETUP_ATTEMPTS) {
+              exited(code);
+              return;
+            }
+            // Whether the command ran is read from bubblewrap's status and standard error, so both are read
+            // to their end (`close`) before deciding; a launch that does not close soon is not started again.
+            let cap: NodeJS.Timeout | undefined;
+            const decide = (closed: boolean) => {
+              clearTimeout(cap);
+              if (settled) return;
+              const neverRan = closed && sandboxSetupHitTransientMount(ownStderr.join(""), status);
+              if (!neverRan || timedOut || ctx.signal?.aborted) {
+                exited(code);
+                return;
+              }
+              retryTimer = setTimeout(() => {
+                retryTimer = undefined;
+                if (!settled && !timedOut) start();
+              }, sandboxSetupBackoffMs(attempt));
+            };
+            cap = setTimeout(() => decide(false), SANDBOX_CLOSE_WAIT_MS);
+            current.once("close", () => decide(true));
+          });
+          send(req);
+          // Without a controller port nothing more is sent; closing stdin lets the worker exit.
+          if (children === undefined) current.stdin.end();
+        };
+        start();
       });
     },
   };
   // The built-in command executor runs a job's commands in containers when the job asks for it.
   return options.sandbox !== true && served.has(BUILTIN_COMMAND_EXECUTOR_ID) ? withDockerConfinement(runner) : runner;
 }
+
+/** How long an exited sandbox's status and standard error may take to close before it is judged without them. */
+const SANDBOX_CLOSE_WAIT_MS = 2_000;
 
 /** Bound on a pre-admission check; it loads the module and runs only the schema. */
 const CHECK_TIMEOUT_MS = 10_000;

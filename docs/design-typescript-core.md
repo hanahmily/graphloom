@@ -226,6 +226,22 @@ read-only and unredirected, so cached private modules resolve and uncached downl
 not available), because Go would bypass every proxy for those paths. The private
 `/tmp` is used only when nothing the job reads lives under `/tmp`; the runner passes that
 launch scope to admission, which accepts a write under `/tmp` only when it is private.
+The read-only root is bubblewrap's recursive bind of `/`, which copies the host's
+mounts and then remounts each one read-only. A host mount that goes away in between
+(containerd mounts `/tmp/containerd-mountNNN` for each `docker exec` or healthcheck)
+fails that setup with `Can't bind mount … Unable to apply mount flags: remount "…":
+Invalid argument` (or `No such file or directory`). The runner then starts the same
+launch again, at most four starts in all, waiting 100, 200 and 400 ms between them,
+and only when the job's process provably never ran. bubblewrap reports an `exit-code`
+on its `--json-status-fd` only for a command it executed: it writes a byte on a
+close-on-exec pipe immediately before `execvp`, and its monitor reports the exit code
+only when it reads that byte. So the runner restarts a launch only when no exit code was
+reported and bubblewrap's whole standard error is that one message. The command never
+holds the status descriptor, so it cannot forge the signal. The bubblewrap probe behind
+"can this machine confine" retries the same way. Binding only chosen top-level
+directories instead of `/` would not avoid the failure. Container runtimes also mount
+under `/var/lib` and `/run`, and a job whose workspace is under `/tmp` needs `/tmp`
+bound too. Leaving out what the root shows would change what a confined job can read.
 A runner that cannot confine
 a job (no bubblewrap, or a non-Linux host) refuses it, in-turn and again at run time,
 rather than running it unconfined. This holds whatever `allowUnrestricted` says for

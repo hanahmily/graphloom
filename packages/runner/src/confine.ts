@@ -54,13 +54,112 @@ async function probeBubblewrap(): Promise<string | undefined> {
   if (process.platform !== "linux") {
     return `write confinement needs Linux bubblewrap and is not available on ${process.platform}`;
   }
-  return await new Promise<string | undefined>((resolve) => {
-    const child = spawn("bwrap", ["--ro-bind", "/", "/", "--dev", "/dev", "--unshare-pid", "--proc", "/proc", "true"], { stdio: "ignore" });
-    child.once("error", () => resolve("write confinement needs bubblewrap (bwrap) on PATH, and it was not found"));
-    child.once("exit", (code) =>
-      resolve(code === 0 ? undefined : "bubblewrap (bwrap) cannot create a mount namespace here (unprivileged user namespaces may be disabled)"),
-    );
-  });
+  const once = () =>
+    new Promise<{ code: number | null; stderr: string; status: BwrapStatus } | "missing">((resolve) => {
+      const child = spawn(
+        "bwrap",
+        ["--ro-bind", "/", "/", "--dev", "/dev", "--unshare-pid", "--proc", "/proc", "--json-status-fd", "3", "true"],
+        { stdio: ["ignore", "ignore", "pipe", "pipe"] },
+      );
+      const stderr: string[] = [];
+      const status = new BwrapStatus();
+      child.stderr!.setEncoding("utf8");
+      child.stderr!.on("data", (c: string) => stderr.push(c));
+      status.read(child.stdio[3] as NodeJS.ReadableStream);
+      child.once("error", () => resolve("missing"));
+      child.once("close", (code) => resolve({ code, stderr: stderr.join(""), status }));
+    });
+  for (let attempt = 1; ; attempt += 1) {
+    const result = await once();
+    if (result === "missing") return "write confinement needs bubblewrap (bwrap) on PATH, and it was not found";
+    if (result.code === 0) return undefined;
+    // A host mount that changed under the probe's own setup says nothing about whether bwrap works here.
+    if (attempt < SANDBOX_SETUP_ATTEMPTS && sandboxSetupHitTransientMount(result.stderr, result.status)) {
+      await delay(sandboxSetupBackoffMs(attempt));
+      continue;
+    }
+    return "bubblewrap (bwrap) cannot create a mount namespace here (unprivileged user namespaces may be disabled)";
+  }
+}
+
+/**
+ * How many times a sandbox is started when its setup keeps failing on a host mount that changed under
+ * it (see `sandboxSetupHitTransientMount`): the first start and three more.
+ */
+export const SANDBOX_SETUP_ATTEMPTS = 4;
+
+/** The wait before start `attempt + 1`, after start `attempt` failed in setup on a changing host mount. */
+export function sandboxSetupBackoffMs(attempt: number): number {
+  return Math.min(1_000, 100 * 2 ** (attempt - 1));
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * What bubblewrap reported on its `--json-status-fd`: first the sandbox's init (`{ "child-pid": n, … }`), and
+ * `{ "exit-code": n }` once the sandboxed command exits, but only when the command was executed. bubblewrap
+ * (every release with `--json-status-fd`, 0.4.0 on) writes one byte on a close-on-exec pipe immediately
+ * before `execvp`, and its monitor reports the exit code only when it reads exactly that byte; a sandbox
+ * whose setup died closed the pipe empty, so no exit code is reported. The command never inherits the
+ * status descriptor (the sandboxed side closes it before setup), so nothing the job runs can write here.
+ */
+export class BwrapStatus {
+  childPid: number | undefined;
+  exitCode: number | undefined;
+  /** Record one line of the status stream. */
+  line(text: string): void {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return;
+    }
+    if (parsed === null || typeof parsed !== "object") return;
+    const record = parsed as Record<string, unknown>;
+    if (typeof record["child-pid"] === "number") this.childPid = record["child-pid"];
+    if (typeof record["exit-code"] === "number") this.exitCode = record["exit-code"];
+  }
+
+  /** Read the status stream; `onChildPid` hears the sandbox's init pid as soon as it is reported. */
+  read(stream: NodeJS.ReadableStream | null | undefined, onChildPid?: (pid: number) => void): void {
+    if (stream === null || stream === undefined) return;
+    let buffered = "";
+    stream.setEncoding("utf8");
+    stream.on("data", (chunk: string) => {
+      buffered += chunk;
+      for (let nl = buffered.indexOf("\n"); nl >= 0; nl = buffered.indexOf("\n")) {
+        const hadPid = this.childPid !== undefined;
+        this.line(buffered.slice(0, nl));
+        buffered = buffered.slice(nl + 1);
+        if (!hadPid && this.childPid !== undefined) onChildPid?.(this.childPid);
+      }
+    });
+    stream.on("error", () => undefined);
+  }
+}
+
+/**
+ * bubblewrap's own message when the recursive bind of the root (or of another bound tree) copied a host
+ * submount that was gone, or no longer remountable, by the time bubblewrap applied the read-only flags to
+ * it: a container runtime's short-lived mounts (`/tmp/containerd-mountNNN`, one per `docker exec` or
+ * healthcheck), a container's overlay coming or going. bubblewrap makes the copy a slave of the host's
+ * mounts, so a host unmount between its read of the mount table and its remount propagates in, and the
+ * remount fails with EINVAL (no longer a mount point) or ENOENT (the directory went too).
+ */
+const TRANSIENT_MOUNT_SETUP_FAILURE =
+  /^bwrap: Can't bind mount [^\n]* on [^\n]*: Unable to apply mount flags: remount "[^"\n]*": (?:Invalid argument|No such file or directory)$/;
+
+/**
+ * Whether a bubblewrap launch failed in its own setup on a host mount that changed under it, so that the
+ * sandboxed command was never executed and the launch may be started again: bubblewrap reported no exit
+ * code on its status stream (it does only once the command was executed; see `BwrapStatus`), and its whole
+ * standard error is the one setup message above. Both streams must have been read to their end (the
+ * process's `close`, not its `exit`).
+ */
+export function sandboxSetupHitTransientMount(stderr: string, status: Pick<BwrapStatus, "exitCode">): boolean {
+  return status.exitCode === undefined && TRANSIENT_MOUNT_SETUP_FAILURE.test(stderr.trim());
 }
 
 /** The operator's effective Go module settings, read once host-side with `go env` (which writes nothing). */
