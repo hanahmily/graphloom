@@ -445,8 +445,14 @@ record the graph asks the supervisor for one instead of failing
 ### Refreshing the pinned CONTRIBUTING.md
 
 The banyandb profile pins `CONTRIBUTING.md` by sha256 (`environment.pinnedFiles`),
-and a different file in the repository stops a run with `environment_changed`.
-When BanyanDB changes it, refresh the pin and the fixture the tests use:
+and a different file in the repository blocks a run with `environment_changed`.
+With the task's `grants: sourceRepair: true`, the supervisor re-pins it for that
+run (`qualify_repair` target `environment`: the digest at the run's base, kept
+only if the environment checks then pass, so a Go version the host lacks still
+stops the run; see the
+[core design](../../../docs/design-typescript-core.md#re-pinning-a-drifted-environment-pin)).
+Without the grant the run stops. Either way, refresh the pin for future runs
+and the fixture the tests use:
 `git -C <skywalking-banyandb> show origin/main:CONTRIBUTING.md | sha256sum` gives
 the digest; put it in `profiles/banyandb.json`, copy the file to
 `examples/skywalking-banyandb/CONTRIBUTING.md`, rebuild, and regenerate the

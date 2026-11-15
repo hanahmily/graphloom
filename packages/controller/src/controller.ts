@@ -99,6 +99,7 @@ import {
   type SupervisorSelectionChoice,
 } from "./supervisor-pin.js";
 import { CURRENT_STATE_FORMAT, STATE_FORMATS, stateFormatOf, type StateFormatRegistry } from "./state-migrations/index.js";
+import { withEnvironmentRepins } from "./environment.js";
 import { upgradeRun, type UpgradeRequest } from "./upgrade.js";
 import { classifyStop, decideResume, FINAL_STOP_HELD_REMEDY, resumeView, stopMarkOf } from "./stop-class.js";
 import {
@@ -974,7 +975,7 @@ export function createController(): Controller {
             {
               ...state,
               intake: { ...state.intake, bundle: pluginUpdate },
-              definition: environment !== undefined ? { ...pinned, environment } : pinned,
+              definition: environment !== undefined ? { ...pinned, environment: withEnvironmentRepins(environment, state.environmentRepins) } : pinned,
             },
             validators,
           );

@@ -284,6 +284,22 @@ export interface InstallTransitionRecord {
   at: string;
 }
 
+/** One pinned file the supervisor re-pinned to the digest it has at the pinned base commit. */
+export interface EnvironmentRepin {
+  path: string;
+  /** The digest the declaration pinned. */
+  from: string;
+  /** The digest observed at the pinned base commit. */
+  to: string;
+  /** The supervisor's reason. */
+  reason: string;
+  /** The evidence recording the drift and the checks that passed against the re-pinned declaration. */
+  evidenceRefs: string[];
+  activeVersion: string;
+  episodeId?: string;
+  at: string;
+}
+
 export interface DurableRunState {
   runId: string;
   status: RunStatus;
@@ -422,9 +438,18 @@ export interface DurableRunState {
   candidateDigest?: string;
   /**
    * Set when the files the graph's environment declaration pins no longer
-   * match: normal jobs stay blocked until a repair changes the active version.
+   * match: normal jobs stay blocked until a repair changes the active version
+   * or re-pins the drifted files (`environmentRepins`).
    */
   environmentBlock?: { activeVersion: string; reason: string };
+  /**
+   * Pinned files the supervisor re-pinned (`qualify_repair` target
+   * `environment`): each file's declared digest, the digest observed at the
+   * pinned base commit, and the evidence that admitted it, oldest first. A
+   * declaration a later plugin repair or update describes again keeps them
+   * wherever it still declares the replaced digest.
+   */
+  environmentRepins?: EnvironmentRepin[];
   /**
    * Probes the supervisor has run in its current recovery episode, so a proposal
    * may cite one across turns of the episode and after a resume. Replaced when

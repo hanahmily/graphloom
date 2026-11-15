@@ -168,6 +168,8 @@ async function makeEnv(
     linkBundle?: boolean;
     /** Rewrites the copied bundle's manifest. */
     manifest?: (manifest: Record<string, unknown>) => Record<string, unknown>;
+    /** A task config the run pins at intake (`config: config.json`). */
+    config?: unknown;
   } = {},
 ): Promise<{ taskPath: string; stateRoot: string; taskDir: string }> {
   // Rebuilding rewrites dist/ under test files that run in parallel; `npm test` builds it first.
@@ -209,11 +211,12 @@ async function makeEnv(
         ? { sourceRepair: true, validatorSubstitution: true }
         : opts.grants;
   const taskPath = path.join(taskDir, "task.yaml");
+  if (opts.config !== undefined) await writeFile(path.join(taskDir, "config.json"), JSON.stringify(opts.config), "utf8");
   await writeFile(
     taskPath,
     `graph: hello
 repo: ./test-repo
-request: |
+${opts.config !== undefined ? "config: config.json\n" : ""}request: |
   Create GREETING.txt containing exactly "Hello, GraphLoom!" followed by
   one newline. Do not modify other files.
 ${
@@ -605,6 +608,60 @@ describe("qualified repair + same-run activation (#29)", () => {
     expect(state.environmentBlock).toBeUndefined();
     const checks = state.evidence.filter((e) => (e.payload as { environment?: unknown }).environment !== undefined);
     expect(checks).toHaveLength(2);
+  });
+
+  /** A graph whose environment comes from its task config, as issue-fix's profiles supply it. */
+  const configDrivenGraph = (advances: GraphDecision[] = []) => {
+    const scripted = createScriptedGraph({ definition, advances });
+    return {
+      describe: (config?: unknown) => ({ ...definition, environment: (config as { environment: NonNullable<GraphDefinition["environment"]> }).environment }),
+      advance: (view: RunView) => scripted.advance(view),
+    };
+  };
+  const stalePin = { environment: { pinnedFiles: [{ path: "README.md", sha256: "0".repeat(64) }] } };
+  const paused = () => stop({ reason: "paused", blocker: "checked" }, "pause");
+
+  it("cannot clear a pin the task config supplies with a plugin repair: the candidate describes the same pinned config", async () => {
+    const env = await makeEnv({ config: stalePin });
+    const triggers: string[] = [];
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: configDrivenGraph(),
+      validators: goodValidators,
+      // The repaired plugin is honest: it still derives its environment from the config it is given.
+      recreateHost: async (ctx) =>
+        createInProcessPluginHost(configDrivenGraph([paused()]), {
+          activeVersion: ctx.activeVersion,
+          generation: ctx.generation,
+          config: JSON.parse(ctx.intake.config!.text) as unknown,
+        }),
+      supervisor: createScriptedSupervisor({
+        sessionId: "sup-env-config",
+        decisions: [
+          (input) => {
+            triggers.push(input.trigger.code);
+            return qualifyRepair({ target: "plugin", reason: "re-pin README.md" }, "q");
+          },
+          activateFirstQualified(),
+          returnToNormal({ summary: "re-pinned" }, "return"),
+          (input) => {
+            triggers.push(input.trigger.code);
+            return stop({ reason: "environment changed", blocker: input.trigger.message }, "still stale");
+          },
+        ],
+      }),
+      repair: approvingRepair("sup-env-config"),
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "repair-environment-config",
+    });
+
+    // The activated candidate re-derived the stale pin from the pinned config: the drift is back.
+    expect(triggers).toEqual(["environment_changed", "environment_changed"]);
+    expect(report.status).toBe("stopped");
+    const state = await loadRunState(report.stateDir);
+    expect(state.activeVersion).not.toBe(HELLO_ACTIVE_VERSION);
+    expect(state.definition.environment!.pinnedFiles).toEqual(stalePin.environment.pinnedFiles);
   });
 
   it("rejects qualify_repair when the operator grant is not pinned", async () => {

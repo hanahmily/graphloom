@@ -69,9 +69,16 @@ export function recordSupervisorOutcome(
 export function admissionFacts(state: DurableRunState, hasRepairHooks: boolean): AdmissionFacts {
   return {
     inRecovery: state.mode === "recovery",
-    canQualify: state.mode === "recovery" && hasRepairHooks && state.budgets.corrections > 0 && repairGranted(state),
+    canQualify:
+      state.mode === "recovery" &&
+      ((hasRepairHooks && state.budgets.corrections > 0 && repairGranted(state)) || environmentRepinnable(state)),
     qualifiedArtifactIds: (state.repairCandidates ?? []).filter((c) => c.status === "qualified").map((c) => c.artifactId),
   };
+}
+
+/** A pinned-file drift blocks the run and the operator granted sourceRepair: `qualify_repair` target `environment` may re-pin it. */
+function environmentRepinnable(state: DurableRunState): boolean {
+  return state.environmentBlock !== undefined && state.intake.grants.sourceRepair;
 }
 
 /** Some repair target the operator granted and the bundle permits. */
@@ -134,6 +141,19 @@ export function qualifyRefusal(
 ): Inadmissible | undefined {
   if (state.mode !== "recovery") {
     return { precondition: "qualify_repair outside recovery", detail: `the run is in ${state.mode} mode` };
+  }
+  if (qualify.target === "environment") {
+    // No candidate to patch or review: the re-pin is admitted on observed digests and passing checks.
+    if (!state.intake.grants.sourceRepair) {
+      return { precondition: "qualify_repair missing operator grant", detail: "sourceRepair grant is false" };
+    }
+    if (state.environmentBlock === undefined) {
+      return {
+        precondition: "qualify_repair environment rejected",
+        detail: "no changed pinned file blocks the run; target environment re-pins only drift the environment check found",
+      };
+    }
+    return undefined;
   }
   if (!hasRepairHooks) {
     return { precondition: "qualify_repair requires repair hooks", detail: "this controller has no repair hooks configured" };

@@ -704,6 +704,45 @@ Dependencies and optional network access belong to the builder's granted scope.
 The MVP does not auto-upgrade shared dependencies or publish a repaired package.
 A patch is local to this run. Reusable upstream fixes are a separate authorized act.
 
+### Re-pinning a drifted environment pin
+
+A graph's environment declaration may pin files (`environment.pinnedFiles`) by
+the SHA-256 of their bytes at the run's pinned base commit. Before normal work
+the controller compares them; a mismatch blocks jobs and opens a recovery
+episode with trigger `environment_changed` (without a supervisor the run stops
+`environment changed`). A plugin repair can update a declaration the plugin's
+code writes, since activation adopts the candidate's described `environment`.
+It cannot update a pin the task config supplies, such as an issue-fix
+profile's: the config is pinned at intake and every candidate host describes
+the same pinned bytes, so the activated version declares the stale pin again.
+Only a hard-coded override in the patched plugin would hide it.
+
+For that case the supervisor proposes `qualify_repair` with target
+`environment`. It needs the `sourceRepair` grant (no other grant) and a run
+blocked by a changed pinned file; it has no candidate tree, independent review
+or activation step, because no code changes. The controller:
+
+1. hashes each pinned file at the pinned base commit and refuses, in-turn, when
+   nothing drifted, when a drifted file is missing there, or when the run's own
+   change (`candidateChange` against the base) touches a drifted file: only
+   drift in the base is re-pinned, never what the run edits;
+2. replaces only the drifted `pinnedFiles` digests with the observed ones, then
+   runs the declaration's checks and preparation against it (a job, reserved
+   before it runs, like the preflight);
+3. when they pass, admits the re-pin: the run's `definition.environment` takes
+   the new digests, `environmentRepins` records each file's old and new digest,
+   the supervisor's reason, the episode, the active version and the evidence
+   (the drift and the check results), and the block lifts. When a check fails
+   the declaration is unchanged and the run stops with the check's own stop
+   reason (`environment check failed`, `environment preparation failed`), so a
+   real toolchain change such as a Go version the host lacks still stops the run.
+
+The supervisor then returns, and the checks run again before normal work. The
+task config file and its pinned bytes are never edited. A later plugin repair
+or `--update-plugin` that describes the environment again keeps each re-pin
+wherever the new declaration still pins the digest it replaced; a declaration
+pinning some other digest is its own statement and wins.
+
 ## 8. Version transitions and crash recovery
 
 Normally resume loads the active pinned version. A qualified repair permits an

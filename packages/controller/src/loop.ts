@@ -15,6 +15,7 @@ import type {
   GraphDefinition,
   JobSpec,
   ObserveSpec,
+  QualifyRepairSpec,
   RunView,
 } from "@graphloom/sdk";
 import {
@@ -116,7 +117,7 @@ import {
   episodeProbeResults,
   keepProbeResult,
 } from "./inspection.js";
-import { checkEnvironment, declaresEnvironment, type EnvironmentOutcome } from "./environment.js";
+import { checkEnvironment, declaresEnvironment, planEnvironmentRepin, withEnvironmentRepins, type EnvironmentOutcome } from "./environment.js";
 import {
   activateRefusal,
   admissionFacts,
@@ -1544,6 +1545,100 @@ async function preflightEnvironment(state: DurableRunState, deps: LoopDeps): Pro
   });
 }
 
+/**
+ * `qualify_repair` target `environment` (sourceRepair): re-pin each pinned
+ * file that drifted in the pinned base to the digest observed there, then run
+ * the declaration's checks and preparation against it. Passing checks admit
+ * the re-pin, recorded with its evidence, and lift the block; a failing check
+ * stops the run as the preflight would, with the declaration unchanged. A file
+ * missing at the base or touched by the run's own change is refused in-turn.
+ */
+async function applyEnvironmentRepin(
+  state: DurableRunState,
+  qualify: QualifyRepairSpec,
+  deps: LoopDeps,
+  signal?: AbortSignal,
+): Promise<DurableRunState> {
+  const plan = await planEnvironmentRepin(state);
+  if ("refusal" in plan) return inadmissible(state, { precondition: "qualify_repair environment rejected", detail: plan.refusal });
+  const env = withEnvironmentRepins(state.definition.environment!, plan.repins);
+  if (setupCommands(env) > 0) {
+    if (state.budgets.jobs <= 0) return { ...state, status: "stopped", stopReason: "budgets exhausted", blocker: "jobs" };
+    // Reserved and saved before the checks run, as the preflight does.
+    state = { ...state, budgets: { ...state.budgets, jobs: state.budgets.jobs - 1 } };
+    await saveRunState(state);
+  }
+  let outcome: EnvironmentOutcome;
+  try {
+    outcome = await checkEnvironment({ state, env, runner: deps.runner, signal: signal ?? new AbortController().signal });
+  } catch (err) {
+    outcome = {
+      kind: "failed",
+      operationId: `env-${state.stateRevision}`,
+      evidence: [],
+      stopReason: "environment check failed",
+      blocker: err instanceof Error ? err.message : String(err),
+    };
+  }
+  const job: JobSpec = {
+    stageId: state.current.stageId,
+    kind: "command",
+    purpose: "diagnostic",
+    instruction: "environment check of the re-pinned declaration",
+    readOnly: true,
+  };
+  const producer: EvidenceProducer = {
+    operationId: outcome.operationId,
+    stageId: job.stageId,
+    purpose: job.purpose,
+    readOnly: true,
+    kind: job.kind,
+    executorId: BUILTIN_COMMAND_EXECUTOR_ID,
+  };
+  const repin = { kind: "other" as const, payload: { environment: { repin: plan.repins, reason: boundText(qualify.reason) } } };
+  const before = state.evidence.length;
+  state = recordJobEvidence(state, job, producer, [repin, ...outcome.evidence], state.candidateDigest);
+  const refs = state.evidence.slice(before).map((e) => e.ref);
+  const paths = plan.repins.map((r) => r.path).join(", ");
+  // An operator stop or the active-time budget aborts the checks: that is the stop, not a failed check
+  // (the caller applies stopCause only to a still-running state). The declaration stays unchanged.
+  if (signal?.aborted === true || (await stopRequested(deps))) {
+    return { ...state, status: "stopped", ...stopCause(deps) };
+  }
+  if (outcome.kind !== "ready") {
+    const blocker = outcome.kind === "failed" ? outcome.blocker : outcome.reason;
+    return {
+      ...state,
+      status: "stopped",
+      stopReason: outcome.kind === "failed" ? outcome.stopReason : "environment changed",
+      blocker: boundText(`re-pinning ${paths} was not applied: ${blocker}`),
+      stopEvidenceRefs: refs,
+    };
+  }
+  const at = new Date().toISOString();
+  const { environmentBlock: _block, ...unblocked } = state;
+  void _block;
+  const next: DurableRunState = {
+    ...unblocked,
+    definition: { ...state.definition, environment: env },
+    environmentRepins: [
+      ...(state.environmentRepins ?? []),
+      ...plan.repins.map((r) => ({
+        ...r,
+        reason: boundText(qualify.reason),
+        evidenceRefs: refs,
+        activeVersion: state.activeVersion,
+        ...(state.recoveryEpisodeId !== undefined ? { episodeId: state.recoveryEpisodeId } : {}),
+        at,
+      })),
+    ],
+  };
+  return noteOutcome(
+    next,
+    `re-pinned ${plan.repins.map((r) => `${r.path} ${r.from.slice(0, 12)} -> ${r.to.slice(0, 12)}`).join(", ")} to the digest at the pinned base commit; the environment checks passed (${refs.join(", ")}) and jobs are no longer blocked`,
+  );
+}
+
 /** Abort an outstanding job, and any child it is waiting on, once the run stops or its time runs out. Returns the disposer. */
 function watchForStop(stateDir: string, deps: LoopDeps, abort: AbortController): () => void {
   // Timers can fire before the monotonic deadline, so recheck before aborting.
@@ -2321,12 +2416,17 @@ async function applyDecision(
       };
     }
     case "qualify_repair": {
+      if (action.qualify.target === "environment") {
+        const refused = qualifyRefusal(state, action.qualify, deps.repair !== undefined);
+        if (refused !== undefined) return inadmissible(state, refused);
+        return applyEnvironmentRepin(state, action.qualify, deps, signal);
+      }
       if (!deps.repair) {
         return inadmissible(state, { precondition: "qualify_repair requires repair hooks", detail: "this controller has no repair hooks configured" });
       }
       // What the supervisor cited anywhere on the proposal reaches the independent reviewer.
       const cited = [...new Set([...(Array.isArray(action.qualify.evidenceRefs) ? action.qualify.evidenceRefs : []), ...(decision.evidence ?? [])])];
-      return applyQualifyRepair(state, cited.length > 0 ? { ...action.qualify, evidenceRefs: cited } : action.qualify, {
+      return applyQualifyRepair(state, { ...action.qualify, target: action.qualify.target, ...(cited.length > 0 ? { evidenceRefs: cited } : {}) }, {
         ...(deps.supervisor !== undefined ? { supervisor: deps.supervisor } : {}),
         repair: deps.repair,
         validators: deps.validators,

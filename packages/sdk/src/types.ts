@@ -241,7 +241,10 @@ export interface EnvironmentDeclaration {
   /**
    * Files this declaration was written against, by SHA-256 of their bytes at
    * the pinned base commit. A mismatch blocks normal jobs; only a qualified
-   * repair that updates the declaration lets the run continue.
+   * repair that updates the declaration lets the run continue: a plugin
+   * repair, or, under the sourceRepair grant, `qualify_repair` target
+   * `environment`, which re-pins a file that drifted in the base to its
+   * observed digest once the checks pass against it.
    */
   pinnedFiles?: Array<{ path: string; sha256: string }>;
 }
@@ -665,8 +668,17 @@ export interface SuperviseSpec {
 
 export type RepairTarget = "plugin" | "validator" | "executor";
 
+/**
+ * What `qualify_repair` may target: a repair candidate (`RepairTarget`), or
+ * `environment`, which re-pins the environment declaration's drifted pinned
+ * files to their digests at the pinned base commit: no candidate and no
+ * activation, under the sourceRepair grant, admitted only when the
+ * environment checks pass against the re-pinned declaration.
+ */
+export type QualifyTarget = RepairTarget | "environment";
+
 export interface QualifyRepairSpec {
-  target: RepairTarget;
+  target: QualifyTarget;
   /** Required for `executor`: a pinned executor id; its whole package is copied and repaired. */
   executorId?: string;
   /**

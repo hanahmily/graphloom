@@ -37,6 +37,7 @@ import { citedEvidence, saveRunState } from "./state.js";
 import { citedProbeEvidence } from "./inspection.js";
 import { citedInvestigationEvidence, episodeInvestigation } from "./investigation.js";
 import { worktreeChangeFingerprints } from "./worktree.js";
+import { withEnvironmentRepins } from "./environment.js";
 
 export interface RepairPatchAuthor {
   /** Must equal the run supervisor session id for every repair round. */
@@ -127,7 +128,7 @@ export type RecreateHostFn = (args: {
 
 export async function applyQualifyRepair(
   state: DurableRunState,
-  qualify: QualifyRepairSpec,
+  qualify: QualifyRepairSpec & { target: RepairTarget },
   deps: {
     supervisor?: Supervisor;
     repair: RepairDeps;
@@ -483,7 +484,7 @@ export interface RepairSubject {
 }
 
 /** Plugin and validator repairs copy the active graph bundle and must keep its steps. */
-async function bundleRepairSubject(state: DurableRunState, qualify: QualifyRepairSpec): Promise<RepairSubject> {
+async function bundleRepairSubject(state: DurableRunState, qualify: QualifyRepairSpec & { target: RepairTarget }): Promise<RepairSubject> {
   const bundleReal = await realpath(state.intake.bundle.bundlePath);
   return {
     label: "active bundle",
@@ -733,7 +734,8 @@ export async function applyActivateRepair(
       const { environment: _previous, ...pinned } = next.definition;
       void _previous;
       const { environment } = described.value;
-      next = { ...next, definition: environment !== undefined ? { ...pinned, environment } : pinned };
+      // Re-pins the supervisor made stay wherever the candidate still declares the digest they replaced.
+      next = { ...next, definition: environment !== undefined ? { ...pinned, environment: withEnvironmentRepins(environment, next.environmentRepins) } : pinned };
     }
 
     return { state: next, validators, ...(host !== undefined ? { host } : {}) };
