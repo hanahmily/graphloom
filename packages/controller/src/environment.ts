@@ -3,6 +3,7 @@
 
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import path from "node:path";
 import { promisify } from "node:util";
 import type { EnvironmentDeclaration, JobSpec } from "@graphloom/sdk";
 import { builtinPinForKind } from "@graphloom/sdk";
@@ -138,10 +139,13 @@ export async function planEnvironmentRepin(state: DurableRunState): Promise<{ re
   if (files.length === 0) return { refusal: "the environment declaration pins no files" };
   const drift = (await pinnedFileDrift(state.worktreePath, state.intake.pinnedHead, files)).filter((p) => p.actual !== p.expected);
   if (drift.length === 0) return { refusal: "every pinned file matches its declared digest at the pinned base commit; there is nothing to re-pin" };
+  const outside = drift.filter((p) => p.repoPath === undefined).map((p) => p.path);
+  if (outside.length > 0) return { refusal: `${outside.join(", ")} is not a path inside the repository; only a repository file can be re-pinned` };
   const missing = drift.filter((p) => p.actual === "missing").map((p) => p.path);
   if (missing.length > 0) return { refusal: `${missing.join(", ")} is missing at the pinned base commit; only a file that exists can be re-pinned` };
   const { fingerprints } = await candidateChange(state.worktreePath, state.intake.pinnedHead);
-  const touched = drift.filter((p) => fingerprints.has(p.path)).map((p) => p.path);
+  // Git's keys are normalized repository paths; compare each pin in that form (`./README.md` is `README.md`).
+  const touched = drift.filter((p) => fingerprints.has(p.repoPath!)).map((p) => p.path);
   if (touched.length > 0) {
     return { refusal: `${touched.join(", ")} is part of the run's own change; a re-pin covers only drift in the pinned base, not what the run edits` };
   }
@@ -164,16 +168,31 @@ export function withEnvironmentRepins(env: EnvironmentDeclaration, repins: reado
   };
 }
 
+/**
+ * A pinned path as Git names it in the repository (POSIX-normalized, no
+ * leading `./`), or undefined when it is absolute or escapes the repository.
+ */
+export function repoRelativePinPath(declared: string): string | undefined {
+  if (declared.includes("\\") || path.posix.isAbsolute(declared)) return undefined;
+  const normalized = path.posix.normalize(declared).replace(/^(\.\/)+/, "");
+  if (normalized === "" || normalized === "." || normalized === ".." || normalized.startsWith("../") || normalized.endsWith("/")) return undefined;
+  return normalized;
+}
+
+/** Each pin's declared path, its repository path (undefined when it escapes), and its digest as declared and at the base. */
 async function pinnedFileDrift(
   worktreePath: string,
   pinnedHead: string,
   files: NonNullable<EnvironmentDeclaration["pinnedFiles"]>,
-): Promise<Array<{ path: string; expected: string; actual: string }>> {
-  const out: Array<{ path: string; expected: string; actual: string }> = [];
+): Promise<Array<{ path: string; repoPath: string | undefined; expected: string; actual: string }>> {
+  const out: Array<{ path: string; repoPath: string | undefined; expected: string; actual: string }> = [];
   for (const file of files) {
+    // Read once in the normalized form, so drift and a re-pin's own-change check name the same file.
+    const repoPath = repoRelativePinPath(file.path);
     let actual: string;
     try {
-      const { stdout } = await execFileAsync("git", ["show", `${pinnedHead}:${file.path}`], {
+      if (repoPath === undefined) throw new Error(`${file.path} is outside the repository`);
+      const { stdout } = await execFileAsync("git", ["show", `${pinnedHead}:${repoPath}`], {
         cwd: worktreePath,
         encoding: "buffer",
         maxBuffer: 64 * 1024 * 1024,
@@ -182,7 +201,7 @@ async function pinnedFileDrift(
     } catch {
       actual = "missing";
     }
-    out.push({ path: file.path, expected: file.sha256, actual });
+    out.push({ path: file.path, repoPath, expected: file.sha256, actual });
   }
   return out;
 }

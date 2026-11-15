@@ -1600,6 +1600,11 @@ async function applyEnvironmentRepin(
   state = recordJobEvidence(state, job, producer, [repin, ...outcome.evidence], state.candidateDigest);
   const refs = state.evidence.slice(before).map((e) => e.ref);
   const paths = plan.repins.map((r) => r.path).join(", ");
+  // An operator stop or the active-time budget aborts the checks: that is the stop, not a failed check
+  // (the caller applies stopCause only to a still-running state). The declaration stays unchanged.
+  if (signal?.aborted === true || (await stopRequested(deps))) {
+    return { ...state, status: "stopped", ...stopCause(deps) };
+  }
   if (outcome.kind !== "ready") {
     const blocker = outcome.kind === "failed" ? outcome.blocker : outcome.reason;
     return {

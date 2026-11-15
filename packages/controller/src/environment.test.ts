@@ -30,7 +30,7 @@ import type { JobContext, JobResult, Runner } from "@graphloom/runner";
 import { createScriptedSupervisor, type SupervisorInput } from "@graphloom/supervisor";
 import { createController } from "./index.js";
 import { loadRunState } from "./state.js";
-import { withEnvironmentRepins } from "./environment.js";
+import { repoRelativePinPath, withEnvironmentRepins } from "./environment.js";
 import { HELLO_VERSION } from "./testing/hello-version.js";
 
 const execFileAsync = promisify(execFile);
@@ -841,9 +841,9 @@ describe("graph-declared environment and disposable checkouts", () => {
         expect(state.stopEvidenceRefs?.length).toBeGreaterThan(0);
       });
 
-      it("refuses to re-pin a pinned file the run's own change touches", async () => {
-        const env = await configuredEnv({ checks: passing, pinnedFiles: [{ path: "README.md", sha256: staleSha }] });
-        const runId = "pinned-repin-own-change";
+      it.each(["README.md", "./README.md"])("refuses to re-pin a pinned file the run's own change touches (pinned as %s)", async (pinnedPath) => {
+        const env = await configuredEnv({ checks: passing, pinnedFiles: [{ path: pinnedPath, sha256: staleSha }] });
+        const runId = `pinned-repin-own-change-${pinnedPath === "README.md" ? "plain" : "dot"}`;
         const report = await createController().run({
           taskPath: env.taskPath,
           plugin: configured([work]),
@@ -865,11 +865,51 @@ describe("graph-declared environment and disposable checkouts", () => {
         });
 
         expect(report.stopReason).toBe("re-pin refused");
-        expect(report.blocker).toContain("qualify_repair environment rejected: README.md is part of the run's own change");
+        expect(report.blocker).toContain(`qualify_repair environment rejected: ${pinnedPath} is part of the run's own change`);
+        const state = await loadRunState(report.stateDir);
+        expect(state.definition.environment!.pinnedFiles).toEqual([{ path: pinnedPath, sha256: staleSha }]);
+        expect(state.environmentRepins).toBeUndefined();
+        expect(state.environmentBlock).toBeDefined();
+      });
+
+      it("stops for the operator, not a failed check, when a stop aborts the re-pin's checks", async () => {
+        const env = await configuredEnv({ checks: [{ id: "wait", argv: ["sh", "-c", "true"] }], pinnedFiles: [{ path: "README.md", sha256: staleSha }] });
+        const runId = "pinned-repin-stopped";
+        const checks = testRunner(fixAndAddTest);
+        let aborted = false;
+        const runner: Runner = {
+          async runJob(job, ctx) {
+            const ids = ((job.input as { commands?: Array<{ id: string }> } | undefined)?.commands ?? []).map((c) => c.id);
+            if (job.kind !== "command" || !ids.includes("wait")) return checks.runJob(job, ctx);
+            // The operator stops the run while the re-pin's checks run; the checks end aborted.
+            await writeFile(path.join(env.stateRoot, runId, "stop.request"), JSON.stringify({ at: new Date().toISOString(), pid: process.pid }), "utf8");
+            await new Promise<void>((resolve) => {
+              const timer = setTimeout(resolve, 10_000);
+              ctx.signal?.addEventListener("abort", () => {
+                aborted = true;
+                clearTimeout(timer);
+                resolve();
+              });
+            });
+            return { status: "failed", summary: "aborted", runId: ctx.runId, operationId: ctx.operationId, generation: ctx.generation };
+          },
+        };
+        const report = await createController().run({
+          taskPath: env.taskPath,
+          plugin: configured([work]),
+          validators,
+          runner,
+          supervisor: createScriptedSupervisor({ decisions: [repin()] }),
+          stateRoot: env.stateRoot,
+          runId,
+        });
+
+        expect(aborted).toBe(true);
+        expect(report.status).toBe("stopped");
+        expect(report.stopReason).toBe("operator stop");
         const state = await loadRunState(report.stateDir);
         expect(state.definition.environment!.pinnedFiles).toEqual([{ path: "README.md", sha256: staleSha }]);
         expect(state.environmentRepins).toBeUndefined();
-        expect(state.environmentBlock).toBeDefined();
       });
 
       it("refuses to re-pin without the sourceRepair grant, and the run stops as before", async () => {
@@ -906,6 +946,15 @@ describe("graph-declared environment and disposable checkouts", () => {
 
         expect(report.blocker).toContain("qualify_repair environment rejected: no changed pinned file blocks the run");
       });
+    });
+  });
+
+  describe("repoRelativePinPath", () => {
+    it("names a pin as Git does, and refuses one outside the repository", () => {
+      expect(repoRelativePinPath("CONTRIBUTING.md")).toBe("CONTRIBUTING.md");
+      expect(repoRelativePinPath("./CONTRIBUTING.md")).toBe("CONTRIBUTING.md");
+      expect(repoRelativePinPath("./docs/../docs//a.md")).toBe("docs/a.md");
+      for (const outside of ["/etc/passwd", "../x", "docs/../../x", ".", "", "docs\\a.md"]) expect(repoRelativePinPath(outside)).toBeUndefined();
     });
   });
 
