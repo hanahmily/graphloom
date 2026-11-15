@@ -3,11 +3,12 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFile, realpath } from "node:fs/promises";
+import { appendFile, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { stop, type GraphPlugin, type JobSpec, type Validator } from "@graphloom/sdk";
+import { qualifyRepair, returnToNormal, stop, type GraphPlugin, type JobSpec, type Validator } from "@graphloom/sdk";
+import { createScriptedSupervisor } from "@graphloom/supervisor";
 import { createBuiltinExecutorRunner } from "@graphloom/runner";
 import { applyGraphDefaultBudgets, createController, intakeTask, loadRunState, resolveBundleEntry, taskConfigValue } from "@graphloom/controller";
 import { createChildPluginHost } from "@graphloom/plugin-host";
@@ -274,6 +275,74 @@ describe.skipIf(GO === undefined)("issue-fix with the banyandb profile on a Go r
     expect(second.agentJobs.filter((j) => j.stageId === "fix" && j.purpose === "diagnostic")).toEqual([]);
     expect(second.agentJobs.filter((j) => j.stageId === "fix" && j.purpose === "review")).toEqual([]);
   }, 60_000);
+
+  describe("BanyanDB bumps its Go version in CONTRIBUTING.md after the profile pinned it", () => {
+    const BUMPED = "# Contributing\n\nInstall Go 1.26.11, run make check-req, then make generate.\n";
+
+    /** The fixture with the profile's pin left at the old CONTRIBUTING.md while the repository moved on. */
+    async function bumpedEnv(grants: string) {
+      const env = await makeEnv();
+      await env.repo.write({ "CONTRIBUTING.md": BUMPED });
+      await env.repo.commit("bump the Go version in CONTRIBUTING.md");
+      await appendFile(env.taskPath, grants);
+      return env;
+    }
+
+    it("is re-pinned by the supervisor under sourceRepair and the run delivers without a stop", async () => {
+      const env = await bumpedEnv("grants:\n  sourceRepair: true\n  validatorSubstitution: false\n");
+      const { runner } = fixRunner(env);
+      const triggers: string[] = [];
+      const report = await createController().run({
+        taskPath: env.taskPath,
+        runner,
+        supervisor: createScriptedSupervisor({
+          decisions: [
+            (input) => {
+              triggers.push(input.trigger.code);
+              return qualifyRepair({ target: "environment", reason: "BanyanDB moved CONTRIBUTING.md to Go 1.26.11" }, "re-pin");
+            },
+            returnToNormal({ summary: "CONTRIBUTING.md re-pinned; the environment checks pass" }, "return"),
+          ],
+        }),
+        stateRoot: env.stateRoot,
+        runId: "bydb-go-bump",
+      });
+
+      expect(report.status, `${report.stopReason}: ${report.blocker}`).toBe("succeeded");
+      expect(triggers).toEqual(["environment_changed"]);
+      const state = await loadRunState(report.stateDir);
+      const bumped = createHash("sha256").update(BUMPED).digest("hex");
+      // The pinned profile is untouched; the run's declaration carries the recorded re-pin.
+      expect(state.intake.config!.text).toContain(env.contributingSha256);
+      expect(state.definition.environment!.pinnedFiles).toEqual([{ path: "CONTRIBUTING.md", sha256: bumped }]);
+      expect(state.environmentRepins).toMatchObject([{ path: "CONTRIBUTING.md", from: env.contributingSha256, to: bumped }]);
+    }, 120_000);
+
+    it("stops with environment changed, as before, without the grant", async () => {
+      const env = await bumpedEnv("");
+      const { runner, agentJobs } = fixRunner(env);
+      const report = await createController().run({
+        taskPath: env.taskPath,
+        runner,
+        supervisor: createScriptedSupervisor({
+          decisions: [
+            qualifyRepair({ target: "environment", reason: "BanyanDB moved CONTRIBUTING.md to Go 1.26.11" }, "re-pin"),
+            (input) => stop({ reason: "environment changed", blocker: input.rejection?.reason ?? "refused" }, "stop"),
+          ],
+        }),
+        stateRoot: env.stateRoot,
+        runId: "bydb-go-bump-no-grant",
+      });
+
+      expect(report.status).toBe("stopped");
+      expect(report.stopReason).toBe("environment changed");
+      expect(report.blocker).toBe("qualify_repair missing operator grant: sourceRepair grant is false");
+      expect(agentJobs).toEqual([]);
+      const state = await loadRunState(report.stateDir);
+      expect(state.definition.environment!.pinnedFiles).toEqual([{ path: "CONTRIBUTING.md", sha256: env.contributingSha256 }]);
+      expect(state.environmentRepins).toBeUndefined();
+    }, 60_000);
+  });
 });
 
 describe("profile budgets under task budgets (#151 review)", () => {

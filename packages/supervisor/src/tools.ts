@@ -122,9 +122,10 @@ const ACTION_TOOLS: Record<GraphLoomSupervisorAction, ActionTool> = {
   },
   qualify_repair: {
     specKey: "qualify",
-    description: "Copy and patch a plugin, validator, or executor package, then qualify it through preflight and independent review.",
+    description:
+      "Copy and patch a plugin, validator, or executor package, then qualify it through preflight and independent review. Target environment instead re-pins the environment declaration's pinned files that changed in the pinned base to their observed digests, admitted only when the environment checks then pass (no patch, no activation).",
     spec: spec(
-      { target: { type: "string", enum: ["plugin", "validator", "executor"] }, reason: STRING },
+      { target: { type: "string", enum: ["plugin", "validator", "executor", "environment"] }, reason: STRING },
       {
         executorId: { ...STRING, description: "Required when target is executor." },
         requirementId: {

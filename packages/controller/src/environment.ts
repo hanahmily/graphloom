@@ -11,7 +11,7 @@ import { commandOutcome, describeFailure, identityMismatch } from "./checkout.js
 import { environmentInput } from "./prepare-cache.js";
 import { resolveExecutorPin } from "./executor-catalog.js";
 import type { DurableRunState } from "./state.js";
-import { changedPaths, worktreeChangeFingerprints } from "./worktree.js";
+import { candidateChange, changedPaths, worktreeChangeFingerprints } from "./worktree.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -52,7 +52,7 @@ export async function checkEnvironment(args: {
         kind: "changed",
         operationId,
         evidence,
-        reason: `${names} changed since the graph's environment declaration was written; update the declaration through a qualified repair`,
+        reason: `${names} changed since the graph's environment declaration was written; update the declaration through a qualified repair (target environment re-pins drift in the base)`,
       };
     }
   }
@@ -118,6 +118,50 @@ export async function checkEnvironment(args: {
     };
   }
   return { kind: "ready", operationId, evidence };
+}
+
+/** A pinned file's declared digest and the digest it has at the pinned base commit. */
+export interface PinnedFileRepin {
+  path: string;
+  from: string;
+  to: string;
+}
+
+/**
+ * The re-pins `qualify_repair` target `environment` would make: every pinned
+ * file whose digest at the pinned base commit differs from the declaration,
+ * or why there is none to make. A file missing at the base, or one the run's
+ * own change touches, is refused: only drift in the base itself is re-pinned.
+ */
+export async function planEnvironmentRepin(state: DurableRunState): Promise<{ repins: PinnedFileRepin[] } | { refusal: string }> {
+  const files = state.definition.environment?.pinnedFiles ?? [];
+  if (files.length === 0) return { refusal: "the environment declaration pins no files" };
+  const drift = (await pinnedFileDrift(state.worktreePath, state.intake.pinnedHead, files)).filter((p) => p.actual !== p.expected);
+  if (drift.length === 0) return { refusal: "every pinned file matches its declared digest at the pinned base commit; there is nothing to re-pin" };
+  const missing = drift.filter((p) => p.actual === "missing").map((p) => p.path);
+  if (missing.length > 0) return { refusal: `${missing.join(", ")} is missing at the pinned base commit; only a file that exists can be re-pinned` };
+  const { fingerprints } = await candidateChange(state.worktreePath, state.intake.pinnedHead);
+  const touched = drift.filter((p) => fingerprints.has(p.path)).map((p) => p.path);
+  if (touched.length > 0) {
+    return { refusal: `${touched.join(", ")} is part of the run's own change; a re-pin covers only drift in the pinned base, not what the run edits` };
+  }
+  return { repins: drift.map((p) => ({ path: p.path, from: p.expected, to: p.actual })) };
+}
+
+/**
+ * The declaration with each re-pinned file's digest replaced, where it still
+ * declares the digest the re-pin replaced; any other pin is left as declared.
+ */
+export function withEnvironmentRepins(env: EnvironmentDeclaration, repins: readonly PinnedFileRepin[] | undefined): EnvironmentDeclaration {
+  if (env.pinnedFiles === undefined || repins === undefined || repins.length === 0) return env;
+  return {
+    ...env,
+    pinnedFiles: env.pinnedFiles.map((file) => {
+      let sha256 = file.sha256;
+      for (const r of repins) if (r.path === file.path && r.from === sha256) sha256 = r.to;
+      return sha256 === file.sha256 ? file : { ...file, sha256 };
+    }),
+  };
 }
 
 async function pinnedFileDrift(
