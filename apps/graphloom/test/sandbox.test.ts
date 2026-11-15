@@ -4,7 +4,8 @@
 /**
  * `graphloom sandbox pull`: the pre-run image check a graph's environment
  * check calls. Usage errors need no Docker; the rest run against the real
- * daemon and skip, saying why, where there is none.
+ * daemon and skip, saying why, where there is none; with GRAPHLOOM_REQUIRE_DOCKER_TESTS=1 (CI) they fail with
+ * that reason instead.
  */
 import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
@@ -40,6 +41,7 @@ describe("graphloom sandbox pull: usage", () => {
 });
 
 const unavailable = dockerUnavailable();
+if (unavailable !== undefined && process.env.GRAPHLOOM_REQUIRE_DOCKER_TESTS === "1") throw new Error(`graphloom sandbox tests skipped: ${unavailable} (GRAPHLOOM_REQUIRE_DOCKER_TESTS=1: these tests must run, not skip)`);
 if (unavailable !== undefined) console.warn(`graphloom sandbox tests skipped: ${unavailable}`);
 
 describe.skipIf(unavailable !== undefined)("graphloom sandbox pull: against Docker", () => {
