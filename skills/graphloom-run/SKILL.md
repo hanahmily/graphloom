@@ -142,7 +142,7 @@ rm -f .graphloom-watch/stopped
 cat > .graphloom-watch/on-stop.sh <<'EOF'
 printf '%s %s %s\n' "$GRAPHLOOM_STATUS" "$GRAPHLOOM_RUN_ID" "$GRAPHLOOM_STOP_REASON" > "$(dirname "$0")/stopped"
 EOF
-setsid nohup sh -c 'graphloom run task.yaml --on-stop "sh $PWD/.graphloom-watch/on-stop.sh" > .graphloom-watch/report.json 2> .graphloom-watch/run.log' >/dev/null 2>&1 &
+setsid nohup sh -c 'graphloom run task.yaml --on-stop "sh .graphloom-watch/on-stop.sh" > .graphloom-watch/report.json 2> .graphloom-watch/run.log' >/dev/null 2>&1 &
 ```
 
 Every agent, Claude Code included, starts it this way, never as the agent
