@@ -956,6 +956,8 @@ The section follows a few rules:
   does a sandboxed `setup` command that fails (`not run (setup failed: <id>
   exited <n> (<output>))`): the sentence under the heading then names the
   setup commands that ran (`after the profile's sandboxed setup (proto, mocks)`).
+  The setup's outcome is kept in the run's scratch, and the reproducing tests of the
+  head copy it instead of running the setup again ([§8.2](#82-reproducing-tests)).
   When the test command exits non-zero, the sentence names the failing tests
   (`the test command exited 1; failing: <list>`), read from the recorded output
   (Go `--- FAIL:` lines, Ginkgo's `[FAIL]` summary lines with colour codes
@@ -2357,6 +2359,38 @@ otherwise:
   and the `resolveId` hook. The script writes the `graphloom-repro-v1` report: per run `failed`, `passed`,
   `build-failed`, `timeout` or `killed`, the failing location, a panic's frames and the failure message
   (at most 2 KiB, secret-scanned), and the test's SHA-256.
+- **Setup (since 0.26.5).** A Go test runs after the profile's sandboxed setup (`metrics.sandbox.go.setup`,
+  [§12.2](#122-confinement)), as coverage runs it: a repository that does not commit its generated code (BanyanDB's
+  protobuf and mock code) builds nothing without it. The spec carries the same `setup <id> <_base64 argument>…` lines,
+  plus `setuptime <seconds>`, so the recorded bytes are the bytes run and the validator recomputes them. Coverage and
+  `repro.sh` run the steps through one shared script, `tools/sandbox/setup.sh`. Setup runs once per head: the first job
+  to run it (coverage, normally) keeps its outcome in the run's scratch (`@scratch/go-setup`, writable in the Go
+  sandbox only when the profile has a setup), keyed by the setup lines, the image's Go version and the inventory of
+  the checkout's files, symbolic links and directories before setup: per path, its type and mode, and its content's
+  SHA-256 or the link's target. What the setup changed is the difference between that inventory and the one after the
+  steps, never a timestamp: a file written with a preserved old timestamp (`cp -p`, an archive), a new symbolic link, a
+  file made executable, a new empty directory and a directory's changed mode all count. The changed entries are kept as
+  a tar of the checkout's own entries (`--no-recursion`: a changed directory brings only its own entry, since its files
+  are listed on their own), so links stay links and modes stay as set. Each test's job then extracts them into its own
+  disposable checkout (`tar -xop`: the recorded modes, owned by the job), removes the deleted files and links, then the
+  deleted directories deepest first (each must be empty by then, or the restore counts as failed and the steps run
+  again), and the report says `setup-restored`. A failed setup is kept the same way, so
+  later tests report it without running it again. When a test's job has to run the setup itself, its container gets
+  15 more minutes (`perFindingMs` plus 3 minutes plus 15, never more than the sandbox's `wallClockMs`), and the steps
+  together get that wall clock less the test's runs. A step still running then is stopped. A step that fails stops
+  the job before the test, and the finding is `unproven (the sandbox setup failed (<step id>: <first error line>))`,
+  never `inconclusive (build failed)`. The first error line is the first line of the step's whole output that reads
+  as an error, else its last line; the record keeps the output's last 25 lines apart from it. A step that runs out of
+  time says `did not finish within <n>s`. Go's refusal of the image's version gives the toolchain reason below.
+  Known limits of the kept setup, each harmless for code generation: only the checkout outside `.git` is reproduced
+  (what a step leaves in `/tmp`, `$HOME`, the build cache or `.git` is not; the build cache is shared anyway); fifos,
+  sockets and devices, extended attributes and ACLs, and the checkout root's own mode are not kept; a new hard link to
+  an unchanged file is restored as a copy; and a path with a backslash, a tab or a line break is compared by type and
+  mode only, so a change to its content alone is not seen.
+- **Build tags (since 0.26.5).** The profile's `metrics.sandbox.go.buildTags` reach the test's `go test` as they reach
+  coverage's: a `tags a,b` line of the spec becomes `-tags=a,b` (never on the setup; `repro.sh` re-checks the characters
+  and drops the tags rather than pass anything else on). A test in a package with tag-guarded files (BanyanDB's
+  `querymetrics`) then builds as coverage builds it.
 - **Outcome.** `judgeRun` and `settledProof` (`src/repro.ts`, `src/review.ts`) apply the four conditions
   of "Proven" below, and the finding records `proof`: `proven` with the run's record, or `unproven` with one
   of the reasons below. Nothing drafts an unproven finding as P0 or P1, or lets it make the verdict
@@ -2520,7 +2554,8 @@ plus its fix run.
 `no test`, `test does not fail`, `inconclusive (<kind>)`, `flaky`,
 `does not demonstrate` (the verifier), `sandbox unavailable` (Docker,
 image or dependency), `the sandbox toolchain is older than the repository
-requires` (since 0.26.4, below), `execution disabled by the profile`
+requires` (since 0.26.4, below), `the sandbox setup failed (<step id>: <first
+error line>)` (since 0.26.5, above), `execution disabled by the profile`
 (`review.repro.enabled: false`), or `repro budget exhausted`. It is never
 drafted as P0 or P1, never makes the verdict `request-changes`, and is listed
 under "Needs your judgment" with its reason and its test, if it has one. A
@@ -3249,9 +3284,12 @@ docker run --rm --pull never --name graphloom-<run>-<op> --label graphloom.run=<
       comparison of the spec covers them), `go.sh` runs them and reports `setup <id> ok` per success. The first failure
       stops the run before any test with `setup-fail <id> <exit> <last output lines>`, and every function is `not run
       (setup failed: <id> exited <n> (<output>))`. The container's wall clock covers setup and tests together. TypeScript
-      has no setup in this version.
+      has no setup in this version. Each reproducing test runs the same setup before it builds, through the same script
+      (`tools/sandbox/setup.sh`), and takes coverage's outcome from the run's scratch when coverage ran it on the head
+      ([§8.2](#82-reproducing-tests)).
     - `buildTags: string[]` (Go): the tags `go test` compiles with, carried as one `tags a,b` line of the spec (so the recorded
-      bytes are the bytes run) and passed as `-tags=a,b` to `go test` only, never to setup. BanyanDB sets `querymetrics`,
+      bytes are the bytes run) and passed as `-tags=a,b` to `go test` only, never to setup; the reproducing tests' `go test`
+      gets the same tags (since 0.26.5, [§8.2](#82-reproducing-tests)). BanyanDB sets `querymetrics`,
       as its own integration workflow does (QLB-T02 asserts it). `go.sh` re-checks the characters and drops the tags
       rather than pass anything else on.
     - **Timeout.** `go test` stops at its own 10 minutes unless told otherwise, which made a 30-minute sandbox end a slow
@@ -3271,11 +3309,15 @@ docker run --rm --pull never --name graphloom-<run>-<op> --label graphloom.run=<
     - **Failing tests.** `go.sh` names failures in dedicated report lines, not the output tail: `failed <text>` per Go
       `--- FAIL:`, Ginkgo `[FAIL]` (colour codes stripped) and `FAIL <pkg>` line, and `build-error <text>` for the first
       compiler error. `parseCoverageReport` reads them, so the validator recomputes the same list.
-    - **Not cached.** The setup's outputs are not kept between runs. They depend on the head (the protobuf sources, the
+    - **Not cached between runs.** The setup's outputs are not kept between runs. They depend on the head (the protobuf sources, the
       sources mockgen reflects over), so a cache keyed by their content would be a new store the sandboxed code writes
       and a later run trusts; issue-fix's prepare cache has a host-side trust model that this sandbox does not share.
       Regeneration is offline and measured in seconds to a minute (BanyanDB: protobuf 2 s, mocks 35 s on 4 CPUs, with
-      the build cache of the run shared with the tests), so this version regenerates every run.
+      the build cache of the run shared with the tests), so this version regenerates every run. Within one run (one
+      head), the outcome is kept in the run's scratch (`@scratch/go-setup`), as the build cache already is, so that the
+      reproducing tests do not regenerate per finding (since 0.26.5, [§8.2](#82-reproducing-tests)). Only sandbox jobs of
+      the same run read and write it, and they already share the writable build cache, so it adds no trust the run did
+      not have.
     - **BanyanDB.** `api/Makefile`'s `generate` target is `buf generate` with the `protoc-gen-*` plugins on `PATH`, and
       `buf.yaml` depends on three BSR modules (`protoc-gen-validate`, `googleapis`, `grpc-gateway`), pinned by
       `buf.lock`. The profile mounts `~/.graphloom/tools/banyandb/bin` (`buf`, `protoc-gen-go`, `protoc-gen-go-grpc`,
@@ -4030,6 +4072,42 @@ both degraded for every review, and nothing said why.
   `graphloom check`); a second sandbox probe of `go version` (Go's own refusal already states both versions).
 
 No step, requirement, name, order or budget changes.
+
+### Version 0.26.5: reproducing tests run the sandboxed setup
+
+A review of apache/skywalking-banyandb#1481 reported every Go reproducing test as `unproven: inconclusive
+(build failed)`, with `api/common/id.go:31:2: cannot find module providing package
+github.com/apache/skywalking-banyandb/api/proto/banyandb/cluster/v1: import lookup disabled by -mod=readonly`.
+BanyanDB does not commit its generated protobuf and mock code. Coverage ran the profile's
+`metrics.sandbox.go.setup` (`proto`, `mocks`) before its tests and built, but `repro.sh` started
+`go test -overlay` on a bare checkout, so no Go test of the repository could build.
+
+- **Same setup.** A Go reproducing test runs the profile's setup before the test, in the same container
+  configuration (no network, the profile's read-only mounts and caches). The steps live in one script,
+  `tools/sandbox/setup.sh`, which `go.sh` and `repro.sh` both source, so they cannot drift apart.
+- **Once per head.** Each job has its own disposable checkout, so the outcome is kept in the run's scratch
+  (`@scratch/go-setup`), keyed by the setup lines, the image's Go version and the inventory of the checkout's
+  files, symbolic links and directories (type, mode, and content hash or link target) before setup. Coverage
+  normally writes it. What the setup did is the difference between the inventories before and after it: later jobs
+  extract the added and changed entries from a tar (so links, directories and modes survive) and remove the deleted
+  ones, directories last. A failure is kept too, so later tests report it without running the
+  steps again.
+- **Reason.** A failed step makes the finding `unproven (the sandbox setup failed (<step id>: <first error
+  line>))`, never `inconclusive (build failed)`; Go's refusal of the image's version keeps the toolchain reason.
+  The first error line is read from the step's whole output, not its tail, since progress lines often follow it.
+- **Build tags.** The test's `go test` gets the profile's `buildTags` as coverage's does (`-tags=a,b`), so a test
+  of a package with tag-guarded files builds as coverage builds it.
+- **Time.** A test's job that has to run the setup gets 15 more minutes of wall clock (never more than the
+  sandbox's), and the steps get that clock less the test's runs. The time budget still counts each test at
+  `perFindingMs`.
+- **Rejected:** a separate setup job before the first test (a new kind of job in the sweep's flow, where the
+  first test's job can do the same); running setup in every test's job without keeping it (BanyanDB's mocks take
+  about 35 seconds, for each finding); keeping the outcome between runs (the reason in [§12.2](#122-confinement)
+  still holds); finding the setup's files by modification time (a file written with a preserved old timestamp
+  would be missed, and a later job would skip the setup without it); copying file contents alone (a symbolic link
+  or a mode change would be lost).
+
+The `findings-proven` requirement's statement names the new reason. No step, name, order or budget changes.
 
 ### Version 0.24: reproducing tests (part 2, first slice)
 

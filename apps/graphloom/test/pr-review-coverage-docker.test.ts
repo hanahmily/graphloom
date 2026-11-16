@@ -30,6 +30,9 @@ interface Plugin {
   graph: { coverageJob(plan: unknown, root: string): JobSpec; sandboxProbeJob(stageId: string, commands: unknown): JobSpec };
   profile: { parseProfile(config: unknown): unknown };
   banyandb: Record<string, unknown>;
+  reproplan: { reproPlanFor(evidence: EvidenceRecord[], profile: unknown, path: string): Record<string, unknown>; reproJob(stageId: string, evidence: EvidenceRecord[], profile: unknown, run: unknown, root: string): JobSpec | { problem: string } };
+  repro: { judgeRun(finding: { id: string; path: string }, repro: unknown, language: string, run: unknown, spec: string, image: string | undefined): { state: string; reason?: string; record?: Record<string, unknown> }; reproSpec(run: unknown): string; parseReproReport(text: string): Record<string, unknown> };
+  review: { reproRunOf(finding: string, plan: unknown, repro: unknown, config: unknown): unknown };
 }
 let plugin: Plugin;
 let tmp: string;
@@ -69,9 +72,9 @@ let tsReady = false;
 beforeAll(async () => {
   await execFileAsync("npm", ["run", "build", "-w", "@graphloom/plugin-pr-review"], { cwd: repoRoot });
   const load = async <T>(rel: string): Promise<T> => (await import(pathToFileURL(path.join(bundle, "dist", rel)).href)) as T;
-  const [coverage, graph, profile] = await Promise.all([load<Plugin["coverage"]>("coverage.js"), load<Plugin["graph"]>("graph.js"), load<Plugin["profile"]>("profile.js")]);
+  const [coverage, graph, profile, reproplan, repro, review] = await Promise.all([load<Plugin["coverage"]>("coverage.js"), load<Plugin["graph"]>("graph.js"), load<Plugin["profile"]>("profile.js"), load<Plugin["reproplan"]>("reproplan.js"), load<Plugin["repro"]>("repro.js"), load<Plugin["review"]>("review.js")]);
   const banyandb = JSON.parse(await readFile(path.join(bundle, "profiles", "banyandb.json"), "utf8")) as Record<string, unknown>;
-  plugin = { coverage, graph, profile, banyandb };
+  plugin = { coverage, graph, profile, banyandb, reproplan, repro, review };
   tmp = await mkdtemp(path.join(os.tmpdir(), "gl-cover-docker-"));
   runner = createBuiltinExecutorRunner({
     packages: [{ manifest: commandExecutorPackage, ...commandBinding() }],
@@ -657,6 +660,68 @@ func TestGenerated(t *testing.T) {
     const inside = await ask(path.join(work, "bin"));
     expect((inside.state.outcomes!.get(GREET) as { reason: string }).reason).toMatch(/read-only mount .* is inside the workspace or holds it/);
   }, 600_000);
+
+  // ---------------------------------------------------------------- reproducing tests (design §8.2) need the same setup
+
+  /** A reviewer's test of the package that needs the generated file: it fails at its own assertion once the package builds. */
+  const REPRO = { dir: "gen", name: "TestGreetRepro", expect: "assertion", oracle: "the PR text says the greeting is bye", text: 'package gen\n\nimport "testing"\n\nfunc TestGreetRepro(t *testing.T) {\n\tif got := Greet(); got != "bye" {\n\t\tt.Fatalf("Greet() = %q, want bye", got)\n\t}\n}\n' };
+
+  /** One finding's reproducing test as the graph dispatches it, in a fresh checkout of the head (a clone of `work`) and the given scratch. */
+  async function reproRun(evidence: EvidenceRecord[], profile: unknown, work: string, scratch: string, finding: string): Promise<{ report: Record<string, unknown>; proof: { state: string; reason?: string; record?: Record<string, unknown> }; job: JobSpec; checkout: string }> {
+    const checkout = path.join(tmp, `${path.basename(work)}-${finding}`);
+    spawnSync("git", ["clone", "-q", work, checkout]);
+    const plan = plugin.reproplan.reproPlanFor(evidence, profile, "gen/lib.go");
+    expect(plan.reason).toBeUndefined();
+    const run = plugin.review.reproRunOf(finding, plan, REPRO, (profile as { review: { repro: unknown } }).review.repro);
+    const spec = plugin.reproplan.reproJob("review", evidence, profile, run, bundle);
+    if ("problem" in spec) throw new Error(spec.problem);
+    const { checkout: _checkout, ...job } = spec;
+    void _checkout;
+    const result = await runner.runJob(job, ctxFor(checkout, scratch));
+    expect(result.status, result.status === "ok" ? "" : result.summary).toBe("ok");
+    const item = (result.evidence ?? []).find((e) => (e.payload as { command?: { id: string } } | undefined)?.command?.id === `repro-${finding}`)!;
+    const record = asRecord(item);
+    const command = (record.payload as { command: { report?: { text: string } } }).command;
+    const proof = plugin.repro.judgeRun({ id: finding, path: "gen/lib.go" }, REPRO, "go", { record, command }, plugin.repro.reproSpec(run), goImage);
+    return { report: plugin.repro.parseReproReport(command.report?.text ?? ""), proof, job: spec, checkout };
+  }
+
+  it.skipIf(!hasDocker || !hasGo)("a reproducing test runs the profile's setup before it builds: copied from what coverage generated on the head, or run in its own job, and a failing step is named", async () => {
+    if (!goReady) return;
+    const gen = { id: "gen", argv: ["sh", "-c", '"$GRAPHLOOM_MOUNT_TOOLS/gen.sh" "hello" > gen/generated.go'] };
+    const { work, scratch, tools } = await setupFixture("repro-setup");
+    const profile = profileFor(tools, [gen]);
+    // Coverage first, as the run does: it runs the setup and keeps its outcome in the run's scratch.
+    const m = await measure({ work, scratch, records: recordsOf(index), index: new Map(Object.entries(index)), files: filesOf, profile });
+    expect(m.state.facts!.runs[0]).toMatchObject({ ran: true, setup: ["gen"] });
+    expect((await readdir(path.join(scratch, "go-setup"))).filter((d) => !d.startsWith("."))).toHaveLength(1);
+    // A test's job has its own fresh checkout, without the generated file: it copies coverage's output, builds and runs.
+    const restored = await reproRun(m.evidence, profile, work, scratch, "F1");
+    expect(restored.job.confinement).toMatchObject({ kind: "docker", writable: [".", "@scratch/gocache", "@scratch/go-setup"], env: { GRAPHLOOM_SETUP_CACHE: "@scratch/go-setup" } });
+    expect(restored.report).toMatchObject({ setup: ["gen"], setupRestored: true });
+    expect(restored.proof).toMatchObject({ state: "proven", record: { runs: ["failed", "failed"], failure: expect.stringContaining('Greet() = "hello", want bye') } });
+    // The test itself never lands in the checkout; only the setup's (ignored) output does.
+    expect(git(restored.checkout, "status", "--porcelain")).toBe("");
+    expect((await readdir(path.join(restored.checkout, "gen"))).sort()).toEqual(["generated.go", "lib.go", "lib_test.go"]);
+    // With no coverage on the head (another run's scratch), the test's own job runs the setup, in the sandbox.
+    const fresh = path.join(tmp, "repro-setup-fresh-scratch");
+    await mkdir(fresh, { recursive: true });
+    const own = await reproRun(m.evidence, profile, work, fresh, "F2");
+    expect(own.report).toMatchObject({ setup: ["gen"], setupRestored: false });
+    expect(own.proof).toMatchObject({ state: "proven" });
+    // A failing step: the finding names it and its first error line, never a build failure.
+    const broken = profileFor(tools, [{ id: "broken", argv: ["sh", "-c", "echo 'generator exploded: error 7' >&2; exit 3"] }]);
+    const failedScratch = path.join(tmp, "repro-setup-fail-scratch");
+    await mkdir(failedScratch, { recursive: true });
+    const failed = await reproRun(m.evidence, broken, work, failedScratch, "F3");
+    expect(failed.proof).toMatchObject({ state: "unproven", reason: "the sandbox setup failed (broken: generator exploded: error 7)" });
+    // Without a setup in the profile the package does not build: the generated file is missing (the bug this fixes).
+    const noneScratch = path.join(tmp, "repro-setup-none-scratch");
+    await mkdir(noneScratch, { recursive: true });
+    const none = await reproRun(m.evidence, profileWith({ metrics: { generated: [], sandbox: { go: { image: goImage, cpus: 2, memory: "2g", pids: 256, tmp: "256m", wallClockMs: 300_000, readOnly: [{ name: "tools", path: tools }] } } } }), work, noneScratch, "F4");
+    expect(none.proof).toMatchObject({ state: "unproven", reason: "inconclusive (build failed)" });
+    expect(spawnSync("docker", ["ps", "-aq", "--filter", `label=graphloom.run=${runId}`], { encoding: "utf8" }).stdout.trim()).toBe("");
+  }, 900_000);
 });
 
 // ---------------------------------------------------------------- opt-in: the real BanyanDB clone, generated offline

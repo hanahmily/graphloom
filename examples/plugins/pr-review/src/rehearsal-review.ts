@@ -24,9 +24,12 @@ export interface ScriptedRun {
  * The stand-in sandbox's result for the command that runs a finding's test: a `graphloom-repro-v1` report for the test text the
  * reviewer wrote, with the given outcome for each run. `sha256` and `file` are what the script would write unless given.
  */
-export function reproStub(finding: string, language: ReproLanguage, text: string, runs: readonly ScriptedRun[], over: { sha256?: string; file?: string } = {}): { exitCode: number; stdout: string } {
+export function reproStub(finding: string, language: ReproLanguage, text: string, runs: readonly ScriptedRun[], over: { sha256?: string; file?: string; setup?: string[]; setupFail?: { id: string; exit: number; line: string } } = {}): { exitCode: number; stdout: string } {
   const file = over.file ?? (language === "go" ? `graphloom_repro_${finding}_test.go` : `graphloom-repro-${finding}.test.ts`);
   const lines = [`graphloom-repro-v1 ${language}`, `finding ${finding}`, `sha256 ${over.sha256 ?? sha256(text)}`, `file ${file}`];
+  // The profile's sandboxed setup, as tools/sandbox/setup.sh reports it: the steps that succeeded, then the one that failed (no runs then).
+  for (const id of over.setup ?? []) lines.push(`setup ${id} ok`);
+  if (over.setupFail !== undefined) lines.push(`setup-step-fail ${over.setupFail.id} ${over.setupFail.exit} ${over.setupFail.line}`);
   runs.forEach((r, i) => {
     const n = i + 1;
     lines.push(`run ${n} ${r.outcome}`);

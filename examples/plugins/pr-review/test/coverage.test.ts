@@ -226,11 +226,16 @@ describe("coverageState", () => {
       memory: "8g",
       pids: 512,
       tmp: "1g",
-      writable: [".", "@scratch/gocache"],
+      // The profile has a sandboxed setup: its outcome is kept in the run's scratch for the reproducing tests (design §8.2).
+      writable: [".", "@scratch/gocache", "@scratch/go-setup"],
       readOnly: ["/plugin", "/gomodcache", "/opt/tools", "/opt/bufcache"],
-      env: { GRAPHLOOM_MOUNT_TOOLS: "/opt/tools", GRAPHLOOM_MOUNT_BUF_CACHE: "/opt/bufcache", GOFLAGS: "-mod=readonly", GOPROXY: "off", GOTOOLCHAIN: "local", GOCACHE: "@scratch/gocache", GOMODCACHE: "/gomodcache", HOME: "/tmp" },
+      env: { GRAPHLOOM_MOUNT_TOOLS: "/opt/tools", GRAPHLOOM_MOUNT_BUF_CACHE: "/opt/bufcache", GOFLAGS: "-mod=readonly", GOPROXY: "off", GOTOOLCHAIN: "local", GOCACHE: "@scratch/gocache", GOMODCACHE: "/gomodcache", HOME: "/tmp", GRAPHLOOM_SETUP_CACHE: "@scratch/go-setup" },
     });
-    expect(Object.keys((confinement as { env: object }).env).sort()).toEqual(["GOCACHE", "GOFLAGS", "GOMODCACHE", "GOPROXY", "GOTOOLCHAIN", "GRAPHLOOM_MOUNT_BUF_CACHE", "GRAPHLOOM_MOUNT_TOOLS", "HOME"]);
+    expect(Object.keys((confinement as { env: object }).env).sort()).toEqual(["GOCACHE", "GOFLAGS", "GOMODCACHE", "GOPROXY", "GOTOOLCHAIN", "GRAPHLOOM_MOUNT_BUF_CACHE", "GRAPHLOOM_MOUNT_TOOLS", "GRAPHLOOM_SETUP_CACHE", "HOME"]);
+    // Without a setup there is nothing to keep: no setup store is mounted.
+    const bare = coverageConfinement({ ...plan, sandbox: { ...plan.sandbox, setup: [] } }, "/plugin") as { writable: string[]; env: Record<string, string> };
+    expect(bare.writable).toEqual([".", "@scratch/gocache"]);
+    expect(bare.env.GRAPHLOOM_SETUP_CACHE).toBeUndefined();
     const cmd = coverageCommand(plan.commands[0]!, "/plugin", 1_800_000);
     expect(cmd.argv.slice(0, 2)).toEqual(["sh", "/plugin/tools/cover/go.sh"]);
     expect(measuredSpec(cmd.argv)).toBe(goSpec);
@@ -563,7 +568,7 @@ describe("sandbox mounts and setup (profile)", () => {
     expect(confinementProblem(c)).toBeUndefined();
     expect(c).toMatchObject({ readOnly: ["/plugin", "/gomodcache", "/home/u/real/bin"], env: { GRAPHLOOM_MOUNT_TOOLS: "/home/u/real/bin" } });
     // Mounts are read-only: never listed as writable.
-    expect((c as { writable: string[] }).writable).toEqual([".", "@scratch/gocache"]);
+    expect((c as { writable: string[] }).writable).toEqual([".", "@scratch/gocache", "@scratch/go-setup"]);
   });
 
   it("waits for the mounts probe, and says which mount is unusable without running anything", () => {

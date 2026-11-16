@@ -8,7 +8,8 @@
 # head, and the outcome of each run written to $GRAPHLOOM_REPORT_FILE as graphloom-repro-v1. The test text arrives as
 # base64 in the spec and is written under $GRAPHLOOM_REPRO_TMP (default /tmp/repro), never into the checkout.
 #
-#   Go: go test -overlay <tmp>/overlay.json -run '^<name>$' -count=1 -timeout <s>s -json ./<dir>, twice.
+#   Go: go test [-tags=<a,b>] -overlay <tmp>/overlay.json -run '^<name>$' -count=1 -timeout <s>s -json ./<dir>, twice
+#       (the spec's `tags a,b` line, the profile's metrics.sandbox.go.buildTags, as coverage passes them).
 #       overlay.json maps <module>/<dir>/graphloom_repro_<F>_test.go, a path absent from the head, to the scratch file, so the
 #       test compiles into its package (it may reach unexported code) and the checkout is not written. Two separate
 #       invocations instead of -count=2: a panic ends a test binary, so a second run in the same binary would never happen.
@@ -22,6 +23,13 @@
 # assertion of the test itself), `frame n <path>:<line>` (a panic's frame in the repository), `message n <text>` (at most 2000
 # characters, newlines as a return symbol). `setup-fail <why>` instead of runs when the test could not be set up (the
 # dependencies could not be installed offline, a bad spec). Always exits 0 once it has written a report.
+#
+# Go, sandboxed setup: the spec's `setup <id> <_base64 argument>...` lines (profile metrics.sandbox.go.setup) run before the
+# test, through tools/sandbox/setup.sh as coverage runs them, bounded by the spec's `setuptime <seconds>`; with
+# GRAPHLOOM_SETUP_CACHE (the run's scratch) the outcome coverage or an earlier test of this head kept is copied instead. The
+# report then has `setup <id> ok` per step and `setup-restored` when it was copied, or, instead of runs,
+# `setup-step-fail <id> <exit> <first error line>`. The generated files land in the job's disposable checkout; the test
+# itself still never does.
 
 set -u
 here=$(dirname "$0")
@@ -52,6 +60,12 @@ secs=$(val timeout)
 ws=$(val ws)
 name=$(val name | base64 -d 2>/dev/null)
 [ -n "$ws" ] || ws=.
+# Go build tags (profile metrics.sandbox.go.buildTags), as coverage's go.sh passes them: `-tags=a,b` on `go test` only, never
+# on the setup; anything but [A-Za-z0-9_.,] is dropped rather than passed on.
+tags=$(val tags)
+case "$tags" in *[!A-Za-z0-9_.,]*) tags="" ;; esac
+tagarg=""
+[ -n "$tags" ] && tagarg="-tags=$tags"
 
 bad=""
 case "$lang" in go|ts) ;; *) bad="lang" ;; esac
@@ -102,6 +116,17 @@ if [ "$lang" = go ]; then
   file="graphloom_repro_${finding}_test.go"
   say "file $file"
   cp "$tmp/test.txt" "$tmp/$file"
+  # The profile's sandboxed setup (code generation the repository does not commit), as coverage runs it and shared with it:
+  # copied from the run's scratch when coverage or an earlier test of this head already ran it, run here otherwise.
+  . "$here/../sandbox/setup.sh"
+  if ! setup_run "$tmp/spec.txt" "$tmp" "$(val setuptime)"; then
+    sed 's/^/setup /; s/$/ ok/' "$tmp/setup-ok" >> "$rep"
+    say "setup-step-fail $SETUP_FAIL_ID $SETUP_FAIL_RC $SETUP_FAIL_FIRST"
+    cat "$tmp/setup-fail.out"
+    exit 0
+  fi
+  sed 's/^/setup /; s/$/ ok/' "$tmp/setup-ok" >> "$rep"
+  [ -z "$SETUP_RESTORED" ] || say "setup-restored"
   # The module that holds the package: the nearest go.mod at or above <dir>.
   mod="$dir"
   while [ ! -f "$root/$mod/go.mod" ] && [ "$mod" != . ]; do
@@ -112,7 +137,7 @@ if [ "$lang" = go ]; then
   i=1
   while [ "$i" -le 2 ]; do
     out="$tmp/out.$i"
-    (cd "$root/$mod" && timeout "$((secs + 30))" go test -overlay "$tmp/overlay.json" -run "^${name}\$" -count=1 -timeout "${secs}s" -json "./$rel") > "$out" 2> "$tmp/err.$i"
+    (cd "$root/$mod" && timeout "$((secs + 30))" go test ${tagarg:+"$tagarg"} -overlay "$tmp/overlay.json" -run "^${name}\$" -count=1 -timeout "${secs}s" -json "./$rel") > "$out" 2> "$tmp/err.$i"
     rc=$?
     mine="$tmp/mine.$i"
     grep "\"Test\":\"$name\"" "$out" > "$mine" 2>/dev/null

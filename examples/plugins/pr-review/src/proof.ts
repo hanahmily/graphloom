@@ -7,7 +7,7 @@
  * in `review.ts`: the named test built and failed in both runs, each failure attributable to the cited behavior, the test text
  * that was run is the text the verifier judged, and the verifier confirmed the finding and judged the test demonstrates it). Anything
  * else is `unproven` with the reason the proof carries (`no test`, `test does not fail`, `inconclusive (<kind>)`, `flaky`,
- * `does not demonstrate`, `sandbox unavailable`, `execution disabled by the profile`, `repro budget exhausted`): it is never drafted as P0 or P1,
+ * `does not demonstrate`, `sandbox unavailable`, `the sandbox setup failed (<step>: <first error line>)`, `execution disabled by the profile`, `repro budget exhausted`): it is never drafted as P0 or P1,
  * never makes the verdict `request-changes`, and is listed under "Needs your judgment". A non-behavioral finding claims no wrong
  * behavior, so it needs no test and is drafted at most as P2.
  *
