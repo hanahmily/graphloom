@@ -51,7 +51,9 @@ report). Exit 1: an error; show it and stop.
 ## 2. Arm it
 
 **Claude Code.** Run in the background (the Bash tool's background option);
-you are notified when it exits:
+you are notified when it exits. This is only the watcher: if the tool's time
+limit ends it, it just exits and you re-arm it, which never affects the run
+(the run itself is started detached, see graphloom-run):
 
 ```sh
 graphloom watch <run> --until report --json

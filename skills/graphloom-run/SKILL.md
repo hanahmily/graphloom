@@ -1,6 +1,6 @@
 ---
 name: graphloom-run
-description: Start a GraphLoom run. Writes task.yaml (graph, repo, config profile, request), checks it with graphloom check, starts graphloom run in the background with an --on-stop hook that writes a marker file, captures the run id from the start line, and hands the run to the graphloom-watch skill (or, inside a HAPI session, to a detached graphloom watch that messages the session). Never polls the process table. Use when the user wants to run a graph (for example issue-fix on an issue) on a repository.
+description: Start a GraphLoom run. Writes task.yaml (graph, repo, config profile, request), checks it with graphloom check, starts graphloom run fully detached (setsid nohup) with an --on-stop hook that writes a marker file, captures the run id from the start line, and hands the run to the graphloom-watch skill (or, inside a HAPI session, to a detached graphloom watch that messages the session). Never polls the process table. Use when the user wants to run a graph (for example issue-fix on an issue) on a repository.
 ---
 
 # Start a GraphLoom run
@@ -129,24 +129,30 @@ adds the supervisor the run would pin and each agent role's harness. Fix every
 failure before starting (see the graphloom-setup skill). For a new profile, a
 zero-provider-call rehearsal is worth it: `graphloom rehearse task.yaml`.
 
-## 3. Start it in the background
+## 3. Start it detached
 
-Make a watch directory beside the task, then start the run detached, with the
-stop hook writing a marker file and stderr kept in a log (prefix the
-repository's toolchain on `PATH` first when section 1 found one):
+Make a watch directory beside the task, write the stop hook as a small script
+(so no quote nests inside the start command), then start the run fully detached
+with stderr kept in a log (prefix the repository's toolchain on `PATH` first
+when section 1 found one, as `PATH=<dir>:$PATH graphloom run ...`):
 
 ```sh
 mkdir -p .graphloom-watch
 rm -f .graphloom-watch/stopped
-graphloom run task.yaml \
-  --on-stop 'printf "%s %s %s\n" "$GRAPHLOOM_STATUS" "$GRAPHLOOM_RUN_ID" "$GRAPHLOOM_STOP_REASON" > .graphloom-watch/stopped' \
-  > .graphloom-watch/report.json 2> .graphloom-watch/run.log
+cat > .graphloom-watch/on-stop.sh <<'EOF'
+printf '%s %s %s\n' "$GRAPHLOOM_STATUS" "$GRAPHLOOM_RUN_ID" "$GRAPHLOOM_STOP_REASON" > "$(dirname "$0")/stopped"
+EOF
+setsid nohup sh -c 'graphloom run task.yaml --on-stop "sh $PWD/.graphloom-watch/on-stop.sh" > .graphloom-watch/report.json 2> .graphloom-watch/run.log' >/dev/null 2>&1 &
 ```
 
-- **Claude Code**: run that command with the Bash tool's background option, so
-  you are notified when it exits.
-- **Codex or opencode** (or any shell): detach it so it outlives the command:
-  `setsid nohup sh -c '<the command above>' >/dev/null 2>&1 &`.
+Every agent, Claude Code included, starts it this way, never as the agent
+tool's own background command. A tool's background command has a time limit (in
+Claude Code, 2 hours); when it expires the command is terminated, `graphloom run`
+receives the signal and records it as `operator stop`, so a long run (an
+issue-fix routinely takes more than 2 hours) would be stopped by the tool, not
+by the operator. A tool's time limit or the end of the agent session must never
+stop a run. You learn of progress and stops from the run's own `--on-stop`
+marker and from `graphloom watch` (section 5), not from the process's exit.
 
 The hook runs once when the run leaves `running` (or the CLI crashes); its
 environment carries `GRAPHLOOM_RUN_ID`, `GRAPHLOOM_STATUS`,
