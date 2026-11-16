@@ -204,6 +204,31 @@ describe.skipIf(!hasGo)("repro.sh with Go and the profile's sandboxed setup: a p
     expect(statSync(path.join(second, "helper.sh")).mode & 0o111).not.toBe(0);
   });
 
+  it("keeps directories: a new empty one, a mode it changed, and one it removed", () => {
+    const store = mkdtempSync(path.join(tmpdir(), "repro-setup-store-"));
+    scratch.push(store);
+    const env = { GRAPHLOOM_SETUP_CACHE: store };
+    const dirs = { id: "proto", argv: ["sh", "-c", `echo run >> '${runs}'; mkdir -p api/v1 && printf 'package v1\\n\\nconst Unit = "w"\\n' > api/v1/v1.go && mkdir -p fixtures/empty && chmod 700 pkg/ttl && rm -rf old`] };
+    const withOld = (): string => {
+      const mod = checkout();
+      mkdirSync(path.join(mod, "old/inner"), { recursive: true });
+      writeFileSync(path.join(mod, "old/inner/stale.txt"), "stale\n");
+      return mod;
+    };
+    const before = count();
+    expect(parseReproReport(runScript(withOld(), "go", "F15", repro, ".", { setup: [dirs], setupSeconds: 60, env }).text)).toMatchObject({ setupRestored: false });
+    const second = withOld();
+    expect(statSync(path.join(second, "pkg/ttl")).mode & 0o777).not.toBe(0o700);
+    const again = runScript(second, "go", "F16", repro, ".", { setup: [dirs], setupSeconds: 60, env }).text;
+    expect(parseReproReport(again)).toMatchObject({ setup: ["proto"], setupRestored: true });
+    expect(count()).toBe(before + 1);
+    expect(judged(again, "F16")).toMatchObject({ state: "proven" });
+    expect(statSync(path.join(second, "fixtures/empty")).isDirectory()).toBe(true);
+    expect(readdirSync(path.join(second, "fixtures/empty"))).toEqual([]);
+    expect(statSync(path.join(second, "pkg/ttl")).mode & 0o777).toBe(0o700);
+    expect(existsSync(path.join(second, "old"))).toBe(false);
+  });
+
   it("names the first error of the step's whole output, though more than 25 progress lines follow it", () => {
     const noisy = { id: "mocks", argv: ["sh", "-c", "echo 'mockgen: error: cannot load package example.com/gen/api/v1'; i=0; while [ $i -lt 30 ]; do echo \"progress $i\"; i=$((i+1)); done; exit 1"] };
     const { text } = runScript(checkout(), "go", "F12", repro, ".", { setup: [noisy], setupSeconds: 60 });
