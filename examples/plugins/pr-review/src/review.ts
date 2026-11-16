@@ -476,11 +476,13 @@ export interface ReproPlan {
   /** The profile's sandboxed setup the test's job runs (or copies from the run's scratch) before the test, and the seconds it may take. */
   setup: ReadonlyArray<{ id: string; argv: readonly string[] }>;
   setupSeconds?: number;
+  /** The Go build tags the test compiles with, as coverage's `go test` does (`metrics.sandbox.go.buildTags`). */
+  buildTags?: readonly string[];
 }
 
 /** The run of a finding's test as the plan and the profile describe it: the graph (to dispatch) and the `findings-proven` validator (to recompute) build the same spec. */
 export function reproRunOf(finding: string, plan: ReproPlan, repro: Repro, config: { perFindingMs: number }): ReproRunSpec {
-  return { finding, language: plan.language, repro, workspace: plan.workspace, timeoutSeconds: reproRunSeconds(config), ...(plan.setup.length > 0 ? { setup: plan.setup, ...(plan.setupSeconds !== undefined ? { setupSeconds: plan.setupSeconds } : {}) } : {}) };
+  return { finding, language: plan.language, repro, workspace: plan.workspace, timeoutSeconds: reproRunSeconds(config), ...(plan.setup.length > 0 ? { setup: plan.setup, ...(plan.setupSeconds !== undefined ? { setupSeconds: plan.setupSeconds } : {}) } : {}), ...(plan.buildTags !== undefined && plan.buildTags.length > 0 ? { buildTags: plan.buildTags } : {}) };
 }
 
 /** What the sweep needs of the sandbox and the profile to run the reviewers' tests (design §8.2). */

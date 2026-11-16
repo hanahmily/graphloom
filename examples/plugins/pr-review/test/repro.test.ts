@@ -188,6 +188,8 @@ describe("a behavioral finding with a test the graph ran", () => {
     expect(spec).toContain(`setuptime ${(3 * 60_000 + 3 * 60_000 + 15 * 60_000 - 3 * 60_000 - 2 * 60_000) / 1000}`);
     expect(job.confinement).toMatchObject({ wallClockMs: 21 * 60_000, writable: [".", "@scratch/gocache", "@scratch/go-setup"], env: { GRAPHLOOM_SETUP_CACHE: "@scratch/go-setup" } });
     expect(job.instruction).toContain("after the profile's sandboxed setup (proto, mocks)");
+    // The profile's build tags reach the test's go test as they reach coverage's.
+    expect(spec).toContain("\ntags querymetrics");
     // No network, a read-only dependency cache, and the plugin's script read-only.
     expect(job.confinement).toMatchObject({ kind: "docker", readOnly: expect.arrayContaining([expect.stringMatching(/pr-review|\//)]) });
     const order = proven.jobs.filter((j) => j.stageId === "review").map((j) => (j.kind === "agent" ? `${j.jobId}` : /reviewer's test/.test(j.instruction) ? "repro" : undefined)).filter((x) => x !== undefined);

@@ -9,15 +9,16 @@
 #   setup_run <spec file> <work dir> [<seconds>]
 #
 # Returns 0 when there is no setup or every step succeeded (the ids that did are in <work dir>/setup-ok, one per line) and 1
-# when a step failed: SETUP_FAIL_ID, SETUP_FAIL_RC, SETUP_FAIL_FIRST (the output's first error line, else its last line) are
-# set, and <work dir>/setup-fail.out holds the step's output tail. <seconds>, when given, bounds all the steps together (a
-# step still running then is stopped and fails with exit 124).
+# when a step failed: SETUP_FAIL_ID, SETUP_FAIL_RC, SETUP_FAIL_FIRST (the first line of the step's whole output that reads as
+# an error, else its last line) are set, and <work dir>/setup-fail.out holds the output's tail. <seconds>, when given, bounds
+# all the steps together (a step still running then is stopped and fails with exit 124).
 #
 # Once per head: when GRAPHLOOM_SETUP_CACHE names a writable directory (the run's scratch), the outcome is kept there under a
-# key of the setup lines, the Go version and the checksums of the checkout's files (without .git) as they were before setup.
-# A later job on the same checkout (each job has its own disposable checkout) then copies the files the setup created or
-# changed into its checkout instead of running the steps again (SETUP_RESTORED=1), or reports the same failure without
-# running them. The files kept are those modified after the steps started; a file setup deletes is not deleted again.
+# key of the setup lines, the Go version and the inventory of the checkout's files (path and SHA-256, without .git) before
+# setup. A later job on the same checkout (each job has its own disposable checkout) then reproduces the setup's effect
+# instead of running the steps again (SETUP_RESTORED=1): it copies the files the setup added or changed and removes those it
+# deleted, found by comparing the inventories before and after the steps (contents, never timestamps). A failure is
+# reported again without running them.
 
 # setup_decode <id> <token>...: runs one step, its argument tokens being `_` and the base64 of each argv element.
 setup_decode() {
@@ -41,11 +42,17 @@ setup_decode() {
   fi
 }
 
-# setup_first <file>: the first line that reads as an error, else the last non-empty line, on one line of at most 240 characters.
+# setup_first <file>: the first line of the whole file that reads as an error, else its last non-empty line, on one line of at
+# most 240 characters.
 setup_first() {
   su_line=$(sed "s/$(printf '\033')\[[0-9;]*[A-Za-z]//g" "$1" | tr '\t\r' '  ' | grep -E '[Ee]rror|ERROR|[Ff]ail|FAIL|[Cc]annot|[Nn]ot found|[Nn]o such|[Dd]enied|panic:|requires go >=' | head -n 1)
   [ -n "$su_line" ] || su_line=$(tr '\t\r' '  ' < "$1" | grep -v '^ *$' | tail -n 1)
   printf '%s' "$su_line" | sed 's/^ *//; s/ *$//' | cut -c1-240
+}
+
+# setup_inventory <out>: `<sha256>  ./<path>` of every file of the checkout but .git, sorted.
+setup_inventory() {
+  (cd "$su_root" && find . -path ./.git -prune -o -type f -exec sha256sum {} + 2>/dev/null) | LC_ALL=C sort > "$1"
 }
 
 # setup_save <failed 0|1>: keeps this outcome in the cache, best effort (a full disk only means the next job runs the steps).
@@ -55,12 +62,18 @@ setup_save() {
   rm -rf "$su_part"
   mkdir -p "$su_part/files" 2>/dev/null || return 0
   cp "$su_work/setup-ok" "$su_part/ok" || { rm -rf "$su_part"; return 0; }
+  : > "$su_part/deleted"
   if [ "$1" = 1 ]; then
     printf '%s %s\n' "$SETUP_FAIL_ID" "$SETUP_FAIL_RC" > "$su_part/fail"
     printf '%s\n' "$SETUP_FAIL_FIRST" > "$su_part/first"
     cp "$su_work/setup-fail.out" "$su_part/out"
   else
-    (cd "$su_root" && find . -path ./.git -prune -o -type f -newer "$su_work/setup-mark" -print) > "$su_work/setup-files" || { rm -rf "$su_part"; return 0; }
+    setup_inventory "$su_work/setup-after" || { rm -rf "$su_part"; return 0; }
+    # Added or changed: an inventory line after that was not there before. Deleted: a path before that is gone after.
+    LC_ALL=C comm -13 "$su_work/setup-before" "$su_work/setup-after" | cut -c67- > "$su_work/setup-files"
+    cut -c67- "$su_work/setup-before" | LC_ALL=C sort > "$su_work/setup-paths-before"
+    cut -c67- "$su_work/setup-after" | LC_ALL=C sort > "$su_work/setup-paths-after"
+    LC_ALL=C comm -23 "$su_work/setup-paths-before" "$su_work/setup-paths-after" > "$su_part/deleted"
     while IFS= read -r su_f; do
       su_d=$(dirname "$su_f")
       mkdir -p "$su_part/files/$su_d" && cp "$su_root/$su_f" "$su_part/files/$su_f" || { rm -rf "$su_part"; return 0; }
@@ -68,6 +81,14 @@ setup_save() {
   fi
   : > "$su_part/done"
   if [ -e "$su_cache" ]; then rm -rf "$su_part"; else mv "$su_part" "$su_cache" 2>/dev/null || rm -rf "$su_part"; fi
+}
+
+# setup_restore: the kept setup's effect on this checkout; non-zero when it did not complete.
+setup_restore() {
+  cp -R "$su_cache/files/." "$su_root/" 2>/dev/null || return 1
+  while IFS= read -r su_f; do
+    rm -f "$su_root/$su_f" || return 1
+  done < "$su_cache/deleted"
 }
 
 setup_run() {
@@ -86,10 +107,11 @@ setup_run() {
 
   su_cache=""
   if [ -n "${GRAPHLOOM_SETUP_CACHE:-}" ] && [ -d "$GRAPHLOOM_SETUP_CACHE" ] && [ -w "$GRAPHLOOM_SETUP_CACHE" ]; then
+    setup_inventory "$su_work/setup-before"
     su_key=$({
       cat "$su_work/setup-lines"
       go version 2>/dev/null
-      (cd "$su_root" && find . -path ./.git -prune -o -type f -exec cksum {} + 2>/dev/null) | LC_ALL=C sort
+      cat "$su_work/setup-before"
     } | sha256sum | cut -c1-32)
     su_cache="$GRAPHLOOM_SETUP_CACHE/$su_key"
   fi
@@ -102,18 +124,15 @@ setup_run() {
       SETUP_RESTORED=1
       return 1
     fi
-    if cp -R "$su_cache/files/." "$su_root/" 2>/dev/null; then
+    if setup_restore; then
       cp "$su_cache/ok" "$su_work/setup-ok"
       SETUP_RESTORED=1
       return 0
     fi
-    # A copy that did not complete leaves the tree uncertain: the steps run again over it.
+    # A restore that did not complete leaves the tree uncertain: the steps run again over it, and nothing is kept.
     su_cache=""
   fi
 
-  touch "$su_work/setup-mark"
-  # A file the steps write within the marker's own clock tick would not be newer than it.
-  sleep 1
   while IFS= read -r su_l; do
     set -f
     # shellcheck disable=SC2086
@@ -127,11 +146,12 @@ setup_run() {
     if [ "$su_rc" -ne 0 ]; then
       SETUP_FAIL_ID="$su_id"
       SETUP_FAIL_RC="$su_rc"
+      # The tail is for the record; the reason is read from the step's whole output.
       tail -n 25 "$su_work/setup.$su_id" > "$su_work/setup-fail.out"
       if [ "$su_rc" = 124 ] && [ -n "$su_deadline" ]; then
         SETUP_FAIL_FIRST="did not finish within ${su_secs}s"
       else
-        SETUP_FAIL_FIRST=$(setup_first "$su_work/setup-fail.out")
+        SETUP_FAIL_FIRST=$(setup_first "$su_work/setup.$su_id")
       fi
       [ -n "$SETUP_FAIL_FIRST" ] || SETUP_FAIL_FIRST="exited $su_rc with no output"
       setup_save 1

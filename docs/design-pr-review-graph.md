@@ -2365,16 +2365,23 @@ otherwise:
   plus `setuptime <seconds>`, so the recorded bytes are the bytes run and the validator recomputes them. Coverage and
   `repro.sh` run the steps through one shared script, `tools/sandbox/setup.sh`. Setup runs once per head: the first job
   to run it (coverage, normally) keeps its outcome in the run's scratch (`@scratch/go-setup`, writable in the Go
-  sandbox only when the profile has a setup), keyed by the setup lines, the image's Go version and the checksums of the
-  checkout's files before setup. Each test's job then copies the generated files into its own disposable checkout
-  (the report says `setup-restored`) instead of running the steps again. A failed setup is kept the same way, so
+  sandbox only when the profile has a setup), keyed by the setup lines, the image's Go version and the inventory of
+  the checkout's files (path and SHA-256) before setup. What the setup changed is the difference between that
+  inventory and the one after the steps, by content, never by timestamp: a file written with a preserved old
+  timestamp (`cp -p`, an archive) is kept like any other. Each test's job then copies the added and changed files
+  into its own disposable checkout and removes the deleted ones (the report says `setup-restored`) instead of running
+  the steps again. A failed setup is kept the same way, so
   later tests report it without running it again. When a test's job has to run the setup itself, its container gets
   15 more minutes (`perFindingMs` plus 3 minutes plus 15, never more than the sandbox's `wallClockMs`), and the steps
   together get that wall clock less the test's runs. A step still running then is stopped. A step that fails stops
   the job before the test, and the finding is `unproven (the sandbox setup failed (<step id>: <first error line>))`,
-  never `inconclusive (build failed)`. The first error line is the first output line that reads as an error,
-  else the last line. A step that runs out of time says `did not finish within <n>s`. Go's refusal of the image's
-  version gives the toolchain reason below.
+  never `inconclusive (build failed)`. The first error line is the first line of the step's whole output that reads
+  as an error, else its last line; the record keeps the output's last 25 lines apart from it. A step that runs out of
+  time says `did not finish within <n>s`. Go's refusal of the image's version gives the toolchain reason below.
+- **Build tags (since 0.26.5).** The profile's `metrics.sandbox.go.buildTags` reach the test's `go test` as they reach
+  coverage's: a `tags a,b` line of the spec becomes `-tags=a,b` (never on the setup; `repro.sh` re-checks the characters
+  and drops the tags rather than pass anything else on). A test in a package with tag-guarded files (BanyanDB's
+  `querymetrics`) then builds as coverage builds it.
 - **Outcome.** `judgeRun` and `settledProof` (`src/repro.ts`, `src/review.ts`) apply the four conditions
   of "Proven" below, and the finding records `proof`: `proven` with the run's record, or `unproven` with one
   of the reasons below. Nothing drafts an unproven finding as P0 or P1, or lets it make the verdict
@@ -3272,7 +3279,8 @@ docker run --rm --pull never --name graphloom-<run>-<op> --label graphloom.run=<
       (`tools/sandbox/setup.sh`), and takes coverage's outcome from the run's scratch when coverage ran it on the head
       ([§8.2](#82-reproducing-tests)).
     - `buildTags: string[]` (Go): the tags `go test` compiles with, carried as one `tags a,b` line of the spec (so the recorded
-      bytes are the bytes run) and passed as `-tags=a,b` to `go test` only, never to setup. BanyanDB sets `querymetrics`,
+      bytes are the bytes run) and passed as `-tags=a,b` to `go test` only, never to setup; the reproducing tests' `go test`
+      gets the same tags (since 0.26.5, [§8.2](#82-reproducing-tests)). BanyanDB sets `querymetrics`,
       as its own integration workflow does (QLB-T02 asserts it). `go.sh` re-checks the characters and drops the tags
       rather than pass anything else on.
     - **Timeout.** `go test` stops at its own 10 minutes unless told otherwise, which made a 30-minute sandbox end a slow
@@ -4069,18 +4077,24 @@ BanyanDB does not commit its generated protobuf and mock code. Coverage ran the 
   configuration (no network, the profile's read-only mounts and caches). The steps live in one script,
   `tools/sandbox/setup.sh`, which `go.sh` and `repro.sh` both source, so they cannot drift apart.
 - **Once per head.** Each job has its own disposable checkout, so the outcome is kept in the run's scratch
-  (`@scratch/go-setup`), keyed by the setup lines, the image's Go version and the checkout's file checksums
-  before setup. Coverage normally writes it. Later jobs copy the files the setup created or changed into
-  their own checkout. A failure is kept too, so later tests report it without running the steps again.
+  (`@scratch/go-setup`), keyed by the setup lines, the image's Go version and the inventory of the checkout's
+  files (path and SHA-256) before setup. Coverage normally writes it. What the setup did is the difference
+  between the inventories before and after it: later jobs copy the added and changed files into their own
+  checkout and remove the deleted ones. A failure is kept too, so later tests report it without running the
+  steps again.
 - **Reason.** A failed step makes the finding `unproven (the sandbox setup failed (<step id>: <first error
   line>))`, never `inconclusive (build failed)`; Go's refusal of the image's version keeps the toolchain reason.
+  The first error line is read from the step's whole output, not its tail, since progress lines often follow it.
+- **Build tags.** The test's `go test` gets the profile's `buildTags` as coverage's does (`-tags=a,b`), so a test
+  of a package with tag-guarded files builds as coverage builds it.
 - **Time.** A test's job that has to run the setup gets 15 more minutes of wall clock (never more than the
   sandbox's), and the steps get that clock less the test's runs. The time budget still counts each test at
   `perFindingMs`.
 - **Rejected:** a separate setup job before the first test (a new kind of job in the sweep's flow, where the
   first test's job can do the same); running setup in every test's job without keeping it (BanyanDB's mocks take
   about 35 seconds, for each finding); keeping the outcome between runs (the reason in [§12.2](#122-confinement)
-  still holds).
+  still holds); finding the setup's files by modification time (a file written with a preserved old timestamp
+  would be missed, and a later job would skip the setup without it).
 
 The `findings-proven` requirement's statement names the new reason. No step, name, order or budget changes.
 

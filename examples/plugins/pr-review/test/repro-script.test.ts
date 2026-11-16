@@ -28,6 +28,7 @@ interface ScriptOptions {
   /** The profile's sandboxed setup, as the plan carries it. */
   setup?: Array<{ id: string; argv: string[] }>;
   setupSeconds?: number;
+  buildTags?: string[];
   /** More environment: GRAPHLOOM_SETUP_CACHE, as the confinement gives it. */
   env?: Record<string, string>;
 }
@@ -36,7 +37,7 @@ function runScript(cwd: string, language: ReproLanguage, finding: string, repro:
   const tmp = mkdtempSync(path.join(tmpdir(), "repro-tmp-"));
   scratch.push(tmp);
   const report = path.join(tmp, "report.txt");
-  const spec = reproSpec({ finding, language, repro, workspace, timeoutSeconds: 120, ...(options.setup !== undefined ? { setup: options.setup } : {}), ...(options.setupSeconds !== undefined ? { setupSeconds: options.setupSeconds } : {}) });
+  const spec = reproSpec({ finding, language, repro, workspace, timeoutSeconds: 120, ...(options.setup !== undefined ? { setup: options.setup } : {}), ...(options.setupSeconds !== undefined ? { setupSeconds: options.setupSeconds } : {}), ...(options.buildTags !== undefined ? { buildTags: options.buildTags } : {}) });
   const parts = writeChunks(spec);
   const r = spawnSync("sh", [SCRIPT, String(parts.length), ...parts], { cwd, encoding: "utf8", env: { ...process.env, GRAPHLOOM_REPORT_FILE: report, GRAPHLOOM_REPRO_TMP: path.join(tmp, "work"), GOFLAGS: "-mod=mod", GOPROXY: "off", GOTOOLCHAIN: "local", ...options.env }, timeout: 240_000 });
   expect(r.status, r.stderr).toBe(0);
@@ -156,6 +157,50 @@ describe.skipIf(!hasGo)("repro.sh with Go and the profile's sandboxed setup: a p
     expect(judged(f8, "F8")).toMatchObject({ reason: "the sandbox setup failed (mocks: boom: error here)" });
     expect(judged(f9, "F9")).toMatchObject({ reason: "the sandbox setup failed (mocks: boom: error here)" });
     expect(count()).toBe(before + 3);
+  });
+
+  it("keeps a file the setup wrote with an old, preserved timestamp, and a file it deleted stays deleted on restore: contents are compared, not mtimes", () => {
+    const store = mkdtempSync(path.join(tmpdir(), "repro-setup-store-"));
+    scratch.push(store);
+    const env = { GRAPHLOOM_SETUP_CACHE: store };
+    // As `cp -p` or an archive extraction: the generated file carries a timestamp from long before the steps started.
+    const preserved = { id: "proto", argv: ["sh", "-c", `echo run >> '${runs}'; s=$(mktemp); printf 'package v1\\n\\nconst Unit = "w"\\n' > "$s"; touch -t 200001010000 "$s"; mkdir -p api/v1 && cp -p "$s" api/v1/v1.go; rm -f "$s" obsolete.txt`] };
+    const withObsolete = (): string => {
+      const mod = checkout();
+      writeFileSync(path.join(mod, "obsolete.txt"), "removed by the setup\n");
+      return mod;
+    };
+    const before = count();
+    expect(parseReproReport(runScript(withObsolete(), "go", "F10", repro, ".", { setup: [preserved], setupSeconds: 60, env }).text)).toMatchObject({ setupRestored: false });
+    const second = withObsolete();
+    const again = runScript(second, "go", "F11", repro, ".", { setup: [preserved], setupSeconds: 60, env }).text;
+    expect(parseReproReport(again)).toMatchObject({ setup: ["proto"], setupRestored: true });
+    expect(judged(again, "F11")).toMatchObject({ state: "proven" });
+    expect(count()).toBe(before + 1);
+    expect(readFileSync(path.join(second, "api/v1/v1.go"), "utf8")).toContain('const Unit = "w"');
+    expect(existsSync(path.join(second, "obsolete.txt"))).toBe(false);
+  });
+
+  it("names the first error of the step's whole output, though more than 25 progress lines follow it", () => {
+    const noisy = { id: "mocks", argv: ["sh", "-c", "echo 'mockgen: error: cannot load package example.com/gen/api/v1'; i=0; while [ $i -lt 30 ]; do echo \"progress $i\"; i=$((i+1)); done; exit 1"] };
+    const { text } = runScript(checkout(), "go", "F12", repro, ".", { setup: [noisy], setupSeconds: 60 });
+    expect(judged(text, "F12")).toMatchObject({ state: "unproven", reason: "the sandbox setup failed (mocks: mockgen: error: cannot load package example.com/gen/api/v1)" });
+  });
+});
+
+describe.skipIf(!hasGo)("repro.sh with Go and the profile's build tags: a package with tag-guarded files builds as coverage's does", () => {
+  const mod = mkdtempSync(path.join(tmpdir(), "repro-tags-"));
+  scratch.push(mod);
+  mkdirSync(path.join(mod, "pkg/q"), { recursive: true });
+  writeFileSync(path.join(mod, "go.mod"), "module example.com/q\n\ngo 1.21\n");
+  writeFileSync(path.join(mod, "pkg/q/q.go"), "package q\n\n// Count counts what the query saw.\nfunc Count() int { return metric() }\n");
+  // Only built with -tags=querymetrics, as BanyanDB's query metrics are.
+  writeFileSync(path.join(mod, "pkg/q/metrics.go"), "//go:build querymetrics\n\npackage q\n\nfunc metric() int { return 1 }\n");
+  const repro: Repro = { dir: "pkg/q", name: "TestCount", expect: "assertion", oracle: "the PR text", text: 'package q\n\nimport "testing"\n\nfunc TestCount(t *testing.T) {\n\tif Count() != 2 {\n\t\tt.Fatalf("Count() = %d, want 2", Count())\n\t}\n}\n' };
+
+  it("passes -tags to go test: without it the package does not build, with it the test runs and fails at its assertion", () => {
+    expect(judge(runScript(mod, "go", "F1", repro, ".").text, "F1", repro, "go", "pkg/q/q.go")).toMatchObject({ state: "unproven", reason: "inconclusive (build failed)" });
+    expect(judge(runScript(mod, "go", "F2", repro, ".", { buildTags: ["querymetrics"] }).text, "F2", repro, "go", "pkg/q/q.go")).toMatchObject({ state: "proven", record: { failure: expect.stringContaining("Count() = 1, want 2") } });
   });
 });
 

@@ -39,9 +39,11 @@ export function reproPlanFor(evidence: readonly EvidenceRecord[], profile: Pick<
   if ("probe" in ready) return { reason: "the sandbox image was not checked" };
   if ("reason" in ready) return { reason: ready.reason };
   const setup = language === "go" ? ready.sandbox.setup : [];
-  if (setup.length === 0) return { language, workspace: language === "go" ? "." : "auto", image: ready.image, setup: [] };
+  // The build tags coverage's `go test` compiles with: a test of a package with tag-guarded files builds as coverage does.
+  const tags = language === "go" && ready.sandbox.buildTags.length > 0 ? { buildTags: ready.sandbox.buildTags } : {};
+  if (setup.length === 0) return { language, workspace: language === "go" ? "." : "auto", image: ready.image, setup: [], ...tags };
   const cap = profile.review.repro.perFindingMs;
-  return { language, workspace: ".", image: ready.image, setup, setupSeconds: reproSetupSeconds(reproWallClockMs(ready.sandbox.wallClockMs, cap, true), cap) };
+  return { language, workspace: ".", image: ready.image, setup, setupSeconds: reproSetupSeconds(reproWallClockMs(ready.sandbox.wallClockMs, cap, true), cap), ...tags };
 }
 
 /** The environment the sweep reads: the profile's settings, the runs of the earlier aspects, the plans and the sandbox's refusals. */

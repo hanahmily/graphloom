@@ -8,7 +8,8 @@
 # head, and the outcome of each run written to $GRAPHLOOM_REPORT_FILE as graphloom-repro-v1. The test text arrives as
 # base64 in the spec and is written under $GRAPHLOOM_REPRO_TMP (default /tmp/repro), never into the checkout.
 #
-#   Go: go test -overlay <tmp>/overlay.json -run '^<name>$' -count=1 -timeout <s>s -json ./<dir>, twice.
+#   Go: go test [-tags=<a,b>] -overlay <tmp>/overlay.json -run '^<name>$' -count=1 -timeout <s>s -json ./<dir>, twice
+#       (the spec's `tags a,b` line, the profile's metrics.sandbox.go.buildTags, as coverage passes them).
 #       overlay.json maps <module>/<dir>/graphloom_repro_<F>_test.go, a path absent from the head, to the scratch file, so the
 #       test compiles into its package (it may reach unexported code) and the checkout is not written. Two separate
 #       invocations instead of -count=2: a panic ends a test binary, so a second run in the same binary would never happen.
@@ -59,6 +60,12 @@ secs=$(val timeout)
 ws=$(val ws)
 name=$(val name | base64 -d 2>/dev/null)
 [ -n "$ws" ] || ws=.
+# Go build tags (profile metrics.sandbox.go.buildTags), as coverage's go.sh passes them: `-tags=a,b` on `go test` only, never
+# on the setup; anything but [A-Za-z0-9_.,] is dropped rather than passed on.
+tags=$(val tags)
+case "$tags" in *[!A-Za-z0-9_.,]*) tags="" ;; esac
+tagarg=""
+[ -n "$tags" ] && tagarg="-tags=$tags"
 
 bad=""
 case "$lang" in go|ts) ;; *) bad="lang" ;; esac
@@ -130,7 +137,7 @@ if [ "$lang" = go ]; then
   i=1
   while [ "$i" -le 2 ]; do
     out="$tmp/out.$i"
-    (cd "$root/$mod" && timeout "$((secs + 30))" go test -overlay "$tmp/overlay.json" -run "^${name}\$" -count=1 -timeout "${secs}s" -json "./$rel") > "$out" 2> "$tmp/err.$i"
+    (cd "$root/$mod" && timeout "$((secs + 30))" go test ${tagarg:+"$tagarg"} -overlay "$tmp/overlay.json" -run "^${name}\$" -count=1 -timeout "${secs}s" -json "./$rel") > "$out" 2> "$tmp/err.$i"
     rc=$?
     mine="$tmp/mine.$i"
     grep "\"Test\":\"$name\"" "$out" > "$mine" 2>/dev/null

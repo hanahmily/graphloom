@@ -119,6 +119,8 @@ export interface ReproRunSpec {
   setup?: ReadonlyArray<{ id: string; argv: readonly string[] }>;
   /** The seconds the setup may take in all when it has to run (the job's wall clock less the test's two runs). */
   setupSeconds?: number;
+  /** The Go build tags `go test` compiles with (`metrics.sandbox.go.buildTags`), as coverage passes them; none when empty. */
+  buildTags?: readonly string[];
 }
 
 /** The spec the script reads: one `key value` line each, the test as base64 so the bytes run are the bytes recorded. */
@@ -135,6 +137,7 @@ export function reproSpec(s: ReproRunSpec): string {
     // Only when there is a setup, so a spec without one is the bytes it always was.
     ...(s.setup ?? []).map((st) => `setup ${st.id} ${st.argv.map(encodeArg).join(" ")}`),
     ...(s.setup !== undefined && s.setup.length > 0 && s.setupSeconds !== undefined ? [`setuptime ${s.setupSeconds}`] : []),
+    ...(s.buildTags !== undefined && s.buildTags.length > 0 ? [`tags ${s.buildTags.join(",")}`] : []),
   ].join("\n");
 }
 
