@@ -111,5 +111,10 @@ and offer to make the fix (with a test). After a plugin fix, the resume is
 
 ## 4. Confirm and hand back
 
-Ask the user to confirm the exact command. Run it only on a yes, in the
-background as graphloom-run starts a run, then hand back to graphloom-watch.
+Ask the user to confirm the exact command. Run it only on a yes, fully
+detached the way graphloom-run section 3 starts a run (`setsid nohup sh -c
+'graphloom resume <run> ... --on-stop "sh .graphloom-watch/on-stop.sh" >
+.graphloom-watch/report.json 2> .graphloom-watch/run.log' >/dev/null 2>&1 &`,
+with `rm -f .graphloom-watch/stopped` first and the same `on-stop.sh`), never as
+an agent tool's background command: its time limit would stop the run as an
+`operator stop`. Then hand back to graphloom-watch.
