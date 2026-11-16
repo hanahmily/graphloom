@@ -14,7 +14,7 @@ import { analyze, evidencePull } from "./analysis.js";
 import { htmlProblems } from "./html.js";
 import { pinnedBase } from "./commands.js";
 import { parseProfile, ProfileError, reviewerRole, verifierRole, type Profile } from "./profile.js";
-import { MAX_SWEEP_PASSES, reproRunSeconds, type AspectRecord } from "./review.js";
+import { MAX_SWEEP_PASSES, reproRunOf, type AspectRecord } from "./review.js";
 import { commandRuns } from "./evidence.js";
 import { hasTest, judgeRun, reproCommandId, reproSpec } from "./repro.js";
 import { reproPlanFor } from "./reproplan.js";
@@ -156,7 +156,7 @@ export const findingsProven: Validator = profiled((input, profile) => {
         if ("reason" in plan) why(`the sandbox could not run its test (${plan.reason})`);
         else {
           const run = commandRuns(input.evidence, reproCommandId(f.id)).at(-1);
-          const planned = reproSpec({ finding: f.id, language: plan.language, repro: f.repro, workspace: plan.workspace, timeoutSeconds: reproRunSeconds(profile.review.repro) });
+          const planned = reproSpec(reproRunOf(f.id, plan, f.repro, profile.review.repro));
           const again = judgeRun(f, f.repro, plan.language, run, planned, plan.image);
           if (again.state !== "proven") why(`the recorded run of its test does not recompute as a proof (${again.reason})`);
           else if (JSON.stringify(again.record) !== JSON.stringify(f.proof.record)) why("the recorded run does not match what its evidence recomputes");

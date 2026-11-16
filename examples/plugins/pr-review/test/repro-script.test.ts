@@ -24,13 +24,21 @@ afterAll(() => {
   for (const d of scratch) rmSync(d, { recursive: true, force: true });
 });
 
-function runScript(cwd: string, language: ReproLanguage, finding: string, repro: Repro, workspace: string): { text: string; tmp: string } {
+interface ScriptOptions {
+  /** The profile's sandboxed setup, as the plan carries it. */
+  setup?: Array<{ id: string; argv: string[] }>;
+  setupSeconds?: number;
+  /** More environment: GRAPHLOOM_SETUP_CACHE, as the confinement gives it. */
+  env?: Record<string, string>;
+}
+
+function runScript(cwd: string, language: ReproLanguage, finding: string, repro: Repro, workspace: string, options: ScriptOptions = {}): { text: string; tmp: string } {
   const tmp = mkdtempSync(path.join(tmpdir(), "repro-tmp-"));
   scratch.push(tmp);
   const report = path.join(tmp, "report.txt");
-  const spec = reproSpec({ finding, language, repro, workspace, timeoutSeconds: 120 });
+  const spec = reproSpec({ finding, language, repro, workspace, timeoutSeconds: 120, ...(options.setup !== undefined ? { setup: options.setup } : {}), ...(options.setupSeconds !== undefined ? { setupSeconds: options.setupSeconds } : {}) });
   const parts = writeChunks(spec);
-  const r = spawnSync("sh", [SCRIPT, String(parts.length), ...parts], { cwd, encoding: "utf8", env: { ...process.env, GRAPHLOOM_REPORT_FILE: report, GRAPHLOOM_REPRO_TMP: path.join(tmp, "work"), GOFLAGS: "-mod=mod", GOPROXY: "off", GOTOOLCHAIN: "local" }, timeout: 240_000 });
+  const r = spawnSync("sh", [SCRIPT, String(parts.length), ...parts], { cwd, encoding: "utf8", env: { ...process.env, GRAPHLOOM_REPORT_FILE: report, GRAPHLOOM_REPRO_TMP: path.join(tmp, "work"), GOFLAGS: "-mod=mod", GOPROXY: "off", GOTOOLCHAIN: "local", ...options.env }, timeout: 240_000 });
   expect(r.status, r.stderr).toBe(0);
   return { text: readFileSync(report, "utf8"), tmp };
 }
@@ -75,6 +83,79 @@ describe.skipIf(!hasGo)("repro.sh with Go: go test -overlay, the test never writ
     expect(judge(runScript(mod, "go", "F6", inCode, ".").text, "F6", inCode, "go", "pkg/schema/ttl.go")).toMatchObject({ state: "proven" });
     const inTest = { ...test("TestSelf", "\tvar m map[string]int\n\tm[\"a\"] = 1"), expect: "panic" as const };
     expect(judge(runScript(mod, "go", "F7", inTest, ".").text, "F7", inTest, "go", "pkg/schema/ttl.go")).toMatchObject({ state: "unproven", reason: expect.stringContaining("no frame in pkg/schema/ttl.go") });
+  });
+});
+
+describe.skipIf(!hasGo)("repro.sh with Go and the profile's sandboxed setup: a package that needs code only the setup generates (design §8.2)", () => {
+  // As BanyanDB's api/proto/... Go code: the repository does not commit it, and the package under review imports it.
+  const counter = mkdtempSync(path.join(tmpdir(), "repro-setup-count-"));
+  scratch.push(counter);
+  const runs = path.join(counter, "runs");
+  /** A fresh checkout of the head, as each job gets its own. */
+  const checkout = (): string => {
+    const mod = mkdtempSync(path.join(tmpdir(), "repro-setup-"));
+    scratch.push(mod);
+    mkdirSync(path.join(mod, "pkg/ttl"), { recursive: true });
+    writeFileSync(path.join(mod, "go.mod"), "module example.com/gen\n\ngo 1.21\n");
+    writeFileSync(path.join(mod, "pkg/ttl/ttl.go"), 'package ttl\n\nimport v1 "example.com/gen/api/v1"\n\n// Unit is the unit a week is stored in.\nfunc Unit() string { return v1.Unit }\n');
+    return mod;
+  };
+  const gen = { id: "proto", argv: ["sh", "-c", `echo run >> '${runs}'; mkdir -p api/v1 && printf 'package v1\\n\\nconst Unit = "w"\\n' > api/v1/v1.go`] };
+  const repro: Repro = { dir: "pkg/ttl", name: "TestWeekUnit", expect: "assertion", oracle: "the PR text says a week is stored in days", text: 'package ttl\n\nimport "testing"\n\nfunc TestWeekUnit(t *testing.T) {\n\tif got := Unit(); got != "d" {\n\t\tt.Fatalf("Unit() = %q, want d", got)\n\t}\n}\n' };
+  const judged = (text: string, finding: string) => judge(text, finding, repro, "go", "pkg/ttl/ttl.go");
+  const count = (): number => (existsSync(runs) ? readFileSync(runs, "utf8").split("\n").filter((l) => l !== "").length : 0);
+
+  it("without the setup the package does not build: the generated package is missing, as in the BanyanDB run", () => {
+    expect(judged(runScript(checkout(), "go", "F1", repro, ".").text, "F1")).toMatchObject({ state: "unproven", reason: "inconclusive (build failed)" });
+  });
+
+  it("with the setup, generates the package first, then builds and runs the test; the test is still never written into the checkout", () => {
+    const mod = checkout();
+    const { text } = runScript(mod, "go", "F2", repro, ".", { setup: [gen], setupSeconds: 60 });
+    expect(parseReproReport(text)).toMatchObject({ setup: ["proto"], setupRestored: false });
+    expect(judged(text, "F2")).toMatchObject({ state: "proven", record: { runs: ["failed", "failed"], at: "graphloom_repro_F2_test.go:7", failure: expect.stringContaining('Unit() = "w", want d') } });
+    expect(readdirSync(path.join(mod, "pkg/ttl"))).toEqual(["ttl.go"]);
+    expect(readdirSync(path.join(mod, "api/v1"))).toEqual(["v1.go"]);
+  });
+
+  it("a failing setup step names the step and its first error line, never a build failure, and no test runs", () => {
+    const broken = { id: "mocks", argv: ["sh", "-c", "echo 'generating mocks'; echo 'mockgen: error: package example.com/gen/api/v1 not found' >&2; echo 'more noise'; exit 3"] };
+    const { text } = runScript(checkout(), "go", "F3", repro, ".", { setup: [gen, broken], setupSeconds: 60 });
+    expect(parseReproReport(text)).toMatchObject({ setup: ["proto"], setupStep: { id: "mocks", exit: 3 }, runs: [] });
+    expect(judged(text, "F3")).toEqual({ state: "unproven", reason: "the sandbox setup failed (mocks: mockgen: error: package example.com/gen/api/v1 not found)", record: expect.objectContaining({ runs: [] }) });
+  });
+
+  it("a setup that outlasts its time is stopped and says so", () => {
+    const slow = { id: "slow", argv: ["sh", "-c", "sleep 20"] };
+    const { text } = runScript(checkout(), "go", "F4", repro, ".", { setup: [slow], setupSeconds: 1 });
+    expect(judged(text, "F4")).toMatchObject({ state: "unproven", reason: "the sandbox setup failed (slow: did not finish within 1s)" });
+  });
+
+  it("with the run's setup store, runs the setup once per head: a later job's fresh checkout copies its output, and a failure is reported again without running", () => {
+    const store = mkdtempSync(path.join(tmpdir(), "repro-setup-store-"));
+    scratch.push(store);
+    const env = { GRAPHLOOM_SETUP_CACHE: store };
+    const before = count();
+    const first = runScript(checkout(), "go", "F5", repro, ".", { setup: [gen], setupSeconds: 60, env }).text;
+    expect(parseReproReport(first)).toMatchObject({ setup: ["proto"], setupRestored: false });
+    const second = checkout();
+    const again = runScript(second, "go", "F6", repro, ".", { setup: [gen], setupSeconds: 60, env }).text;
+    expect(parseReproReport(again)).toMatchObject({ setup: ["proto"], setupRestored: true });
+    expect(judged(again, "F6")).toMatchObject({ state: "proven" });
+    expect(count()).toBe(before + 1);
+    expect(readFileSync(path.join(second, "api/v1/v1.go"), "utf8")).toContain('const Unit = "w"');
+    // A different head (other files) is another key: its setup runs.
+    const other = checkout();
+    writeFileSync(path.join(other, "pkg/ttl/doc.go"), "package ttl\n");
+    expect(parseReproReport(runScript(other, "go", "F7", repro, ".", { setup: [gen], setupSeconds: 60, env }).text)).toMatchObject({ setupRestored: false });
+    expect(count()).toBe(before + 2);
+    // A failure is kept too: the next test of the head says the same without running the step again.
+    const failing = { id: "mocks", argv: ["sh", "-c", `echo run >> '${runs}'; echo 'boom: error here' >&2; exit 2`] };
+    const f8 = runScript(checkout(), "go", "F8", repro, ".", { setup: [failing], setupSeconds: 60, env }).text;
+    const f9 = runScript(checkout(), "go", "F9", repro, ".", { setup: [failing], setupSeconds: 60, env }).text;
+    expect(judged(f8, "F8")).toMatchObject({ reason: "the sandbox setup failed (mocks: boom: error here)" });
+    expect(judged(f9, "F9")).toMatchObject({ reason: "the sandbox setup failed (mocks: boom: error here)" });
+    expect(count()).toBe(before + 3);
   });
 });
 

@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { parseDraft } from "../src/draft.js";
 import { maxReproRuns, parseVerification, parsePass, REVIEW_SCHEMA_NAME, VERIFY_SCHEMA_NAME } from "../src/review.js";
 import { passReply, reproStub, SANDBOX_GO_READY, verifyReply } from "../src/rehearsal-review.js";
-import { judgeRun, parseReproReport, reproProblems, reproSpecOf, sha256, type Repro } from "../src/repro.js";
+import { judgeRun, parseReproReport, reproProblems, reproSpec, reproSpecOf, sha256, type Repro } from "../src/repro.js";
 import { readParts } from "../src/parts.js";
 import { recordedAspect } from "../src/reviewdraft.js";
 import { findingsProven } from "../src/reviewvalidators.js";
@@ -100,7 +100,7 @@ describe("what a recorded run means for a finding (design §8.2)", () => {
     record: { ref: "e1" } as EvidenceRecord,
     command: { id: "repro-F1", argv: ["sh", "tools/repro/repro.sh", "1", planned], exitCode: stub.exitCode, stdoutTail: stub.stdout, stderrTail: "" },
   });
-  const judge = (runs: Parameters<typeof reproStub>[3], over: { sha256?: string; file?: string } = {}, r: Repro = repro()) => {
+  const judge = (runs: Parameters<typeof reproStub>[3], over: Parameters<typeof reproStub>[4] = {}, r: Repro = repro()) => {
     const planned = "SPEC";
     return judgeRun(finding, r, "go", runOf(reproStub("F1", "go", r.text, runs, over), planned), planned, "golang@sha256:abc");
   };
@@ -148,6 +148,19 @@ describe("what a recorded run means for a finding (design §8.2)", () => {
     const r = parseReproReport(["graphloom-repro-v1 go", "finding F1", "run 1 failed", `message 1 token ghp_${"a".repeat(36)} leaked`].join("\n"));
     expect("error" in r ? "" : r.runs[0]!.message).toContain("looked like a credential");
   });
+
+  it("reads the sandboxed setup's lines, and a failed step is the reason, never a build failure", () => {
+    const r = parseReproReport(["graphloom-repro-v1 go", "finding F1", "setup proto ok", "setup mocks ok", "setup-restored", "run 1 passed", "run 2 passed"].join("\n"));
+    expect(r).toMatchObject({ setup: ["proto", "mocks"], setupRestored: true });
+    const failed = parseReproReport(["graphloom-repro-v1 go", "finding F1", "setup proto ok", "setup-step-fail mocks 2 mockgen: error: no such package"].join("\n"));
+    expect(failed).toMatchObject({ setup: ["proto"], setupStep: { id: "mocks", exit: 2, line: "mockgen: error: no such package" }, runs: [] });
+    expect(judge([], { setupFail: { id: "mocks", exit: 2, line: "mockgen: error: no such package" } })).toMatchObject({ state: "unproven", reason: "the sandbox setup failed (mocks: mockgen: error: no such package)" });
+    expect(judge([], { setupFail: { id: "proto", exit: 124, line: "" } })).toMatchObject({ reason: "the sandbox setup failed (proto: exited 124)" });
+    // A spec without a setup is the bytes it always was; one with a setup carries each step and its time.
+    expect(reproSpec(spec())).not.toMatch(/^setup/m);
+    const withSetup = reproSpec({ ...spec(), setup: [{ id: "proto", argv: ["sh", "-c", "buf generate"] }], setupSeconds: 960 });
+    expect(withSetup).toContain(`\nsetup proto _${Buffer.from("sh").toString("base64")} _${Buffer.from("-c").toString("base64")} _${Buffer.from("buf generate").toString("base64")}\nsetuptime 960`);
+  });
 });
 
 describe("a behavioral finding with a test the graph ran", () => {
@@ -167,6 +180,14 @@ describe("a behavioral finding with a test the graph ran", () => {
     expect(spec).toContain(`file ${Buffer.from(GO_TEST).toString("base64")}`);
     expect(spec).toContain("lang go");
     expect(spec).toContain("finding F1");
+    // The banyandb profile's sandboxed setup (proto, mocks) runs before the test, as coverage runs it, with the run's setup store
+    // writable so it runs once per head; the job's wall clock makes room for it (the test's cap, 3 minutes, and 15 for the setup).
+    const steps = (BANYANDB as { metrics: { sandbox: { go: { setup: Array<{ id: string; argv: string[] }> } } } }).metrics.sandbox.go.setup;
+    expect(steps.map((s) => s.id)).toEqual(["proto", "mocks"]);
+    for (const s of steps) expect(spec).toContain(`setup ${s.id} ${s.argv.map((a) => `_${Buffer.from(a).toString("base64")}`).join(" ")}`);
+    expect(spec).toContain(`setuptime ${(3 * 60_000 + 3 * 60_000 + 15 * 60_000 - 3 * 60_000 - 2 * 60_000) / 1000}`);
+    expect(job.confinement).toMatchObject({ wallClockMs: 21 * 60_000, writable: [".", "@scratch/gocache", "@scratch/go-setup"], env: { GRAPHLOOM_SETUP_CACHE: "@scratch/go-setup" } });
+    expect(job.instruction).toContain("after the profile's sandboxed setup (proto, mocks)");
     // No network, a read-only dependency cache, and the plugin's script read-only.
     expect(job.confinement).toMatchObject({ kind: "docker", readOnly: expect.arrayContaining([expect.stringMatching(/pr-review|\//)]) });
     const order = proven.jobs.filter((j) => j.stageId === "review").map((j) => (j.kind === "agent" ? `${j.jobId}` : /reviewer's test/.test(j.instruction) ? "repro" : undefined)).filter((x) => x !== undefined);
@@ -250,6 +271,19 @@ describe("a behavioral finding whose test does not prove it", () => {
     expect(draftOf(toolchain).recommended).not.toBe("request-changes");
     const flaky = run(scenario([passReply(1, [find({ repro: repro() })]), ...empty()], [confirmF1(demonstrates(false))], { "repro-F1": reproStub("F1", "go", GO_TEST, [{ outcome: "failed", at: 6 }, { outcome: "passed" }]) }));
     expect(judgment(flaky)).toMatchObject({ reason: "unproven: flaky" });
+  });
+
+  it("names the failed sandbox setup step and its first error line, not a build failure, when the profile's setup failed before the test", () => {
+    const line = "Failure: plugin protoc-gen-go: could not find protoc plugin for name go";
+    const sim = run(scenario([passReply(1, [find({ repro: repro() })]), ...empty()], [confirmF1()], { "repro-F1": reproStub("F1", "go", GO_TEST, [], { setupFail: { id: "proto", exit: 1, line } }) }));
+    expect(findingOf(sim, "correctness", "F1").proof).toMatchObject({ state: "unproven", reason: `the sandbox setup failed (proto: ${line})`, record: { runs: [] } });
+    expect(judgment(sim)).toMatchObject({ reason: `unproven: the sandbox setup failed (proto: ${line})` });
+    expect(draftOf(sim).recommended).not.toBe("request-changes");
+    const evidence = candidateEvidence(sim.evidence, "d1");
+    expect(findingsProven.evaluate({ requirementId: "findings-proven", statement: "", evidence, candidateDigest: "d1", config: BANYANDB })).toMatchObject({ status: "passed" });
+    // Go's refusal of the image's version during the setup says what to change, as a build would.
+    const old = run(scenario([passReply(1, [find({ repro: repro() })]), ...empty()], [confirmF1()], { "repro-F1": reproStub("F1", "go", GO_TEST, [], { setup: ["proto"], setupFail: { id: "mocks", exit: 1, line: "go: go.mod requires go >= 1.26.11 (running go 1.26.10; GOTOOLCHAIN=local)" } }) }));
+    expect(judgment(old)).toMatchObject({ reason: expect.stringContaining("unproven: the sandbox toolchain is older than the repository requires") });
   });
 
   it("is unproven with no test when the reviewer wrote none, and no job runs", () => {

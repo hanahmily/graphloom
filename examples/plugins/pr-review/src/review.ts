@@ -473,6 +473,14 @@ export interface ReproPlan {
   language: ReproLanguage;
   workspace: string;
   image: string;
+  /** The profile's sandboxed setup the test's job runs (or copies from the run's scratch) before the test, and the seconds it may take. */
+  setup: ReadonlyArray<{ id: string; argv: readonly string[] }>;
+  setupSeconds?: number;
+}
+
+/** The run of a finding's test as the plan and the profile describe it: the graph (to dispatch) and the `findings-proven` validator (to recompute) build the same spec. */
+export function reproRunOf(finding: string, plan: ReproPlan, repro: Repro, config: { perFindingMs: number }): ReproRunSpec {
+  return { finding, language: plan.language, repro, workspace: plan.workspace, timeoutSeconds: reproRunSeconds(config), ...(plan.setup.length > 0 ? { setup: plan.setup, ...(plan.setupSeconds !== undefined ? { setupSeconds: plan.setupSeconds } : {}) } : {}) };
 }
 
 /** What the sweep needs of the sandbox and the profile to run the reviewers' tests (design §8.2). */
@@ -571,7 +579,7 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
         unproven(`sandbox unavailable (${plan.reason})`);
         continue;
       }
-      const run: ReproRunSpec = { finding: f.id, language: plan.language, repro, workspace: plan.workspace, timeoutSeconds: reproRunSeconds(env.config) };
+      const run = reproRunOf(f.id, plan, repro, env.config);
       const made = commandRuns(evidence, reproCommandId(f.id)).at(-1);
       if (made !== undefined) {
         used += 1;

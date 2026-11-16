@@ -506,10 +506,17 @@ export function coverageCommand(c: PlannedCommand, pluginRoot: string, wallClock
   return { id: c.id, argv: ["sh", `${pluginRoot}/tools/cover/${c.script}`, String(parts.length), ...parts], timeoutMs: Math.min(MAX_COMMAND_TIMEOUT_MS, wallClockMs + 60_000) };
 }
 
+/**
+ * Where a Go sandbox keeps the outcome of the profile's sandboxed setup, in the run's scratch (one run reviews one head): coverage
+ * writes it, and each reproducing test's job copies the generated files from it instead of running the setup again (design §8.2).
+ */
+export const SETUP_CACHE = "@scratch/go-setup";
+
 /** The Docker confinement of a coverage job: the checkout and (Go) a build cache in the run's scratch are writable; the plugin, the dependency cache and the profile's mounts (tools, offline caches) are read-only; only the variables below reach the container. */
 export function coverageConfinement(plan: CoveragePlan, pluginRoot: string): DockerConfinement {
   const { sandbox: s } = plan;
   const go = plan.language === GO;
+  const setup = go && s.setup.length > 0;
   return {
     kind: "docker",
     image: s.image,
@@ -518,11 +525,12 @@ export function coverageConfinement(plan: CoveragePlan, pluginRoot: string): Doc
     pids: s.pids,
     tmp: s.tmp,
     wallClockMs: s.wallClockMs,
-    writable: go ? [".", "@scratch/gocache"] : ["."],
+    // Go with a sandboxed setup also gets the run's setup store, where tools/sandbox/setup.sh keeps the setup's outcome per head.
+    writable: go ? [".", "@scratch/gocache", ...(setup ? [SETUP_CACHE] : [])] : ["."],
     readOnly: [pluginRoot, plan.cache, ...plan.mounts.map((m) => m.path)],
     env: {
       ...(go
-        ? { HOME: "/tmp", GOFLAGS: "-mod=readonly", GOPROXY: "off", GOTOOLCHAIN: "local", GOCACHE: "@scratch/gocache", GOMODCACHE: plan.cache }
+        ? { HOME: "/tmp", GOFLAGS: "-mod=readonly", GOPROXY: "off", GOTOOLCHAIN: "local", GOCACHE: "@scratch/gocache", GOMODCACHE: plan.cache, ...(setup ? { GRAPHLOOM_SETUP_CACHE: SETUP_CACHE } : {}) }
         : { HOME: "/tmp", npm_config_cache: plan.cache, npm_config_update_notifier: "false", npm_config_fund: "false", npm_config_audit: "false" }),
       ...Object.fromEntries(plan.mounts.map((m) => [mountVariable(m.name), m.path])),
     },

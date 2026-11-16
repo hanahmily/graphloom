@@ -16,14 +16,32 @@ import type { ReproEnv, ReproPlan } from "./review.js";
 /** The tests that ran in `evidence` (each finding has one command, so each counts once): they count against the head's time budget. */
 export const reproRunsIn = (evidence: readonly EvidenceRecord[]): number => new Set(commandRuns(evidence).filter((r) => r.command.id.startsWith(REPRO_ID_PREFIX)).map((r) => r.command.id)).size;
 
-/** The sandbox plan for a test of the cited file, from the evidence of the image checks. */
+/** What a test's job may spend on the profile's sandboxed setup when it has to run it (nothing kept it on this head yet): on top of the test's own cap. */
+export const REPRO_SETUP_MS = 15 * 60_000;
+/** The test's two runs (each `go test`'s timeout plus 30 seconds) and the report, beside the setup, in the job's wall clock. */
+const REPRO_RUNS_MARGIN_MS = 2 * 60_000;
+
+/** The wall clock of a test's container: the finding's cap and a margin, plus the setup's allowance when the profile has a setup; never above the sandbox's own. */
+export function reproWallClockMs(sandboxWallClockMs: number, perFindingMs: number, setup: boolean): number {
+  return Math.min(sandboxWallClockMs, perFindingMs + 3 * 60_000 + (setup ? REPRO_SETUP_MS : 0));
+}
+
+/** The seconds the setup may take in a test's job: the wall clock less the test's runs, at least half a minute. */
+export function reproSetupSeconds(wallClockMs: number, perFindingMs: number): number {
+  return Math.max(30, Math.floor((wallClockMs - perFindingMs - REPRO_RUNS_MARGIN_MS) / 1000));
+}
+
+/** The sandbox plan for a test of the cited file, from the evidence of the image checks; a Go plan carries the profile's sandboxed setup, as coverage runs it. */
 export function reproPlanFor(evidence: readonly EvidenceRecord[], profile: Pick<Profile, "metrics" | "review">, path: string): ReproPlan | { reason: string } {
   const language = reproLanguage(path);
   if (language === undefined) return { reason: `no way to run a test for ${path}` };
   const ready = languageReadiness(evidence, profile, language);
   if ("probe" in ready) return { reason: "the sandbox image was not checked" };
   if ("reason" in ready) return { reason: ready.reason };
-  return { language, workspace: language === "go" ? "." : "auto", image: ready.image };
+  const setup = language === "go" ? ready.sandbox.setup : [];
+  if (setup.length === 0) return { language, workspace: language === "go" ? "." : "auto", image: ready.image, setup: [] };
+  const cap = profile.review.repro.perFindingMs;
+  return { language, workspace: ".", image: ready.image, setup, setupSeconds: reproSetupSeconds(reproWallClockMs(ready.sandbox.wallClockMs, cap, true), cap) };
 }
 
 /** The environment the sweep reads: the profile's settings, the runs of the earlier aspects, the plans and the sandbox's refusals. */
@@ -41,18 +59,20 @@ export function reproJob(stageId: string, evidence: readonly EvidenceRecord[], p
   const ready = languageReadiness(evidence, profile, run.language);
   if (!("ready" in ready)) return { problem: "reason" in ready ? ready.reason : "the sandbox image was not checked" };
   const cap = profile.review.repro.perFindingMs;
-  const wallClockMs = Math.min(ready.sandbox.wallClockMs, cap + 3 * 60_000);
+  const wallClockMs = reproWallClockMs(ready.sandbox.wallClockMs, cap, (run.setup ?? []).length > 0);
   const command = reproCommand(run, pluginRoot, wallClockMs);
   if (command === undefined) return { problem: `the test of ${run.finding} does not fit one command` };
   const plan: CoveragePlan = { language: run.language, sandbox: { ...ready.sandbox, wallClockMs }, commands: [], cache: ready.cache, mounts: ready.mounts };
   const confinement: DockerConfinement = coverageConfinement(plan, pluginRoot);
   const commands: EnvironmentCommand[] = [command];
+  const setup = (run.setup ?? []).map((s) => s.id);
+  const after = setup.length > 0 ? `, after the profile's sandboxed setup (${setup.join(", ")}), copied from the run's scratch when coverage or an earlier test of this head already ran it` : "";
   return {
     stageId,
     kind: "command",
     purpose: "diagnostic",
     readOnly: true,
-    instruction: `Run the reviewer's test of ${run.finding} (${run.language === "go" ? "Go" : "TypeScript"}) twice against the head, in the Docker sandbox (no network, read-only dependency cache, a checkout of the head; the test is never written into it)`,
+    instruction: `Run the reviewer's test of ${run.finding} (${run.language === "go" ? "Go" : "TypeScript"}) twice against the head, in the Docker sandbox (no network, read-only dependency cache, a checkout of the head; the test is never written into it)${after}`,
     input: { commands, continueOnFailure: true },
     checkout: { from: "candidate" },
     confinement,

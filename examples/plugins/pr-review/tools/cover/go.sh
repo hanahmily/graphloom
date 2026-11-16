@@ -15,7 +15,8 @@
 # run in order in the checkout's root, in this same container configuration (no network, read-only mounts), before any
 # `go test`: code generation the repository does not commit (design-pr-review-graph.md 12.2). The first one to fail
 # ends the run with `setup-fail <id> <exit> <output tail>` and no coverage; the report says why. Setup never runs
-# on the host.
+# on the host. The steps run through tools/sandbox/setup.sh, which the reproducing tests share; with GRAPHLOOM_SETUP_CACHE
+# set (the run's scratch), the outcome is kept for them, and a later job on the same head copies it instead of running it.
 #
 # Build tags: a `tags <a,b>` line of the spec (profile metrics.sandbox.go.buildTags, the tags the repository's own CI
 # passes) becomes `-tags=a,b` on `go test` and on nothing else; the setup commands never get them. The profile validates
@@ -71,48 +72,20 @@ printf '%s' "$spec" > "$tmp/spec.txt"
 : > "$tmp/timeouts"
 t0=$(date +%s)
 worst=0
-root0=$(pwd -P)
 
-# decode_run <id> <token>...: the argument tokens are `_` and the base64 of each argv element.
-decode_run() {
-  sid="$1"
-  shift
-  count=$#
-  while [ "$count" -gt 0 ]; do
-    tok="$1"
-    shift
-    dec=$(printf '%s' "${tok#_}" | base64 -d 2>/dev/null; printf x)
-    set -- "$@" "${dec%x}"
-    count=$((count - 1))
-  done
-  [ "$#" -gt 0 ] || return 127
-  (cd "$root0" && "$@") < /dev/null > "$tmp/setup.$sid" 2>&1
-}
-
-: > "$tmp/setup-ok"
-while IFS= read -r line; do
-  case "$line" in "setup "*) ;; *) continue ;; esac
-  set -f
-  # shellcheck disable=SC2086
-  set -- $line
-  set +f
-  shift
-  sid="$1"
-  shift
-  decode_run "$sid" "$@"
-  rc=$?
-  if [ "$rc" -ne 0 ]; then
-    why=$(tail -n 6 "$tmp/setup.$sid" | tr '\n\t' '  ' | sed 's/ *$//' | cut -c1-240)
-    {
-      echo "graphloom-coverage-v1 go"
-      sed 's/^/setup /; s/$/ ok/' "$tmp/setup-ok"
-      echo "setup-fail $sid $rc $why"
-    } > "$rep"
-    tail -n 25 "$tmp/setup.$sid"
-    exit 0
-  fi
-  echo "$sid" >> "$tmp/setup-ok"
-done < "$tmp/spec.txt"
+# The sandboxed setup, shared with the reproducing tests (tools/sandbox/setup.sh). With GRAPHLOOM_SETUP_CACHE (the run's
+# scratch) its outcome is kept, so the reproducing tests of this head copy what it generated instead of running it again.
+. "$here/../sandbox/setup.sh"
+if ! setup_run "$tmp/spec.txt" "$tmp"; then
+  why=$(tail -n 6 "$tmp/setup-fail.out" | tr '\n\t' '  ' | sed 's/ *$//' | cut -c1-240)
+  {
+    echo "graphloom-coverage-v1 go"
+    sed 's/^/setup /; s/$/ ok/' "$tmp/setup-ok"
+    echo "setup-fail $SETUP_FAIL_ID $SETUP_FAIL_RC $why"
+  } > "$rep"
+  cat "$tmp/setup-fail.out"
+  exit 0
+fi
 
 tags=$(sed -n 's/^tags //p' "$tmp/spec.txt" | head -n 1)
 case "$tags" in *[!A-Za-z0-9_.,]*) tags="" ;; esac

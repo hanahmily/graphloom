@@ -15,6 +15,7 @@ import { createHash } from "node:crypto";
 import type { EnvironmentCommand } from "@graphloom/sdk";
 import { MAX_EXECUTOR_INPUT_BYTES } from "@graphloom/sdk";
 import { reportText, type CommandRun } from "./evidence.js";
+import { encodeArg } from "./metrics/coverage.js";
 import { secretFindings } from "./secrets.js";
 import { toolchainMismatch, toolchainSentence } from "./toolchain.js";
 import { writeChunks } from "./write.js";
@@ -114,6 +115,10 @@ export interface ReproRunSpec {
   /** The TypeScript workspace (the directory of the package.json that declares vitest), repository-relative; `.` for Go. */
   workspace: string;
   timeoutSeconds: number;
+  /** The profile's sandboxed setup (Go, `metrics.sandbox.go.setup`), run before the test as coverage runs it; none when empty. */
+  setup?: ReadonlyArray<{ id: string; argv: readonly string[] }>;
+  /** The seconds the setup may take in all when it has to run (the job's wall clock less the test's two runs). */
+  setupSeconds?: number;
 }
 
 /** The spec the script reads: one `key value` line each, the test as base64 so the bytes run are the bytes recorded. */
@@ -127,6 +132,9 @@ export function reproSpec(s: ReproRunSpec): string {
     `timeout ${s.timeoutSeconds}`,
     `ws ${s.workspace}`,
     `file ${Buffer.from(s.repro.text, "utf8").toString("base64")}`,
+    // Only when there is a setup, so a spec without one is the bytes it always was.
+    ...(s.setup ?? []).map((st) => `setup ${st.id} ${st.argv.map(encodeArg).join(" ")}`),
+    ...(s.setup !== undefined && s.setup.length > 0 && s.setupSeconds !== undefined ? [`setuptime ${s.setupSeconds}`] : []),
   ].join("\n");
 }
 
@@ -167,7 +175,25 @@ export interface ReproReport {
   file: string;
   /** Why the run could not start (dependencies that could not be installed offline), when it could not. */
   setupFail?: string;
+  /** The profile's sandboxed setup step that failed (the test then never ran), with its exit status and first error line. */
+  setupStep?: { id: string; exit: number; line: string };
+  /** The setup steps that succeeded, in order, and whether their outcome was copied from an earlier job on this head. */
+  setup: string[];
+  setupRestored: boolean;
   runs: ReproRunReport[];
+}
+
+/** The longest first error line of a failed setup step a reason quotes. */
+const SETUP_LINE_CHARS = 240;
+
+/**
+ * Why a finding's test never ran when the profile's sandboxed setup failed (design §8.2): the step and its first error line, or
+ * the toolchain sentence when Go refused the image's version. Never "build failed": nothing of the test was built.
+ */
+export function setupFailureReason(step: { id: string; exit: number; line: string }): string {
+  const old = toolchainMismatch(step.line);
+  if (old !== undefined) return `the sandbox toolchain is older than the repository requires (${toolchainSentence(old)})`;
+  return `the sandbox setup failed (${step.id}: ${step.line !== "" ? step.line : `exited ${step.exit}`})`;
 }
 
 const redact = (m: string): string => (secretFindings(m).length > 0 ? "(the failure message looked like a credential and was withheld)" : m);
@@ -177,7 +203,7 @@ export function parseReproReport(text: string): ReproReport | { error: string } 
   const lines = text.split("\n").map((l) => l.replace(/\r$/, ""));
   const head = /^graphloom-repro-v1 (go|typescript)$/.exec(lines[0] ?? "");
   if (head === null) return { error: "the command wrote no graphloom-repro-v1 report" };
-  const report: ReproReport = { language: head[1] as ReproLanguage, finding: "", sha256: "", file: "", runs: [] };
+  const report: ReproReport = { language: head[1] as ReproLanguage, finding: "", sha256: "", file: "", setup: [], setupRestored: false, runs: [] };
   const run = (n: number): ReproRunReport => (report.runs[n - 1] ??= { outcome: "killed", frames: [] });
   for (const line of lines.slice(1)) {
     const m = /^(\w[\w-]*) ?(.*)$/.exec(line);
@@ -187,6 +213,14 @@ export function parseReproReport(text: string): ReproReport | { error: string } 
     else if (key === "sha256") report.sha256 = rest.trim();
     else if (key === "file") report.file = rest.trim();
     else if (key === "setup-fail") report.setupFail = redact(rest.trim()).slice(0, MAX_MESSAGE_CHARS);
+    else if (key === "setup") {
+      const s = /^([a-z][a-z0-9-]*) ok$/.exec(rest.trim());
+      if (s !== null) report.setup.push(s[1]!);
+    } else if (key === "setup-restored") report.setupRestored = true;
+    else if (key === "setup-step-fail") {
+      const s = /^([a-z][a-z0-9-]*) (\d+) ?(.*)$/.exec(rest.trim());
+      if (s !== null && report.setupStep === undefined) report.setupStep = { id: s[1]!, exit: Number(s[2]), line: redact(s[3]!.trim()).slice(0, SETUP_LINE_CHARS) };
+    }
     else if (key === "run" || key === "at" || key === "frame" || key === "message") {
       const k = /^([12]) ?(.*)$/.exec(rest);
       if (k === null) continue;
@@ -241,6 +275,7 @@ export function judgeRun(finding: { id: string; path: string }, repro: Repro, la
   if ("error" in parsed) return unproven(run.command.exitCode !== 0 && run.command.exitCode !== null ? "inconclusive (killed)" : "inconclusive (no report)");
   if (parsed.language !== language || parsed.finding !== finding.id || parsed.sha256 !== record.sha256) return unproven("inconclusive (the report is not of the recorded test)");
   if (parsed.setupFail !== undefined) return unproven(`sandbox unavailable (${parsed.setupFail})`);
+  if (parsed.setupStep !== undefined) return unproven(setupFailureReason(parsed.setupStep));
   record.runs = parsed.runs.map((r) => r.outcome);
   if (parsed.runs.length !== 2) return unproven("inconclusive (the test did not run twice)");
   const [a, b] = parsed.runs as [ReproRunReport, ReproRunReport];

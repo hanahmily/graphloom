@@ -22,6 +22,13 @@
 # assertion of the test itself), `frame n <path>:<line>` (a panic's frame in the repository), `message n <text>` (at most 2000
 # characters, newlines as a return symbol). `setup-fail <why>` instead of runs when the test could not be set up (the
 # dependencies could not be installed offline, a bad spec). Always exits 0 once it has written a report.
+#
+# Go, sandboxed setup: the spec's `setup <id> <_base64 argument>...` lines (profile metrics.sandbox.go.setup) run before the
+# test, through tools/sandbox/setup.sh as coverage runs them, bounded by the spec's `setuptime <seconds>`; with
+# GRAPHLOOM_SETUP_CACHE (the run's scratch) the outcome coverage or an earlier test of this head kept is copied instead. The
+# report then has `setup <id> ok` per step and `setup-restored` when it was copied, or, instead of runs,
+# `setup-step-fail <id> <exit> <first error line>`. The generated files land in the job's disposable checkout; the test
+# itself still never does.
 
 set -u
 here=$(dirname "$0")
@@ -102,6 +109,17 @@ if [ "$lang" = go ]; then
   file="graphloom_repro_${finding}_test.go"
   say "file $file"
   cp "$tmp/test.txt" "$tmp/$file"
+  # The profile's sandboxed setup (code generation the repository does not commit), as coverage runs it and shared with it:
+  # copied from the run's scratch when coverage or an earlier test of this head already ran it, run here otherwise.
+  . "$here/../sandbox/setup.sh"
+  if ! setup_run "$tmp/spec.txt" "$tmp" "$(val setuptime)"; then
+    sed 's/^/setup /; s/$/ ok/' "$tmp/setup-ok" >> "$rep"
+    say "setup-step-fail $SETUP_FAIL_ID $SETUP_FAIL_RC $SETUP_FAIL_FIRST"
+    cat "$tmp/setup-fail.out"
+    exit 0
+  fi
+  sed 's/^/setup /; s/$/ ok/' "$tmp/setup-ok" >> "$rep"
+  [ -z "$SETUP_RESTORED" ] || say "setup-restored"
   # The module that holds the package: the nearest go.mod at or above <dir>.
   mod="$dir"
   while [ ! -f "$root/$mod/go.mod" ] && [ "$mod" != . ]; do
