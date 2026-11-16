@@ -2366,11 +2366,13 @@ otherwise:
   `repro.sh` run the steps through one shared script, `tools/sandbox/setup.sh`. Setup runs once per head: the first job
   to run it (coverage, normally) keeps its outcome in the run's scratch (`@scratch/go-setup`, writable in the Go
   sandbox only when the profile has a setup), keyed by the setup lines, the image's Go version and the inventory of
-  the checkout's files (path and SHA-256) before setup. What the setup changed is the difference between that
-  inventory and the one after the steps, by content, never by timestamp: a file written with a preserved old
-  timestamp (`cp -p`, an archive) is kept like any other. Each test's job then copies the added and changed files
-  into its own disposable checkout and removes the deleted ones (the report says `setup-restored`) instead of running
-  the steps again. A failed setup is kept the same way, so
+  the checkout's files and symbolic links before setup: per path, its type and mode, and its content's SHA-256 or the
+  link's target. What the setup changed is the difference between that inventory and the one after the steps, never
+  a timestamp: a file written with a preserved old timestamp (`cp -p`, an archive), a new symbolic link and a file
+  made executable all count. The changed entries are kept as a tar of the checkout's own entries, so links stay links
+  and modes stay as set. Each test's job then extracts them into its own disposable checkout (`tar -xop`: the recorded
+  modes, owned by the job) and removes the deleted paths (the report says `setup-restored`) instead of running the
+  steps again. A failed setup is kept the same way, so
   later tests report it without running it again. When a test's job has to run the setup itself, its container gets
   15 more minutes (`perFindingMs` plus 3 minutes plus 15, never more than the sandbox's `wallClockMs`), and the steps
   together get that wall clock less the test's runs. A step still running then is stopped. A step that fails stops
@@ -4078,9 +4080,9 @@ BanyanDB does not commit its generated protobuf and mock code. Coverage ran the 
   `tools/sandbox/setup.sh`, which `go.sh` and `repro.sh` both source, so they cannot drift apart.
 - **Once per head.** Each job has its own disposable checkout, so the outcome is kept in the run's scratch
   (`@scratch/go-setup`), keyed by the setup lines, the image's Go version and the inventory of the checkout's
-  files (path and SHA-256) before setup. Coverage normally writes it. What the setup did is the difference
-  between the inventories before and after it: later jobs copy the added and changed files into their own
-  checkout and remove the deleted ones. A failure is kept too, so later tests report it without running the
+  files and symbolic links (type, mode, and content hash or link target) before setup. Coverage normally writes
+  it. What the setup did is the difference between the inventories before and after it: later jobs extract the
+  added and changed entries from a tar (so links and modes survive) and remove the deleted ones. A failure is kept too, so later tests report it without running the
   steps again.
 - **Reason.** A failed step makes the finding `unproven (the sandbox setup failed (<step id>: <first error
   line>))`, never `inconclusive (build failed)`; Go's refusal of the image's version keeps the toolchain reason.
@@ -4094,7 +4096,8 @@ BanyanDB does not commit its generated protobuf and mock code. Coverage ran the 
   first test's job can do the same); running setup in every test's job without keeping it (BanyanDB's mocks take
   about 35 seconds, for each finding); keeping the outcome between runs (the reason in [§12.2](#122-confinement)
   still holds); finding the setup's files by modification time (a file written with a preserved old timestamp
-  would be missed, and a later job would skip the setup without it).
+  would be missed, and a later job would skip the setup without it); copying file contents alone (a symbolic link
+  or a mode change would be lost).
 
 The `findings-proven` requirement's statement names the new reason. No step, name, order or budget changes.
 

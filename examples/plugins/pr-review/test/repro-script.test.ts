@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -179,6 +179,29 @@ describe.skipIf(!hasGo)("repro.sh with Go and the profile's sandboxed setup: a p
     expect(count()).toBe(before + 1);
     expect(readFileSync(path.join(second, "api/v1/v1.go"), "utf8")).toContain('const Unit = "w"');
     expect(existsSync(path.join(second, "obsolete.txt"))).toBe(false);
+  });
+
+  it("keeps a symbolic link the setup made and a mode it changed: the restored checkout has both", () => {
+    const store = mkdtempSync(path.join(tmpdir(), "repro-setup-store-"));
+    scratch.push(store);
+    const env = { GRAPHLOOM_SETUP_CACHE: store };
+    // The generated package is a link to a file the setup writes; helper.sh, already in the checkout, is made executable.
+    const linking = { id: "proto", argv: ["sh", "-c", `echo run >> '${runs}'; mkdir -p api/v1 gen && printf 'package v1\\n\\nconst Unit = "w"\\n' > gen/target.go.txt && ln -s ../../gen/target.go.txt api/v1/v1.go && chmod +x helper.sh`] };
+    const withHelper = (): string => {
+      const mod = checkout();
+      writeFileSync(path.join(mod, "helper.sh"), "#!/bin/sh\necho helper\n", { mode: 0o644 });
+      return mod;
+    };
+    const before = count();
+    expect(parseReproReport(runScript(withHelper(), "go", "F13", repro, ".", { setup: [linking], setupSeconds: 60, env }).text)).toMatchObject({ setupRestored: false });
+    const second = withHelper();
+    const again = runScript(second, "go", "F14", repro, ".", { setup: [linking], setupSeconds: 60, env }).text;
+    expect(parseReproReport(again)).toMatchObject({ setup: ["proto"], setupRestored: true });
+    expect(count()).toBe(before + 1);
+    expect(judged(again, "F14")).toMatchObject({ state: "proven" });
+    expect(lstatSync(path.join(second, "api/v1/v1.go")).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(path.join(second, "api/v1/v1.go"))).toBe("../../gen/target.go.txt");
+    expect(statSync(path.join(second, "helper.sh")).mode & 0o111).not.toBe(0);
   });
 
   it("names the first error of the step's whole output, though more than 25 progress lines follow it", () => {

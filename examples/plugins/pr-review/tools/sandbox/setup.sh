@@ -14,11 +14,12 @@
 # all the steps together (a step still running then is stopped and fails with exit 124).
 #
 # Once per head: when GRAPHLOOM_SETUP_CACHE names a writable directory (the run's scratch), the outcome is kept there under a
-# key of the setup lines, the Go version and the inventory of the checkout's files (path and SHA-256, without .git) before
-# setup. A later job on the same checkout (each job has its own disposable checkout) then reproduces the setup's effect
-# instead of running the steps again (SETUP_RESTORED=1): it copies the files the setup added or changed and removes those it
-# deleted, found by comparing the inventories before and after the steps (contents, never timestamps). A failure is
-# reported again without running them.
+# key of the setup lines, the Go version and the inventory of the checkout's files and symbolic links (path, type and mode,
+# and the content's SHA-256 or the link's target; without .git) before setup. A later job on the same checkout (each job has
+# its own disposable checkout) then reproduces the setup's effect instead of running the steps again (SETUP_RESTORED=1): it
+# extracts the entries the setup added or changed (kept as a tar, so links and modes survive) and removes those it deleted,
+# found by comparing the inventories before and after the steps (never timestamps). A failure is reported again without
+# running them.
 
 # setup_decode <id> <token>...: runs one step, its argument tokens being `_` and the base64 of each argv element.
 setup_decode() {
@@ -50,9 +51,23 @@ setup_first() {
   printf '%s' "$su_line" | sed 's/^ *//; s/ *$//' | cut -c1-240
 }
 
-# setup_inventory <out>: `<sha256>  ./<path>` of every file of the checkout but .git, sorted.
+# setup_inventory <out>: one line per regular file and symbolic link of the checkout but .git, sorted by path:
+# `./<path><TAB><raw mode in hex: type and permissions><TAB><sha256 of the content | -> link target>`. A change of content,
+# of link target, of type or of permission bits changes the line. `stat -c %f` and `readlink` are in coreutils and busybox.
 setup_inventory() {
-  (cd "$su_root" && find . -path ./.git -prune -o -type f -exec sha256sum {} + 2>/dev/null) | LC_ALL=C sort > "$1"
+  (
+    cd "$su_root" || exit 1
+    find . -path ./.git -prune -o \( -type f -o -type l \) -exec stat -c '%f %n' {} + > "$su_work/inv-mode" 2>/dev/null
+    find . -path ./.git -prune -o -type f -exec sha256sum {} + > "$su_work/inv-hash" 2>/dev/null
+    find . -path ./.git -prune -o -type l -print 2>/dev/null | while IFS= read -r su_p; do printf '%s\t-> %s\n' "$su_p" "$(readlink "$su_p")"; done > "$su_work/inv-link"
+    awk -v hash="$su_work/inv-hash" -v link="$su_work/inv-link" '
+      BEGIN {
+        while ((getline l < hash) > 0) c[substr(l, 67)] = substr(l, 1, 64)
+        while ((getline l < link) > 0) { i = index(l, "\t"); c[substr(l, 1, i - 1)] = substr(l, i + 1) }
+      }
+      { p = substr($0, index($0, " ") + 1); print p "\t" $1 "\t" ((p in c) ? c[p] : "?") }
+    ' "$su_work/inv-mode"
+  ) | LC_ALL=C sort > "$1"
 }
 
 # setup_save <failed 0|1>: keeps this outcome in the cache, best effort (a full disk only means the next job runs the steps).
@@ -60,7 +75,7 @@ setup_save() {
   [ -n "$su_cache" ] || return 0
   su_part="$GRAPHLOOM_SETUP_CACHE/.part.$$.$(date +%s)"
   rm -rf "$su_part"
-  mkdir -p "$su_part/files" 2>/dev/null || return 0
+  mkdir -p "$su_part" 2>/dev/null || return 0
   cp "$su_work/setup-ok" "$su_part/ok" || { rm -rf "$su_part"; return 0; }
   : > "$su_part/deleted"
   if [ "$1" = 1 ]; then
@@ -69,15 +84,14 @@ setup_save() {
     cp "$su_work/setup-fail.out" "$su_part/out"
   else
     setup_inventory "$su_work/setup-after" || { rm -rf "$su_part"; return 0; }
-    # Added or changed: an inventory line after that was not there before. Deleted: a path before that is gone after.
-    LC_ALL=C comm -13 "$su_work/setup-before" "$su_work/setup-after" | cut -c67- > "$su_work/setup-files"
-    cut -c67- "$su_work/setup-before" | LC_ALL=C sort > "$su_work/setup-paths-before"
-    cut -c67- "$su_work/setup-after" | LC_ALL=C sort > "$su_work/setup-paths-after"
+    # Added or changed (content, link target, type or mode): an inventory line after that was not there before. Deleted: a
+    # path before that is gone after. The changed paths are kept as a tar of the checkout's own entries, so a symbolic link
+    # stays a link and a mode stays the mode.
+    LC_ALL=C comm -13 "$su_work/setup-before" "$su_work/setup-after" | cut -f1 > "$su_work/setup-files"
+    cut -f1 "$su_work/setup-before" > "$su_work/setup-paths-before"
+    cut -f1 "$su_work/setup-after" > "$su_work/setup-paths-after"
     LC_ALL=C comm -23 "$su_work/setup-paths-before" "$su_work/setup-paths-after" > "$su_part/deleted"
-    while IFS= read -r su_f; do
-      su_d=$(dirname "$su_f")
-      mkdir -p "$su_part/files/$su_d" && cp "$su_root/$su_f" "$su_part/files/$su_f" || { rm -rf "$su_part"; return 0; }
-    done < "$su_work/setup-files"
+    (cd "$su_root" && tar -cf "$su_part/files.tar" -T "$su_work/setup-files") 2>/dev/null || { rm -rf "$su_part"; return 0; }
   fi
   : > "$su_part/done"
   if [ -e "$su_cache" ]; then rm -rf "$su_part"; else mv "$su_part" "$su_cache" 2>/dev/null || rm -rf "$su_part"; fi
@@ -85,7 +99,8 @@ setup_save() {
 
 # setup_restore: the kept setup's effect on this checkout; non-zero when it did not complete.
 setup_restore() {
-  cp -R "$su_cache/files/." "$su_root/" 2>/dev/null || return 1
+  # Modes as recorded (-p, not the umask), owned by whoever restores (-o: --no-same-owner).
+  (cd "$su_root" && tar -xopf "$su_cache/files.tar") 2>/dev/null || return 1
   while IFS= read -r su_f; do
     rm -f "$su_root/$su_f" || return 1
   done < "$su_cache/deleted"
