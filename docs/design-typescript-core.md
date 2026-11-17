@@ -361,6 +361,18 @@ I/O in scoped execution processes. Built-in executors follow the same lifecycle
 protocol. The controller records and admits execution without implementing its
 domain behavior; see [executor invocation](design-executors.md#invocation-and-lifecycle).
 
+A validator's `ValidationInput` carries the requirement ID and statement, the
+evidence it rests on, earlier generations' evidence as `history`, the candidate
+identity, and two task values the controller interprets nothing in: `config`,
+the task's pinned config, and `request`, the task's request as intake pinned it
+(the text `RunView.task.request` shows). The controller passes `request` on
+every validator call of a run, on run, on resume and on a resume's receipt
+recheck, from the run's state, never from the task file, which may have changed
+since intake. Both are optional: a validator that ignores them behaves as it
+did, and an evaluation outside a run (the scenario walk of `graphloom check`)
+leaves `request` out. An added optional field keeps the protocol version; the
+wire check rejects only a `request` that is not a string.
+
 `prepareTask` is optional and runs before any run exists. It is pure over its
 input, like `advance`: it returns a plan as data, which the CLI validates and
 executes ([§16](#16-preparing-a-task-graphloom-task-new)).

@@ -129,6 +129,9 @@ export function assertValidationInput(value: unknown): ValidationInput {
   if (obj["candidateDigest"] !== undefined && typeof obj["candidateDigest"] !== "string") {
     throw new WireValidationError("malformed", "candidateDigest must be a string");
   }
+  if (obj["request"] !== undefined && typeof obj["request"] !== "string") {
+    throw new WireValidationError("malformed", "request must be a string");
+  }
   return obj as unknown as ValidationInput;
 }
 
