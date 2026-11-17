@@ -2,15 +2,15 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { EnvironmentCommand, EvidenceRecord, RehearsalScenario } from "@graphloom/sdk";
 import { ledgerReadCommand } from "../src/kit/commands.js";
-import { LEDGER_JSON_FILE, LEDGER_MD_FILE, LEDGER_REVIEW_JSON_FILE, LEDGER_REVIEW_MD_FILE } from "../src/kit/constants.js";
-import { ledgerWriteCommands, parseSectionRecord, priorState, writtenLedger, type Migration } from "../src/kit/ledger.js";
-import { partCommands, readParts, recordedNecessityJson } from "../src/kit/parts.js";
+import { LEDGER_DESIGN_JSON_FILE, LEDGER_DESIGN_MD_FILE, LEDGER_JSON_FILE, LEDGER_MD_FILE } from "../src/kit/constants.js";
+import { parseSectionRecord, priorState, reviewLedgerWriteCommands, writtenReviewLedger, type ReviewMigration } from "../src/kit/ledger.js";
+import { partCommands, readParts } from "../src/kit/parts.js";
 import { ledgerPublishedCommand } from "../src/publish.js";
 import type { PullRequest } from "../src/kit/request.js";
 import { REHEARSAL_HEAD } from "../src/rehearsal.js";
@@ -26,15 +26,13 @@ export const GIT_TEST_ENV = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GI
 export interface LedgerState {
   sha: string;
   reads: Record<string, string>;
-  qa: string;
-  necessity: string;
-  design: { heads: Array<Record<string, unknown>>; qa: Array<Record<string, unknown>>; items: Array<Record<string, unknown>> };
+  design: { heads: Array<Record<string, unknown>>; qa: Array<Record<string, unknown>>; items: Array<Record<string, unknown>> } | undefined;
   review: { heads: Array<Record<string, unknown>>; findings: Array<Record<string, unknown>> } | undefined;
 }
 
 /**
- * A review clone holding a pull request's ledger, which the Answers and Publish stages of simulated runs advance with their own
- * commands (the section write and `ledger-published`), every simulated head renamed to a label of the test's.
+ * A review clone holding a pull request's ledger, which the Draft and Publish stages of simulated runs advance with their own
+ * commands (the review section's write and `ledger-published`), every simulated head renamed to a label of the test's.
  */
 export class LedgerRepo {
   dir = "";
@@ -46,10 +44,6 @@ export class LedgerRepo {
   }
   git = async (...args: string[]): Promise<string> => (await sh("git", args, { cwd: this.dir, env: GIT_TEST_ENV, maxBuffer: 64 * 1024 * 1024 })).stdout.trim();
   exec = async (argv: readonly string[], extra: Record<string, string> = {}) => sh(argv[0]!, argv.slice(1), { cwd: this.dir, env: { ...GIT_TEST_ENV, ...extra }, maxBuffer: 64 * 1024 * 1024 });
-  private async put(file: string, text: string): Promise<void> {
-    await mkdir(path.dirname(path.join(this.dir, file)), { recursive: true });
-    await writeFile(path.join(this.dir, file), text);
-  }
 
   /** Runs a command as the command executor does, with a report file, and returns what it wrote there (or printed). */
   async report(c: EnvironmentCommand): Promise<string> {
@@ -76,11 +70,12 @@ export class LedgerRepo {
     return { sha, reads, evidence };
   }
 
-  /** The ledger after a run, with its head renamed to `label`: its Answers write (from the value the run read), then Publish's. */
+  /** The ledger after a run, with its head renamed to `label`: its Draft write of the review section (from the value the run read), then Publish's. */
   async advance(sim: Simulation, label: string): Promise<LedgerState> {
     const rename = (s: string): string => s.split(REHEARSAL_HEAD).join(label);
-    const job = sim.jobs.find((j) => j.instruction.startsWith("Advance the pull"))!;
-    const written = writtenLedger((job.input as { commands: Array<{ argv: string[] }> }).commands[0]!.argv)!;
+    const job = sim.jobs.find((j) => j.instruction.startsWith("Advance the ledger's review section"))!;
+    const argv = (job.input as { commands: Array<{ argv: string[] }> }).commands[0]!.argv;
+    const written = writtenReviewLedger(argv)!;
     const parts = (base: string, file: string): string => {
       const p = readParts(sim.evidence, base, file);
       if (p.state !== "read") throw new Error(`${file} was not written: ${p.state}`);
@@ -88,28 +83,21 @@ export class LedgerRepo {
     };
     const json = written.files !== undefined ? parts("ledger-json", LEDGER_JSON_FILE) : written.json;
     const markdown = written.files !== undefined ? parts("ledger-md", LEDGER_MD_FILE) : written.markdown;
-    const migration: Migration =
-      written.migration.mode === "-" ? { from: "none" } : { from: "v1", review: written.migration.mode === "v1+review" ? { json: parts("ledger-review-json", LEDGER_REVIEW_JSON_FILE), markdown: parts("ledger-review-md", LEDGER_REVIEW_MD_FILE) } : undefined };
-    const necessity = recordedNecessityJson(sim.evidence);
-    if (necessity.state !== "read") throw new Error("necessity.json was not recorded");
-    // The worktree's files the write commits beside the section's ledger.json.
-    await this.put(".graphloom/review/qa.json", rename(sim.qa!.json));
-    await this.put(".graphloom/review/necessity.json", necessity.value);
-    await this.put(".graphloom/review/report.json", "{}\n");
+    const migration: ReviewMigration = written.migration.mode === "v1" ? { from: "v1", design: { json: parts("ledger-design-json", LEDGER_DESIGN_JSON_FILE), markdown: parts("ledger-design-md", LEDGER_DESIGN_MD_FILE) } } : { from: "none" };
     const pr = { ...LEDGER_PULL, head: label, mode: "review" } as PullRequest;
-    const w = ledgerWriteCommands(pr, written.old, written.baseline, rename(json), rename(markdown), migration);
+    const w = reviewLedgerWriteCommands(pr, written.old, written.baseline, rename(json), rename(markdown), migration, rename(argv[6]!));
     for (const c of w.parts) await this.exec(c.argv);
     const record = parseSectionRecord((await this.exec(w.write.argv)).stdout)!;
     const patch = readParts(sim.evidence, "publish-patch", ".graphloom/review/ledger/publish-patch.json");
     if (patch.state === "read") {
       const text = rename(patch.value);
       for (const part of partCommands("publish-patch", ".graphloom/review/ledger/publish-patch.json", text)) await this.exec(part.argv);
-      await this.exec(ledgerPublishedCommand(pr, JSON.parse(text), { design: record.sections.design!, review: record.sections.review ?? "absent" }, process.execPath).argv);
+      await this.exec(ledgerPublishedCommand(pr, JSON.parse(text), { design: record.sections.design ?? "absent", review: record.sections.review! }, process.execPath).argv);
     }
     const { sha, reads } = await this.reads();
     const show = async (p: string): Promise<string> => this.git("show", `${sha}:${p}`);
-    const hasReview = (await this.git("ls-tree", "--name-only", sha)).split("\n").includes("review");
-    return { sha, reads, qa: await show("design/qa.json"), necessity: await show("design/necessity.json"), design: JSON.parse(await show("design/ledger.json")), review: hasReview ? JSON.parse(await show("review/ledger.json")) : undefined };
+    const names = (await this.git("ls-tree", "--name-only", sha)).split("\n");
+    return { sha, reads, design: names.includes("design") ? JSON.parse(await show("design/ledger.json")) : undefined, review: names.includes("review") ? JSON.parse(await show("review/ledger.json")) : undefined };
   }
 }
 

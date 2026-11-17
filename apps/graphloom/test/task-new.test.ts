@@ -491,6 +491,19 @@ describe("pr-review: graphloom task new, end to end against a fixture remote", (
     expect((await refused(["acme/widgets#7", "--bogus"])).errors.join("\n")).toMatch(/unknown argument/);
     expect((await refused(["acme/widgets#7", "--base", "a..b"])).errors.join("\n")).toMatch(/not a branch name/);
   }, 120_000);
+
+  it("--no-report writes the request suffix the validators read (pr-review 1.x); --all-questions is refused, naming pr-design-review", async () => {
+    const w = await prWorld();
+    const r = await run({ graph: "pr-review", args: ["acme/widgets#7", "--no-report"], repo: w.repo.path, out: w.out, profile: "widgets" });
+    expect(r.errors).toEqual([]);
+    expect(r.code).toBe(0);
+    const taskPath = path.join(w.out, "reviews", "widgets-7", "task.yaml");
+    expect(await readFile(taskPath, "utf8")).toContain(`request: "Review on acme/widgets#7 at ${w.head}, without a report."`);
+    expect((await check(taskPath)).problems).toEqual([]);
+    const refused = await run({ graph: "pr-review", args: ["acme/widgets#7", "--all-questions"], repo: w.repo.path, out: w.out, profile: "widgets", force: true });
+    expect(refused.code).toBe(2);
+    expect(refused.errors.join("\n")).toMatch(/pr-design-review/);
+  }, 120_000);
 });
 
 describe("pr-design-review: graphloom task new, end to end against a fixture remote", () => {

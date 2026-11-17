@@ -11,8 +11,7 @@ import { createHash } from "node:crypto";
 import { COMMAND } from "./kit/constants.js";
 import { ledgerRead, oldValue, priorState } from "./kit/ledger.js";
 import { isObject } from "./kit/evidence.js";
-import { FEATURE_TYPE, LEDGER_V1, LEDGER_V2, migrateV1 } from "./kit/ledgerv2.js";
-import { REUSE_TYPE } from "./questions.js";
+import { LEDGER_V1, LEDGER_V2, migrateV1 } from "./kit/ledgerv2.js";
 import { lineText, parsePatch } from "./kit/patch.js";
 import type { PullFile } from "./kit/snapshot.js";
 import type { EvidenceRecord } from "@graphloom/sdk";
@@ -138,81 +137,6 @@ export function registryFromEvidence(evidence: readonly EvidenceRecord[]): Prior
   if (read === undefined || !read.ledger.present) return EMPTY_REGISTRY;
   const prior = priorState(evidence, oldValue(read.ledger));
   return prior.state === "read" ? { ...registryOf(prior.value), designDir: prior.layout === "v2" ? "design/" : "" } : EMPTY_REGISTRY;
-}
-
-// ---- stable keys and ids ----
-
-export interface KeyQuestion {
-  id: string;
-  type: string;
-  item: string;
-  symbol?: string | undefined;
-  fn?: string | undefined;
-  fnPath?: string | undefined;
-}
-
-export interface KeySymbol {
-  id: string;
-  path: string;
-  qualified: string;
-}
-
-/**
- * The stable key of each question: its type and its subject, which is what the same question on a new head shares. The subject
- * is the symbol (path and qualified name), the measured function (path and name), or else the change item's first cited path
- * (an item's own id and text are the reporter's and differ from head to head). Two questions that share a key are told apart by
- * their order.
- */
-export function questionKeys(questions: readonly KeyQuestion[], symbols: readonly KeySymbol[], itemPath: (item: string) => string | undefined): Map<string, string> {
-  const out = new Map<string, string>();
-  const seen = new Map<string, number>();
-  for (const q of questions) {
-    const sym = q.symbol !== undefined ? symbols.find((s) => s.id === q.symbol) : undefined;
-    const base =
-      q.type === "necessity"
-        ? "necessity|N1"
-        : sym !== undefined
-          ? `${q.type}|sym|${sym.path}|${sym.qualified}`
-          : q.fn !== undefined
-            ? `${q.type}|fn|${q.fnPath ?? ""}|${q.fn}`
-            : // A high-level existing-reuse-common question is keyed as the v2 ledger keys it (design-pr-review-split §5.4), so a migrated ledger's id carries on.
-              `${q.type === REUSE_TYPE ? FEATURE_TYPE : q.type}|item|${itemPath(q.item) ?? q.item}`;
-    const n = (seen.get(base) ?? 0) + 1;
-    seen.set(base, n);
-    out.set(q.id, n === 1 ? base : `${base}#${n}`);
-  }
-  return out;
-}
-
-/** The ids of a run's questions: a question whose key the ledger holds keeps its id, the others number on from the ledger's last. */
-export function continueIds<T extends { id: string; type: string }>(questions: readonly T[], keys: ReadonlyMap<string, string>, registry: PriorRegistry): Map<string, string> {
-  const byKey = new Map<string, string>();
-  for (const q of registry.qa) if (q.key !== "") byKey.set(q.key, q.id);
-  for (const i of registry.items) if (i.origin === "round1" && i.key !== "" && !byKey.has(i.key)) byKey.set(i.key, i.id);
-  const used = new Set<string>();
-  const out = new Map<string, string>();
-  let next = registry.nextQ;
-  for (const q of questions) {
-    if (q.type === "necessity") {
-      out.set(q.id, q.id);
-      continue;
-    }
-    const prior = byKey.get(keys.get(q.id) ?? "");
-    if (prior !== undefined && !used.has(prior)) {
-      used.add(prior);
-      out.set(q.id, prior);
-    } else {
-      let id = `Q${next}`;
-      next += 1;
-      while (used.has(id)) {
-        id = `Q${next}`;
-        next += 1;
-      }
-      used.add(id);
-      out.set(q.id, id);
-    }
-  }
-  return out;
 }
 
 // ---- anchors ----

@@ -10,13 +10,15 @@ import type { EvidenceRecord } from "@graphloom/sdk";
 import { afterAll, describe, expect, it } from "vitest";
 import type { Draft, DraftEntry } from "../src/draft.js";
 import { readParts, partCommands } from "../src/kit/parts.js";
-import { commentIds, createInput, findPosted, findingMarker, ledgerPatch, ledgerPublishedCommand, planReview, publishFlow, publishPlan, designReviewMarker, reviewMarker, viewerOf, verdictLine, MAX_INLINE_COMMENTS, MAX_REVIEW_BODY } from "../src/publish.js";
+import { commentIds, createInput, findPosted, findingMarker, ledgerPatch, ledgerPublishedCommand, MAX_ITEM_TEXT, planReview, publishFlow, publishPlan, designReviewMarker, reviewMarker, viewerOf, verdictLine, MAX_INLINE_COMMENTS, MAX_REVIEW_BODY, type PublishPlan } from "../src/publish.js";
 import { analyze, evidencePull } from "../src/kit/analysis.js";
+import { measurementState } from "../src/kit/measurements.js";
 import { REHEARSAL_HEAD } from "../src/rehearsal.js";
 import { pinnedBase } from "../src/kit/commands.js";
-import { recordedRound1, writtenDraftFiles } from "../src/reviewdraft.js";
-import { MAX_ITEM_TEXT, ROUND1_SCHEMA, type Round1Issue, type Round1Record } from "../src/round1.js";
-import { reviewPublished, round1Gated } from "../src/reviewvalidators.js";
+import { writtenDraftFiles } from "../src/reviewdraft.js";
+import { recordedContext } from "../src/runcontext.js";
+import { reviewPublished } from "../src/reviewvalidators.js";
+import type { Round1Status } from "../src/context.js";
 import { BANYANDB, candidateEvidence, profileOf, simulate, type FakeReview, type Simulation } from "./support.js";
 
 const sh = promisify(execFile);
@@ -24,348 +26,256 @@ const HEAD = REHEARSAL_HEAD;
 const NONCE = "op42";
 const PULL = { owner: "apache", repo: "skywalking-banyandb", number: 7, head: HEAD };
 
-const issue = (id: string, over: Partial<Round1Issue> = {}): Round1Issue => ({ id, key: `needs-author|item|${id}`, kinds: ["needs-author"], status: "needs author", body: `**needs the author** (${id}). Why?`, anchored: false, ...over });
-const round1 = (issues: Round1Issue[]): Round1Record => ({ schema: ROUND1_SCHEMA, head: HEAD, necessity: "necessary", issues });
 const entry = (id: string, over: Partial<DraftEntry> = {}): DraftEntry => ({ id, kind: "finding", aspects: ["correctness"], severity: "P2", proof: { state: "non-behavioral" }, path: "pkg/a.go", side: "RIGHT", line: 12, anchored: true, body: "The loop drops the error.", ...over });
-const draft = (comments: DraftEntry[], summary = "Reviewed the whole pull request."): Draft => ({ comments, summary }) as unknown as Draft;
+const draft = (comments: DraftEntry[], summary = "Reviewed the whole pull request."): Draft => ({ comments, summary, context: { source: "prelude" }, leads: { given: 0, raised: 0 } }) as unknown as Draft;
+const plan = (comments: DraftEntry[], round1: Round1Status | null = null, over: Partial<Parameters<typeof planReview>[0]> = {}) => planReview({ pull: PULL, head: HEAD, nonce: NONCE, draft: draft(comments), round1, ...over });
+const POSTED = { reviewId: 1, url: null, how: "created" as const };
 
 describe("the review the Publish stage posts", () => {
-  it("is one COMMENT review at the pinned head, never APPROVE or REQUEST_CHANGES, with the verdict as the first line", () => {
-    const plan = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([issue("N1"), issue("Q3")]) });
-    expect(plan).toMatchObject({ round: 1, verdict: "changes-requested", open: 2, firstLine: "Changes requested: 2 open" });
-    expect(plan.body.split("\n")[0]).toBe("Changes requested: 2 open");
-    expect(plan.body.split("\n")[1]).toBe(designReviewMarker(HEAD, NONCE));
-    const input = createInput(PULL, plan);
-    expect(input).toMatchObject({ owner: "apache", repo: "skywalking-banyandb", number: 7, event: "COMMENT", commitId: HEAD, idempotencyKey: `design-${HEAD.slice(0, 12)}` });
+  it("is one COMMENT review at the pinned head with the PR review's marker and key, never APPROVE or REQUEST_CHANGES, with the verdict as the first line", () => {
+    const p = plan([entry("F1"), entry("F2", { line: 20 })]);
+    expect(p).toMatchObject({ verdict: "changes-requested", open: 2, openFindings: 2, firstLine: "Changes requested: 2 open" });
+    expect(p.body.split("\n")[0]).toBe("Changes requested: 2 open");
+    expect(p.body.split("\n")[1]).toBe(reviewMarker(HEAD, NONCE));
+    const input = createInput(PULL, p);
+    expect(input).toMatchObject({ owner: "apache", repo: "skywalking-banyandb", number: 7, event: "COMMENT", commitId: HEAD, idempotencyKey: `review-${HEAD.slice(0, 12)}` });
     expect(JSON.stringify(input)).not.toMatch(/APPROVE|REQUEST_CHANGES/);
   });
 
-  it("says Review passed only when round 1 has no open issue and round 2 no open postable finding", () => {
+  it("says Review passed only when no finding is open and no round-1 item is open", () => {
     expect(verdictLine(0)).toBe("Review passed");
     expect(verdictLine(3)).toBe("Changes requested: 3 open");
-    const passed = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([]), draft: draft([]) });
-    expect(passed).toMatchObject({ round: 2, verdict: "passed", open: 0, firstLine: "Review passed", comments: [] });
-    expect(passed.body).toContain("Round 1 (design and architecture, from the change report and its questions): no open issue.");
-    expect(passed.body).toContain("Round 2 (details, functionality, algorithms): no open finding.");
-    // Round 1's open issues decide the verdict, whatever a draft would say; a draft is not even read.
-    expect(planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([issue("Q1")]), draft: draft([]) })).toMatchObject({ round: 1, verdict: "changes-requested", open: 1 });
-    // Round 2's postable findings are the draft's finding comments: a question it carries is round 1's, never posted twice.
-    const open = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([]), draft: draft([entry("F3"), entry("Q9", { kind: "question", aspects: [] })]) });
-    expect(open).toMatchObject({ round: 2, verdict: "changes-requested", open: 1, firstLine: "Changes requested: 1 open" });
-    expect(open.items.map((i) => i.id)).toEqual(["F3"]);
+    const passed = plan([]);
+    expect(passed).toMatchObject({ verdict: "passed", open: 0, firstLine: "Review passed", comments: [] });
+    expect(passed.body).toContain("no open finding.");
+    expect(passed.body).toContain("Round 1 (the design review) was not run on this pull request; the verdict counts this review's findings only.");
+    expect(plan([], { head: HEAD, open: [] }).firstLine).toBe("Review passed");
+    expect(plan([], { head: HEAD, open: [{ id: "Q1" }] })).toMatchObject({ verdict: "changes-requested", open: 1, openFindings: 0 });
   });
 
-  it("makes an anchored item an inline comment and puts the others in the body, each ending with its marker", () => {
-    const plan = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([issue("N1", { path: "pkg/a.go", line: 4, anchored: true }), issue("Q3", { path: "pkg/a.go", line: 90, anchored: false }), issue("Q4")]) });
-    expect(plan.comments).toEqual([{ path: "pkg/a.go", line: 4, side: "RIGHT", body: expect.stringMatching(/<!-- graphloom-finding: N1 -->$/) }]);
-    expect(plan.items.map((i) => [i.id, i.inline])).toEqual([["N1", true], ["Q3", false], ["Q4", false]]);
-    expect(plan.body).toContain(`(Q3). Why?\n\n${findingMarker("Q3")}`);
-    expect(plan.body).toContain(findingMarker("Q4"));
-    expect(plan.body).not.toContain(findingMarker("N1"));
-    expect(plan.body).toContain("1 item is commented on the diff.");
-    for (const i of plan.items) expect(i.body.endsWith(findingMarker(i.id))).toBe(true);
+  it("makes an anchored finding an inline comment and puts the others in the body, each ending with its marker", () => {
+    const p = plan([entry("F1", { line: 4 }), entry("F2", { anchored: false, line: 90 }), entry("F3", { anchored: false })]);
+    expect(p.comments).toEqual([{ path: "pkg/a.go", line: 4, side: "RIGHT", body: expect.stringMatching(/<!-- graphloom-finding: F1 -->$/) }]);
+    expect(p.items.map((i) => [i.id, i.inline])).toEqual([["F1", true], ["F2", false], ["F3", false]]);
+    expect(p.body).toContain(findingMarker("F2"));
+    expect(p.body).toContain(findingMarker("F3"));
+    expect(p.body).not.toContain(findingMarker("F1"));
+    expect(p.body).toContain("1 item is commented on the diff.");
+    for (const i of p.items) expect(i.body.endsWith(findingMarker(i.id))).toBe(true);
   });
 
-  it("labels a round-2 finding with its severity and aspects, keeps a suggestion for its exact RIGHT range, and marks it F<n>", () => {
-    const plan = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([]), draft: draft([entry("F3", { suggestion: "return err", startLine: 10, line: 12, aspects: ["correctness", "security"], severity: "P1", proof: { state: "proven" } }), entry("F4", { anchored: false, line: 400 })]) });
-    expect(plan.comments).toHaveLength(1);
-    expect(plan.comments[0]).toMatchObject({ path: "pkg/a.go", startLine: 10, line: 12, side: "RIGHT" });
-    expect(plan.comments[0]!.body).toBe(`**[P1] major** · correctness, security · proven by a failing test\n\nThe loop drops the error.\n\n\`\`\`suggestion\nreturn err\n\`\`\`\n\n${findingMarker("F3")}`);
-    expect(plan.body).toContain(`**[P2] minor** · correctness · non-behavioral\n\nThe loop drops the error.\n\n${findingMarker("F4")}`);
+  it("labels a finding with its severity and aspects, keeps a suggestion for its exact RIGHT range, and marks it F<n>", () => {
+    const p = plan([entry("F3", { suggestion: "return err", startLine: 10, line: 12, aspects: ["correctness", "security"], severity: "P1", proof: { state: "proven" } }), entry("F4", { anchored: false, line: 400 })]);
+    expect(p.comments).toHaveLength(1);
+    expect(p.comments[0]).toMatchObject({ path: "pkg/a.go", startLine: 10, line: 12, side: "RIGHT" });
+    expect(p.comments[0]!.body).toBe(`**[P1] major** · correctness, security · proven by a failing test\n\nThe loop drops the error.\n\n\`\`\`suggestion\nreturn err\n\`\`\`\n\n${findingMarker("F3")}`);
+    expect(p.body).toContain(`**[P2] minor** · correctness · non-behavioral\n\nThe loop drops the error.\n\n${findingMarker("F4")}`);
   });
 
-  it("keeps every item's marker readable (a read cuts a body at 4,000 characters), and every comment inside what a review carries", () => {
+  it("labels a confirmed untested-feature finding as a new feature with no test", () => {
+    const p = plan([entry("F5", { severity: "P1", aspects: ["maintainability"], lead: { id: "L1", kind: "untested-feature" } })]);
+    expect(p.comments[0]!.body.split("\n")[0]).toBe("**[P1] major** · maintainability · non-behavioral · a new feature with no test");
+  });
+
+  it("keeps every item's marker readable, and every comment and the body inside what a review carries", () => {
     const long = entry("F1", { body: "x".repeat(20_000), suggestion: "y".repeat(5_000) });
-    const plan = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([]), draft: draft([long]) });
-    expect(plan.comments[0]!.body.length).toBeLessThanOrEqual(MAX_ITEM_TEXT + 300);
-    expect(plan.comments[0]!.body.length).toBeLessThan(65_536 / 4);
-    expect(plan.comments[0]!.body).not.toContain("```suggestion");
-    expect(plan.comments[0]!.body.endsWith(findingMarker("F1"))).toBe(true);
-    // A read keeps the first 4,000 characters of a body, so a long body leads with its marker as well.
-    expect(commentIds([{ reviewId: 1, id: 77, body: plan.comments[0]!.body.slice(0, 4_000) + "…" }], 1).get("F1")).toBe(77);
-    const many = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([]), draft: draft(Array.from({ length: 80 }, (_, i) => entry(`F${i + 1}`, { line: i + 1 }))) });
+    const p = plan([long]);
+    expect(p.comments[0]!.body.length).toBeLessThanOrEqual(MAX_ITEM_TEXT + 300);
+    expect(p.comments[0]!.body).not.toContain("```suggestion");
+    expect(p.comments[0]!.body.endsWith(findingMarker("F1"))).toBe(true);
+    expect(commentIds([{ reviewId: 1, id: 77, body: p.comments[0]!.body.slice(0, 4_000) + "…" }], 1).get("F1")).toBe(77);
+    const many = plan(Array.from({ length: 80 }, (_, i) => entry(`F${i + 1}`, { line: i + 1 })));
     expect(many.comments).toHaveLength(MAX_INLINE_COMMENTS);
     expect(many.items.filter((i) => !i.inline)).toHaveLength(30);
     expect(many.body.length).toBeLessThanOrEqual(MAX_REVIEW_BODY);
-    const huge = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1(Array.from({ length: 60 }, (_, i) => issue(`Q${i + 1}`, { body: "z".repeat(3_000) }))) });
+    const huge = plan(Array.from({ length: 60 }, (_, i) => entry(`F${i + 1}`, { anchored: false, body: "zz ".repeat(1_000).trim() })));
     expect(huge.body.length).toBeLessThanOrEqual(MAX_REVIEW_BODY);
     expect(huge.firstLine).toBe("Changes requested: 60 open");
     // Nothing is reduced to an id: every item keeps a clipped one-line text and its marker, and its whole text goes to the ledger.
     expect(huge.problem).toBeUndefined();
     for (const x of huge.items) {
       expect(x.body).toMatch(new RegExp(`^\\S.*z+.* <!-- graphloom-finding: ${x.id} -->$`));
-      expect(x.body).not.toContain("\n");
       expect(huge.body).toContain(x.body);
-      expect(x.full).toContain("z".repeat(3_000));
+      expect(x.full).toContain("zz ".repeat(999));
     }
-    expect(huge.body).not.toMatch(/did not fit this body/);
-    const patch = ledgerPatch({ head: HEAD }, huge, { reviewId: 1, url: null, how: "created" }, new Map());
-    expect(patch.items.every((i) => (i.body ?? "").includes("z".repeat(3_000)))).toBe(true);
+    const patch = ledgerPatch({ head: HEAD }, huge, draft([]), POSTED, new Map());
+    expect(patch.items.every((i) => (i.body ?? "").includes("zz ".repeat(999)))).toBe(true);
   });
 
   it("moves an anchored item inline before it shrinks the others, and escalates rather than post ids only", () => {
-    const mixed = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([...Array.from({ length: 25 }, (_, i) => issue(`Q${i + 1}`, { body: "y".repeat(3_000), path: "pkg/a.go", line: i + 1, anchored: true })), ...Array.from({ length: 25 }, (_, i) => issue(`Q${i + 30}`, { body: "w".repeat(3_000) }))]) });
+    const mixed = plan([...Array.from({ length: 25 }, (_, i) => entry(`F${i + 1}`, { body: "y".repeat(3_000), line: i + 1, anchored: true })), ...Array.from({ length: 25 }, (_, i) => entry(`F${i + 30}`, { body: "w".repeat(3_000), anchored: false }))]);
     expect(mixed.problem).toBeUndefined();
     expect(mixed.items.filter((x) => x.inline)).toHaveLength(25);
-    const impossible = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1(Array.from({ length: 700 }, (_, i) => issue(`Q${i + 1}`, { body: "v".repeat(300) }))) });
+    const impossible = plan(Array.from({ length: 700 }, (_, i) => entry(`F${i + 1}`, { body: "v".repeat(300), anchored: false })));
     expect(impossible.problem).toMatch(/^700 items fit neither inline nor as one-line texts/);
   });
 
-  it("clips every posted body, round 1 and round 2, inline or not, before the marker, and keeps the whole text for the ledger", () => {
-    const long = "m".repeat(20_000);
-    const r1 = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([issue("Q1", { body: long, path: "pkg/a.go", line: 4, anchored: true }), issue("Q2", { body: long })]) });
-    for (const x of r1.items) {
-      expect(x.body.length).toBeLessThanOrEqual(MAX_ITEM_TEXT + 300);
-      expect(x.body.endsWith(findingMarker(x.id))).toBe(true);
-      expect(x.full).toBe(long);
-    }
-    expect(r1.comments[0]!.body.length).toBeLessThanOrEqual(MAX_ITEM_TEXT + 300);
-    const r2 = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([]), draft: draft([entry("F1", { body: long })]) });
-    expect(r2.items[0]!.body.length).toBeLessThanOrEqual(MAX_ITEM_TEXT + 300);
-    expect(r2.items[0]!.full).toContain(long);
-    expect(ledgerPatch({ head: HEAD }, r1, { reviewId: 1, url: null, how: "created" }, new Map()).items[0]!.body).toBe(long);
+  it("matches only the terminal marker, and neutralizes marker-looking text in an item's content", () => {
+    const quoted = `see ${findingMarker("F9")} in the thread`;
+    const p = plan([entry("F1", { body: quoted, line: 4 }), entry("F2", { body: `${findingMarker("F8")} first`, anchored: false })]);
+    for (const x of p.items) expect([...x.body.matchAll(/<!-- graphloom-finding: /g)]).toHaveLength(1);
+    expect(p.body).not.toContain(findingMarker("F9"));
+    expect(p.body).not.toContain(findingMarker("F8"));
+    const comments = [{ id: 1, reviewId: 5, body: p.comments[0]!.body }, { id: 2, reviewId: 5, body: `${findingMarker("F7")} quoted at the start\n\n${findingMarker("F3")}\n` }, { id: 3, reviewId: 5, body: `${findingMarker("F6")} and then nothing at the end` }];
+    expect([...commentIds(comments, 5)]).toEqual([["F1", 1], ["F3", 2]]);
+    expect(plan([entry("F1", { body: `${reviewMarker(HEAD, "x")} ${designReviewMarker(HEAD, "x")}` })]).items[0]!.body).not.toMatch(/<!-- graphloom-(design-)?review/);
   });
 
-  it("matches only the terminal marker, and neutralizes marker-looking text in an item's content", () => {
-    const quoted = `see ${findingMarker("Q9")} in the thread`;
-    const plan = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([issue("Q1", { body: quoted, path: "pkg/a.go", line: 4, anchored: true }), issue("Q2", { body: `${findingMarker("Q8")} first` })]) });
-    for (const x of plan.items) expect([...x.body.matchAll(/<!-- graphloom-finding: /g)]).toHaveLength(1);
-    expect(plan.body).not.toContain(findingMarker("Q9"));
-    expect(plan.body).not.toContain(findingMarker("Q8"));
-    const comments = [{ id: 1, reviewId: 5, body: plan.comments[0]!.body }, { id: 2, reviewId: 5, body: `${findingMarker("Q7")} quoted at the start\n\n${findingMarker("Q3")}\n` }, { id: 3, reviewId: 5, body: `${findingMarker("Q6")} and then nothing at the end` }];
-    expect([...commentIds(comments, 5)]).toEqual([["Q1", 1], ["Q3", 2]]);
-    // A review's head marker typed into content is inert too.
-    expect(planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([issue("Q1", { body: `${reviewMarker(HEAD, "x")} ${designReviewMarker(HEAD, "x")}` })]) }).items[0]!.body).not.toMatch(/<!-- graphloom-(design-)?review/);
+  it("appends the profile's footer, neutralized", () => {
+    const p = plan([], null, { comments: { footer: "Reviewed by GraphLoom." } });
+    expect(p.body.endsWith("\n\nReviewed by GraphLoom.")).toBe(true);
   });
 
   it("finds a review of this head only when this credential's login authored it, as COMMENTED, with this run's marker", () => {
     const marked = { id: 41, commitId: HEAD, user: "graphloom-bot", state: "COMMENTED", body: `Review passed\n${reviewMarker(HEAD, NONCE)}\n\nx`, url: "https://github.com/o/r/pull/7#pullrequestreview-41" };
-    const find = (r: object, nonce = NONCE) => findPosted([{ ...marked, ...r }], HEAD, nonce, "graphloom-bot", 2);
+    const find = (r: object, nonce = NONCE) => findPosted([{ ...marked, ...r }], HEAD, nonce, "graphloom-bot");
     expect(find({})).toEqual({ id: 41, url: marked.url });
     expect(find({ commitId: "b".repeat(40) })).toBeUndefined();
     expect(find({ body: "Review passed" })).toBeUndefined();
-    expect(find({ body: `x\n${reviewMarker("c".repeat(40), NONCE)}` })).toBeUndefined();
-    // The marker is public once posted and the head sha always was: a review by anybody else is not ours.
     expect(find({ user: "mallory" })).toBeUndefined();
     expect(find({ state: "APPROVED" })).toBeUndefined();
-    expect(find({ state: "PENDING" })).toBeUndefined();
-    // Another run's review of the same head is not this run's.
     expect(find({}, "op7")).toBeUndefined();
-    // Each round has its own head marker (design-pr-review-split §5.3): a post with the other marker is not this round's post, even with this run's nonce.
-    expect(find({ body: `Review passed\n${designReviewMarker(HEAD, NONCE)}\n\nx` })).toBeUndefined();
-    expect(findPosted([{ ...marked, body: `Changes requested: 1 open\n${designReviewMarker(HEAD, NONCE)}\n\nx` }], HEAD, NONCE, "graphloom-bot", 1)).toEqual({ id: 41, url: marked.url });
-    expect(findPosted([marked], HEAD, NONCE, "graphloom-bot", 1)).toBeUndefined();
-    // The marker counts only as the body's second line, where the post puts it.
+    // The design review's post of this head, even with this run's nonce, is never this graph's (design-pr-review-split §5.3).
+    expect(find({ body: `Changes requested: 1 open\n${designReviewMarker(HEAD, NONCE)}\n\nx` })).toBeUndefined();
     expect(find({ body: `Review passed\n\n${reviewMarker(HEAD, NONCE)}` })).toBeUndefined();
-    const comments = [{ id: 5, reviewId: 41, body: `a ${findingMarker("N1")}` }, { id: 6, reviewId: 42, body: `a ${findingMarker("Q3")}` }, { id: 7, reviewId: 41, body: `b ${findingMarker("Q4")}` }, { id: 8, reviewId: 41, body: "no marker" }];
-    expect([...commentIds(comments, 41)]).toEqual([["N1", 5], ["Q4", 7]]);
   });
 });
 
-/** A clean round-1 scenario's run, whole, and the scenario with issues, with the fake GitHub's view of it. */
-const clean = (over: Parameters<typeof simulate>[0] = {}): Simulation => simulate({ scenarioName: "review-layer", maxSteps: 600, through: "end", ...over });
+/** A whole run of the review-layer scenario, with the fake GitHub's view of it. */
+const run = (over: Parameters<typeof simulate>[0] = {}): Simulation => simulate({ scenarioName: "review-layer", maxSteps: 600, through: "end", ...over });
 /** This run's nonce (the viewer read's operation id): the same in a second simulation of the same scenario, which is how a test seeds a review "of this run". */
 const nonceOf = (s: Simulation): string => viewerOf(s.evidence)!.nonce;
-const issues = (over: Parameters<typeof simulate>[0] = {}): Simulation => simulate({ scenarioName: "complex-function", maxSteps: 600, through: "end", ...over });
 const stopOf = (s: Simulation) => (s.final.action.type === "stop" ? s.final.action.stop : undefined);
 const publishJobs = (s: Simulation) => s.jobs.filter((j) => j.stageId === "publish").map((j) => j.executor?.id ?? ((j.input as { commands?: Array<{ id: string }> }).commands ?? []).map((c) => c.id).join(","));
 const ledgerPatchOf = (s: Simulation) => {
   const written = readParts(s.evidence, "publish-patch", ".graphloom/review/ledger/publish-patch.json");
   if (written.state !== "read") throw new Error(`the ledger patch was not written: ${written.state}`);
-  return JSON.parse(written.value) as { head: string; round: number; verdict: string; reviewId: number; items: Array<{ id: string; origin: string; inline: boolean; commentId: number | null }> };
+  return JSON.parse(written.value) as { head: string; verdict: string; reviewId: number; context: unknown; round1: unknown; items: Array<{ id: string; origin: string; inline: boolean; commentId: number | null }> };
 };
+/** What the Publish stage plans and where it stands, recomputed from a run's evidence as the validator sees it. */
+function planned(evidence: EvidenceRecord[]): { plan: Extract<PublishPlan, { state: "ready" }>; pull: ReturnType<typeof evidencePull> & object } {
+  const pull = evidencePull(evidence, profileOf())!;
+  const a = analyze(evidence, profileOf(), pull);
+  if (a.state !== "ready") throw new Error("not ready");
+  const c = recordedContext(evidence);
+  if (c.state !== "read") throw new Error("no context");
+  const p = publishPlan(evidence, a.analysis, pull, pinnedBase(evidence), c.value, measurementState(evidence, a.analysis.snapshot.files, profileOf()), profileOf());
+  if (p.state !== "ready") throw new Error(p.state);
+  return { plan: p, pull };
+}
 
-describe("the gate after Answers: issues publish round 1 and end the run, none continue into round 2", () => {
-  const sim = issues();
+describe("a run posts round 2 once and records it in the review section", () => {
+  const sim = run();
 
-  it("ends the run, complete, after publishing round 1 when round 1 has issues, without any review job", () => {
-    const r = recordedRound1(sim.evidence);
-    expect(r.state === "read" && r.value.issues.length).toBeGreaterThan(0);
+  it("ends complete with the verdict, after one COMMENT review under the PR review's key", () => {
     expect(stopOf(sim)).toMatchObject({ reason: "complete", retryable: false });
-    expect(stopOf(sim)!.blocker).toMatch(/^round 1: changes requested: \d+ issues? open on apache\/skywalking-banyandb#7 at 0123456789ab; the review is posted \(https:.*\), and round 2 \(the aspect reviewers\) runs on a later head/);
-    expect(sim.jobs.filter((j) => j.stageId === "review" || j.stageId === "draft")).toEqual([]);
-    expect(sim.receipts.filter((x) => x.valid).map((x) => x.requirementId).slice(-5)).toEqual(["round1-gated", "code-review", "findings-proven", "draft-composed", "review-published"]);
-  });
-
-  it("posts exactly one review, whose event is COMMENT and whose first line counts the open issues", () => {
-    const n = (recordedRound1(sim.evidence) as { value: Round1Record }).value.issues.length;
+    expect(stopOf(sim)!.blocker).toMatch(/^changes requested: 1 open on apache\/skywalking-banyandb#7 at 0123456789ab; the review is posted \(https:/);
     expect(sim.github.creates).toHaveLength(1);
-    const c = sim.github.creates[0]!;
-    expect(c).toMatchObject({ event: "COMMENT", commitId: HEAD, idempotencyKey: `design-${HEAD.slice(0, 12)}` });
-    expect(String(c.body).split("\n")[0]).toBe(`Changes requested: ${n} open`);
-    expect(sim.github.reviews).toHaveLength(1);
+    expect(sim.github.creates[0]).toMatchObject({ event: "COMMENT", commitId: HEAD, idempotencyKey: `review-${HEAD.slice(0, 12)}` });
+    const body = String(sim.github.creates[0]!.body);
+    expect(body.split("\n")[0]).toBe("Changes requested: 1 open");
+    expect(body.split("\n")[1]).toBe(reviewMarker(HEAD, nonceOf(sim)));
+    expect(body).toContain("Round 1 (the design review) was not run on this pull request");
   });
 
   it("reads the reviews before posting, posts, reads the comments back, then records the ids in the ledger", () => {
     expect(publishJobs(sim)).toEqual(["graphloom.github/get-viewer", "graphloom.github/list-pull-reviews", "graphloom.github/create-pull-review", "graphloom.github/list-pull-review-comments", "publish-patch-p1", "ledger-published"]);
-    const reads = sim.jobs.filter((j) => j.stageId === "publish" && j.executor !== undefined && j.executor.id !== "graphloom.github/create-pull-review");
-    for (const j of reads) expect(j.readOnly).toBe(true);
+    for (const j of sim.jobs.filter((x) => x.stageId === "publish" && x.executor !== undefined && x.executor.id !== "graphloom.github/create-pull-review")) expect(j.readOnly).toBe(true);
     const write = sim.jobs.find((j) => j.executor?.id === "graphloom.github/create-pull-review")!;
     expect(write).toMatchObject({ effect: "write", purpose: "diagnostic" });
     expect(write.readOnly).not.toBe(true);
-    expect(write.writeScope).toBeUndefined();
   });
 
-  it("records the review id and each item's comment id in the ledger", () => {
+  it("records the review id, the context source, the round-1 head (none) and each item's comment id", () => {
     const patch = ledgerPatchOf(sim);
-    const review = sim.github.reviews[0]!;
-    expect(patch).toMatchObject({ head: HEAD, round: 1, verdict: "changes-requested", reviewId: review.id });
-    const inline = patch.items.filter((i) => i.inline);
-    expect(inline.length).toBeGreaterThan(0);
-    expect(inline.map((i) => i.commentId)).toEqual(review.comments.map((c) => c.id));
-    expect(patch.items.filter((i) => !i.inline).every((i) => i.commentId === null)).toBe(true);
-    expect(patch.items.every((i) => i.origin === "round1")).toBe(true);
+    expect(patch).toMatchObject({ head: HEAD, verdict: "changes-requested", reviewId: sim.github.reviews[0]!.id, context: { source: "prelude" }, round1: null });
+    expect(patch.items).toEqual([expect.objectContaining({ id: "F3", origin: "round2", inline: true, commentId: sim.github.reviews[0]!.comments[0]!.id })]);
+    const c = sim.jobs.find((j) => ((j.input as { commands?: Array<{ id: string }> }).commands ?? []).some((x) => x.id === "ledger-published"))!;
+    // The review section only: the design section is never written by this graph.
+    expect((c.input as { commands: Array<{ argv: string[] }> }).commands[0]!.argv[8]).toBe("review");
   });
 
-  it("continues into the review layer in the same run when round 1 has none, and publishes round 2's findings", () => {
-    const run = clean();
-    expect(recordedRound1(run.evidence)).toMatchObject({ state: "read", value: { issues: [] } });
-    expect(run.jobs.some((j) => j.stageId === "review" && j.kind === "agent")).toBe(true);
-    expect(run.github.creates).toHaveLength(1);
-    expect(run.github.creates[0]).toMatchObject({ event: "COMMENT", idempotencyKey: `review-${HEAD.slice(0, 12)}` });
-    const body = String(run.github.creates[0]!.body);
-    expect(body.split("\n")[0]).toBe("Changes requested: 1 open");
-    expect(body).toContain("Round 1 (design and architecture, from the change report and its questions): no open issue.");
-    const patch = ledgerPatchOf(run);
-    expect(patch).toMatchObject({ round: 2, verdict: "changes-requested", items: [{ id: "F3", origin: "round2", inline: true, commentId: run.github.reviews[0]!.comments[0]!.id }] });
+  it("needs the ledger write before the stage validates", () => {
+    const evidence = candidateEvidence(sim.evidence, "d1");
+    const { plan: p, pull } = planned(evidence);
+    expect(publishFlow(evidence, p.plan, p.draft, pull).state).toBe("done");
+    const without = evidence.filter((e) => (e.payload as { command?: { id?: string } } | undefined)?.command?.id !== "ledger-published");
+    expect(publishFlow(without, p.plan, p.draft, pull).state).toBe("ledger");
+    expect(reviewPublished.evaluate({ requirementId: "review-published", statement: "", evidence: without, candidateDigest: "d1", config: BANYANDB })).toMatchObject({ status: "inconclusive" });
+    expect(reviewPublished.evaluate({ requirementId: "review-published", statement: "", evidence, candidateDigest: "d1", config: BANYANDB })).toMatchObject({ status: "passed", reason: expect.stringMatching(/one COMMENT review \(\d+, created\) at head 0123456789ab: Changes requested: 1 open \(1 open finding\(s\); round 1 not run\)/) });
   });
 });
 
 describe("publishing is idempotent across retries and runs: the reviews are read before anything is posted", () => {
-  const marked = (nonce: string, over: Partial<FakeReview> = {}): FakeReview => ({ id: 99, body: `Changes requested: 1 open\n${designReviewMarker(HEAD, nonce)}\n\nearlier`, commitId: HEAD, state: "COMMENTED", url: "https://github.com/apache/skywalking-banyandb/pull/7#pullrequestreview-99", comments: issues().github.reviews[0]!.comments.map((c, k) => ({ ...c, id: 990 + k })), ...over });
+  const first = run();
+  const marked = (nonce: string, over: Partial<FakeReview> = {}): FakeReview => ({ id: 99, body: `Changes requested: 1 open\n${reviewMarker(HEAD, nonce)}\n\nearlier`, commitId: HEAD, state: "COMMENTED", url: "https://github.com/apache/skywalking-banyandb/pull/7#pullrequestreview-99", comments: first.github.reviews[0]!.comments.map((c, k) => ({ ...c, id: 990 + k })), ...over });
 
   it("posts nothing when a review of this head already carries the marker, and records that review", () => {
-    const sim = issues({ reviews: [marked(nonceOf(issues()))] });
+    const sim = run({ reviews: [marked(nonceOf(first))] });
     expect(sim.github.creates).toEqual([]);
-    expect(sim.github.reviews).toHaveLength(1);
     expect(stopOf(sim)).toMatchObject({ reason: "complete" });
     expect(ledgerPatchOf(sim).reviewId).toBe(99);
     expect(publishJobs(sim)).toEqual(["graphloom.github/get-viewer", "graphloom.github/list-pull-reviews", "graphloom.github/list-pull-review-comments", "publish-patch-p1", "ledger-published"]);
   });
 
-  it("posts when the review there is of another head, or carries no marker of this graph", () => {
-    const sim = issues({ reviews: [marked(nonceOf(issues()), { commitId: "b".repeat(40), id: 98 }), marked(nonceOf(issues()), { body: "Looks good to me", id: 97 })] });
+  it("posts when the review there is of another head, carries no marker of this graph, or is the design review's", () => {
+    const n = nonceOf(first);
+    const sim = run({ reviews: [marked(n, { commitId: "b".repeat(40), id: 98 }), marked(n, { body: "Looks good to me", id: 97 }), marked(n, { id: 96, body: `Changes requested: 1 open\n${designReviewMarker(HEAD, n)}\n\nround 1`, comments: [] })] });
     expect(sim.github.creates).toHaveLength(1);
-    expect(sim.github.reviews).toHaveLength(3);
+    expect([96, 97, 98]).not.toContain(ledgerPatchOf(sim).reviewId);
   });
 
-  it("ignores a review that forges the marker: by another author, not COMMENTED, or from another run, and posts its own", () => {
-    const n = nonceOf(issues());
-    const sim = issues({ reviews: [marked(n, { id: 90, user: "mallory" }), marked(n, { id: 91, state: "APPROVED" }), marked("op1", { id: 92 })] });
+  it("ignores a review that forges the marker: by another author, not COMMENTED, or from another run", () => {
+    const n = nonceOf(first);
+    const sim = run({ reviews: [marked(n, { id: 90, user: "mallory" }), marked(n, { id: 91, state: "APPROVED" }), marked("op1", { id: 92 })] });
     expect(sim.github.creates).toHaveLength(1);
-    expect(sim.github.reviews).toHaveLength(4);
     expect([90, 91, 92]).not.toContain(ledgerPatchOf(sim).reviewId);
   });
 
-  it("ignores a review of this head with this run's nonce under the other round's head marker, and posts its own (design-pr-review-split §5.3)", () => {
-    const n = nonceOf(issues());
-    // Round 1's issues are posted under the design review's marker; a review with the PR review's marker is not that post.
-    const r1 = issues({ reviews: [marked(n, { id: 93, body: `Review passed\n${reviewMarker(HEAD, n)}\n\nround 2` })] });
-    expect(r1.github.creates).toHaveLength(1);
-    expect(r1.github.creates[0]).toMatchObject({ idempotencyKey: `design-${HEAD.slice(0, 12)}` });
-    expect(ledgerPatchOf(r1).reviewId).not.toBe(93);
-    // Round 2's findings are posted under the PR review's marker; a design-review post of this head is not that post.
-    const r2 = clean({ reviews: [marked(nonceOf(clean()), { id: 94, comments: [] })] });
-    expect(r2.github.creates).toHaveLength(1);
-    expect(r2.github.creates[0]).toMatchObject({ idempotencyKey: `review-${HEAD.slice(0, 12)}` });
-    expect(String(r2.github.creates[0]!.body).split("\n")[1]).toBe(reviewMarker(HEAD, nonceOf(clean())));
-    expect(ledgerPatchOf(r2).reviewId).not.toBe(94);
-  });
-
-  it("reconciles an attempt whose outcome is unknown: the reviews are read again, the review that reached GitHub is found, and nothing is posted twice", () => {
-    const sim = issues({ create: ["posted-then-failed"] });
+  it("reconciles an attempt whose outcome is unknown, and posts again only after a read shows nothing there", () => {
+    const sim = run({ create: ["posted-then-failed"] });
     expect(sim.github.creates).toHaveLength(1);
-    expect(sim.github.reviews).toHaveLength(1);
     expect(stopOf(sim)).toMatchObject({ reason: "complete" });
-    expect(publishJobs(sim).slice(0, 5)).toEqual(["graphloom.github/get-viewer", "graphloom.github/list-pull-reviews", "graphloom.github/create-pull-review", "graphloom.github/list-pull-reviews", "graphloom.github/list-pull-review-comments"]);
     expect(ledgerPatchOf(sim).reviewId).toBe(sim.github.reviews[0]!.id);
-  });
-
-  it("posts again after a read that shows the lost attempt left nothing there, and hands a stage that keeps failing to the supervisor", () => {
-    const retried = issues({ create: ["lost", "post"] });
+    const retried = run({ create: ["lost", "post"] });
     expect(retried.github.creates).toHaveLength(2);
     expect(retried.github.reviews).toHaveLength(1);
-    expect(stopOf(retried)).toMatchObject({ reason: "complete" });
-    const stuck = issues({ create: ["lost"] });
+    const stuck = run({ create: ["lost"] });
     expect(stuck.github.creates).toHaveLength(3);
     expect(stuck.final.action.type).toBe("supervise");
-    expect(JSON.stringify(stuck.final)).toMatch(/3 attempts to post the review did not produce a review of this head/);
   });
 
-  it("needs the posting job to be read back before the stage validates", () => {
-    const sim = issues();
-    const evidence = candidateEvidence(sim.evidence, "d1");
-    const pull = evidencePull(evidence, profileOf())!;
-    const a = analyze(evidence, profileOf(), pull);
-    if (a.state !== "ready") throw new Error("not ready");
-    const plan = publishPlan(evidence, a.analysis, pull, pinnedBase(evidence));
-    if (plan.state !== "ready") throw new Error(plan.state);
-    expect(publishFlow(evidence, plan.plan, pull).state).toBe("done");
-    // Without the ledger write the stage is not done, and its validator is inconclusive.
-    const without = evidence.filter((e) => (e.payload as { command?: { id?: string } } | undefined)?.command?.id !== "ledger-published");
-    expect(publishFlow(without, plan.plan, pull).state).toBe("ledger");
-    expect(reviewPublished.evaluate({ requirementId: "review-published", statement: "", evidence: without, candidateDigest: "d1", config: BANYANDB })).toMatchObject({ status: "inconclusive" });
-    expect(reviewPublished.evaluate({ requirementId: "review-published", statement: "", evidence, candidateDigest: "d1", config: BANYANDB })).toMatchObject({ status: "passed", reason: expect.stringMatching(/one COMMENT review \(\d+, created\) at head 0123456789ab: Changes requested: \d+ open; round 1/) });
+  it("reads the comments again when a read lags the post, and goes to the supervisor after three that lack one", () => {
+    const lag = run({ hideComments: 1 });
+    expect(publishJobs(lag).filter((j) => j === "graphloom.github/list-pull-review-comments")).toHaveLength(2);
+    expect(ledgerPatchOf(lag).items.filter((i) => i.inline).every((i) => i.commentId !== null)).toBe(true);
+    const lost = run({ hideComments: 9 });
+    expect(lost.final.action.type).toBe("supervise");
+    expect(publishJobs(lost)).not.toContain("ledger-published");
   });
-});
 
-describe("the read-back of the posted comments must recover every inline item's id", () => {
-  it("reads again when a read lags the post, and records the ids once they show", () => {
-    const sim = issues({ hideComments: 1 });
-    expect(publishJobs(sim).filter((j) => j === "graphloom.github/list-pull-review-comments")).toHaveLength(2);
-    expect(ledgerPatchOf(sim).items.filter((i) => i.inline).every((i) => i.commentId !== null)).toBe(true);
+  it("asks for the next page with the cursor of a long list of reviews", () => {
+    const sim = run({ reviewPages: 3 });
+    expect(sim.jobs.filter((j) => j.executor?.id === "graphloom.github/list-pull-reviews" && j.stageId === "publish")).toHaveLength(3);
     expect(stopOf(sim)).toMatchObject({ reason: "complete" });
   });
-
-  it("goes to the supervisor, naming the items, after three reads that lack one, and never records a null id", () => {
-    const sim = issues({ hideComments: 9 });
-    expect(publishJobs(sim).filter((j) => j === "graphloom.github/list-pull-review-comments")).toHaveLength(3);
-    expect(sim.final.action.type).toBe("supervise");
-    expect(JSON.stringify(sim.final)).toMatch(/3 reads of the review's comments did not show the inline comments? of /);
-    expect(publishJobs(sim)).not.toContain("ledger-published");
-  });
-
-  it("is rejected by the validator when the ledger would hold a null id for an inline item", () => {
-    const sim = issues();
-    const evidence = candidateEvidence(sim.evidence, "d1");
-    const pull = evidencePull(evidence, profileOf())!;
-    const a = analyze(evidence, profileOf(), pull);
-    if (a.state !== "ready") throw new Error("not ready");
-    const plan = publishPlan(evidence, a.analysis, pull, pinnedBase(evidence));
-    if (plan.state !== "ready") throw new Error(plan.state);
-    // The comments the read showed, with the first inline comment taken away: the stage is not done.
-    const inline = plan.plan.items.find((x) => x.inline)!;
-    const cut = evidence.map((e): EvidenceRecord => {
-      const g = (e.payload as { github?: { items?: Array<{ body?: string }> } } | undefined)?.github;
-      if (g?.items === undefined || !g.items.some((c) => c.body?.includes(`graphloom-finding: ${inline.id} `))) return e;
-      return { ...e, payload: { ...(e.payload as object), github: { ...g, items: g.items.filter((c) => !c.body?.includes(`graphloom-finding: ${inline.id} `)) } } };
-    });
-    expect(publishFlow(cut, plan.plan, pull).state).not.toBe("done");
-    expect(reviewPublished.evaluate({ requirementId: "review-published", statement: "", evidence: cut, candidateDigest: "d1", config: BANYANDB }).status).not.toBe("passed");
-  });
 });
 
-describe("the validators of the gate and of Publish recompute their records", () => {
-  const sim = issues();
-  const evidence = candidateEvidence(sim.evidence, "d1");
-
-  it("passes round 1 on the recorded issues and fails it when the record is not what the Q&A recomputes", () => {
-    expect(round1Gated.evaluate({ requirementId: "round1-gated", statement: "", evidence, candidateDigest: "d1", config: BANYANDB })).toMatchObject({ status: "passed", reason: expect.stringMatching(/^round 1 found \d+ issues?/) });
-    const tampered = evidence.map((e): EvidenceRecord => {
-      const c = (e.payload as { command?: { id: string; argv: string[] } } | undefined)?.command;
-      if (c?.id !== "round1") return e;
-      const json = JSON.parse(c.argv.slice(6).join("")) as { issues: unknown[] };
-      json.issues = json.issues.slice(1);
-      return { ...e, payload: { ...(e.payload as object), command: { ...c, argv: [...c.argv.slice(0, 5), "1", JSON.stringify(json)] } } };
-    });
-    expect(round1Gated.evaluate({ requirementId: "round1-gated", statement: "", evidence: tampered, candidateDigest: "d1", config: BANYANDB })).toMatchObject({ status: "failed", reason: expect.stringContaining("not what necessity.json and qa.json recompute") });
-    const unrecorded = evidence.filter((e) => (e.payload as { command?: { id?: string } } | undefined)?.command?.id !== "round1");
-    expect(round1Gated.evaluate({ requirementId: "round1-gated", statement: "", evidence: unrecorded, candidateDigest: "d1", config: BANYANDB })).toMatchObject({ status: "inconclusive" });
+describe("posting is the operator's to enable", () => {
+  it("stops before it dispatches anything when the write is withheld, naming the draft and the report", () => {
+    const sim = run({ executors: [{ id: "graphloom.github/create-pull-review", effect: "write", effectGranted: false }] });
+    expect(stopOf(sim)).toMatchObject({ reason: "posting not enabled", retryable: false });
+    expect(stopOf(sim)!.blocker).toBe("draft ready; posting is not enabled (set the runner config's github.writeTokenEnv and resume to post). The draft is .graphloom/review/draft.md and the report .graphloom/review/review.html, in the run's worktree");
+    expect(writtenDraftFiles(sim.evidence).html.state).toBe("read");
+    expect(publishJobs(sim)).toEqual([]);
+    expect(sim.decisions.some((d) => d.action.type === "supervise")).toBe(false);
   });
 
-  it("passes round 1 with no issue and says the same run goes on", () => {
-    const run = clean();
-    expect(round1Gated.evaluate({ requirementId: "round1-gated", statement: "", evidence: candidateEvidence(run.evidence, "d1"), candidateDigest: "d1", config: BANYANDB })).toMatchObject({ status: "passed", reason: expect.stringContaining("the same run continues into the review layer") });
+  it("names review.md as the report when there is none (--no-report)", async () => {
+    const { REHEARSAL_REQUEST_NO_REPORT } = await import("../src/rehearsal.js");
+    const sim = simulate({ scenarioName: "no-report", request: REHEARSAL_REQUEST_NO_REPORT, executors: [{ id: "graphloom.github/create-pull-review", effect: "write", effectGranted: false }] });
+    expect(stopOf(sim)!.blocker).toContain("the report .graphloom/review/review.md");
+    expect(writtenDraftFiles(sim.evidence).html.state).toBe("none");
   });
 });
 
@@ -378,20 +288,22 @@ describe("the ledger advance that records the published review, against a real r
   const env = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
   const git = async (cwd: string, ...args: string[]): Promise<string> => (await sh("git", args, { cwd, env })).stdout.trim();
   const TOP = JSON.stringify({ schema: "graphloom-pr-ledger-v2", pull: { owner: "apache", repo: "skywalking-banyandb", number: 7 }, sections: ["design", "review"] });
+  const DESIGN = JSON.stringify({ schema: "pr-design-review-ledger-v1", heads: [{ sha: "a".repeat(40), round1: "clean", open: 0 }], purposes: [], qa: [], items: [] });
 
-  /** A repository whose ledger ref holds the Answers stage's commit: the v2 ledger.json and the design section (this head, one Q&A item). */
+  /** A repository whose ledger ref holds the Draft stage's commit: the v2 ledger.json, a design section, and the review section with this head. */
   async function ledgerRepo(): Promise<{ dir: string; first: string; baselines: { design: string; review: string } }> {
     const dir = await mkdtemp(path.join(os.tmpdir(), "pr-review-ledger-"));
     dirs.push(dir);
     await sh("git", ["init", "-q", "-b", "main", dir], { env });
-    const design = { schema: "pr-design-review-ledger-v1", heads: [{ sha: "a".repeat(40), round1: "clean", open: 0 }, { sha: HEAD, base: "b".repeat(40), files: 1, commits: 1, facts: 0 }], purposes: [], qa: [{ id: "Q1", type: "purpose", state: "open", history: [] }, { id: "Q2", type: "purpose", state: "open", history: [] }], items: [] };
+    const review = { schema: "pr-review-ledger-v1", heads: [{ sha: "c".repeat(40), reviewId: 5 }, { sha: HEAD, base: "b".repeat(40), context: { source: "prelude" }, round1: null, leads: { given: 1, raised: 0 } }], findings: [] };
     await mkdir(path.join(dir, "design"));
-    for (const [name, text] of Object.entries({ "ledger.json": TOP, "design/ledger.json": JSON.stringify(design), "design/ledger.md": "# apache/skywalking-banyandb#7\n", "design/qa.json": "{\"q\":1}", "design/report.json": "{\"r\":1}" })) await writeFile(path.join(dir, name), text);
+    await mkdir(path.join(dir, "review"));
+    for (const [name, text] of Object.entries({ "ledger.json": TOP, "design/ledger.json": DESIGN, "design/ledger.md": "# d\n", "review/ledger.json": JSON.stringify(review), "review/ledger.md": "# apache/skywalking-banyandb#7: the PR review\n" })) await writeFile(path.join(dir, name), text);
     await git(dir, "add", "-A");
-    await git(dir, "commit", "-q", "-m", "answers");
+    await git(dir, "commit", "-q", "-m", "draft");
     const first = await git(dir, "rev-parse", "HEAD");
     await git(dir, "update-ref", REF, first);
-    return { dir, first, baselines: { design: await git(dir, "rev-parse", `${first}:design`), review: "absent" } };
+    return { dir, first, baselines: { design: await git(dir, "rev-parse", `${first}:design`), review: await git(dir, "rev-parse", `${first}:review`) } };
   }
   /** Another run's commit on the ref: `files` replace the paths they name in the ref's current tree. */
   async function advance(dir: string, files: Record<string, string>): Promise<string> {
@@ -406,203 +318,72 @@ describe("the ledger advance that records the published review, against a real r
     await git(dir, "update-ref", REF, sha);
     return sha;
   }
-  const patchOf = (over: Partial<ReturnType<typeof ledgerPatch>> = {}) => ({ ...ledgerPatch({ head: HEAD, base: "b".repeat(40) }, planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([issue("Q1", { path: "pkg/a.go", line: 4, anchored: true }), issue("N1")]) }), { reviewId: 4242, url: "https://github.com/o/r/pull/7#pullrequestreview-4242", how: "created" }, new Map([["Q1", 777]])), ...over });
-  /** As the stage does: the patch is written as a part set with a digest, then the ledger command reads the file. */
-  const run = async (dir: string, patch: ReturnType<typeof ledgerPatch>, baselines: { design: string; review: string }) => {
+  const round1: Round1Status = { head: "a".repeat(40), open: [{ id: "Q1", link: "https://github.com/o/r/pull/7#discussion_r1" }] };
+  const patchOf = (over: Partial<ReturnType<typeof ledgerPatch>> = {}) => ({ ...ledgerPatch({ head: HEAD, base: "b".repeat(40) }, plan([entry("F1", { line: 4 }), entry("F2", { anchored: false })], round1), draft([]), { reviewId: 4242, url: "https://github.com/o/r/pull/7#pullrequestreview-4242", how: "created" }, new Map([["F1", 777]])), ...over });
+  const write = async (dir: string, patch: ReturnType<typeof ledgerPatch>, baselines: { design: string; review: string }) => {
     for (const part of partCommands("publish-patch", ".graphloom/review/ledger/publish-patch.json", JSON.stringify(patch))) await sh(part.argv[0]!, part.argv.slice(1), { cwd: dir, env });
     const c = ledgerPublishedCommand(PULL, patch, baselines, process.execPath);
     return sh(c.argv[0]!, c.argv.slice(1), { cwd: dir, env });
   };
-  type DesignDoc = { heads: Array<Record<string, unknown>>; qa: Array<Record<string, unknown>>; items: Array<Record<string, unknown>> };
+  type ReviewDoc = { heads: Array<Record<string, unknown>>; findings: Array<Record<string, unknown>> };
 
-  it("adds one commit that records round 1's post on the design section's head and items, keeping the other heads and files and the top-level ledger.json", async () => {
+  it("adds one commit that records the review on the review section's head and findings, keeping the other heads, the design section and the top-level ledger.json", async () => {
     const { dir, first, baselines } = await ledgerRepo();
-    const out = await run(dir, patchOf(), baselines);
+    const out = await write(dir, patchOf(), baselines);
     expect(out.stdout).toMatch(/^advanced [0-9a-f]{40}/);
     const now = await git(dir, "rev-parse", REF);
-    expect(now).not.toBe(first);
     expect(await git(dir, "rev-parse", `${now}^`)).toBe(first);
-    const design = JSON.parse(await git(dir, "show", `${now}:design/ledger.json`)) as DesignDoc;
-    expect(design.heads[0]).toEqual({ sha: "a".repeat(40), round1: "clean", open: 0 });
-    expect(design.heads[1]).toEqual({ sha: HEAD, base: "b".repeat(40), files: 1, commits: 1, facts: 0, round1: "items", open: 2, reviewId: 4242, reviewUrl: "https://github.com/o/r/pull/7#pullrequestreview-4242" });
-    expect(design.qa[0]).toMatchObject({ id: "Q1", state: "open", github: { head: HEAD, reviewId: 4242, commentId: 777, inline: true } });
-    expect(design.qa[1]).not.toHaveProperty("github");
-    expect(design.items.map((f) => [f.id, f.origin, f.state, (f.github as { commentId: number | null }).commentId])).toEqual([["Q1", "round1", "open", 777], ["N1", "round1", "open", null]]);
-    expect(await git(dir, "show", `${now}:design/qa.json`)).toBe("{\"q\":1}");
-    expect(await git(dir, "show", `${now}:design/report.json`)).toBe("{\"r\":1}");
-    expect(await git(dir, "show", `${now}:design/ledger.md`)).toContain("apache/skywalking-banyandb#7");
-    // A round-1 post writes the design section only, and the top-level ledger.json never changes.
-    expect(await git(dir, "ls-tree", "--name-only", now)).toBe("design\nledger.json");
+    const review = JSON.parse(await git(dir, "show", `${now}:review/ledger.json`)) as ReviewDoc;
+    expect(review.heads[0]).toEqual({ sha: "c".repeat(40), reviewId: 5 });
+    expect(review.heads[1]).toEqual({ sha: HEAD, base: "b".repeat(40), context: { source: "prelude" }, round1: { head: "a".repeat(40), open: 1 }, reviewId: 4242, reviewUrl: "https://github.com/o/r/pull/7#pullrequestreview-4242", verdict: "changes-requested", open: 3, leads: { given: 0, raised: 0 } });
+    expect(review.findings.map((f) => [f.id, f.origin, f.state, (f.github as { commentId: number | null }).commentId])).toEqual([["F1", "round2", "open", 777], ["F2", "round2", "open", null]]);
+    expect(await git(dir, "rev-parse", `${now}:design`)).toBe(baselines.design);
     expect(await git(dir, "show", `${now}:ledger.json`)).toBe(TOP);
     expect(await git(dir, "log", "-1", "--format=%s", REF)).toBe(`pr-review apache/skywalking-banyandb#7 at ${HEAD.slice(0, 12)}: published review 4242`);
   });
 
-  it("records a patch of about 200 KiB, written as a part set that fits the executor input and read from its file, not an argument", async () => {
+  it("records a patch of about 200 KiB, written as a part set and read from its file, not an argument", async () => {
     const { dir, baselines } = await ledgerRepo();
-    const big = patchOf({ items: Array.from({ length: 140 }, (_, i) => ({ id: `Q${i + 1}`, origin: "round1" as const, path: null, line: null, inline: false, commentId: null, body: `${i}:${"b".repeat(2_000)}`, text: `${i}:${"b".repeat(2_000)}` })) });
+    const big = patchOf({ items: Array.from({ length: 140 }, (_, i) => ({ id: `F${i + 1}`, origin: "round2" as const, path: null, line: null, inline: false, commentId: null, body: `${i}:${"b".repeat(2_000)}`, text: `${i}:${"b".repeat(2_000)}` })) });
     const json = JSON.stringify(big);
     expect(json.length).toBeGreaterThan(200_000);
     const parts = partCommands("publish-patch", ".graphloom/review/ledger/publish-patch.json", json);
     expect(parts.length).toBeGreaterThan(1);
-    for (const part of parts) expect(Buffer.byteLength(JSON.stringify({ commands: [part] }), "utf8")).toBeLessThan(256_000);
     const command = ledgerPublishedCommand(PULL, big, baselines, process.execPath);
-    expect(JSON.stringify(command.argv).length).toBeLessThan(16_000);
-    // Every argument fits the command executor's 4,096 characters.
     for (const a of command.argv) expect(a.length).toBeLessThanOrEqual(4_096);
-    expect(command.argv[6]).toBe(".graphloom/review/ledger/publish-patch.json");
-    const out = await run(dir, big, baselines);
-    expect(out.stdout).toMatch(/^advanced /);
-    const design = JSON.parse(await git(dir, "show", `${REF}:design/ledger.json`)) as { items: Array<{ id: string; body: string }> };
-    expect(design.items).toHaveLength(140);
-    expect(design.items[139]!.body).toBe(`139:${"b".repeat(2_000)}`);
+    expect((await write(dir, big, baselines)).stdout).toMatch(/^advanced /);
+    const review = JSON.parse(await git(dir, "show", `${REF}:review/ledger.json`)) as ReviewDoc;
+    expect(review.findings).toHaveLength(140);
   });
 
-  it("is a no-op when the ledger already holds that review, so a retry or a resume changes nothing", async () => {
+  it("is a no-op when the ledger already holds that review", async () => {
     const { dir, baselines } = await ledgerRepo();
-    await run(dir, patchOf(), baselines);
+    await write(dir, patchOf(), baselines);
     const once = await git(dir, "rev-parse", REF);
-    const again = await run(dir, patchOf(), baselines);
-    expect(again.stdout).toContain("already recorded");
+    expect((await write(dir, patchOf(), baselines)).stdout).toContain("already recorded");
     expect(await git(dir, "rev-parse", REF)).toBe(once);
   });
 
-  it("builds on its own first write when the other section moved in between, carrying that section unchanged", async () => {
+  it("carries the design section when the design review moved it in between", async () => {
     const { dir, baselines } = await ledgerRepo();
-    const review = JSON.stringify({ schema: "pr-review-ledger-v1", heads: [{ sha: "c".repeat(40), reviewId: 5 }], findings: [] });
-    const other = await advance(dir, { "review/ledger.json": review, "review/ledger.md": "# r\n" });
-    const out = await run(dir, patchOf(), baselines);
-    expect(out.stdout).toMatch(/^advanced /);
+    const other = await advance(dir, { "design/ledger.json": JSON.stringify({ schema: "pr-design-review-ledger-v1", heads: [{ sha: "d".repeat(40) }] }) });
+    expect((await write(dir, patchOf(), baselines)).stdout).toMatch(/^advanced /);
     const now = await git(dir, "rev-parse", REF);
     expect(await git(dir, "rev-parse", `${now}^`)).toBe(other);
-    expect(await git(dir, "rev-parse", `${now}:review`)).toBe(await git(dir, "rev-parse", `${other}:review`));
-    expect((JSON.parse(await git(dir, "show", `${now}:design/ledger.json`)) as DesignDoc).heads[1]).toMatchObject({ round1: "items", reviewId: 4242 });
-    expect(await git(dir, "show", `${now}:ledger.json`)).toBe(TOP);
+    expect(await git(dir, "rev-parse", `${now}:design`)).toBe(await git(dir, "rev-parse", `${other}:design`));
   });
 
-  it("records a round-2 post on both sections: round 1 clean on the design head, and the review section's head and findings", async () => {
+  it("stops \"ledger moved\" when the review section is not its baseline, leaving the ref where the other run put it", async () => {
     const { dir, baselines } = await ledgerRepo();
-    await run(dir, patchOf({ round: 2, verdict: "passed", open: 0, round1Open: 0, items: [], priors: [] }), baselines);
-    const design = JSON.parse(await git(dir, "show", `${REF}:design/ledger.json`)) as DesignDoc;
-    expect(design.heads[1]).toEqual({ sha: HEAD, base: "b".repeat(40), files: 1, commits: 1, facts: 0, round1: "clean", open: 0 });
-    const review = JSON.parse(await git(dir, "show", `${REF}:review/ledger.json`)) as { schema: string; heads: unknown[]; findings: unknown[] };
-    expect(review).toEqual({ schema: "pr-review-ledger-v1", heads: [{ sha: HEAD, base: "b".repeat(40), context: { source: "design-review", head: HEAD }, round1: { head: HEAD, open: 0 }, reviewId: 4242, reviewUrl: "https://github.com/o/r/pull/7#pullrequestreview-4242", verdict: "passed", open: 0, leads: { given: 0, raised: 0 } }], findings: [] });
-    expect(await git(dir, "show", `${REF}:review/ledger.md`)).toContain("the PR review");
-    expect(await git(dir, "show", `${REF}:ledger.json`)).toBe(TOP);
-  });
-
-  it("stops \"ledger moved\" when a section it writes is not its baseline, leaving the ref where the other run put it", async () => {
-    const { dir, baselines } = await ledgerRepo();
-    // Another run advanced the review section, which a round-2 post writes.
-    const reviewed = await advance(dir, { "review/ledger.json": JSON.stringify({ schema: "pr-review-ledger-v1", heads: [], findings: [{ id: "F1" }] }), "review/ledger.md": "# r\n" });
-    const r2 = run(dir, patchOf({ round: 2, verdict: "passed", open: 0, round1Open: 0, items: [], priors: [] }), baselines);
-    await expect(r2).rejects.toMatchObject({ code: 4, stderr: expect.stringContaining("ledger moved: its review section") });
-    expect(await git(dir, "rev-parse", REF)).toBe(reviewed);
-    // Another run of round 1 advanced the design section.
-    const designed = await advance(dir, { "design/ledger.json": "{\"schema\":\"pr-design-review-ledger-v1\",\"heads\":[]}" });
-    await expect(run(dir, patchOf(), baselines)).rejects.toMatchObject({ code: 4, stderr: expect.stringContaining("ledger moved: its design section") });
-    expect(await git(dir, "rev-parse", REF)).toBe(designed);
+    const moved = await advance(dir, { "review/ledger.json": JSON.stringify({ schema: "pr-review-ledger-v1", heads: [], findings: [{ id: "F1" }] }) });
+    await expect(write(dir, patchOf(), baselines)).rejects.toMatchObject({ code: 4, stderr: expect.stringContaining("ledger moved: its review section") });
+    expect(await git(dir, "rev-parse", REF)).toBe(moved);
   });
 
   it("fails, leaving the ref where it is, when the ledger ref does not exist", async () => {
     const { dir, baselines } = await ledgerRepo();
     await git(dir, "update-ref", "-d", REF);
-    await expect(run(dir, patchOf(), baselines)).rejects.toBeTruthy();
+    await expect(write(dir, patchOf(), baselines)).rejects.toBeTruthy();
     await expect(git(dir, "rev-parse", "--verify", REF)).rejects.toBeTruthy();
-  });
-});
-
-describe("the Publish stage's paginated reads are its own flow", () => {
-  it("do not replace Fetch's complete chain in the pull request snapshot, even when its last page is incomplete", () => {
-    const sim = issues();
-    const evidence = candidateEvidence(sim.evidence, "d1");
-    const pull = evidencePull(evidence, profileOf())!;
-    const before = analyze(evidence, profileOf(), pull);
-    expect(before.state).toBe("ready");
-    const producerOf = (e: EvidenceRecord) => (e.payload as { producer?: { stageId?: string } }).producer;
-    const incomplete: EvidenceRecord = { ref: "e-publish-page", kind: "other", candidateDigest: "d1", payload: { producer: { operationId: "opx", stageId: "publish", purpose: "diagnostic", readOnly: true, kind: "command", executorId: "graphloom.github/list-pull-reviews" }, github: { items: [{ id: 1 }], page: { complete: false, nextCursor: "2", startCursor: "1" } } } };
-    expect(producerOf(incomplete)!.stageId).toBe("publish");
-    const after = analyze([...evidence, incomplete], profileOf(), pull);
-    expect(after.state).toBe("ready");
-    // Still the whole of Fetch's reviews, not the page that Publish has read so far.
-    expect(after.state === "ready" && after.analysis.snapshot.reviews).toEqual(before.state === "ready" ? before.analysis.snapshot.reviews : []);
-  });
-
-  it("let the stage ask for the next cursor of a long list of reviews", () => {
-    const sim = issues({ reviewPages: 3 });
-    expect(sim.jobs.filter((j) => j.executor?.id === "graphloom.github/list-pull-reviews" && j.stageId === "publish")).toHaveLength(3);
-    expect(stopOf(sim)).toMatchObject({ reason: "complete" });
-  });
-});
-
-describe("posting is the operator's to enable: without the write grant the run ends at Publish with the review ready", () => {
-  const withheld = { executors: [{ id: "graphloom.github/create-pull-review", effect: "write" as const, effectGranted: false }] };
-  const granted = { executors: [{ id: "graphloom.github/create-pull-review", effect: "write" as const, effectGranted: true }] };
-
-  it("stops before it dispatches anything when the run view says the write is withheld, with no supervisor episode", () => {
-    const sim = clean(withheld);
-    expect(sim.final.action.type).toBe("stop");
-    expect(stopOf(sim)).toMatchObject({ reason: "posting not enabled", retryable: false });
-    expect(stopOf(sim)!.blocker).toMatch(/^draft ready; posting is not enabled \(set the runner config's github\.writeTokenEnv and resume to post\)\. The draft is \.graphloom\/review\/draft\.md and the report \.graphloom\/review\/review\.html/);
-    // Round 2 path: the files it names exist.
-    const files = writtenDraftFiles(sim.evidence);
-    expect(files.draftMd.state).toBe("read");
-    expect(files.html.state).toBe("read");
-    expect(publishJobs(sim)).toEqual([]);
-    expect(sim.github.creates).toEqual([]);
-    expect(sim.decisions.some((d) => d.action.type === "supervise")).toBe(false);
-    // The other work stays: every stage before Publish is accepted.
-    expect(sim.receipts.filter((r) => r.valid).map((r) => r.requirementId)).not.toContain("review-published");
-    expect(sim.receipts.filter((r) => r.valid).map((r) => r.requirementId)).toContain("round1-gated");
-  });
-
-  it("names what exists when round 1 found issues: there is no draft, the report and the round-1 record are the result", () => {
-    const sim = issues({ executors: withheld.executors });
-    // The complex-function scenario is the round-1 path; the other is the round-2 path.
-    const r1 = recordedRound1(sim.evidence);
-    expect(r1.state === "read" && r1.value.issues.length).toBeGreaterThan(0);
-    const n = (r1 as { value: Round1Record }).value.issues.length;
-    expect(stopOf(sim)).toMatchObject({ reason: "posting not enabled", retryable: false });
-    expect(stopOf(sim)!.blocker).toBe(`round 1 found ${n} issue${n === 1 ? "" : "s"}; posting is not enabled (set the runner config's github.writeTokenEnv and resume to post). The report is .graphloom/review/review.html and the round-1 record .graphloom/review/round1/round1.json, in the run's worktree`);
-    expect(stopOf(sim)!.blocker).not.toContain("draft");
-    expect(readParts(sim.evidence, "review-html-qa", ".graphloom/review/review.html").state).toBe("read");
-    expect(writtenDraftFiles(sim.evidence).draftMd.state).not.toBe("read");
-    expect(sim.jobs.filter((j) => j.stageId === "review" || j.stageId === "draft")).toEqual([]);
-  });
-
-  it("posts as before when the write is granted", () => {
-    const sim = issues(granted);
-    expect(stopOf(sim)).toMatchObject({ reason: "complete" });
-    expect(sim.github.creates).toHaveLength(1);
-  });
-
-  it("posts as before when the runner reports nothing of its grants", () => {
-    expect(stopOf(issues())).toMatchObject({ reason: "complete" });
-  });
-});
-
-describe("a still-open round-1 issue that gains questions on a later head", () => {
-  const OLD = "a".repeat(40);
-  const item = (covers?: string[]) => ({ id: "Q1", origin: "round1" as const, key: "k|Q1", status: "open" as const, head: OLD, history: [], ...(covers !== undefined ? { covers } : {}) });
-  const covered = [{ id: "Q2", symbol: "`sym2`", equivalents: ["pkg/b.go:10"], excerpt: "b does the same" }, { id: "Q5", symbol: "`newSymbol`", equivalents: ["pkg/a.go:3"], excerpt: "a does it" }];
-  const host = issue("Q1", { kinds: ["existing"], covers: ["Q2", "Q5"], covered });
-  const line = (covers?: string[]) => ({ id: "Q1", origin: "round1" as const, status: "open" as const, reason: "it is still an issue on this head", carried: false, link: "https://github.com/o/r/pull/7#discussion_r1", repost: false, covered, item: item(covers) });
-
-  it("shows the newly covered question under the earlier comment's link, and the ledger records the coverage", () => {
-    const plan = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([host]), prior: [line(["Q2"])] });
-    expect(plan.items).toEqual([]);
-    expect(plan.body).toContain("Q1 (still open) now also covers Q5 `newSymbol`: `pkg/a.go:3` (a does it)");
-    expect(plan.body).not.toContain("now also covers Q2");
-    const patch = ledgerPatch({ head: HEAD }, plan, { reviewId: 1, url: null, how: "created" } as never, new Map());
-    expect(patch.priors).toEqual([expect.objectContaining({ id: "Q1", covers: ["Q2", "Q5"] })]);
-  });
-
-  it("shows nothing new when the earlier head already covered them", () => {
-    expect(planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([host]), prior: [line(["Q2", "Q5"])] }).body).not.toContain("now also covers");
-  });
-
-  it("records the covers of a new merged issue it posts", () => {
-    const plan = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([host]) });
-    expect(plan.items[0]!.covers).toEqual(["Q2", "Q5"]);
-    expect(ledgerPatch({ head: HEAD }, plan, { reviewId: 1, url: null, how: "created" } as never, new Map()).items[0]!.covers).toEqual(["Q2", "Q5"]);
   });
 });

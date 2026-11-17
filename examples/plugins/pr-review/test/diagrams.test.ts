@@ -13,7 +13,8 @@ import { largeNeeds } from "../src/kit/large.js";
 import { agentRuns } from "../src/kit/evidence.js";
 import { LARGE_LIMITS, REHEARSAL_HEAD, REHEARSAL_MERGE_BASE, rehearsal } from "../src/rehearsal.js";
 import { featureDocument, fixtureDiagrams, stateDocument } from "../src/rehearsal-diagrams.js";
-import { recordedAppendix, recordedHtml, recordedReport } from "../src/kit/parts.js";
+import { readParts, recordedHtml, recordedReport } from "../src/kit/parts.js";
+import { PART_BASE, REVIEW_APPENDIX_HTML, REVIEW_HTML } from "../src/kit/constants.js";
 import type { FinalFeature } from "../src/kit/briefing.js";
 import type { StateEntry } from "../src/kit/report.js";
 import { BANYANDB, root, scenarioWith, simulate, type Simulation } from "./support.js";
@@ -65,12 +66,12 @@ const reportOf = (sim: Simulation): { json: string; doc: ReturnType<typeof parse
   return { json: w.value.json, doc: parseReportDoc(w.value.json) };
 };
 const htmlOf = (sim: Simulation): string => {
-  const h = recordedHtml(sim.evidence, true);
+  const h = readParts(sim.evidence, PART_BASE.finalHtml, REVIEW_HTML);
   if (h.state !== "read") throw new Error("no review.html");
   return h.value;
 };
 const appendixOf = (sim: Simulation): string => {
-  const h = recordedAppendix(sim.evidence, true);
+  const h = readParts(sim.evidence, PART_BASE.finalAppendix, REVIEW_APPENDIX_HTML);
   if (h.state !== "read") throw new Error("no review-appendix.html");
   return h.value;
 };
@@ -389,7 +390,7 @@ describe("the diagram job in the graph", () => {
     const sim = simulate({ scenarioName: "diagram-corrected" });
 
     it("draws, checks, sends the problems back to the same session once, and checks the correction", () => {
-      expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "answers accepted" } });
+      expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
       const jobs = diagramJobs(sim);
       expect(jobs).toHaveLength(2);
       expect(jobs[0]).toMatchObject({ jobId: "diagrammer", stageId: "report", purpose: "diagnostic", readOnly: true });
@@ -419,7 +420,7 @@ describe("the diagram job in the graph", () => {
     const sim = simulate({ scenarioName: "diagram-fallback" });
 
     it("goes on: the plugin draws the diagram, and review.html says the skill's drawing failed its checks and why", () => {
-      expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "answers accepted" } });
+      expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
       expect(diagramJobs(sim)).toHaveLength(2);
       const { doc } = reportOf(sim);
       const drawn = doc!.diagrams!.features.F1!;
@@ -441,7 +442,7 @@ describe("the diagram job in the graph", () => {
     const sim = simulate({ scenarioName: "diagram-skill-check-fails" });
 
     it("sends the skill's findings back, then runs the checks on the correction, and the state diagrams are the skill's", () => {
-      expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "answers accepted" } });
+      expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
       const jobs = diagramJobs(sim);
       expect(jobs).toHaveLength(2);
       expect((jobs[1]!.input as { assignment: string }).assignment).toMatch(/the skill's checks failed: .*self_check\.py: finding/);
@@ -521,7 +522,7 @@ describe("the diagram job in the graph", () => {
 
   it("draws in large mode too, once, after the claim check, and draws the same on the same report", () => {
     const sim = simulate({ scenario: scenarioWith("large-pull-request", () => undefined, { limits: LARGE_LIMITS }), config: { limits: LARGE_LIMITS }, maxSteps: 250 });
-    expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "answers accepted" } });
+    expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
     expect(diagramJobs(sim)).toHaveLength(1);
     const order = sim.jobs.filter((j) => j.stageId === "report" && j.kind === "agent").map((j) => j.resultSchema);
     expect(order.at(-2)).toBe("claim-check-v1");
@@ -584,7 +585,7 @@ describe("the flow, from the evidence alone", () => {
 });
 
 describe("report.json and review.html agree", () => {
-  it("embeds exactly the svg report.json holds, at the Report stage and at the Answers stage", () => {
+  it("embeds exactly the svg report.json holds, at the Report stage and at the Draft stage", () => {
     const sim = simulate({ scenarioName: "diagram-corrected" });
     const { doc } = reportOf(sim);
     const flow = doc!.diagrams!.features.F1 as { svg: string };

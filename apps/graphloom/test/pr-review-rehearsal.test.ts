@@ -19,6 +19,7 @@ const scope = createScope();
 
 interface Fixture {
   REHEARSAL_REQUEST: string;
+  REHEARSAL_REQUEST_NO_REPORT: string;
   REHEARSAL_HEAD_FILES: Record<string, string>;
 }
 let fixture: Fixture;
@@ -45,14 +46,14 @@ afterEach(async () => {
  * profile unmodified, as task preparation (wave 3: `graphloom task new`) will write it, and the
  * request the scenarios replay.
  */
-async function ready() {
+async function ready(request?: string) {
   const profile = JSON.parse(await readFile(path.join(bundle, "profiles", "banyandb.json"), "utf8")) as object;
   const env = await createTaskWorkspace(scope, {
     graph: "pr-review",
     repoName: "banyandb",
     files: { "go.mod": `module example.com/banyandb\n\ngo ${GO}\n`, ...fixture.REHEARSAL_HEAD_FILES },
     config: { name: "profile.json", value: profile },
-    request: fixture.REHEARSAL_REQUEST,
+    request: request ?? fixture.REHEARSAL_REQUEST,
     bundle,
   });
   github = await startFakeGitHub({});
@@ -79,16 +80,44 @@ describe.skipIf(GO === undefined)("graphloom check and rehearse on pr-review wit
     expect(report.supervisor).toMatchObject({ status: "selected", harness: "pi", source: "plugin" });
   }, 60_000);
 
-  // The offline stand-in never writes to GitHub (rehearsal design §4.6), so these runs stop once Round 1 is decided: after it the graph
-  // would publish its review, which is the one write the graph makes. The publish flow is covered by the plugin's own tests.
-  for (const scenario of ["happy", "report", "report-corrections", "injection", "complex-function", "sandbox-unavailable", "answer-finds-existing-helper", "answer-no-library-with-whole-repo-search", "answer-checker-contradicts", "needs-author-purpose", "purpose-stated", "missing-test", "crap-upper-bound", "state-lifecycle", "necessity-unnecessary", "necessity-disputed", "necessity-necessary"]) {
-    it(`reaches Round 1 for the ${scenario} scenario: Fetch, Report, Questions and Answers accepted, then Round 1 decided`, async () => {
-      const env = await ready();
-      const stopped = await rehearseStopAt(env.taskPath, "round1", { scenario, offline: true, commands: "stub" });
+  // The offline stand-in never writes to GitHub (rehearsal design §4.6), so these runs stop once the Draft stage is accepted: after it the
+  // graph would publish its review, which is the one write the graph makes. The publish flow is covered by the plugin's own tests.
+  // One scenario per context source (design-pr-review-split §4.2): the prelude (no ledger), the design review of this head, of an
+  // earlier head with a usable delta, of an earlier head whose delta is not usable (back to the prelude), and no report (--no-report).
+  const contexts: Record<string, { source: string; reporter: boolean; request?: "no-report" }> = {
+    prelude: { source: "prelude", reporter: true },
+    "design-review": { source: "design-review", reporter: false },
+    "design-review-earlier-head": { source: "design-review", reporter: false },
+    "design-review-unusable-delta": { source: "prelude", reporter: true },
+    "no-report": { source: "none", reporter: false, request: "no-report" },
+  };
+  for (const [scenario, want] of Object.entries(contexts)) {
+    it(`reaches Draft for the ${scenario} scenario with the ${want.source} context: Fetch, Report, Review and Draft accepted`, async () => {
+      const env = await ready(want.request === "no-report" ? fixture.REHEARSAL_REQUEST_NO_REPORT : undefined);
+      const stopped = await rehearseStopAt(env.taskPath, "draft", { scenario, offline: true, commands: "stub" });
       expect(stopped.ok, JSON.stringify(stopped)).toBe(true);
       const state = await loadRunState(stopped.stateDir);
-      expect([...new Set(state.receipts.filter((r) => r.valid).map((r) => r.stageId))].sort()).toEqual(["answers", "fetch", "questions", "report", "round1"]);
-      // Offline: the fake GitHub was never asked.
+      expect([...new Set(state.receipts.filter((r) => r.valid).map((r) => r.stageId))].sort()).toEqual(["draft", "fetch", "report", "review"]);
+      const commands = state.evidence.flatMap((e) => {
+        const p = e.payload as { command?: { id?: unknown; argv?: unknown } } | undefined;
+        return typeof p?.command?.id === "string" ? [{ id: p.command.id, argv: p.command.argv as string[] }] : [];
+      });
+      // The context record names the source the rule chose; a reporter runs only for the prelude.
+      expect(commands.filter((c) => c.id.startsWith("context-json")).at(-1)?.argv.join(" ")).toContain(`"source":"${want.source}"`);
+      expect(state.evidence.some((e) => (e as { resultSchema?: string }).resultSchema === "change-report-v1")).toBe(want.reporter);
+      // The ledger's review section is written; nothing is written to GitHub offline.
+      expect(commands.some((c) => c.id === "ledger-review-write")).toBe(true);
+      expect(github!.requests).toEqual([]);
+    }, 180_000);
+  }
+
+  for (const scenario of ["report-corrections", "injection", "complex-function", "sandbox-unavailable", "reuse-lead", "untested-feature", "crap-upper-bound", "state-lifecycle"]) {
+    it(`reaches Draft for the ${scenario} scenario`, async () => {
+      const env = await ready();
+      const stopped = await rehearseStopAt(env.taskPath, "draft", { scenario, offline: true, commands: "stub" });
+      expect(stopped.ok, JSON.stringify(stopped)).toBe(true);
+      const state = await loadRunState(stopped.stateDir);
+      expect([...new Set(state.receipts.filter((r) => r.valid).map((r) => r.stageId))].sort()).toEqual(["draft", "fetch", "report", "review"]);
       expect(github!.requests).toEqual([]);
     }, 180_000);
   }

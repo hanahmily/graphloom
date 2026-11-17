@@ -6,13 +6,13 @@ import path from "node:path";
 import type { EnvironmentCommand, EvidenceRecord } from "@graphloom/sdk";
 import { afterAll, describe, expect, it } from "vitest";
 import { LEDGER_MOVED } from "../src/kit/constants.js";
-import { ledgerRead, ledgerWriteCommands, migrationOf, oldValue, parseSectionRecord, priorChunkText, priorState, readBaselines, writtenLedger } from "../src/kit/ledger.js";
+import { ledgerRead, oldValue, parseSectionRecord, priorChunkText, priorState, readBaselines, reviewLedgerWriteCommands, reviewMigrationOf, writtenReviewLedger } from "../src/kit/ledger.js";
 import { blobId, DESIGN_SCHEMA, migratedDesignMarkdown, migratedTrees, migrateV1, MOVED_REASON, reviewMarkdown, REVIEW_SCHEMA, SKIPPED_NOTE, SUPERSEDED_REASON, topLedgerJson, treeId } from "../src/kit/ledgerv2.js";
 import { registryOf } from "../src/prior.js";
 import { ledgerPatch, ledgerPublishedCommand, planReview } from "../src/publish.js";
 import type { PullRequest } from "../src/kit/request.js";
-import { ROUND1_SCHEMA, type Round1Issue } from "../src/round1.js";
-import { answersComplete } from "../src/validators.js";
+import { ledgerCas } from "../src/reviewvalidators.js";
+import type { Draft } from "../src/draft.js";
 import { commitLedger, LEDGER_PULL, LEDGER_REF, ledgerFiles, LedgerRepo, v2Ledger, withLedger } from "./ledgerrepo.js";
 import { BANYANDB, candidateEvidence, scenarioWith, simulate } from "./support.js";
 
@@ -193,7 +193,7 @@ describe("the Git ids a migration names before it writes", () => {
   });
 });
 
-describe("writing a section, against a real repository (design-pr-review-split ยง5.2)", () => {
+describe("writing the review section, against a real repository (design-pr-review-split ยง5.2)", () => {
   const dirs: string[] = [];
   afterAll(async () => {
     for (const d of dirs) await rm(d, { recursive: true, force: true });
@@ -201,21 +201,17 @@ describe("writing a section, against a real repository (design-pr-review-split ย
   const TOP = topLedgerJson(LEDGER_PULL);
   const DESIGN = { schema: DESIGN_SCHEMA, heads: [{ sha: H1, round1: "clean", open: 0 }], purposes: [], qa: [], items: [] };
   const REVIEW = { schema: REVIEW_SCHEMA, heads: [], findings: [{ id: "F1", state: "open" }] };
+  const MESSAGE = "pr-review apache/skywalking-banyandb#7 at 555555555555: review section";
 
-  async function repoWithWorktree(): Promise<LedgerRepo> {
-    const repo = await new LedgerRepo().init(dirs, "pr-review-sections-");
-    await mkdir(path.join(repo.dir, ".graphloom/review"), { recursive: true });
-    for (const [name, text] of Object.entries({ "qa.json": '{"qa":1}', "report.json": '{"report":1}', "necessity.json": '{"necessity":1}' })) await writeFile(path.join(repo.dir, ".graphloom/review", name), text);
-    return repo;
-  }
-  /** What a run's Fetch reads of the ledger now, and the write its Answers stage makes from that read. */
-  async function answersWrite(repo: LedgerRepo, tag = "mine"): Promise<{ evidence: EvidenceRecord[]; commands: { parts: EnvironmentCommand[]; write: EnvironmentCommand } }> {
+  const repoOf = async (): Promise<LedgerRepo> => new LedgerRepo().init(dirs, "pr-review-sections-");
+  /** What a run's Fetch reads of the ledger now, and the write its Draft stage makes of the review section from that read. */
+  async function draftWrite(repo: LedgerRepo, tag = "mine"): Promise<{ evidence: EvidenceRecord[]; commands: { parts: EnvironmentCommand[]; write: EnvironmentCommand } }> {
     const { evidence } = await repo.reads();
     const read = ledgerRead(evidence)!;
     const prior = priorState(evidence, oldValue(read.ledger));
     const baselines = readBaselines(read.ledger, prior, PR)!;
-    const json = JSON.stringify({ schema: DESIGN_SCHEMA, heads: [{ sha: PR.head }], tag, items: prior.state === "read" ? prior.value.design?.items ?? [] : [] });
-    return { evidence, commands: ledgerWriteCommands(PR, oldValue(read.ledger), baselines.design, json, `# ${tag}\n`, migrationOf(prior, PR)) };
+    const json = JSON.stringify({ schema: REVIEW_SCHEMA, heads: [{ sha: PR.head }], tag, findings: prior.state === "read" ? prior.value.review?.findings ?? [] : [] });
+    return { evidence, commands: reviewLedgerWriteCommands(PR, oldValue(read.ledger), baselines.review, json, reviewMarkdown(LEDGER_PULL), reviewMigrationOf(prior, PR), MESSAGE) };
   }
   const run = async (repo: LedgerRepo, c: { parts: EnvironmentCommand[]; write: EnvironmentCommand }) => {
     for (const p of c.parts) await repo.exec(p.argv);
@@ -230,106 +226,110 @@ describe("writing a section, against a real repository (design-pr-review-split ย
     throw new Error("the command succeeded");
   };
 
-  it("migrates a v1 commit on the first write: the top-level ledger.json, its own design section, and the review section the migration builds", async () => {
-    const repo = await repoWithWorktree();
+  it("creates the ledger when Fetch read none: the top-level ledger.json and the review section only", async () => {
+    const repo = await repoOf();
+    const { commands } = await draftWrite(repo);
+    expect(writtenReviewLedger(commands.write.argv)).toMatchObject({ old: "absent", section: "review", baseline: "absent", migration: { mode: "-" } });
+    const record = parseSectionRecord((await run(repo, commands)).stdout)!;
+    expect(record).toMatchObject({ cur: "absent", sections: { review: expect.any(String) } });
+    expect(record.sections.design).toBe("absent");
+    const files = await ledgerFiles(repo.dir);
+    expect(Object.keys(files).sort()).toEqual(["ledger.json", "review/ledger.json", "review/ledger.md"]);
+    expect(files["ledger.json"]).toBe(TOP);
+  });
+
+  it("migrates a v1 commit on the first write: the top-level ledger.json, the design section the migration builds with the v1 commit's records, and its own review section", async () => {
+    const repo = await repoOf();
     const v1 = await commitLedger(repo.dir, { "ledger.json": JSON.stringify(V1), "ledger.md": "# v1\n", "qa.json": '{"old":"qa"}', "report.json": '{"old":"report"}', "necessity.json": '{"old":"n1"}' });
-    const { evidence, commands } = await answersWrite(repo);
-    const w = writtenLedger(commands.write.argv)!;
-    expect(w).toMatchObject({ old: v1, section: "design", migration: { mode: "v1+review" } });
-    const out = await run(repo, commands);
-    const record = parseSectionRecord(out.stdout)!;
+    const { evidence, commands } = await draftWrite(repo);
+    const w = writtenReviewLedger(commands.write.argv)!;
+    expect(w).toMatchObject({ old: v1, section: "review", migration: { mode: "v1" } });
+    // The migrated design section's files are written first, as parts the write reads.
+    expect(commands.parts.map((c) => c.id)).toEqual(["ledger-design-json-p1", "ledger-design-md-p1"]);
+    const record = parseSectionRecord((await run(repo, commands)).stdout)!;
     const now = await repo.git("rev-parse", LEDGER_REF);
     expect(record).toMatchObject({ advanced: now, cur: v1 });
     expect(await repo.git("rev-parse", `${now}^`)).toBe(v1);
     const files = await ledgerFiles(repo.dir);
     expect(Object.keys(files).sort()).toEqual(["design/ledger.json", "design/ledger.md", "design/necessity.json", "design/qa.json", "design/report.json", "ledger.json", "review/ledger.json", "review/ledger.md"]);
     expect(files["ledger.json"]).toBe(TOP);
-    expect(files["design/qa.json"]).toBe('{"qa":1}');
-    // The review section is the migration of what Fetch read (the extract), and its subtree is the one the plugin names before writing.
+    expect(files["design/qa.json"]).toBe('{"old":"qa"}');
+    expect(files["design/report.json"]).toBe('{"old":"report"}');
+    expect(JSON.parse(files["review/ledger.json"]!)).toMatchObject({ tag: "mine" });
+    // The design section is the migration of what Fetch read, and its subtree is the one the plugin names before writing.
     const prior = priorState(evidence, v1);
     expect(prior).toMatchObject({ state: "read", layout: "v1" });
     const extract = (prior as { v1: unknown }).v1;
-    expect(JSON.parse(files["review/ledger.json"]!)).toEqual(migrateV1(extract).review);
-    expect(files["review/ledger.md"]).toBe(reviewMarkdown(LEDGER_PULL));
+    expect(JSON.parse(files["design/ledger.json"]!)).toEqual(migrateV1(extract).design);
+    expect(files["design/ledger.md"]).toBe(migratedDesignMarkdown(LEDGER_PULL));
     const listing = ledgerRead(evidence)!.ledger as unknown as { entries: Map<string, string> };
     const trees = migratedTrees(extract, PR, listing.entries);
-    expect(record.sections.review).toBe(trees.review);
-    expect(await repo.git("rev-parse", `${now}:review`)).toBe(trees.review);
-    // The migrated design subtree (the baseline) is what git makes of the migrated ledger.json beside the v1 commit's own files.
-    const design = await commitLedger(repo.dir, { "design/ledger.json": trees.json.design, "design/ledger.md": migratedDesignMarkdown(LEDGER_PULL), "design/qa.json": '{"old":"qa"}', "design/report.json": '{"old":"report"}', "design/necessity.json": '{"old":"n1"}' });
-    expect(await repo.git("rev-parse", `${design}:design`)).toBe(trees.design);
-    expect(w.baseline).toBe(trees.design);
+    expect(record.sections.design).toBe(trees.design);
+    // The baseline of the review section is the migrated one, which the v1 commit does not hold.
+    expect(w.baseline).toBe(trees.review);
   });
 
-  it("carries the other section when it advanced between Fetch and the write, and never changes the top-level ledger.json", async () => {
-    const repo = await repoWithWorktree();
+  it("carries the design section when the design review advanced it between Fetch and the write, and never changes the top-level ledger.json", async () => {
+    const repo = await repoOf();
     await v2Ledger(repo.dir, { design: DESIGN, review: REVIEW });
-    const { commands } = await answersWrite(repo);
-    // Another run (the PR review) advances the review section after this run's Fetch read the ledger.
-    const other = await commitLedger(repo.dir, { ...(await ledgerFiles(repo.dir)), "review/ledger.json": JSON.stringify({ ...REVIEW, findings: [{ id: "F1" }, { id: "F2" }] }) });
+    const { commands } = await draftWrite(repo);
+    const other = await commitLedger(repo.dir, { ...(await ledgerFiles(repo.dir)), "design/ledger.json": JSON.stringify({ ...DESIGN, heads: [] }) });
     const out = await run(repo, commands);
     const now = await repo.git("rev-parse", LEDGER_REF);
     expect(parseSectionRecord(out.stdout)).toMatchObject({ advanced: now, cur: other });
-    expect(await repo.git("rev-parse", `${now}^`)).toBe(other);
-    expect(await repo.git("rev-parse", `${now}:review`)).toBe(await repo.git("rev-parse", `${other}:review`));
-    expect(JSON.parse(await repo.git("show", `${now}:design/ledger.json`))).toMatchObject({ tag: "mine" });
+    expect(await repo.git("rev-parse", `${now}:design`)).toBe(await repo.git("rev-parse", `${other}:design`));
+    expect(JSON.parse(await repo.git("show", `${now}:review/ledger.json`))).toMatchObject({ tag: "mine", findings: [{ id: "F1" }] });
     expect(await repo.git("show", `${now}:ledger.json`)).toBe(TOP);
   });
 
   it("stops \"ledger moved\" when its own section advanced between Fetch and the write, leaving the ref where the other run put it", async () => {
-    const repo = await repoWithWorktree();
+    const repo = await repoOf();
     await v2Ledger(repo.dir, { design: DESIGN, review: REVIEW });
-    const { commands } = await answersWrite(repo);
-    const other = await commitLedger(repo.dir, { ...(await ledgerFiles(repo.dir)), "design/ledger.json": JSON.stringify({ ...DESIGN, heads: [] }) });
+    const { commands } = await draftWrite(repo);
+    const other = await commitLedger(repo.dir, { ...(await ledgerFiles(repo.dir)), "review/ledger.json": JSON.stringify({ ...REVIEW, findings: [] }) });
     const err = await fails(run(repo, commands));
     expect(err.code).toBe(LEDGER_MOVED);
-    expect(err.stderr).toContain("ledger moved: its design section");
+    expect(err.stderr).toContain("ledger moved: its review section");
     expect(await repo.git("rev-parse", LEDGER_REF)).toBe(other);
-    // The same for a ledger created after Fetch read it absent, and for a v1 ledger another 0.26 run advanced.
-    const fresh = await repoWithWorktree();
-    const fromAbsent = await answersWrite(fresh);
-    await v2Ledger(fresh.dir, { design: DESIGN });
-    expect((await fails(run(fresh, fromAbsent.commands))).code).toBe(LEDGER_MOVED);
-    const old = await repoWithWorktree();
+    // The same for a v1 ledger another 0.26 run advanced after Fetch read it.
+    const old = await repoOf();
     await commitLedger(old.dir, { "ledger.json": JSON.stringify(V1), "ledger.md": "#\n", "qa.json": "{}", "report.json": "{}" });
-    const fromV1 = await answersWrite(old);
+    const fromV1 = await draftWrite(old);
     const advanced = await commitLedger(old.dir, { "ledger.json": JSON.stringify({ ...V1, heads: [] }), "ledger.md": "#\n", "qa.json": "{}", "report.json": "{}" });
     expect((await fails(run(old, fromV1.commands))).stderr).toContain("a v1 ledger other than");
     expect(await old.git("rev-parse", LEDGER_REF)).toBe(advanced);
   });
 
-  it("builds a run's second write (Publish's ledger-published) on its own first write, also when the other section moved in between", async () => {
-    const repo = await repoWithWorktree();
+  it("builds Publish's ledger-published on its own first write, writes the review section only, also when the design section moved in between", async () => {
+    const repo = await repoOf();
     await v2Ledger(repo.dir, { design: DESIGN, review: REVIEW });
     const top = await repo.git("rev-parse", `${LEDGER_REF}:ledger.json`);
-    const fetched = await repo.git("rev-parse", `${LEDGER_REF}:review`);
-    const { commands } = await answersWrite(repo);
+    const fetchedDesign = await repo.git("rev-parse", `${LEDGER_REF}:design`);
+    const fetchedReview = await repo.git("rev-parse", `${LEDGER_REF}:review`);
+    const { commands } = await draftWrite(repo);
     const first = parseSectionRecord((await run(repo, commands)).stdout)!;
-    // Another run advances the review section between this run's two writes.
-    const other = await commitLedger(repo.dir, { ...(await ledgerFiles(repo.dir)), "review/ledger.json": JSON.stringify({ ...REVIEW, findings: [] }) });
-    const issue: Round1Issue = { id: "Q1", key: "purpose|item|x", kinds: ["needs-author"], status: "needs author", body: "Why?", anchored: false };
-    const plan = planReview({ pull: PR, head: PR.head, nonce: "n", round1: { schema: ROUND1_SCHEMA, head: PR.head, necessity: "necessary", issues: [issue] } });
-    const patch = ledgerPatch({ head: PR.head, base: B }, plan, { reviewId: 77, url: null, how: "created" }, new Map());
+    // The design review advances its section between this run's two writes.
+    const other = await commitLedger(repo.dir, { ...(await ledgerFiles(repo.dir)), "design/ledger.json": JSON.stringify({ ...DESIGN, heads: [{ sha: H2 }] }) });
+    const draft = { comments: [], summary: "", context: { source: "prelude" }, leads: { given: 2, raised: 0 } } as unknown as Draft;
+    const plan = planReview({ pull: PR, head: PR.head, nonce: "n", draft, round1: null });
+    const patch = ledgerPatch({ head: PR.head, base: B }, plan, draft, { reviewId: 77, url: null, how: "created" }, new Map());
     const { partCommands } = await import("../src/kit/parts.js");
     for (const p of partCommands("publish-patch", ".graphloom/review/ledger/publish-patch.json", JSON.stringify(patch))) await repo.exec(p.argv);
-    const published = ledgerPublishedCommand(PR, patch, { design: first.sections.design!, review: fetched }, process.execPath);
-    const out = await repo.exec(published.argv);
+    const out = await repo.exec(ledgerPublishedCommand(PR, patch, { design: fetchedDesign, review: first.sections.review! }, process.execPath).argv);
     const now = await repo.git("rev-parse", LEDGER_REF);
     expect(parseSectionRecord(out.stdout)).toMatchObject({ advanced: now, cur: other });
-    expect(await repo.git("rev-parse", `${now}:review`)).toBe(await repo.git("rev-parse", `${other}:review`));
-    expect(JSON.parse(await repo.git("show", `${now}:design/ledger.json`))).toMatchObject({ tag: "mine", heads: [{ sha: PR.head, round1: "items", open: 1, reviewId: 77 }], items: [{ id: "Q1", state: "open" }] });
+    expect(await repo.git("rev-parse", `${now}:design`)).toBe(await repo.git("rev-parse", `${other}:design`));
+    expect(JSON.parse(await repo.git("show", `${now}:review/ledger.json`))).toMatchObject({ tag: "mine", heads: [{ sha: PR.head, context: { source: "prelude" }, round1: null, reviewId: 77, verdict: "passed", open: 0, leads: { given: 2, raised: 0 } }] });
     expect(await repo.git("rev-parse", `${now}:ledger.json`)).toBe(top);
-    // A round-2 post writes the review section too: from the review section Fetch read, which moved, so it stops "ledger moved".
-    const plan2 = planReview({ pull: PR, head: PR.head, nonce: "n", round1: { schema: ROUND1_SCHEMA, head: PR.head, necessity: "necessary", issues: [] }, draft: { comments: [], summary: "" } as never });
-    const patch2 = ledgerPatch({ head: PR.head, base: B }, plan2, { reviewId: 78, url: null, how: "created" }, new Map());
+    // From the review section Fetch read, which this run's own write moved, it stops "ledger moved".
+    const patch2 = { ...patch, reviewId: 78 };
     for (const p of partCommands("publish-patch", ".graphloom/review/ledger/publish-patch.json", JSON.stringify(patch2))) await repo.exec(p.argv);
-    const design = await repo.git("rev-parse", `${now}:design`);
-    const err = await fails(repo.exec(ledgerPublishedCommand(PR, patch2, { design, review: fetched }, process.execPath).argv));
+    const err = await fails(repo.exec(ledgerPublishedCommand(PR, patch2, { design: fetchedDesign, review: fetchedReview }, process.execPath).argv));
     expect(err.code).toBe(LEDGER_MOVED);
     expect(err.stderr).toContain("its review section");
   });
 
-  /** A `git` on PATH that moves the ledger ref before the first `n` update-refs a write makes (another run winning the race), then runs git. */
+  /** A `git` on PATH that moves the ledger ref before the first `n` update-refs a write makes (the design review winning the race), then runs git. */
   async function racingGit(repo: LedgerRepo, n: number): Promise<Record<string, string>> {
     const bin = path.join(repo.dir, ".git", "racing-bin");
     await mkdir(bin, { recursive: true });
@@ -341,10 +341,10 @@ describe("writing a section, against a real repository (design-pr-review-split ย
       '  if [ "$k" -lt "$RACE_TIMES" ]; then',
       '    echo $((k + 1)) > "$RACE_COUNT"',
       '    cur=$("$REAL_GIT" rev-parse "$RACE_REF")',
-      // The other run rewrites the review section only.
+      // The other run rewrites the design section only.
       '    blob=$(printf \'{"race":%s}\' "$k" | "$REAL_GIT" hash-object -w --stdin)',
       '    sub=$(printf \'100644 blob %s\\tledger.json\\n\' "$blob" | "$REAL_GIT" mktree)',
-      '    tree=$({ "$REAL_GIT" ls-tree "$cur" | grep -v "	review$"; printf \'040000 tree %s\\treview\\n\' "$sub"; } | "$REAL_GIT" mktree)',
+      '    tree=$({ "$REAL_GIT" ls-tree "$cur" | grep -v "	design$"; printf \'040000 tree %s\\tdesign\\n\' "$sub"; } | "$REAL_GIT" mktree)',
       '    new=$("$REAL_GIT" commit-tree "$tree" -p "$cur" -m race)',
       '    "$REAL_GIT" update-ref "$RACE_REF" "$new"',
       "  fi",
@@ -358,22 +358,20 @@ describe("writing a section, against a real repository (design-pr-review-split ย
   }
 
   it("starts again from the ref's new value when it loses the update-ref race, at most three times, then stops \"ledger moved\"", async () => {
-    const repo = await repoWithWorktree();
+    const repo = await repoOf();
     await v2Ledger(repo.dir, { design: DESIGN, review: REVIEW });
-    const { commands } = await answersWrite(repo);
+    const { commands } = await draftWrite(repo);
     const env = await racingGit(repo, 3);
     const out = await repo.exec(commands.write.argv, env);
     const now = await repo.git("rev-parse", LEDGER_REF);
     const raced = await repo.git("rev-parse", `${now}^`);
-    // Three races lost, the fourth attempt wins: on top of the last racer, whose review section it carries.
     expect(parseSectionRecord(out.stdout)).toMatchObject({ advanced: now, cur: raced });
-    expect(await repo.git("show", `${now}:review/ledger.json`)).toBe('{"race":2}');
-    expect(await repo.git("log", "--format=%s", "-5", LEDGER_REF)).toBe(["pr-review apache/skywalking-banyandb#7 at 555555555555: report and Q&A", "race", "race", "race", "a v2 ledger"].join("\n"));
+    expect(await repo.git("show", `${now}:design/ledger.json`)).toBe('{"race":2}');
+    expect(await repo.git("log", "--format=%s", "-5", LEDGER_REF)).toBe([MESSAGE, "race", "race", "race", "a v2 ledger"].join("\n"));
     expect(await repo.git("show", `${now}:ledger.json`)).toBe(TOP);
-    // A fourth lost race is one too many.
-    const again = await repoWithWorktree();
+    const again = await repoOf();
     await v2Ledger(again.dir, { design: DESIGN, review: REVIEW });
-    const second = await answersWrite(again);
+    const second = await draftWrite(again);
     const err = await fails(again.exec(second.commands.write.argv, await racingGit(again, 4)));
     expect(err.code).toBe(LEDGER_MOVED);
     expect(err.stderr).toContain("lost 4 races");
@@ -415,39 +413,39 @@ describe("reading each section file in parts (design-pr-review-split ยง5.2)", ()
   });
 });
 
-describe("the validators recompute a migrated tree (design-pr-review-split ยง5.4)", () => {
-  // A run on a 0.26 ledger with V1's heads and round-2 findings (its questions left out, so this scenario's canned answers keep their ids): Fetch reads it, and the Answers stage's write migrates it.
-  const LEDGER = { ...V1, qa: [], findings: V1.findings.filter((f) => f.id.startsWith("F")) };
+describe("the ledger-cas validator recomputes a migrated tree (design-pr-review-split ยง5.4)", () => {
+  // A 1.0 run on a 0.26 ledger: Fetch reads it (migrated in memory), and the Draft stage's write of the review section migrates it.
+  const LEDGER = { ...V1, findings: V1.findings.filter((f) => f.id.startsWith("F")) };
   const V1_SHA = hex("c");
   const sim = simulate({
-    scenario: scenarioWith("answer-finds-existing-helper", (s) => withLedger(s, { reads: { "ledger-read": `present ${V1_SHA}\n`, "ledger-prior": priorChunkText(JSON.stringify(LEDGER), 0) } })),
+    scenario: scenarioWith("reuse-lead", (s) => withLedger(s, { reads: { "ledger-read": `present ${V1_SHA}\n`, "ledger-prior": priorChunkText(JSON.stringify({ schema: LEDGER.schema, heads: LEDGER.heads, qa: [], findings: LEDGER.findings }), 0) } })),
   });
-  const upto = sim.evidence.findIndex((e) => (e.payload as { command?: { id?: string } }).command?.id === "ledger-write");
-  const evaluate = (evidence: EvidenceRecord[]) => answersComplete.evaluate({ requirementId: "answers-complete", statement: "", evidence: candidateEvidence(evidence.slice(0, upto + 1), "d1"), candidateDigest: "d1", config: BANYANDB });
+  const upto = sim.evidence.findIndex((e) => (e.payload as { command?: { id?: string } }).command?.id === "ledger-review-write");
+  const evaluate = (evidence: EvidenceRecord[]) => ledgerCas.evaluate({ requirementId: "ledger-recorded", statement: "", evidence: candidateEvidence(evidence.slice(0, upto + 1), "d1"), candidateDigest: "d1", config: BANYANDB });
   const extract = { schema: LEDGER.schema, heads: LEDGER.heads, qa: [], findings: LEDGER.findings };
-  const migrated = migrateV1(extract).review!;
-  const reviewTree = treeId([{ name: "ledger.json", id: blobId(JSON.stringify(migrated)) }, { name: "ledger.md", id: blobId(reviewMarkdown(LEDGER_PULL)) }]);
-  const record = (review: string): string => `advanced ${hex("e")}\ncur ${V1_SHA}\ndesign ${hex("d")}\nreview ${review}\n`;
+  const designTree = migratedTrees(extract, PR, new Map()).design;
+  const record = (design: string): string => `advanced ${hex("e")}\ncur ${V1_SHA}\ndesign ${design}\nreview ${hex("d")}\n`;
   const change = (id: string, f: (c: { argv: string[]; stdoutTail: string }) => object) =>
     sim.evidence.map((e) => {
       const c = (e.payload as { command?: { id: string; argv: string[]; stdoutTail: string } }).command;
       return c?.id === id ? ({ ...e, payload: { ...(e.payload as object), command: { ...c, ...f(c) } } } as EvidenceRecord) : e;
     });
 
-  it("writes the migrated review section first, and the write names the migration", () => {
+  it("writes the migrated design section first, and the write names the migration", () => {
     expect(upto, JSON.stringify(sim.final).slice(0, 800)).toBeGreaterThan(0);
-    const write = sim.jobs.find((j) => j.instruction.startsWith("Advance the pull"))!;
-    expect(writtenLedger((write.input as { commands: Array<{ argv: string[] }> }).commands[0]!.argv)).toMatchObject({ old: V1_SHA, migration: { mode: "v1+review" } });
-    expect(sim.jobs.flatMap((j) => ((j.input as { commands?: Array<{ id: string }> }).commands ?? []).map((c) => c.id)).filter((id) => id.startsWith("ledger-review-"))).toEqual(["ledger-review-json-p1", "ledger-review-md-p1"]);
+    const write = sim.jobs.find((j) => j.instruction.startsWith("Advance the ledger's review section"))!;
+    expect(writtenReviewLedger((write.input as { commands: Array<{ argv: string[] }> }).commands[0]!.argv)).toMatchObject({ old: V1_SHA, migration: { mode: "v1" } });
+    expect(sim.jobs.flatMap((j) => ((j.input as { commands?: Array<{ id: string }> }).commands ?? []).map((c) => c.id)).filter((id) => id.startsWith("ledger-design-"))).toEqual(["ledger-design-json-p1", "ledger-design-md-p1"]);
+    expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
   });
 
-  it("passes when the write swapped from the v1 commit and its review subtree is the migrated one, and fails on another subtree", () => {
-    expect(evaluate(change("ledger-write", () => ({ stdoutTail: record(reviewTree) })))).toMatchObject({ status: "passed" });
-    expect(evaluate(change("ledger-write", () => ({ stdoutTail: record(hex("9")) })))).toMatchObject({ status: "failed", reason: expect.stringContaining("not the migrated one") });
+  it("passes when the write swapped from the v1 commit and its design subtree is the migrated one, and fails on another subtree", () => {
+    expect(evaluate(change("ledger-review-write", () => ({ stdoutTail: record(designTree) })))).toMatchObject({ status: "passed" });
+    expect(evaluate(change("ledger-review-write", () => ({ stdoutTail: record(hex("9")) })))).toMatchObject({ status: "failed", reason: expect.stringContaining("not the migrated one") });
   });
 
-  it("fails when the migrated review section written is not the migration of the v1 ledger Fetch read", () => {
-    const tampered = change("ledger-review-json-p1", (c) => ({ argv: c.argv.map((a) => a.replace('"F2"', '"F9"')) }));
+  it("fails when the migrated design section written is not the migration of the v1 ledger Fetch read", () => {
+    const tampered = change("ledger-design-json-p1", (c) => ({ argv: c.argv.map((a) => a.replace(H2, H4)) }));
     expect(evaluate(tampered)).toMatchObject({ status: "failed" });
   });
 });

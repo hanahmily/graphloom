@@ -33,14 +33,22 @@ import { claimTargets, readClaimCheck, type ClaimTarget } from "./kit/claims.js"
 import { ALPHA_GO, BETA_GO, GENERATED_GO, GUIDE_MD, LARGE_HEAD_FILES, LARGE_LIMITS, largeDoc, OMITTED_PATH } from "./rehearsal-large.js";
 import { diagramInputOf, DIAGRAM_CHECK, diagramCheckId } from "./kit/diagrams.js";
 import { fixtureDiagrams } from "./rehearsal-diagrams.js";
-import { assembleReport, asReporterOutput, numbered, type Cite, type FinalReport, type ReportContext, type ReportItem, type ReporterOutput, type StateEntry } from "./kit/report.js";
+import { assembleReport, numbered, type Cite, type FinalReport, type ReportContext, type ReportItem, type ReporterOutput, type StateEntry } from "./kit/report.js";
 import { detectStateCandidates } from "./kit/statecandidates.js";
 import { DOCS } from "./rehearsal-docs.js";
 import { HUGE_BODY, HUGE_COMMITS, HUGE_TITLE, hugeDiff, hugeHeadFiles, hugeHits, hugeSources, hugeStaticDocs } from "./rehearsal-huge.js";
-import type { Necessity } from "./necessity.js";
-import { BASE_FILES, FLAGS_GO, NEW_HEAD_FILES, RETENTION_TTL_GO, BACKOFF_GO, JITTER_GO, LIMIT_GO, SYNC_GO, SYNC_CHANGED, STREAM_ADDED_LINES, STREAM_CHANGED, STREAM_PATH, STREAM_WRITE_BASE_GO, STREAM_WRITE_GO, WRITE_PATH_DOC, PRINCIPLES_FILE } from "./rehearsal-fixtures.js";
-import { pinnedTexts } from "./questions.js";
-import { qaScenario, type QaSpec } from "./rehearsal-qa.js";
+import { BASE_FILES, FLAGS_GO, NEW_HEAD_FILES, RETENTION_TTL_GO, LIMIT_GO, SYNC_GO, SYNC_CHANGED, STREAM_ADDED_LINES, STREAM_CHANGED, STREAM_PATH, STREAM_WRITE_GO } from "./rehearsal-fixtures.js";
+import { pinnedTexts } from "./kit/pinned.js";
+import { groundworkStubs, type BaseFixture } from "./rehearsal-groundwork.js";
+import { computeLeads, type Lead } from "./leads.js";
+import { chooseScope } from "./reviewscope.js";
+import { coarsestChanges, highLevelId } from "./kit/reportview.js";
+import { reportJson } from "./kit/output.js";
+import { priorChunkText } from "./kit/ledger.js";
+import { LEDGER_V2 } from "./kit/ledgerv2.js";
+import { DELTA_END, designFileText } from "./context.js";
+import type { PullRequest } from "./kit/request.js";
+import type { Snapshot } from "./kit/snapshot.js";
 import { pullFile, type PullFile } from "./kit/snapshot.js";
 import { reporterSections } from "./kit/template.js";
 
@@ -49,9 +57,11 @@ export const REHEARSAL_HEAD = "0123456789abcdef0123456789abcdef01234567";
 export const REHEARSAL_BASE_TIP = "89abcdef0123456789abcdef0123456789abcdef";
 export const REHEARSAL_MERGE_BASE = "fedcba9876543210fedcba9876543210fedcba98";
 const TREE = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-export const REHEARSAL_REQUEST = `Report on ${REHEARSAL_PULL.owner}/${REHEARSAL_PULL.repo}#${REHEARSAL_PULL.number} at ${REHEARSAL_HEAD}.`;
+export const REHEARSAL_REQUEST = `Review on ${REHEARSAL_PULL.owner}/${REHEARSAL_PULL.repo}#${REHEARSAL_PULL.number} at ${REHEARSAL_HEAD}.`;
+/** The same request with `--no-report` (design-pr-review-split §7.1): the `no-report` scenario runs with it. */
+export const REHEARSAL_REQUEST_NO_REPORT = `Review on ${REHEARSAL_PULL.owner}/${REHEARSAL_PULL.repo}#${REHEARSAL_PULL.number} at ${REHEARSAL_HEAD}, without a report.`;
 
-import { reviewScenarioParts, type ReviewScript } from "./rehearsal-review.js";
+import { reviewScenarioParts } from "./rehearsal-review.js";
 
 export { FLAGS_GO, LARGE_LIMITS };
 
@@ -238,8 +248,8 @@ interface Pull {
   commits: string[];
   diff: string;
   doc: unknown;
-  /** The base repository fixture and the answerer's behaviour for the Questions and Answers stages. */
-  qa?: QaSpec;
+  /** The base repository fixture the groundwork of the leads reads (design-pr-review-split §4.3). */
+  base?: BaseFixture;
 }
 
 function reads(p: Pull): NonNullable<RehearsalScenario["reads"]> {
@@ -340,7 +350,7 @@ const REPORT_PULL: Pull = {
   commits: ["Add retention_days to Group", "Sweep expired data nightly"],
   diff: FLAGS_DIFF,
   doc: FLAGS_DOC,
-  qa: { base: { defs: `banyand/cmd/server/flags.go:1:package server\nbanyand/cmd/server/flags.go:12:func registerFlags(cmd *cobra.Command) {` } },
+  base: { defs: `banyand/cmd/server/flags.go:1:package server\nbanyand/cmd/server/flags.go:12:func registerFlags(cmd *cobra.Command) {` },
 };
 
 /** A thousand data files: past the profile's file limit (large mode) and past one write command (`large-artifacts`, design §6.6). */
@@ -362,28 +372,7 @@ const COMPLEX_PULL: Pull = {
   doc: TTL_DOC,
 };
 
-/**
- * A Q&A with nothing for round 1 to raise on the `COMPLEX_PULL` change: its purpose is stated, no declared dependency lacks a
- * source (so "none found" is a plain answer), and the missing-test and complexity-coverage questions are answered by a cited test.
- */
-const CLEAN_ROUND1: QaSpec = {
-  base: { manifests: { "go.mod": "module github.com/apache/skywalking-banyandb\n\ngo 1.24.0\n" } },
-  purposes: [{ section: "features", source: "body", quote: "which parses a retention such as 7d" }],
-  answer: (q, _sym, _record, dflt) =>
-    q.type === "missing-test" || q.type === "complexity-coverage"
-      ? { ...dflt, answer: "pkg/schema/ttl_test.go exercises ParseTTL with a table of units and ranges.", status: "answered", none_found: false, reusable: false, citations: [{ path: "pkg/schema/ttl_test.go", tree: "base", start: 1, end: 1, quote: "package schema" }], proposal: { kind: "none", splits: [], testFile: "", testName: "", cases: [], assertion: "" } }
-      : dflt,
-};
 
-/** The same for the `LARGE_PULL` change: both high-level changes (W1, W2) have their purpose stated in the body, and their missing-test questions a cited test. */
-const CLEAN_LARGE: QaSpec = {
-  base: { manifests: { "go.mod": "module github.com/apache/skywalking-banyandb\n\ngo 1.24.0\n" } },
-  purposes: [
-    { section: "highlevel", item: "W1", source: "body", quote: "Adds the alpha helpers" },
-    { section: "highlevel", item: "W2", source: "body", quote: "a beta helper that uses them" },
-  ],
-  answer: CLEAN_ROUND1.answer!,
-};
 
 /** What `go.sh` reports for `pkg/schema/ttl.go` when its tests run 8 of ParseTTL's 20 statements (lines 6 to 35). */
 const TTL_COVERAGE_REPORT = [
@@ -638,12 +627,89 @@ function measuredRecords(doc: { records?: MetricsRecord[]; files?: FileIndex[] }
   });
 }
 
-function build(profile: Profile, pull: Pull, options: { body?: string; notes?: string[]; toolId?: string; corrections?: boolean; qa?: QaSpec; coverage?: string; report?: (files: readonly PullFile[], sectionIds: readonly string[]) => Core; features?: (files: readonly PullFile[]) => Feature[]; unsupported?: string[]; diagrams?: DiagramBehavior; headFiles?: Readonly<Record<string, string>> }): Built {
+/** Where a scenario's context comes from (design-pr-review-split §4.2): no ledger, the design review's report of this head or of an earlier one, or no report. */
+export type ContextScenario = "prelude" | "design-review" | "design-earlier" | "design-unusable" | "none";
+
+/** The design head of the `design-earlier` and `design-unusable` scenarios: an earlier head of the pull request, on the same base. */
+export const REHEARSAL_DESIGN_HEAD = "fedcba9876543210fedcba9876543210fedcba01";
+/** The ledger commit a design scenario's Fetch reads. */
+export const REHEARSAL_LEDGER = "1edbe11edbe11edbe11edbe11edbe11edbe11edb";
+
+/** N1's answer the design review recorded in a design scenario: necessary, on the pull request's title. */
+function designNecessity(title: string): Record<string, unknown> {
+  return {
+    conclusion: "necessary",
+    rationale: "The failure the pull request describes is possible on the base, the change keeps the system's design, and no existing way does it.",
+    problem: { claim: `The pull request is titled "${title}": it describes a behavior the base lacks.`, quotes: [{ source: "title", quote: title }], trace: [{ step: "The base code path the change touches has no handling for the case the title names", path: "pkg/timestamp/duration.go", tree: "base", start: 30, end: 42, quote: "func ParseDuration" }], canHappen: "yes", explanation: "Nothing else handles the case on the base." },
+    reproduction: "not attempted: no reproduction mechanism in this version",
+    principles: [],
+    design: { statements: [], changed: [], effect: "unrelated", explanation: "No design or architecture statement concerns this behavior.", searches: [] },
+    alternatives: { exists: false, explanation: "No caller or other layer already handles it.", citations: [] },
+    searches: [],
+  };
+}
+
+/**
+ * The design review's records of head `d` (design-pr-review-split §5.1), as pr-design-review would have left them for the same change:
+ * its report (the scenario's own, rendered by the kit), a Q&A with one open `purpose` question about the first high-level change, and
+ * N1's record; and the design section's ledger.json with that question posted and open.
+ */
+function designRecords(profile: Profile, pull: Pull, files: readonly PullFile[], final: FinalReport, facts: readonly Fact[], mode: ReviewMode, d: string): { report: string; qa: string; necessity: string; ledger: string } {
+  const pr: PullRequest = { mode: "review", owner: REHEARSAL_PULL.owner, repo: REHEARSAL_PULL.repo, number: REHEARSAL_PULL.number, head: d };
+  const snapshot = {
+    pull: { number: REHEARSAL_PULL.number, title: pull.title, state: "open", url: `https://github.com/${REHEARSAL_PULL.owner}/${REHEARSAL_PULL.repo}/pull/${REHEARSAL_PULL.number}`, body: pull.body, author: "contributor", labels: [], draft: false, merged: false, head: { ref: "retention-days", sha: d }, base: { ref: "main", sha: REHEARSAL_BASE_TIP } },
+    files: [...files],
+    commits: pull.commits.map((message, i) => ({ sha: `${i + 1}`.repeat(40), message })),
+    reviews: [],
+    reviewComments: [],
+    threads: [],
+    checks: [],
+    mode,
+    refs: [],
+  } as Snapshot;
+  const report = reportJson({ pr, snapshot, base: REHEARSAL_MERGE_BASE, final, facts, measurements: { state: "none", reason: "the design review measures statically; pr-review measures coverage" }, profile, mode });
+  const w1 = final.briefing.whatsNew[0];
+  const cite = w1?.cites[0] ?? { path: files[0]!.path, side: "head" as const, start: 1, end: 1 };
+  const question = { id: "Q1", type: "purpose", item: "W1", text: `What is the purpose of ${w1?.title ?? "this change"}? The pull request's text does not state it.`, origin: "required", stable: `purpose|item|${cite.path}`, answer: { answer: "Nothing the pull request's text, its commits or the code comments state why this change is made.", status: "needs author", none_found: false, citations: [], searches: [], inventory: [], metrics: [], proposal: { kind: "none", splits: [], testFile: "", testName: "", cases: [], assertion: "" }, check: { verdict: "supported", note: "", searches: [] }, notes: [], history: [] } };
+  const qa = JSON.stringify({ schema: "pr-qa-v1", mode: mode.mode, pull: { owner: pr.owner, repo: pr.repo, number: pr.number, head: d, base: REHEARSAL_MERGE_BASE }, symbols: [], purposes: [], inventory: { dependencies: [], packages: 0, truncated: false }, questions: [question] });
+  const answer = { question: "N1", answer: "The change is necessary.", status: "answered", citations: [], searches: [], inventory: [], metrics: [], proposal: { kind: "none", splits: [], testFile: "", testName: "", cases: [], assertion: "" }, necessity: designNecessity(pull.title), check: { verdict: "supported", note: "", searches: [], principles: [] }, notes: [], history: [] };
+  const necessity = JSON.stringify({ schema: "pr-necessity-v1", question: { id: "N1", text: "Is the change necessary?" }, conclusion: "necessary", decision: { action: "ask-all", reason: "N1 concluded necessary: every question is asked" }, answer });
+  const ledger = JSON.stringify({
+    schema: "pr-design-review-ledger-v1",
+    heads: [{ sha: d, base: REHEARSAL_MERGE_BASE, files: files.length, commits: pull.commits.length, facts: facts.length, round1: "items", open: 1, reviewId: 5001, reviewUrl: `https://github.com/${pr.owner}/${pr.repo}/pull/${pr.number}#pullrequestreview-5001` }],
+    purposes: [],
+    qa: [{ id: "Q1", type: "purpose", key: question.stable, symbol: null, item: "W1", status: "needs author", answer: question.answer.answer, state: "open", history: [] }],
+    items: [{ id: "Q1", origin: "round1", key: question.stable, head: d, path: cite.path, line: Math.max(1, cite.start), text: question.text, state: "open", github: { head: d, reviewId: 5001, commentId: 6001, inline: true }, history: [{ head: d, status: "open" }] }],
+  });
+  return { report, qa, necessity, ledger };
+}
+
+/** The ledger reads of a design scenario's Fetch (design-pr-review-split §5.2): a v2 ledger with a design section and no review section, and the design head's files. */
+function ledgerStubs(context: ContextScenario, records: { report: string; qa: string; necessity: string; ledger: string }): NonNullable<RehearsalScenario["commands"]> {
+  if (context === "prelude" || context === "none") return {};
+  const ok = (stdout: string): { exitCode: number; stdout: string } => ({ exitCode: 0, stdout });
+  const extract = (doc: Record<string, unknown>): string => JSON.stringify({ schema: doc.schema, heads: doc.heads, qa: (Array.isArray(doc.qa) ? doc.qa : []).map((q: Record<string, unknown>) => ({ id: q.id, type: q.type, key: q.key, symbol: q.symbol, item: q.item, status: q.status, state: q.state })), findings: Array.isArray(doc.findings) ? doc.findings : [], items: doc.items }).replace(/[\u007f-￿]/g, (m) => `\\u${m.charCodeAt(0).toString(16).padStart(4, "0")}`);
+  return {
+    "ledger-read": ok(`100644 blob ${"1".repeat(40)}\tledger.json\n040000 tree ${"2".repeat(40)}\tdesign\npresent ${REHEARSAL_LEDGER}\n`),
+    "ledger-prior": ok(priorChunkText(extract({ schema: LEDGER_V2 }), 0)),
+    "ledger-prior-design": ok(priorChunkText(extract(JSON.parse(records.ledger) as Record<string, unknown>), 0)),
+    "ledger-prior-review": ok("graphloom-prior-absent\n"),
+    "ledger-prior-report": ok(designFileText(records.report, 0)),
+    "ledger-prior-qa": ok(designFileText(records.qa, 0)),
+    "ledger-prior-nec": ok(designFileText(records.necessity, 0)),
+    // The delta from the earlier design head to this one: one hunk in one file; a design head that is not in the review clone fails it.
+    ...(context === "design-earlier" ? { "ledger-delta": ok(`diff --git a/docs/retention.md b/docs/retention.md\n@@ -3,0 +4,1 @@\n${DELTA_END}\n`) } : {}),
+    ...(context === "design-unusable" ? { "ledger-delta": { exitCode: 128, stdout: "", stderr: `fatal: Not a valid object name ${REHEARSAL_DESIGN_HEAD}` } } : {}),
+  };
+}
+
+function build(profile: Profile, pull: Pull, options: { body?: string; notes?: string[]; toolId?: string; corrections?: boolean; coverage?: string; report?: (files: readonly PullFile[], sectionIds: readonly string[]) => Core; features?: (files: readonly PullFile[]) => Feature[]; unsupported?: string[]; diagrams?: DiagramBehavior; headFiles?: Readonly<Record<string, string>>; context?: ContextScenario; raise?: (leads: readonly Lead[]) => string[] }): Built {
   const files = pull.files.map((f) => pullFile(fileItem(f))!);
   const facts = detectFacts(files, profile);
   const sections = reporterSections(profile);
   const sectionIds = sections.map((s) => s.id);
   const notes = options.notes ?? [];
+  const context = options.context ?? "prelude";
   // A pull request over the task's limits is reviewed in large mode (design §6.9): the same flow, with one high-level report whose
   // quotes are verified against the trees, and the files no item is expected to cite (generated, no patch) left to the plugin.
   const mode = reportMode(files, profile.limits);
@@ -685,49 +751,46 @@ function build(profile: Profile, pull: Pull, options: { body?: string; notes?: s
     // A claim the check did not support goes back to the reporter once; the revision keeps it, and it is removed.
     if (weak.size > 0) results["change-report-revision-v1"] = [{ output: good }];
   }
-  // The Questions and Answers stages: what the questioner asks, how the answerer and its checker reply, and the
-  // read-only commands' canned outputs, all derived with the plugin's own functions from the pull request's files.
-  const finalReport = options.corrections === true ? undefined : good;
-  const reported = finalReport ?? removeDubious(good);
-  const qa = qaScenario({
-    profile,
-    files,
-    headFiles: options.headFiles ?? REHEARSAL_HEAD_FILES,
-    sections,
-    good: reported,
-    records:
-      options.coverage !== undefined
-        ? measuredRecords({ ...(pull.doc as { files?: FileIndex[] }), records: recordsWithBase(pull) }, options.coverage)
-        : recordsWithBase(pull).map((r) => withUnknownCoverage(r, `docker unavailable: ${REHEARSAL_NO_DOCKER}`)),
-    pull: { title: pull.title, body: options.body ?? pull.body, commits: pull.commits },
-    mergeBase: REHEARSAL_MERGE_BASE,
-    spec: options.qa ?? pull.qa ?? {},
-    reportMode: mode,
-  });
-  Object.assign(results, qa.results);
   const ctxStandard: ReportContext = { sections, files, facts, pinned: pinnedTexts({ title: pull.title, body: options.body ?? pull.body }, pull.commits.map((message) => ({ message }))), candidates: detectStateCandidates(files) };
   const ctxFinal = partition !== undefined ? largeContext(ctxStandard, partition) : ctxStandard;
-  const diagrams = diagramScenario(assembleReport(left.report, new Map([...left.removed].map((id) => [id, "not supported"] as const)), ctxFinal), options.diagrams);
+  const final = assembleReport(left.report, new Map([...left.removed].map((id) => [id, "not supported"] as const)), ctxFinal);
+  const diagrams = diagramScenario(final, options.diagrams);
   Object.assign(results, diagrams.results);
+  // The measurements this run records, and the groundwork the leads rest on (design-pr-review-split §4.3), derived with the plugin's own functions.
+  const records = options.coverage !== undefined ? measuredRecords({ ...(pull.doc as { files?: FileIndex[] }), records: recordsWithBase(pull) }, options.coverage) : recordsWithBase(pull).map((r) => withUnknownCoverage(r, `docker unavailable: ${REHEARSAL_NO_DOCKER}`));
+  const gw = groundworkStubs({ profile, files, headFiles: options.headFiles ?? REHEARSAL_HEAD_FILES, mergeBase: REHEARSAL_MERGE_BASE, base: pull.base ?? {} });
+  // The context's high-level changes and "what to check": the report's (this run's prelude, or the design review's of the same change); none without one.
+  const usesReport = context !== "none";
+  const items = final.sections.flatMap((s) => s.items.map((i) => ({ id: i.id, section: s.id, text: i.text, cites: i.cites, facts: i.facts })));
+  const whatsNew = final.briefing.whatsNew.map((w, n) => ({ id: highLevelId(n + 1), section: "highlevel", text: w.text, cites: w.cites, facts: [] as string[] }));
+  const changes = !usesReport ? [] : whatsNew.length > 0 ? whatsNew : coarsestChanges(items);
+  const paths = new Set(files.map((f) => f.path));
+  const check = usesReport ? { risks: final.briefing.check.risks, behavior: final.briefing.check.behavior, compatibility: final.briefing.check.compatibility } : { risks: [], behavior: [], compatibility: [] };
+  const scope = chooseScope({ mode, files, partition, check: { risks: check.risks.map((b) => ({ ...b, cites: b.cites.filter((c) => paths.has(c.path)) })), behavior: check.behavior.map((b) => ({ ...b, cites: b.cites.filter((c) => paths.has(c.path)) })), compatibility: check.compatibility.map((b) => ({ ...b, cites: b.cites.filter((c) => paths.has(c.path)) })) } });
+  const leads = computeLeads({ records, groundwork: gw.groundwork, changes, scope: new Set(scope.files), changed: new Set(files.flatMap((f) => [f.path, ...(f.previousPath !== null ? [f.previousPath] : [])])), similarity: profile.questions.similarity, searched: gw.groundwork.symbols.filter((s) => s.change === "new").length <= profile.limits.maxNewSymbols });
+  const reviewPath = scope.files.find((p) => p.endsWith(".go")) ?? scope.files[0]!;
+  const review = reviewScenarioParts({ total: scope.files.length, path: reviewPath, leads, raise: options.raise?.(leads) ?? [] });
+  Object.assign(results, review.results);
+  const d = context === "design-review" ? REHEARSAL_HEAD : REHEARSAL_DESIGN_HEAD;
+  const design = context === "prelude" || context === "none" ? undefined : designRecords(profile, pull, files, final, facts, mode, d);
   return {
     scenario: {
       results,
-      commands: { ...commands(pull, options.toolId), ...quoteStubs(results["claim-check-v1"]!.at(-1)!, claimTargets(good, { sections }, { treeQuotes: large }), files), ...(options.coverage !== undefined ? { "sandbox-go": { exitCode: 0, stdout: "ready\n" }, "cover-go": { exitCode: 0, stdout: options.coverage } } : {}), ...qa.commands, ...diagrams.commands },
+      commands: {
+        ...commands(pull, options.toolId),
+        ...quoteStubs(results["claim-check-v1"]!.at(-1)!, claimTargets(good, { sections }, { treeQuotes: large }), files),
+        ...(options.coverage !== undefined ? { "sandbox-go": { exitCode: 0, stdout: "ready\n" }, "cover-go": { exitCode: 0, stdout: options.coverage } } : {}),
+        ...gw.commands,
+        ...diagrams.commands,
+        ...review.commands,
+        ...(design !== undefined ? ledgerStubs(context, design) : {}),
+        // The record of the review section's write (design-pr-review-split §5.2): the new commit, the value it swapped from, and the subtrees it holds.
+        "ledger-review-write": { exitCode: 0, stdout: `advanced ${"b".repeat(40)}\ncur ${design !== undefined ? REHEARSAL_LEDGER : "absent"}\ndesign ${design !== undefined ? "2".repeat(40) : "absent"}\nreview ${"d".repeat(40)}\n` },
+      },
       reads: reads({ ...pull, ...(options.body !== undefined ? { body: options.body } : {}) }),
-      expect: { status: "stopped", stopReason: "report ready", receipts: ["fetch", "report", "questions", "answers"] },
+      expect: { status: "stopped", stopReason: "posting not enabled", receipts: ["fetch", "report", "review", "draft"] },
     },
   };
-}
-
-/** The report once the claim check removes the dubious document item (the `report-corrections` scenario). */
-function removeDubious(good: ReporterOutput): ReporterOutput {
-  const out = structuredClone(good);
-  const other = out.sections.find((s) => s.id === "other");
-  if (other !== undefined) {
-    other.items = other.items.filter((i) => i.cites[0]?.path !== "docs/retention.md");
-    other.none = other.items.length === 0;
-  }
-  return out;
 }
 
 const fixtureDiff = (path: string, text: string): string => ["diff --git a/" + path + " b/" + path, "new file mode 100644", "--- /dev/null", "+++ b/" + path, `@@ -0,0 +1,${text.split("\n").length - 1} @@`, ...text.replace(/\n$/, "").split("\n").map((l) => `+${l}`), ""].join("\n");
@@ -754,9 +817,7 @@ const RETENTION_PULL: Pull = {
   commits: ["Add ParseTTL"],
   diff: fixtureDiff("pkg/retention/ttl.go", RETENTION_TTL_GO),
   doc: doc("pkg/retention/ttl.go"),
-  qa: {
-    purposes: [{ section: "features", source: "body", quote: "parses a retention such as 7d into hours" }],
-    base: {
+  base: {
       hits: {
         ParseTTL: {
           name: [],
@@ -768,22 +829,6 @@ const RETENTION_PULL: Pull = {
       snippets: { "pkg/timestamp/duration.go:30": DURATION_BODY },
       sites: { "github.com/spf13/cobra": "banyand/cmd/server/flags.go:7" },
     },
-    answer: (q, sym, _record, dflt) =>
-      q.type === "existing-reuse-common"
-        ? {
-            ...dflt,
-            answer: "`ParseDuration` (pkg/timestamp/duration.go:30) parses the same <n><unit> grammar and is called from 7 places, for example banyand/measure/flusher.go:52.",
-            none_found: false,
-            reusable: true,
-            status: "answered",
-            citations: [
-              { path: "pkg/timestamp/duration.go", tree: "base", start: 30, end: 42, quote: "func ParseDuration" },
-              { path: "banyand/measure/flusher.go", tree: "base", start: 52, end: 52, quote: "timestamp.ParseDuration" },
-            ],
-            searches: [{ pattern: "func .*\\(.*string.*\\).*int.*error", tree: "base", paths: [], ignoreCase: false, hits: 3 }],
-          }
-        : dflt,
-  },
 };
 
 /**
@@ -803,71 +848,10 @@ const LARGE_PULL: Pull = {
   commits: ["Add alpha and beta helpers"],
   diff: [fixtureDiff("pkg/alpha/alpha.go", ALPHA_GO), fixtureDiff("pkg/beta/beta.go", BETA_GO)].join(""),
   doc: largeDoc(),
-  qa: { purposes: [{ section: "features", source: "body", quote: "a beta helper that uses them" }] },
 };
 
-const BACKOFF_PULL: Pull = {
-  files: [addedFile("pkg/retry/backoff.go", BACKOFF_GO)],
-  title: "Add a retry back-off helper",
-  body: "Adds Backoff, which returns the delay before a retry attempt.",
-  commits: ["Add Backoff"],
-  diff: fixtureDiff("pkg/retry/backoff.go", BACKOFF_GO),
-  doc: doc("pkg/retry/backoff.go"),
-  qa: {
-    purposes: [{ section: "features", source: "body", quote: "returns the delay before a retry attempt" }],
-    answer: (q, _sym, _record, dflt) =>
-      q.type === "existing-reuse-common"
-        ? {
-            ...dflt,
-            answer: "No declared dependency or internal package provides a back-off: github.com/spf13/cobra, github.com/robfig/cron/v3 and go.uber.org/multierr do not, and no directory of the base is named for retries; none of their sources is available here, so the answer rests on the searches and the manifest.",
-            searches: [
-              { pattern: "\\bBackoff\\b|\\bbackoff\\b|\\bback_off\\b", tree: "base", paths: [], ignoreCase: false, hits: 0 },
-              { pattern: "func .*\\(.*int.*Duration.*\\).*Duration", tree: "base", paths: [], ignoreCase: false, hits: 2 },
-              { pattern: "maxDelay|time.Minute", tree: "base", paths: [], ignoreCase: false, hits: 6 },
-            ],
-            inventory: [{ name: "github.com/spf13/cobra", version: "v1.9.1" }, { name: "github.com/robfig/cron/v3", version: "v3.0.1" }],
-          }
-        : dflt,
-  },
-};
 
-const VENDORED_JITTER = `func Jitter(d time.Duration) time.Duration {
-	span := int64(d) / 5
-	if span <= 0 {
-		return d
-	}
-	return d + time.Duration(rand.Int63n(2*span)-span)
-}`;
 
-const JITTER_PULL: Pull = {
-  files: [addedFile("pkg/spread/jitter.go", JITTER_GO)],
-  title: "Spread retry delays",
-  body: "Adds Jitter, which spreads a delay by up to a fifth either way.",
-  commits: ["Add Jitter"],
-  diff: fixtureDiff("pkg/spread/jitter.go", JITTER_GO),
-  doc: doc("pkg/spread/jitter.go"),
-  qa: {
-    purposes: [{ section: "features", source: "body", quote: "spreads a delay by up to a fifth either way" }],
-    base: {
-      hits: { Jitter: { name: [], signature: [], tokens: [] } },
-      snippets: { "vendor/github.com/foo/jitter/jitter.go:12": VENDORED_JITTER },
-    },
-    // The answerer finds nothing in its own searches; the checker's search finds the vendored equivalent.
-    checks: [
-      (q) => (q.type === "existing-reuse-common" ? { verdict: "unsupported", note: "git grep -n 'func Jitter' finds vendor/github.com/foo/jitter/jitter.go:12, which spreads a duration by a fifth: the same function", searches: [{ pattern: "func Jitter", tree: "base", paths: [], ignoreCase: false, hits: 1 }] } : undefined),
-    ],
-    revise: (q, _sym, prev) => ({
-      ...prev,
-      answer: "`Jitter` (vendor/github.com/foo/jitter/jitter.go:12) spreads a duration by a fifth either way, as this one does; the vendored directory is searched too.",
-      none_found: false,
-      reusable: true,
-      status: "answered",
-      citations: [{ path: "vendor/github.com/foo/jitter/jitter.go", tree: "base", start: 12, end: 18, quote: "func Jitter" }],
-      searches: [{ pattern: "func Jitter", tree: "base", paths: [], ignoreCase: false, hits: 1 }],
-      question: q.id,
-    }),
-  },
-};
 
 const LIMIT_PULL: Pull = {
   files: [addedFile("pkg/quota/limit.go", LIMIT_GO)],
@@ -877,7 +861,6 @@ const LIMIT_PULL: Pull = {
   diff: fixtureDiff("pkg/quota/limit.go", LIMIT_GO),
   doc: doc("pkg/quota/limit.go"),
   // The questioner leaves out the missing-test question; the plugin adds it.
-  qa: { purposes: [{ section: "features", source: "body", quote: "clamps a requested quota at zero" }], omit: ["missing-test"] },
 };
 
 /** `git diff -U0 -w` for the Sync fixture: only the head-side hunk matters to the tools. */
@@ -896,10 +879,7 @@ const SYNC_PULL: Pull = {
   commits: ["Reset on forced sync"],
   diff: SYNC_DIFF,
   doc: doc("pkg/offline/sync.go"),
-  qa: {
-    purposes: [{ section: "features", source: "title", quote: "Reset when forced" }],
-    base: { defs: "pkg/offline/sync.go:3:package offline\npkg/offline/sync.go:6:func Sync(items []string, force bool) error {" },
-  },
+  base: { defs: "pkg/offline/sync.go:3:package offline\npkg/offline/sync.go:6:func Sync(items []string, force bool) error {" },
 };
 
 /** The patch of a file whose head adds only the lines numbered `added`: hunks of three lines of context, merged where they touch. */
@@ -950,10 +930,7 @@ const STREAM_PULL: Pull = {
   commits: ["fix(stream): reply with an error when a write batch stores nothing"],
   diff: STREAM_DIFF,
   doc: doc(STREAM_PATH),
-  qa: {
-    purposes: [{ section: "features", source: "body", quote: "replies with the first error when nothing was stored" }],
-    base: { defs: `${STREAM_PATH}:3:package stream\n${STREAM_PATH}:6:func (w *writeCallback) Rev(message bus.Message) (resp bus.Message) {` },
-  },
+  base: { defs: `${STREAM_PATH}:3:package stream\n${STREAM_PATH}:6:func (w *writeCallback) Rev(message bus.Message) (resp bus.Message) {` },
 };
 
 /** The head-side line of the `n`th line of the stream fixture that reads `text` once trimmed. */
@@ -1018,62 +995,8 @@ function streamReport(files: readonly PullFile[], sectionIds: readonly string[])
   };
 }
 
-/** The base-side line of the `n`th line of the stream fixture's base that reads `text` once trimmed. */
-function streamBaseLine(text: string, n = 1): number {
-  const lines = STREAM_WRITE_BASE_GO.replace(/\n$/, "").split("\n");
-  let seen = 0;
-  for (let i = 0; i < lines.length; i += 1) {
-    if (lines[i]!.trim() === text && ++seen === n) return i + 1;
-  }
-  throw new Error(`the stream fixture's base has no line ${n} of ${JSON.stringify(text)}`);
-}
 
-/**
- * The necessity answer of the `necessity-unnecessary` scenario, a #1443-like change: the problem is real (a batch whose events all fail is
- * acknowledged as a success), but the fix makes the acknowledgement depend on a loop that flushes the groups, and the write path design
- * says a write returns once it is buffered, with a background worker flushing. The ground is the design statement it breaks.
- */
-function streamUnnecessary(dflt: Necessity): Necessity {
-  const flush = streamBaseLine("w.flushGroups()");
-  const reply = streamLine("if stored == 0 && firstErr != nil {");
-  return {
-    ...dflt,
-    conclusion: "unnecessary",
-    rationale: "Replying only after the groups are flushed makes the write wait on flushing, against the write path design, which acknowledges a write once it is buffered and flushes in the background.",
-    problem: {
-      claim: "A write batch whose events all fail was acknowledged as a success, so the sender never learns of the failure.",
-      quotes: [{ source: "body", quote: "A write batch whose events all fail used to be acknowledged as a success." }],
-      trace: [
-        { step: "Rev handles each event and only logs a failure; nothing is kept for the reply", path: STREAM_PATH, tree: "base", start: streamBaseLine("for i := range events {"), end: flush - 1, quote: "w.l.Error().Err(err).Msg(\"cannot handle write event\")" },
-        { step: "After the loop Rev flushes the groups and returns an empty reply whatever failed", path: STREAM_PATH, tree: "base", start: flush, end: flush + 2, quote: "w.flushGroups()" },
-      ],
-      canHappen: "yes",
-      explanation: "The failure can happen as described: the reply does not depend on what was stored. The question is whether the fix, which decides the reply after flushing, fits the write path.",
-    },
-    design: {
-      statements: [{ path: WRITE_PATH_DOC.path, tree: "base", start: WRITE_PATH_DOC.line, end: WRITE_PATH_DOC.line, quote: WRITE_PATH_DOC.quote }],
-      changed: [{ path: STREAM_PATH, tree: "head", start: reply, end: reply + 2, quote: "if stored == 0 && firstErr != nil {" }],
-      effect: "breaks",
-      explanation: "The design says the write is buffered as a memory part and a background worker flushes it later, so a write returns before flushing. The change decides the reply after the flush loop, so the reply waits on flushing, which the design does not allow.",
-      searches: [
-        { pattern: "write path|flush|acknowledg", tree: "base", paths: [], ignoreCase: false, hits: 9 },
-        { pattern: "background worker", tree: "base", paths: ["docs/concept/*.md"], ignoreCase: false, hits: 2 },
-      ],
-    },
-    alternatives: { exists: false, explanation: "The liaison does not report a data node's partial failure either; the failure would have to be reported by an asynchronous path, not by delaying the reply.", citations: [] },
-  };
-}
 
-/** A new flag and a nightly sweep, with nothing in the pull request's text that says why. */
-const FLAG_PULL = (body: string, title: string): Pull => ({
-  files: [FLAGS],
-  title,
-  body,
-  commits: ["Wire the flag"],
-  diff: FLAGS_DIFF,
-  doc: FLAGS_DOC,
-  qa: { base: { defs: "banyand/cmd/server/flags.go:1:package server\nbanyand/cmd/server/flags.go:12:func registerFlags(cmd *cobra.Command) {" } },
-});
 
 
 /** The report of the huge pull request: sixty long items of four cites each, half of them features, as a reporter of #1445 would give. */
@@ -1124,14 +1047,7 @@ export function hugeRehearsal(config: unknown): { scenario: RehearsalScenario; h
     diff: hugeDiff(),
     doc: hugeStaticDocs().all,
     // A Q&A round 1 raises nothing on (the purposes are stated by the title, no dependency lacks a source, a test is cited), so the run goes on into the review layer.
-    qa: {
-      base: { hits: hugeHits(), manifests: { "go.mod": "module github.com/apache/skywalking-banyandb\n\ngo 1.24.0\n" } },
-      purposes: ["W1", "W2", "W3", "W4", "W5"].map((item) => ({ section: "highlevel", item, source: "title" as const, quote: HUGE_TITLE })),
-      answer: (q, sym, record, dflt) => {
-        const a = CLEAN_ROUND1.answer!(q, sym, record, dflt);
-        return { ...a, answer: `${a.answer} ${"The searches and the cited lines show it. ".repeat(60)}`.slice(0, 1_900) };
-      },
-    },
+    base: { hits: hugeHits(), manifests: { "go.mod": "module github.com/apache/skywalking-banyandb\n\ngo 1.24.0\n" } },
   };
   const headFiles = hugeHeadFiles();
   const built = build(profile, pull, { report: hugeReport, features: hugeFeatures, headFiles }).scenario;
@@ -1140,26 +1056,9 @@ export function hugeRehearsal(config: unknown): { scenario: RehearsalScenario; h
   return { scenario: { ...built, commands: commandsOf }, headFiles };
 }
 
-/**
- * The `incremental-round1` scenario (design §16): the `LIMIT_PULL` change (two new functions, `Limit` and `Burst`) with a clean Q&A
- * and review replies. A test runs it on an earlier head's ledger with a delta; `over` says which questions that head asks (the others
- * are carried, so the replies and canned checks leave them out) and may change the answers.
- */
-export function incrementalRehearsal(config: unknown, over: Pick<QaSpec, "asked" | "necessityCarried" | "answer"> = {}): RehearsalScenario {
-  const profile = parseProfile(config);
-  return withReview(build(profile, LIMIT_PULL, { toolId: "static-go-1", qa: { purposes: LIMIT_PULL.qa!.purposes!, base: CLEAN_ROUND1.base!, ...over, answer: over.answer !== undefined ? (q, sym, record, dflt) => over.answer!(q, sym, record, CLEAN_ROUND1.answer!(q, sym, record, dflt)) : CLEAN_ROUND1.answer! } }).scenario, { total: 1, path: "pkg/quota/limit.go" });
-}
+
 
 /** The scenarios, for the profile the run is described with (design §16). */
-/**
- * A scenario with the review layer's replies added (design §16, `review-layer`): the replies are used when round 1 finds no issue
- * and the same run goes on into the review layer.
- */
-function withReview(scenario: RehearsalScenario, script: ReviewScript): RehearsalScenario {
-  const parts = reviewScenarioParts(script);
-  return { ...scenario, results: { ...scenario.results, ...parts.results }, commands: { ...scenario.commands, ...parts.commands } };
-}
-
 export function rehearsal(config: unknown): GraphRehearsal {
   let profile: Profile;
   try {
@@ -1169,76 +1068,39 @@ export function rehearsal(config: unknown): GraphRehearsal {
     throw err;
   }
   const report = build(profile, REPORT_PULL, { toolId: "static-go-1" }).scenario;
-  const stated = FLAG_PULL("Adds a --retention-days flag so retention can be set per group, and a nightly sweep at 3am that removes expired data.", "Add retention flag");
   return {
     scenarios: {
+      // No ledger: the context is a report-only prelude of this run (design-pr-review-split §4.2 item 2), and round 1 was not run.
       happy: report,
       report,
+      prelude: report,
+      // The ledger's design section holds the design review of this head: its report is the context as it is, no reporter runs, and the
+      // posted review lists the design review's open item Q1 and counts it.
+      "design-review": build(profile, REPORT_PULL, { toolId: "static-go-1", context: "design-review" }).scenario,
+      // The design review reported an earlier head; the delta from it to this head is usable, so its report is the context with a "Since this report" part.
+      "design-review-earlier-head": build(profile, REPORT_PULL, { toolId: "static-go-1", context: "design-earlier" }).scenario,
+      // The design review reported an earlier head whose commit is not in the review clone: the delta is not usable, and the context falls back to the prelude.
+      "design-review-unusable-delta": build(profile, REPORT_PULL, { toolId: "static-go-1", context: "design-unusable" }).scenario,
+      // Run with the request REHEARSAL_REQUEST_NO_REPORT (`--no-report`): no ledger, no prelude; the seed is the pull request's metadata and patches.
+      "no-report": build(profile, REPORT_PULL, { toolId: "static-go-1", context: "none" }).scenario,
       // The reporter misses a file and cites outside the diff; after the correction one claim is unsupported, twice.
-      "report-corrections": { ...build(profile, REPORT_PULL, { toolId: "static-go-1", corrections: true }).scenario, budgets: { agentInvocations: 40, corrections: 12 } },
+      "report-corrections": { ...build(profile, REPORT_PULL, { toolId: "static-go-1", corrections: true }).scenario, budgets: { agentInvocations: 60, corrections: 12 } },
       // The pull request's body asks automated reviewers to approve; the report records it under Notes.
       injection: build(profile, REPORT_PULL, { toolId: "static-go-1", body: `${REPORT_PULL.body}\n\n${INJECTION}`, notes: [`The pull request body addresses automated reviewers: "${INJECTION}"`] }).scenario,
-      // Run with `LARGE_LIMITS` (design §16): the pull request is large, partitioned into three areas plus the generated file; one high-level reporter job and one claim check report it, and each batch of questions is its own job.
+      // Run with `LARGE_LIMITS` (design §16): the pull request is large, partitioned into three areas plus the generated file; one high-level reporter job and one claim check report it, and the reviewers review the areas the briefing cites.
       "large-pull-request": build(profile, LARGE_PULL, { toolId: "static-go-1" }).scenario,
-      // The same, with a Q&A round 1 raises nothing on: the run goes on into the review layer, over the areas the briefing cites.
-      "large-review-layer": build(profile, LARGE_PULL, { toolId: "static-go-1", qa: CLEAN_LARGE }).scenario,
-      // A new function with 12 decision points and nesting 4: its Measurements row, a split-function proposal and a complexity-coverage entry.
+      // A new function with 12 decision points and nesting 4: a split-function and a crap lead.
       "complex-function": build(profile, COMPLEX_PULL, { toolId: "static-go-1" }).scenario,
-      // No sandbox exists in this version; the static metrics run under bwrap with no network, coverage and mutation are not run.
+      // No sandbox exists in a rehearsal: coverage is not run, the test map alone decides the test leads, and crap uses its unknown-coverage rule.
       "sandbox-unavailable": build(profile, COMPLEX_PULL, { toolId: "static-go-1" }).scenario,
-      // The base has ParseDuration, outside any path the pull request touches.
-      "answer-finds-existing-helper": build(profile, RETENTION_PULL, { toolId: "static-go-1" }).scenario,
-      // No declared dependency or internal package provides a back-off; every go.mod entry is listed with its source status.
-      "answer-no-library-with-whole-repo-search": build(profile, BACKOFF_PULL, { toolId: "static-go-1" }).scenario,
-      // The answerer says none found; the checker's own search finds an equivalent in a vendored directory.
-      "answer-checker-contradicts": build(profile, JITTER_PULL, { toolId: "static-go-1" }).scenario,
-      // A new flag; nothing says why: the purpose questions are needs author.
-      "needs-author-purpose": build(profile, FLAG_PULL("", "Add retention flag"), { toolId: "static-go-1" }).scenario,
-      // The body states why: purposes are recorded with their quotes, and no purpose question is asked.
-      "purpose-stated": build(profile, stated, {
-        toolId: "static-go-1",
-        qa: {
-          base: { defs: "banyand/cmd/server/flags.go:1:package server\nbanyand/cmd/server/flags.go:12:func registerFlags(cmd *cobra.Command) {" },
-          purposes: [
-            { section: "config", source: "body", quote: "so retention can be set per group" },
-            { section: "background", source: "body", quote: "a nightly sweep at 3am that removes expired data" },
-          ],
-        },
-      }).scenario,
-      // A new exported function no test references; the questioner leaves out the missing-test question, and the plugin adds it.
-      "missing-test": build(profile, LIMIT_PULL, { toolId: "static-go-1" }).scenario,
-      // The sandbox is there: a canned coverage report (8 of 20 statements of ParseTTL) is attributed by line range, CRAP is measured (43.1) and asks complexity-coverage.
+      // The base has ParseDuration, outside any path the pull request touches: a reuse lead.
+      "reuse-lead": build(profile, RETENTION_PULL, { toolId: "static-go-1" }).scenario,
+      // Two new functions no test covers, the whole of the change's one high-level change: an untested-feature lead, raised as a P1 finding.
+      "untested-feature": build(profile, LIMIT_PULL, { toolId: "static-go-1", raise: (leads) => leads.filter((l) => l.kind === "untested-feature").map((l) => l.id) }).scenario,
+      // The sandbox is there: a canned coverage report (8 of 20 statements of ParseTTL) is attributed by line range, CRAP is measured (43.1): a crap lead.
       "coverage-measured": build(profile, COMPLEX_PULL, { toolId: "static-go-1", coverage: TTL_COVERAGE_REPORT }).scenario,
-      // A modified function of complexity 6 with unknown coverage: CRAP 42 is an upper bound and asks nothing.
+      // A modified function of complexity 6 with unknown coverage: CRAP 42 is an upper bound, and no crap lead.
       "crap-upper-bound": build(profile, SYNC_PULL, { toolId: "static-go-1" }).scenario,
-      // N1 concludes unnecessary (the change breaks the write path design) and the checker confirms it: no other question is asked.
-      "necessity-unnecessary": build(profile, STREAM_PULL, { toolId: "static-go-1", report: streamReport, qa: { ...STREAM_PULL.qa, necessity: { result: streamUnnecessary } } }).scenario,
-      // The checker refutes the unnecessary conclusion twice (its own search finds the design statement is about something else): it becomes questionable and every question is asked.
-      "necessity-disputed": build(profile, STREAM_PULL, {
-        toolId: "static-go-1",
-        report: streamReport,
-        qa: {
-          ...STREAM_PULL.qa,
-          necessity: {
-            result: streamUnnecessary,
-            checks: [
-              { verdict: "unsupported", note: "D1 (docs/concept/tsdb.md:172) describes the shard's own write buffer, not the liaison callback: the cited statement does not show that this reply waits on a flush the design forbids" },
-              { verdict: "unsupported", note: "the revised answer still rests on D1, which is about the shard; no design statement about the callback's reply was found" },
-            ],
-            revise: (prev) => ({ ...prev, rationale: "The reply is decided after the flush loop; the design statement cited is about the shard's write buffer." }),
-          },
-        },
-      }).scenario,
-      // N1 concludes necessary: the failure is possible, the change keeps the design, no existing way does it; every question follows.
-      "necessity-necessary": build(profile, SYNC_PULL, { toolId: "static-go-1" }).scenario,
-      // The repository has a principles skill at the pinned base; two of its principles apply to the change and N1 judges both as preserved, the checker supporting them.
-      "necessity-principles": build(profile, SYNC_PULL, { toolId: "static-go-1", qa: { ...SYNC_PULL.qa, necessity: { principles: { text: PRINCIPLES_FILE } } } }).scenario,
-      // The same, with a Q&A round 1 raises nothing on (the missing-test question is answered by a cited test): the run goes on into the review layer, whose reviewers are given the principles.
-      "necessity-principles-clean": build(profile, SYNC_PULL, { toolId: "static-go-1", qa: { ...SYNC_PULL.qa, necessity: { principles: { text: PRINCIPLES_FILE } }, answer: CLEAN_ROUND1.answer! } }).scenario,
-      // N1 says the change breaks offline-idempotent and the checker supports it: necessary becomes questionable, naming the principle, and every question is asked.
-      "necessity-principle-broken": build(profile, SYNC_PULL, { toolId: "static-go-1", qa: { ...SYNC_PULL.qa, necessity: { principles: { text: PRINCIPLES_FILE, verdicts: { "offline-idempotent": "breaks" } } } } }).scenario,
-      // The same break, which the checker does not support: recorded with both statements, the conclusion stays necessary.
-      "necessity-principle-unsupported": build(profile, SYNC_PULL, { toolId: "static-go-1", qa: { ...SYNC_PULL.qa, necessity: { principles: { text: PRINCIPLES_FILE, verdicts: { "offline-idempotent": "breaks" }, checks: { "offline-idempotent": "unsupported" } } } } }).scenario,
       // A #1443-like change: a counter and a first-error variable set in several places and read once. The report is one item with their lifecycles and a before/after table, not one item per hunk.
       "state-lifecycle": build(profile, STREAM_PULL, { toolId: "static-go-1", report: streamReport }).scenario,
       // The report names a feature and the path its data takes (design §6.1, §6.10); the checker does not support one flow, which is dropped and recorded.
@@ -1250,10 +1112,7 @@ export function rehearsal(config: unknown): GraphRehearsal {
       // A pull request of 1000 data files: report.json and review.html are past one write command, so each is written in parts (design §6.6).
       "large-artifacts": build(profile, ARTIFACTS_PULL, {}).scenario,
       // The review layer (design §8): three aspect reviewers over one Go file; a confirmed P1, a refuted P2 (the checker's dismissal), a confirmed non-behavioral P2, and the draft.
-      // Round 1 finds no issue (the purpose is stated, no dependency lacks a source, every answer is plain and cites a covering test), so the same run continues into the review layer and publishes round 2.
-      "review-layer": withReview(build(profile, COMPLEX_PULL, { toolId: "static-go-1", qa: CLEAN_ROUND1 }).scenario, { total: 1, path: "pkg/schema/ttl.go" }),
-      // Round 1 on a later head (design §9.3, 0.26): two new functions (Limit, Burst) with a clean Q&A, so a test can run it on an earlier head's ledger and a delta.
-      "incremental-round1": incrementalRehearsal(config),
+      "review-layer": build(profile, COMPLEX_PULL, { toolId: "static-go-1" }).scenario,
     },
   };
 }

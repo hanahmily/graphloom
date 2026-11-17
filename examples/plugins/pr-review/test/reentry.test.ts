@@ -5,69 +5,71 @@ import type { EvidenceRecord, GraphDecision, JobSpec } from "@graphloom/sdk";
 import { describe, expect, it } from "vitest";
 import { attemptEvidence, noteAttempt, readAttempts, type AttemptState } from "../src/kit/attempt.js";
 import { advancePullRequest } from "../src/graph.js";
-import type { Necessity } from "../src/necessity.js";
-import { ANSWERED, assignmentOf, scenarioWith, simulate, viewOf, type Simulation } from "./support.js";
+import { REVIEW_SCHEMA_NAME } from "../src/review.js";
+import { REVIEWED, assignmentOf, scenarioWith, simulate, viewOf, type Simulation } from "./support.js";
 
-/** The N1 answer of the default scenario with its design explanation past the 800-character bound (the live run's 814). */
-function tooLong(good: Necessity, chars = 814): Necessity {
-  return { ...good, design: { ...good.design, explanation: "x".repeat(chars) } };
-}
+/** The correctness reviewer's first pass of the review-layer scenario with one comment on a file outside the review's scope, which the deterministic rules refuse. */
+const PROBLEM = /is not a file in the review's scope/;
 
-/** A scenario whose N1 answerer exceeds the bound `times` times in a row, then answers within it. */
+/** A scenario whose correctness reviewer gives an unusable first pass `times` times in a row, then a usable one. */
 const overBound = (times: number) =>
-  scenarioWith("necessity-necessary", (sc) => {
-    const good = sc.results["necessity-v1"]![0]!.output as Necessity;
-    sc.results["necessity-v1"] = [...Array.from({ length: times }, () => ({ output: tooLong(good) })), { output: good }];
+  scenarioWith("review-layer", (sc) => {
+    const passes = sc.results[REVIEW_SCHEMA_NAME]!;
+    const good = passes[0]!.output as { comments: Array<Record<string, unknown>> };
+    const bad = { ...good, comments: [...good.comments, { ...good.comments[0]!, path: "outside/scope.go" }] };
+    sc.results[REVIEW_SCHEMA_NAME] = [...Array.from({ length: times }, () => ({ output: bad })), ...passes];
   });
 
 const kindOf = (d: GraphDecision): string => d.action.type;
 const jobOf = (d: GraphDecision): JobSpec => (d.action.type === "dispatch" ? d.action.job : (undefined as never));
-const answerers = (sim: Simulation) => sim.jobs.filter((j) => j.resultSchema === "necessity-v1");
+const answerers = (sim: Simulation) => sim.jobs.filter((j) => j.instruction === "Review the correctness aspect (pass 1)");
 const firstSupervise = (sim: Simulation): number => sim.decisions.findIndex((d) => d.action.type === "supervise");
 
-describe("the questions stage reentered after N1 exceeded its bound", () => {
+describe("the review stage reentered after the correctness reviewer kept failing its rules", () => {
   it("escalates after the answerer's two corrections, as the live run did", () => {
-    const sim = simulate({ scenario: overBound(3) });
+    const sim = simulate({ through: "review", scenario: overBound(3) });
     expect(sim.final.action.type).toBe("supervise");
-    expect(sim.final.action.type === "supervise" ? sim.final.action.supervise.reason : "").toMatch(/N1: the design explanation is 814 characters, more than 800/);
+    expect(sim.final.action.type === "supervise" ? sim.final.action.supervise.reason : "").toMatch(PROBLEM);
     expect(answerers(sim)).toHaveLength(3);
   });
 
-  it("starts a fresh answerer in the new attempt, with no corrections spent, and accepts a compliant answer", () => {
-    const sim = simulate({ scenario: overBound(3), reentries: [{ stageId: "questions" }], maxSteps: 400 });
+  it("starts a fresh reviewer in the new attempt, with no corrections spent, and accepts a compliant answer", () => {
+    const sim = simulate({ through: "review", scenario: overBound(3), reentries: [{ stageId: "review" }], maxSteps: 400 });
     const at = firstSupervise(sim);
     expect(at).toBeGreaterThan(0);
-    // The next proposal is the stage's own answerer, not another escalation of the same 814.
+    // The next proposal is the stage's own reviewer, in a fresh session, not another escalation of the same problem.
     const next = sim.decisions[at + 1]!;
     expect(kindOf(next)).toBe("dispatch");
     const job = jobOf(next);
-    expect(job.resultSchema).toBe("necessity-v1");
+    expect(job.resultSchema).toBe(REVIEW_SCHEMA_NAME);
     expect(job.continueFrom).toBeUndefined();
-    expect(assignmentOf(job)).not.toMatch(/814 characters/);
-    // Three answers before the reentry, one after: a compliant one, which passes.
+    expect(assignmentOf(job)).not.toMatch(PROBLEM);
+    // Three passes before the reentry, one after: a compliant one, which passes.
     expect(answerers(sim)).toHaveLength(4);
-    expect(sim.final).toMatchObject({ action: { stop: { reason: ANSWERED } } });
+    expect(sim.final).toMatchObject({ action: { stop: { reason: REVIEWED } } });
     expect(sim.decisions.filter((d) => d.action.type === "supervise")).toHaveLength(1);
   });
 
   it("counts corrections per attempt: a second attempt that fails again gets its own two corrections", () => {
-    const sim = simulate({ scenario: overBound(6), reentries: [{ stageId: "questions" }], maxSteps: 400 });
+    const sim = simulate({ through: "review", scenario: overBound(6), reentries: [{ stageId: "review" }], maxSteps: 400 });
     expect(sim.final.action.type).toBe("supervise");
     expect(answerers(sim)).toHaveLength(6);
-    const corrections = answerers(sim).slice(3).map((j) => assignmentOf(j).includes("814 characters"));
+    const corrections = answerers(sim).slice(3).map((j) => PROBLEM.test(assignmentOf(j)));
     expect(corrections).toEqual([false, true, true]);
+    // A correction goes back to the same session; the attempt's first pass starts a fresh one.
+    expect(answerers(sim).slice(3).map((j) => j.continueFrom !== undefined)).toEqual([false, true, true]);
   });
 
   it("keeps a repeated reentry converging", () => {
-    const sim = simulate({ scenario: overBound(6), reentries: [{ stageId: "questions" }, { stageId: "questions" }], maxSteps: 400 });
-    expect(sim.final).toMatchObject({ action: { stop: { reason: ANSWERED } } });
+    const sim = simulate({ through: "review", scenario: overBound(6), reentries: [{ stageId: "review" }, { stageId: "review" }], maxSteps: 400 });
+    expect(sim.final).toMatchObject({ action: { stop: { reason: REVIEWED } } });
     expect(answerers(sim)).toHaveLength(7);
   });
 });
 
 describe("a reentry back to fetch after a repair changed the candidate", () => {
-  // As the live run went: the questions stage is reentered and fails again, then the supervisor, whose repair wrote into the worktree, sends the run back to fetch.
-  const sim = simulate({ scenario: overBound(6), reentries: [{ stageId: "questions" }, { stageId: "fetch", changesCandidate: true }], maxSteps: 800 });
+  // As a live run would go: the review stage is reentered and fails again, then the supervisor, whose repair wrote into the worktree, sends the run back to fetch.
+  const sim = simulate({ through: "review", scenario: overBound(6), reentries: [{ stageId: "review" }, { stageId: "fetch", changesCandidate: true }], maxSteps: 800 });
   const supervises = sim.decisions.flatMap((d, i) => (d.action.type === "supervise" ? [i] : []));
 
   it("has the graph run fetch's own jobs again instead of escalating", () => {
@@ -75,19 +77,19 @@ describe("a reentry back to fetch after a repair changed the candidate", () => {
     const next = sim.decisions[supervises[1]! + 1]!;
     expect(kindOf(next)).toBe("dispatch");
     expect(jobOf(next)).toMatchObject({ stageId: "fetch", purpose: "work", writeScope: ["."] });
-    expect(sim.final).toMatchObject({ action: { stop: { reason: ANSWERED } } });
+    expect(sim.final).toMatchObject({ action: { stop: { reason: REVIEWED } } });
   });
 
   it("checks the head out again and reads the pull request again, from evidence the validators accept", () => {
     expect(sim.jobs.filter((j) => j.stageId === "fetch" && j.purpose === "work")).toHaveLength(2);
     const reads = sim.jobs.filter((j) => j.stageId === "fetch" && j.kind === "command" && j.executor !== undefined);
     expect(reads.length).toBeGreaterThanOrEqual(2 * 7);
-    for (const stage of ["fetch", "report", "questions", "answers"]) {
+    for (const stage of ["fetch", "report", "review"]) {
       expect(sim.receipts.filter((r) => r.stageId === stage && r.valid).length).toBeGreaterThan(0);
     }
   });
 
-  it("runs the report stage's own agents again, and then the answerer once more", () => {
+  it("runs the report stage's own agents again, and then the reviewer once more", () => {
     expect(sim.jobs.filter((j) => j.resultSchema === "change-report-v1")).toHaveLength(2);
     expect(sim.jobs.filter((j) => j.resultSchema === "claim-check-v1")).toHaveLength(2);
     expect(answerers(sim)).toHaveLength(7);
@@ -95,11 +97,15 @@ describe("a reentry back to fetch after a repair changed the candidate", () => {
 });
 
 describe("a reentry to fetch that left the candidate unchanged", () => {
-  it("reuses what the candidate already earned: no second checkout, no second report", () => {
-    const sim = simulate({ scenario: overBound(3), reentries: [{ stageId: "fetch" }, { stageId: "questions" }], maxSteps: 800 });
-    expect(sim.final).toMatchObject({ action: { stop: { reason: ANSWERED } } });
+  // The Review stage's reviewer passes are the latest review evidence of the candidate, so the report's validators no longer see the
+  // claim checks; the graph's record of them puts them back, and the Report stage is accepted again without a second report.
+  it("reuses what the candidate already earned: no second checkout, no second report or claim check, and Report is accepted again", () => {
+    const sim = simulate({ through: "review", scenario: overBound(3), reentries: [{ stageId: "fetch" }, { stageId: "review" }], maxSteps: 800 });
+    expect(sim.final).toMatchObject({ action: { stop: { reason: REVIEWED } } });
     expect(sim.jobs.filter((j) => j.stageId === "fetch" && j.purpose === "work")).toHaveLength(1);
     expect(sim.jobs.filter((j) => j.resultSchema === "change-report-v1")).toHaveLength(1);
+    expect(sim.jobs.filter((j) => j.resultSchema === "claim-check-v1")).toHaveLength(1);
+    expect(sim.receipts.filter((r) => r.stageId === "report" && r.valid).map((r) => r.requirementId).sort()).toEqual(["change-report", "claims-checked", "measurements", "review-context"]);
   });
 });
 
@@ -151,15 +157,15 @@ describe("the attempt scoping of evidence", () => {
   });
 
   it("keeps the attempts across calls of the graph in the private state it returns", () => {
-    const sim = simulate({ scenario: overBound(3), reentries: [{ stageId: "questions" }], maxSteps: 400 });
+    const sim = simulate({ through: "review", scenario: overBound(3), reentries: [{ stageId: "review" }], maxSteps: 400 });
     const at = firstSupervise(sim);
     expect(readAttempts(sim.decisions[at]!.privateState).stages).toEqual({ fetch: { attempt: 1, generation: 0 } });
-    expect(readAttempts(sim.decisions[at + 1]!.privateState).stages.questions).toEqual({ attempt: 2, generation: 2 });
-    expect(readAttempts(sim.decisions.at(-2)!.privateState).stages.questions).toEqual({ attempt: 2, generation: 2 });
+    expect(readAttempts(sim.decisions[at + 1]!.privateState).stages.review).toEqual({ attempt: 2, generation: 2 });
+    expect(readAttempts(sim.decisions.at(-2)!.privateState).stages.review).toEqual({ attempt: 2, generation: 2 });
   });
 
   it("is a no-op for a view the run has not reentered", () => {
-    const sim = simulate({ scenario: overBound(3) });
+    const sim = simulate({ through: "review", scenario: overBound(3) });
     const plain = advancePullRequest(viewOf(sim));
     const stamped = advancePullRequest(viewOf(sim, { evidence: sim.evidence.map((e) => ({ ...e, generation: 1 })), generation: 1 }));
     expect(stamped.action).toEqual(plain.action);

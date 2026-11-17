@@ -22,7 +22,8 @@ import {
   type CoverageReport,
 } from "../src/kit/metrics/coverage.js";
 import type { FunctionIndexEntry, MetricsRecord } from "../src/kit/metrics/record.js";
-import { requiredQuestions } from "../src/questions.js";
+import { computeLeads } from "../src/leads.js";
+import { recordedAspect } from "../src/reviewdraft.js";
 import { validatorById } from "../src/validators.js";
 import { BANYANDB, candidateEvidence, profileOf, simulate } from "./support.js";
 
@@ -146,14 +147,13 @@ describe("CRAP from measured coverage, and the question it asks", () => {
     expect(withOutcome(rec({ test: true }), { reason: "x" })).toEqual(rec({ test: true }));
   });
 
-  it("asks complexity-coverage for measured CRAP of 30 or more, and nothing for measured CRAP below it", () => {
+  it("gives a crap lead for measured CRAP of 30 or more, and none for measured CRAP below it", () => {
     const ask = (r: MetricsRecord) =>
-      requiredQuestions({ view: { items: [{ id: "R1", section: "features", text: "x", cites: [{ path: r.path, side: "head", start: r.startLine, end: r.endLine, symbol: "" }], facts: [] }], records: [r] }, groundwork: { symbols: [], testMap: new Map() } as never }, new Map())
-        .filter((q) => q.type === "complexity-coverage");
+      computeLeads({ records: [r], groundwork: { symbols: [], testMap: new Map(), candidates: [], prSimilar: [] }, changes: [], scope: new Set([r.path]), changed: new Set([r.path]), similarity: 0.5, searched: true }).filter((l) => l.kind === "crap");
     const worst = withOutcome(rec({ complexity: 9 }), { source: "measured", covered: 0, total: 10 });
     expect(worst.crap).toBe(90);
     expect(ask(worst)).toHaveLength(1);
-    expect(ask(worst)[0]!.text).toContain("measured coverage 0/10");
+    expect(ask(worst)[0]!.facts[0]).toContain("coverage 0/10 statements");
     expect(ask(withOutcome(rec({ complexity: 9 }), { source: "measured", covered: 9, total: 10 }))).toHaveLength(0);
     // Unknown coverage alone asks nothing below complexity 10 (the upper bound of 90 reflects the missing measurement).
     expect(ask(withOutcome(rec({ complexity: 9 }), { reason: "docker unavailable" }))).toHaveLength(0);
@@ -443,17 +443,17 @@ describe("coverage-measured (through the graph)", () => {
     expect(sim.receipts.filter((r) => r.requirementId === "measurements" || r.requirementId === "change-report").every((r) => r.valid)).toBe(true);
   });
 
-  it("asks complexity-coverage for the measured CRAP, with the measured numbers, and stops at answers accepted", () => {
-    expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "answers accepted" } });
-    const qa = JSON.parse(sim.qa!.json) as { questions: Array<{ type: string; text: string; answer?: { answer: string } }> };
-    const q = qa.questions.find((x) => x.type === "complexity-coverage")!;
-    expect(q.text).toMatch(/Complexity 12, measured coverage 8\/20, CRAP 43\.1\./);
-    expect(q.answer!.answer).toContain("the sandbox measured 8 of 20 statements covered");
+  it("gives the maintainability reviewer a crap lead with the measured numbers, and completes", () => {
+    expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    const m = recordedAspect(sim.evidence, "maintainability");
+    if (m.state !== "read") throw new Error("no maintainability record");
+    const lead = m.value.leads.find((l) => l.kind === "crap")!;
+    expect(lead.facts[0]).toMatch(/complexity 12, coverage 8\/20 statements, CRAP 43\.1 \(threshold 30\)/);
   });
 
   const evaluate = (id: string, evidence: EvidenceRecord[]) => validatorById(id)!.evaluate({ requirementId: id, statement: "", evidence: candidateEvidence(evidence, "d1"), candidateDigest: "d1", config: BANYANDB });
   // The evidence as the Report stage judges it: before the questions (the controller keeps only the latest review).
-  const atReport = sim.evidence.slice(0, sim.evidence.findIndex((e) => e.resultSchema === "necessity-v1"));
+  const atReport = sim.evidence.slice(0, sim.evidence.findIndex((e) => e.resultSchema === "pr-code-review-v2"));
   const tamper = (change: (c: { argv: string[]; stdoutTail: string }) => void): EvidenceRecord[] =>
     atReport.map((e) => {
       const c = (e.payload as { command?: { id: string; argv: string[]; stdoutTail: string } }).command;
@@ -480,7 +480,7 @@ describe("the sandbox-unavailable and coverage-off runs", () => {
     for (const config of [{}, { metrics: { generated: [], coverage: false, mutation: { enabled: false } }, review: { repro: { enabled: false } } }]) {
       const sim = simulate({ scenarioName: "sandbox-unavailable", config });
       expect(sim.jobs.filter((j) => j.confinement?.kind === "docker" || j.checkout !== undefined)).toEqual([]);
-      expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "answers accepted" } });
+      expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
     }
   });
 

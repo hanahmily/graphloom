@@ -2,21 +2,26 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 /**
- * The draft review (design §8.4, §10): composed by plugin code from the aspects' records, the verdicts and the Q&A, never by
- * a model. `draft.json` (`pr-review-draft-v1`) is canonical; `draft.md` is its rendering, for whoever wants to read it. The Publish
- * stage (`publish.ts`) posts the draft's comments that are findings; nothing here writes to GitHub. The summary is plain text
- * from the ledger, at most 1,200 characters.
+ * The draft review (design §8.4, §10; design-pr-review-split §4.5): composed by plugin code from the aspects' records and the
+ * verdicts, never by a model. No Q&A item is drafted: round 1 is the design review's (pr-design-review), and the draft lists its
+ * open items, or says it was not run. `draft.json` (`pr-review-draft-v2`) is canonical; `draft.md` is its rendering, for whoever wants
+ * to read it. The Publish stage (`publish.ts`) posts the draft's comments; nothing here writes to GitHub. The summary is plain text,
+ * at most 1,200 characters.
+ *
+ * Only a proven behavioral finding may be drafted as P0 or P1, with one exception (§4.3): a confirmed finding raised from an
+ * `untested-feature` lead, whose proof is the recorded test map and coverage, may be drafted at P1.
  */
 import { ASPECTS, DRAFT_ORDER, type Aspect } from "./kit/aspects.js";
-import { citationLinks, composeParts, proposalText, type GithubPin, type ProposalLike } from "./kit/answertext.js";
 import { clip } from "./kit/escape.js";
+import { contextLine, round1Lines, type ContextSource, type Round1Status } from "./context.js";
+import { leadLine, type LeadKind, type LeadRecord } from "./leads.js";
 import { proofOf, type Proof } from "./proof.js";
 import { findingsOf, keptSuggestion, MAX_SWEEP_PASSES, SEVERITIES, type AspectRecord, type Finding, type Severity } from "./review.js";
 import type { ScopeRecord } from "./reviewscope.js";
 import { sideLines, parsePatch } from "./kit/patch.js";
 import type { PullFile } from "./kit/snapshot.js";
 
-export const DRAFT_SCHEMA = "pr-review-draft-v1";
+export const DRAFT_SCHEMA = "pr-review-draft-v2";
 export const MAX_SUMMARY_CHARS = 1_200;
 export type Verdict = "approve" | "comment" | "request-changes";
 
@@ -27,10 +32,10 @@ const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof
 export const scrub = (text: string): string => text.replace(/\.graphloom\/[^\s)`'"<>:]*/g, "[a review file]");
 
 export interface DraftEntry {
-  /** `F3` for a finding, `Q3` for a question. */
+  /** `F3`. */
   id: string;
-  kind: "finding" | "question";
-  /** Every aspect of the findings linked into this entry (the first sits first); empty for a question. */
+  kind: "finding";
+  /** Every aspect of the findings linked into this entry (the first sits first). */
   aspects: Aspect[];
   severity?: Severity;
   /** The finding's proof state and, for an unproven one, why. */
@@ -51,6 +56,8 @@ export interface DraftEntry {
   principle?: string;
   /** The reviewer's test and what the graph's run of it recorded (design §8.2), when the finding has one: the maintainer can run it. */
   test?: DraftTest;
+  /** The lead the finding was raised from (design-pr-review-split §4.3). */
+  lead?: { id: string; kind: LeadKind };
 }
 
 /** A finding's reproducing test as the draft carries it: the exact text the graph ran, and its recorded result. */
@@ -108,6 +115,8 @@ export interface ReviewDoc {
   context: ScopeRecord["context"];
   aspects: AspectView[];
   findings: Finding[];
+  /** Every lead with its status (design-pr-review-split §4.3); the appendix lists them. */
+  leads: LeadRecord[];
 }
 
 export interface Draft {
@@ -119,9 +128,14 @@ export interface Draft {
   verdict: Verdict;
   recommended: Verdict;
   summary: string;
+  /** The context the reviewers started from (design-pr-review-split §4.2). */
+  context: { source: ContextSource; head?: string };
+  /** Round 1 on the pull request (§4.5): the design review's open items, or null when round 1 was not run. */
+  round1: Round1Status | null;
+  /** How many leads the maintainability reviewer was given, and how many it raised (§4.3). */
+  leads: { given: number; raised: number };
   comments: DraftEntry[];
   judgment: DraftEntry[];
-  notSelected: DraftEntry[];
   /** Existing human threads shown as already raised: not read in this version. */
   earlier: never[];
   /** Lines for the maintainer, never posted. */
@@ -167,8 +181,10 @@ function entryOf(members: readonly Finding[], files: readonly PullFile[], reason
   const primary = pool[0] ?? members[0]!;
   const proof = proofOf(primary);
   const best = pool.reduce((s, f) => (sevIndex(f.severity) < sevIndex(s) ? f.severity : s), primary.severity);
-  // Only a proven finding may be drafted as P0 or P1 (design §8.2); a non-behavioral one claims no wrong behavior, so it is at most P2.
-  const severity: Severity = proof.state === "proven" ? best : sevIndex(best) < sevIndex("P2") ? "P2" : best;
+  // Only a proven finding may be drafted as P0 or P1 (design §8.2); a non-behavioral one claims no wrong behavior, so it is at most P2,
+  // except a confirmed untested-feature finding, which may be P1 (design-pr-review-split §4.3).
+  const ceiling: Severity = proof.state === "proven" ? "P0" : untestedFeature(primary) ? "P1" : "P2";
+  const severity: Severity = sevIndex(best) < sevIndex(ceiling) ? ceiling : best;
   const kept = draftable ? keptSuggestion(primary) : undefined;
   const aspects = [...new Set(members.map((f) => f.aspect))];
   const file = files.find((x) => x.path === primary.path);
@@ -193,56 +209,12 @@ function entryOf(members: readonly Finding[], files: readonly PullFile[], reason
     ...(kept !== undefined && "text" in kept ? { suggestion: kept.text } : {}),
     ...(test !== undefined ? { test } : {}),
     ...(members.length > 1 ? { linked: members.filter((f) => f !== primary).map((f) => f.id) } : {}),
+    ...(primary.lead !== undefined && primary.leadKind !== undefined ? { lead: { id: primary.lead, kind: primary.leadKind } } : {}),
   };
 }
 
-// ---- the Q&A items ----
-
-export interface QaInput {
-  questions: Array<{ id: string; type: string; item?: string; symbol?: string; functionPath?: string; text: string; answer?: { answer?: string; status?: string; citations?: Array<{ path: string; start: number; end: number; tree: string }>; inventory?: Array<{ name: string; version: string }>; proposal?: ProposalLike } }>;
-  symbols: Array<{ id: string; path: string; startLine: number; endLine: number }>;
-}
-
-/** The report's change items by id, with the first head cite of each, which anchors a question that names no symbol. */
-export interface ItemCites {
-  [item: string]: { path: string; start: number; end: number } | undefined;
-}
-
-export function qaInputFrom(json: string | undefined): QaInput | undefined {
-  if (json === undefined) return undefined;
-  try {
-    const v: unknown = JSON.parse(json);
-    if (!isObj(v) || !Array.isArray(v.questions)) return undefined;
-    return { questions: v.questions.filter(isObj) as unknown as QaInput["questions"], symbols: (Array.isArray(v.symbols) ? v.symbols.filter(isObj) : []) as unknown as QaInput["symbols"] };
-  } catch {
-    return undefined;
-  }
-}
-
-function questionEntries(qa: QaInput | undefined, cites: ItemCites, files: readonly PullFile[], github: GithubPin): { selected: DraftEntry[]; rest: DraftEntry[] } {
-  const selected: DraftEntry[] = [];
-  const rest: DraftEntry[] = [];
-  for (const q of qa?.questions ?? []) {
-    if (q.type === "necessity" || q.answer?.status === undefined) continue;
-    const sym = q.symbol !== undefined ? qa!.symbols.find((s) => s.id === q.symbol) : undefined;
-    const cite = q.item !== undefined ? cites[q.item] : undefined;
-    const at = sym !== undefined ? { path: sym.path, line: sym.startLine } : q.functionPath !== undefined ? { path: q.functionPath, line: 1 } : cite !== undefined ? { path: cite.path, line: cite.start } : undefined;
-    if (at === undefined) continue;
-    const file = files.find((f) => f.path === at.path);
-    const entry: DraftEntry = {
-      id: q.id,
-      kind: "question",
-      aspects: [],
-      path: at.path,
-      side: "RIGHT",
-      line: at.line,
-      anchored: anchored(file, "RIGHT", at.line, at.line),
-      body: scrub(composeParts({ id: q.id, head: oneLine(q.text), label: q.answer.status === "needs author" ? "What was checked" : `Answer (${q.answer.status})`, answer: oneLine(q.answer.answer ?? ""), cites: citationLinks(q.answer.citations ?? [], github, q.answer.inventory ?? []), proposal: proposalText(q.answer.proposal) })),
-    };
-    (q.answer.status === "needs author" ? selected : rest).push(entry);
-  }
-  return { selected, rest };
-}
+/** A confirmed non-behavioral finding raised from an `untested-feature` lead: the one that may be drafted at P1 (§4.3). */
+export const untestedFeature = (f: Pick<Finding, "leadKind" | "kind" | "state">): boolean => f.leadKind === "untested-feature" && f.kind === "non-behavioral" && f.state === "confirmed";
 
 // ---- composing ----
 
@@ -253,16 +225,14 @@ export interface DraftInput {
   files: readonly PullFile[];
   scope: ScopeRecord;
   records: readonly AspectRecord[];
-  qa?: QaInput | undefined;
-  itemCites?: ItemCites | undefined;
-  /** N1's conclusion as one line, for the maintainer section. */
-  necessity?: string | undefined;
+  context: { source: ContextSource; head?: string | undefined };
+  round1: Round1Status | null;
 }
 
 const SEV_LABEL: Record<Severity, string> = { P0: "critical", P1: "major", P2: "minor", P3: "nit" };
 export const severityLabel = (s: Severity): string => `[${s}] ${SEV_LABEL[s]}`;
 
-/** The draft, from the recorded review: comments (confirmed findings that need no test, the Q&A items that need the author), judgment, not selected, for the maintainer. */
+/** The draft, from the recorded review: comments (confirmed findings that need no test, or are proven), judgment, for the maintainer. */
 export function composeDraft(i: DraftInput): Draft {
   const findings = findingsOf(i.records);
   const confirmed = findings.filter((f) => f.state === "confirmed");
@@ -278,22 +248,27 @@ export function composeDraft(i: DraftInput): Draft {
   const byAspect = (a: DraftEntry, b: DraftEntry): number => aspectIndex(a.aspects[0]!) - aspectIndex(b.aspects[0]!) || Number(a.id.slice(1)) - Number(b.id.slice(1));
   comments.sort(byAspect);
   judgment.sort(byAspect);
-  const q = questionEntries(i.qa, i.itemCites ?? {}, i.files, { owner: i.pull.owner, repo: i.pull.repo, head: i.head, base: i.base });
   const dismissed = findings.filter((f) => f.state === "dismissed");
   const nits = i.records.reduce((n, r) => n + r.passes.reduce((m, p) => m + p.nits, 0), 0);
   const unsaturated = i.records.filter((r) => r.unsaturated).map((r) => r.aspect);
+  const leads = i.records.flatMap((r) => r.leads ?? []);
+  const given = leads.filter((l) => l.given);
+  const raisedLeads = given.filter((l) => l.status === "raised").length;
   const maintainer = [
-    ...(i.necessity !== undefined ? [i.necessity] : []),
+    `Context: ${contextLine(i.context, i.head)}.`,
+    ...round1Lines(i.round1, i.head),
     `Review scope: ${scopeLine(i.scope)}. ${i.scope.context.reason[0]!.toUpperCase()}${i.scope.context.reason.slice(1)}.`,
+    ...(leads.length > 0 ? [`Leads: ${given.length} given to the maintainability reviewer, ${raisedLeads} raised as findings, ${given.length - raisedLeads} judged not an issue${leads.length > given.length ? `; ${leads.length - given.length} not given (over the bound)` : ""}.`] : []),
     ...(unsaturated.length > 0 ? [`Not saturated: the ${unsaturated.join(", ")} sweep${unsaturated.length === 1 ? "" : "s"} reached ${MAX_SWEEP_PASSES} passes with findings still surviving verification; more may be there.`] : []),
     ...(nits > 0 ? [`${nits} nit${nits === 1 ? "" : "s"} (P3) raised and not verified or drafted.`] : []),
     ...dismissed.map((f) => `Dismissed ${f.id} (${f.aspect}, ${f.path}:${f.startLine}): refuted by the verifier — ${clip(f.verdict?.reason ?? "", 240)}${f.verdict !== undefined ? ` Quotes: ${f.verdict.quotes.map((x) => `${x.path}:${x.line}`).join(", ")}.` : ""}`),
     ...i.records.filter((r) => r.findings.some((f) => f.notes.some((n) => n.startsWith("merged")))).map((r) => `The ${r.aspect} pass merged comments on overlapping lines into one finding.`),
     ...(i.scope.mode === "large" ? [`Large pull request: only the files of ${i.scope.areas.map((a) => a.id).join(", ")} were reviewed; the other areas were not.`] : []),
   ];
-  // The recommendation (design §10.3): request-changes needs a proven P0 or P1; approve only when nothing is open.
-  const blocking = comments.some((c) => c.proof?.state === "proven" && (c.severity === "P0" || c.severity === "P1"));
-  const open = comments.length > 0 || judgment.length > 0 || q.selected.length > 0;
+  // The recommendation (design §10.3): request-changes needs a proven P0 or P1, or a confirmed untested-feature finding at P1
+  // (design-pr-review-split §4.5); approve only when nothing is open.
+  const blocking = comments.some((c) => (c.proof?.state === "proven" && (c.severity === "P0" || c.severity === "P1")) || (c.lead?.kind === "untested-feature" && c.severity === "P1"));
+  const open = comments.length > 0 || judgment.length > 0;
   const recommended: Verdict = blocking ? "request-changes" : open ? "comment" : "approve";
   const views: AspectView[] = i.records.map((r) => ({
     aspect: r.aspect,
@@ -312,8 +287,9 @@ export function composeDraft(i: DraftInput): Draft {
     context: i.scope.context,
     aspects: views,
     findings,
+    leads,
   };
-  const summary = summaryText(i.scope, confirmed.filter((f) => f.principle !== undefined), views, comments, judgment, q.selected.length, dismissed.length, recommended);
+  const summary = summaryText(i.scope, confirmed.filter((f) => f.principle !== undefined), views, comments, judgment, dismissed.length, recommended);
   return {
     schema: DRAFT_SCHEMA,
     pull: i.pull,
@@ -322,9 +298,11 @@ export function composeDraft(i: DraftInput): Draft {
     verdict: recommended === "approve" ? "comment" : recommended,
     recommended,
     summary,
-    comments: [...comments, ...q.selected],
+    context: { source: i.context.source, ...(i.context.head !== undefined ? { head: i.context.head } : {}) },
+    round1: i.round1,
+    leads: { given: given.length, raised: raisedLeads },
+    comments,
     judgment,
-    notSelected: q.rest,
     earlier: [],
     maintainer,
     review,
@@ -342,13 +320,13 @@ export function scopeLine(s: { source: ScopeRecord["source"]; areas: ScopeRecord
   return `${sourceText[s.source]}${areas}, ${s.files.length} file${s.files.length === 1 ? "" : "s"}`;
 }
 
-function summaryText(scope: ScopeRecord, principled: readonly Finding[], aspects: readonly AspectView[], comments: readonly DraftEntry[], judgment: readonly DraftEntry[], questions: number, dismissed: number, recommended: Verdict): string {
+function summaryText(scope: ScopeRecord, principled: readonly Finding[], aspects: readonly AspectView[], comments: readonly DraftEntry[], judgment: readonly DraftEntry[], dismissed: number, recommended: Verdict): string {
   const confirmed = aspects.reduce((n, a) => n + a.confirmed, 0);
   const text = [
     `Reviewed ${scopeLine(scope)} for ${ASPECTS.join(", ")}, with every finding verified by an independent reader.`,
     `${confirmed} finding${confirmed === 1 ? "" : "s"} confirmed: ${comments.filter((c) => c.kind === "finding").length} drafted as comments, ${comments.filter((c) => c.proof?.state === "proven").length} of them proven by a failing test the graph ran, ${judgment.filter((j) => j.proof?.state === "unproven").length} confirmed but unproven (each says why).`,
     ...(principled.length > 0 ? [`Confirmed breaks of the project's design principles: ${principled.map((f) => `${f.id} breaks ${f.principle}`).join(", ")}.`] : []),
-    `${judgment.filter((j) => j.reason?.startsWith("disputed")).length} disputed, ${dismissed} dismissed, ${questions} question${questions === 1 ? "" : "s"} for the author.`,
+    `${judgment.filter((j) => j.reason?.startsWith("disputed")).length} disputed, ${dismissed} dismissed.`,
     `Recommended verdict: ${recommended}${recommended === "approve" ? " (drafted as comment)" : ""}.`,
   ].join(" ");
   return clip(text, MAX_SUMMARY_CHARS);
@@ -372,7 +350,7 @@ const aspectTitle = (a: Aspect): string => `${a.charAt(0).toUpperCase()}${a.slic
 const lines = (e: DraftEntry): string => (e.startLine !== undefined ? `${e.startLine}-${e.line}` : `${e.line}`);
 
 function entryMarkdown(e: DraftEntry, level: "####" | "###"): string[] {
-  const head = [e.id, e.kind === "question" ? "question" : e.reason === undefined ? e.severity ?? "" : "", ...(e.aspects.length > 0 ? [e.aspects.join(", ")] : []), ...(e.principle !== undefined ? [`breaks principle ${e.principle}`] : []), ...(e.proof?.state === "non-behavioral" ? ["non-behavioral"] : []), ...(e.reason !== undefined ? [e.reason] : []), `${e.path}:${lines(e)}`, e.side].filter((x) => x !== "");
+  const head = [e.id, e.reason === undefined ? e.severity ?? "" : "", ...(e.aspects.length > 0 ? [e.aspects.join(", ")] : []), ...(e.principle !== undefined ? [`breaks principle ${e.principle}`] : []), ...(e.proof?.state === "non-behavioral" ? ["non-behavioral"] : []), ...(e.lead !== undefined ? [`from lead ${e.lead.id} (${e.lead.kind})`] : []), ...(e.reason !== undefined ? [e.reason] : []), `${e.path}:${lines(e)}`, e.side].filter((x) => x !== "");
   const out = [`${level} ${head.join(" · ")}${e.anchored ? "" : " · not in the diff (goes in the review body)"}`, e.body];
   if (e.suggestion !== undefined) out.push("```suggestion", e.suggestion, "```");
   if (e.test !== undefined) {
@@ -385,14 +363,16 @@ function entryMarkdown(e: DraftEntry, level: "####" | "###"): string[] {
 
 /** The readable rendering (design §10.1). `draft.json` is what the plugin wrote, and what Publish posts from. */
 export function draftMarkdown(d: Draft): string {
-  const findings = d.comments.filter((c) => c.kind === "finding");
-  const questions = d.comments.filter((c) => c.kind === "question");
+  const findings = d.comments;
   const out: string[] = [
     `# Review of ${d.pull.owner}/${d.pull.repo}#${d.pull.number} at ${d.head.slice(0, 12)}`,
     `Verdict: ${d.verdict}        <!-- recommended: ${d.recommended} -->`,
     "",
     "## Summary",
     d.summary,
+    "",
+    "## Design review (round 1)",
+    ...round1Lines(d.round1, d.head),
     "",
     "## Comments",
   ];
@@ -402,13 +382,9 @@ export function draftMarkdown(d: Draft): string {
     out.push(`### ${aspectTitle(a)}`, ...mine.flatMap((e) => entryMarkdown(e, "####")));
   }
   if (findings.length === 0) out.push("No finding is drafted as a comment.");
-  if (questions.length > 0) out.push("### Questions", ...questions.flatMap((e) => entryMarkdown(e, "####")));
   out.push("", "## Needs your judgment (move an entry into Comments to post it)");
   if (d.judgment.length === 0) out.push("None.");
   for (const e of d.judgment) out.push(...entryMarkdown(e, "###"));
-  out.push("", "## Not selected (move an entry into Comments to post it)");
-  if (d.notSelected.length === 0) out.push("None.");
-  for (const e of d.notSelected) out.push(...entryMarkdown(e, "###"));
   out.push("", "## For the maintainer (never posted)", ...d.maintainer.map((m) => `- ${m}`), "");
   return out.join("\n");
 }
@@ -429,7 +405,8 @@ export function reviewBriefingMarkdown(d: Draft): string {
   const out = [
     "## Review",
     `Recommended verdict: ${d.recommended}${d.recommended === "approve" ? " (drafted as comment)" : ""}. Scope: ${scopeLine({ source: d.review.scope.source as ScopeRecord["source"], areas: d.review.scope.areas, files: { length: d.review.scope.files } })}. Draft: draft.md in .graphloom/review/ (the Publish stage posts its comments).`,
-    `Findings: ${countBy(d.review.findings, "confirmed")} confirmed, ${countBy(d.review.findings, "disputed")} disputed, ${countBy(d.review.findings, "dismissed")} dismissed; ${d.comments.filter((c) => c.kind === "question").length} question(s) for the author.`,
+    `Findings: ${countBy(d.review.findings, "confirmed")} confirmed, ${countBy(d.review.findings, "disputed")} disputed, ${countBy(d.review.findings, "dismissed")} dismissed; leads: ${d.leads.given} given, ${d.leads.raised} raised.`,
+    ...round1Lines(d.round1, d.head),
   ];
   for (const sev of SEVERITIES) {
     const at = f.filter((x) => x.severity === sev);
@@ -452,6 +429,7 @@ export function reviewAppendixMarkdown(d: Draft): string {
     out.push("");
   }
   if (d.review.findings.length === 0) out.push("None raised.", "");
+  out.push("### Leads", ...(d.review.leads.length === 0 ? ["None: no lead was computed for the review's scope."] : d.review.leads.map((l) => `- ${leadLine(l)} → ${l.status}${l.reason !== undefined ? `: ${l.reason}` : ""}${l.finding !== undefined ? ` (${l.finding})` : ""}`)), "");
   out.push("### Draft", ...draftMarkdown(d).split("\n").map((l) => (l.startsWith("#") ? `##${l}` : l)), "");
   return out.join("\n");
 }

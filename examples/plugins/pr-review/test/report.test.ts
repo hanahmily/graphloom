@@ -5,7 +5,7 @@ import { validateResultShape } from "@graphloom/sdk";
 import { describe, expect, it } from "vitest";
 import { emptyBriefing } from "../src/kit/briefing.js";
 import { detectFacts } from "../src/kit/detectors.js";
-import { pinnedTexts } from "../src/questions.js";
+import { pinnedTexts } from "../src/kit/pinned.js";
 import { assembleReport, asReporterOutput, CHANGE_REPORT_SCHEMA, MAX_ITEM_CHARS, MAX_ITEMS_PER_SECTION, MAX_LARGE_REPORTER_ITEMS, numbered, parseReporterOutput, renderReport, reportProblems, type Cite, type ReportContext, type ReportItem, type ReporterOutput } from "../src/kit/report.js";
 import { pullFile, type PullFile } from "../src/kit/snapshot.js";
 import { reporterSections } from "../src/kit/template.js";

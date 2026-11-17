@@ -74,6 +74,12 @@ export interface GroundworkOptions {
    * the dependency inventory and the base export only.
    */
   perSymbol?: boolean;
+  /**
+   * The most new symbols the whole-repository searches run for (default: no bound): pr-review computes its `reuse` leads from them,
+   * and past the profile's `limits.maxNewSymbols` it computes none (the searches are what costs, design-pr-review-split §4.3), while
+   * the test map, which costs no command, is still made.
+   */
+  maxSearched?: number;
   /** Whether a failed command may be run again (the operator resumed since). */
   retryable?: (run: CommandRun) => boolean;
 }
@@ -166,7 +172,8 @@ export function groundworkState(o: GroundworkOptions): GroundworkState {
   const population = tokenPopulation(symbols.filter((s) => s.change === "new").map((s) => s.body));
   const testSpecs = [...new Set(packs.flatMap((p) => p.testFiles))];
   const perSymbol = o.perSymbol !== false;
-  const searchCmds = !perSymbol ? [] : symbols.flatMap((s) => {
+  const searching = perSymbol && (o.maxSearched === undefined || newCount <= o.maxSearched);
+  const searchCmds = !searching ? [] : symbols.flatMap((s) => {
     const plan = planFor(s, population);
     if (s.change === "modified" && testSpecs.length === 0) return [];
     return [searchCommand(s.id, plan, o.base, o.profile.questions.maxCandidates, o.profile.questions.excludeRoots, packOf(packs, s.path)?.testFiles ?? testSpecs)];
@@ -176,14 +183,14 @@ export function groundworkState(o: GroundworkOptions): GroundworkState {
   if (s2 !== undefined) return s2;
   for (const c of phase2) refs.push(runOf(o.evidence, c.id)!.record.ref);
   const searches = new Map<string, SearchSection[]>();
-  for (const s of perSymbol ? symbols : []) {
+  for (const s of searching ? symbols : []) {
     const out = textOf(o.evidence, `${COMMAND.search}-${s.id}`);
     if (out.truncated) notes.push(`the searches for ${s.qualified} did not fit the report whole`);
     searches.set(s.id, parseSearch(out.text));
   }
 
   // Phase 3: the bodies of the candidate definitions the searches found.
-  const wanted = perSymbol ? candidatePlan(symbols, searches, packs) : [];
+  const wanted = searching ? candidatePlan(symbols, searches, packs) : [];
   const phase3 = wanted.map((c, i) => candidateCommand(i + 1, o.base, c.path, c.line));
   const s3 = step(phase3, "read the candidate definitions the searches found");
   if (s3 !== undefined) return s3;
@@ -200,7 +207,7 @@ export function groundworkState(o: GroundworkOptions): GroundworkState {
       candidates.push({ symbol: owner.symbol, path: w.path, line: w.line, ...(body !== undefined ? { body } : {}), similarity: body !== undefined ? similarity(sym.body, body) : 0, via: owner.via });
     }
   }
-  const newOnes = perSymbol ? symbols.filter((s) => s.change === "new") : [];
+  const newOnes = searching ? symbols.filter((s) => s.change === "new") : [];
   const sets = new Map(newOnes.map((s) => [s.id, shingles(tokensOf(s.body))] as const));
   const prSimilar: Groundwork["prSimilar"] = [];
   for (let i = 0; i < newOnes.length; i += 1) {

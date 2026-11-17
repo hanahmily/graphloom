@@ -6,16 +6,16 @@ import { describe, expect, it } from "vitest";
 import { composeDraft, draftMarkdown, type DraftInput } from "../src/draft.js";
 import { readParts } from "../src/kit/parts.js";
 import { principlesContext, type PrinciplesRead } from "../src/kit/principles.js";
-import { REHEARSAL_REQUEST } from "../src/rehearsal.js";
+import { REHEARSAL_MERGE_BASE, REHEARSAL_REQUEST } from "../src/rehearsal.js";
+import { designFileText } from "../src/context.js";
 import { PRINCIPLES_FILE, PRINCIPLES_PATH } from "../src/rehearsal-fixtures.js";
-import { reviewScenarioParts } from "../src/rehearsal-review.js";
 import { parsePass, REVIEW_SCHEMA_NAME, type AspectRecord, type Finding } from "../src/review.js";
 import { planReviewer, planVerifier } from "../src/reviewprompts.js";
 import { scenarioWith, simulate, assignmentOf, type Simulation } from "./support.js";
 
 const read: PrinciplesRead = { path: PRINCIPLES_PATH, commit: "c".repeat(40), file: "present", text: PRINCIPLES_FILE, truncated: false };
 const SYNC = "pkg/offline/sync.go";
-const base = { pr: { mode: "review" as const, owner: "o", repo: "r", number: 1, head: "a".repeat(40) }, snapshot: { pull: { title: "t", body: "b" }, commits: [] } as never, aspect: "correctness" as const, pass: 1, files: [SYNC, "docs/x.md"], scopeLine: "the whole pull request", groups: [], summary: "", context: { kind: "seeded" as const, reason: "x" }, known: [], feedback: [], reviewDir: "/work/.graphloom/review" };
+const base = { pr: { mode: "review" as const, owner: "o", repo: "r", number: 1, head: "a".repeat(40) }, snapshot: { pull: { title: "t", body: "b" }, commits: [] } as never, aspect: "correctness" as const, pass: 1, files: [SYNC, "docs/x.md"], scopeLine: "the whole pull request", groups: [], known: [], feedback: [], reviewDir: "/work/.graphloom/review", source: "design-review" as const };
 
 describe("a reviewer's assignment lists the principles that apply to its scope", () => {
   it("gives each one with its statement, the source and what round 1 concluded, and asks for the principle field", () => {
@@ -29,6 +29,13 @@ describe("a reviewer's assignment lists the principles that apply to its scope",
     expect(text).not.toContain("proto-compatible");
     expect(text).toMatch(/not raised again unless you cite a different concrete site/);
     expect(text).toMatch(/principle \(the id of the design principle/);
+  });
+
+  it("says round 1 was not run beside each principle when the design review is not the context (design-pr-review-split §4.2)", () => {
+    const principles = principlesContext(read, [{ path: SYNC }]);
+    const text = planReviewer({ ...base, source: "prelude", principles }).text;
+    expect(text).toContain("- offline-idempotent [round 1: not run]: Offline sync must be safe to repeat");
+    expect(text).toContain("- small-steps [round 1: not run]: A change does one thing");
   });
 
   it("says nothing of principles when none applies to the scope, and the field is always empty", () => {
@@ -85,9 +92,9 @@ describe("the verifier is shown the principle's statement", () => {
 
 describe("the draft shows a finding's principle", () => {
   const files = [{ path: SYNC, status: "modified", previousPath: null, additions: 1, deletions: 0, patch: null, patchOmitted: true, parsed: [] }];
-  const record = (findings: Finding[]): AspectRecord => ({ schema: "pr-review-aspect-v1", aspect: "correctness", reviewer: "claude-code", verifier: "codex", context: { kind: "seeded", reason: "r" }, scopeFiles: 1, passes: [{ n: 1, reviewed: 1, raised: findings.map((f) => f.id), reaffirmed: [], nits: 0, merged: 0 }], findings, unsaturated: false });
-  const scope = { schema: "pr-review-scope-v1" as const, mode: "standard" as const, source: "whole" as const, areas: [], files: [SYNC], base: { kind: "answerer" as const, stageId: "answers", sessionRef: "s", chain: [] }, context: { kind: "seeded" as const, reason: "r" }, summary: { sha256: "x", bytes: 0, cuts: 0, turns: 0 }, harnesses: {} };
-  const input = (findings: Finding[]): DraftInput => ({ pull: { owner: "o", repo: "r", number: 7 }, head: "a".repeat(40), files: files as never, scope, records: [record(findings), { ...record([]), aspect: "maintainability" }, { ...record([]), aspect: "security" }] });
+  const record = (findings: Finding[]): AspectRecord => ({ schema: "pr-review-aspect-v2", aspect: "correctness", reviewer: "claude-code", verifier: "codex", context: { kind: "seeded", reason: "r" }, scopeFiles: 1, passes: [{ n: 1, reviewed: 1, raised: findings.map((f) => f.id), reaffirmed: [], nits: 0, merged: 0 }], findings, unsaturated: false, leads: [] });
+  const scope = { schema: "pr-review-scope-v2" as const, mode: "standard" as const, source: "whole" as const, areas: [], files: [SYNC], context: { kind: "seeded" as const, reason: "r" }, contextSource: "prelude" as const, harnesses: {} };
+  const input = (findings: Finding[]): DraftInput => ({ pull: { owner: "o", repo: "r", number: 7 }, head: "a".repeat(40), files: files as never, scope, records: [record(findings), { ...record([]), aspect: "maintainability" }, { ...record([]), aspect: "security" }], context: { source: "prelude" }, round1: null });
 
   it("names the principle in the entry, draft.md and the summary's principle line", () => {
     const d = composeDraft(input([finding({ principle: "offline-idempotent", kind: "non-behavioral", verdict: { verdict: "confirmed", kind: "non-behavioral", witness: `${SYNC}:10`, quotes: [], reason: "yes", fixes: false } })]));
@@ -108,27 +115,40 @@ describe("the draft shows a finding's principle", () => {
 });
 
 describe("the Review stage gives the reviewers the principles", () => {
+  const PRESENT = { "principles-read": { exitCode: 0, stdout: `commit ${REHEARSAL_MERGE_BASE}\npresent\n${PRINCIPLES_FILE}` } };
+  // A change to pkg/offline/sync.go, reviewed from a report-only prelude, with the repository's principles file at the pinned base.
   const withPrinciple = (principle: string): RehearsalScenario =>
-    scenarioWith("necessity-principles-clean", (s) => {
-      const parts = reviewScenarioParts({ total: 1, path: SYNC });
-      const passes = parts.results[REVIEW_SCHEMA_NAME]!;
-      const first = passes[0]!.output as { comments: Array<Record<string, unknown>> };
+    scenarioWith("crap-upper-bound", (s) => {
+      const first = s.results[REVIEW_SCHEMA_NAME]![0]!.output as { comments: Array<Record<string, unknown>> };
       first.comments[0]!.principle = principle;
-      s.results = { ...s.results, ...parts.results };
-      s.commands = { ...s.commands, ...parts.commands };
+      s.commands = { ...s.commands, ...PRESENT };
     });
-  const run = (scenario: RehearsalScenario): Simulation => simulate({ scenario, request: REHEARSAL_REQUEST.replace("Report on", "Review on"), maxSteps: 500, through: "end" });
+  const run = (scenario: RehearsalScenario): Simulation => simulate({ scenario, request: REHEARSAL_REQUEST, maxSteps: 500, through: "end" });
   const reviewers = (sim: Simulation): JobSpec[] => sim.jobs.filter((j) => j.stageId === "review" && j.jobId === "reviewer-correctness");
 
-  it("lists the applicable principles with N1's verdicts and the checker's, and records the finding's principle", () => {
+  it("lists the applicable principles, with round 1 not run beside them, and records the finding's principle", () => {
     const sim = run(withPrinciple("offline-idempotent"));
     const text = assignmentOf(reviewers(sim)[0]!);
-    expect(text).toContain("- offline-idempotent [round 1: preserves; checker: supported]:");
-    expect(text).toContain("- small-steps [round 1: preserves; checker: supported]:");
+    expect(text).toContain("- offline-idempotent [round 1: not run]:");
+    expect(text).toContain("- small-steps [round 1: not run]:");
     expect(text).not.toContain("proto-compatible");
     const verifier = sim.jobs.find((j) => j.stageId === "review" && j.jobId === "verifier-correctness")!;
     expect(assignmentOf(verifier)).toContain("Says it breaks the design principle offline-idempotent");
     expect(sim.jobs.find((j) => j.jobId === "reviewer-correctness")!.knownReferences?.["comments[].principle"]?.ids).toEqual(["", "small-steps", "offline-idempotent"]);
+  });
+
+  it("gives N1's verdicts and the checker's beside each principle when the design review is the context", () => {
+    const scenario = scenarioWith("design-review", (s) => {
+      const stub = s.commands!["ledger-prior-nec"]!.stdout!;
+      const nec = JSON.parse(stub.slice(stub.indexOf("\n") + 1)) as { answer: { necessity: { principles: unknown[] }; check: { principles: unknown[] } } };
+      nec.answer.necessity.principles = [{ id: "small-steps", verdict: "preserves", explanation: "one thing", citations: [] }];
+      nec.answer.check.principles = [{ id: "small-steps", verdict: "supported", note: "" }];
+      s.commands = { ...s.commands, ...PRESENT, "ledger-prior-nec": { exitCode: 0, stdout: designFileText(JSON.stringify(nec), 0) } };
+    });
+    const sim = run(scenario);
+    const text = assignmentOf(reviewers(sim)[0]!);
+    expect(text).toContain("- small-steps [round 1: preserves; checker: supported]:");
+    expect(text).toContain("- proto-compatible [round 1: no verdict]:");
   });
 
   it("shows it in the review grid, the appendix and review.md", () => {

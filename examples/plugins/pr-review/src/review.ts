@@ -8,14 +8,18 @@
  * runs (at most `MAX_SWEEP_PASSES`); the sweep ends at the first pass whose findings were all dismissed. The ledger is a
  * pure function of the recorded passes and verdicts, so a resume or a supervisor decision cannot lose it.
  *
- * Contract `pr-code-review-v1` is `code-review-v2` plus `side`, `suggestion`, `aspect`, `kind`, `principle` and `repro` (a
- * behavioral comment's test, design §8.2). A pass's behavioral findings that carry a test are run in the Docker sandbox, one at
+ * Contract `pr-code-review-v2` is `code-review-v2` plus `side`, `suggestion`, `aspect`, `kind`, `principle`, `repro` (a
+ * behavioral comment's test, design §8.2) and `leads` (design-pr-review-split §4.3: the status of each lead the first pass was given). A pass's behavioral findings that carry a test are run in the Docker sandbox, one at
  * a time, before they are verified (`repro.ts`); the verifier reads the test and its recorded run, and `proof.ts` reads the
  * finding's `proof`, which this module computes from the recorded runs and the verdict alone.
  *
  * On a later head (design §9.3) the first pass is also given the findings an earlier head left open, already re-anchored to this
  * head, and judges each `still_present` or `fixed`; the verifier confirms the ones still present like a new finding (confirmed
  * keeps it open, refuted makes it fixed). A new comment that overlaps a closed or an earlier finding is suppressed before it is verified.
+ *
+ * The maintainability aspect's first pass is also given its leads (design-pr-review-split §4.3) and must give each one exactly one
+ * status: a missing, repeated or unknown lead is a problem that goes back to the same session as a correction. A lead raised by a
+ * comment marks the finding the comment became, which is then verified and prioritized like any other.
  */
 import type { EnvironmentCommand, EvidenceRecord } from "@graphloom/sdk";
 import { isAspect, type Aspect } from "./kit/aspects.js";
@@ -23,10 +27,11 @@ import { agentRuns, commandRuns, succeeded, reportText, type AgentRun, type Comm
 import { overlaps as priorOverlaps } from "./prior.js";
 import { hasTest, judgeRun, reproCommandId, reproProblems, REPRO_SCHEMA, reproSpec, type FindingProof, type Repro, type ReproLanguage, type ReproRunSpec } from "./repro.js";
 import { treeQuotePlan, readTreeQuotes, type TreeQuotePlan } from "./kit/treequotes.js";
+import { LEADS_SCHEMA, NOT_GIVEN, parseLeadStatuses, type Lead, type LeadEntry, type LeadKind, type LeadRecord } from "./leads.js";
 
-export const REVIEW_SCHEMA_NAME = "pr-code-review-v1";
+export const REVIEW_SCHEMA_NAME = "pr-code-review-v2";
 export const VERIFY_SCHEMA_NAME = "pr-finding-verification-v1";
-export const REVIEW_REFERENCES = ["comments[].finding", "comments[].principle", "prior[].finding"];
+export const REVIEW_REFERENCES = ["comments[].finding", "comments[].principle", "prior[].finding", "leads[].lead"];
 export const VERIFY_REFERENCES = ["verdicts[].finding"];
 /** Passes one aspect may run on the head (issue-fix's `MAX_SWEEP_PASSES`); hitting it is noted unsaturated and does not fail the stage. */
 export const MAX_SWEEP_PASSES = 4;
@@ -57,8 +62,10 @@ const ASPECT_ENUM = ["correctness", "maintainability", "security"];
 export const REVIEW_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["comments", "summary", "prior"],
+  required: ["comments", "summary", "prior", "leads"],
   properties: {
+    // The status of each lead the assignment gives (empty when it gives none): raised by a comment (its index), or not an issue.
+    leads: LEADS_SCHEMA,
     // The judgment of each earlier finding the assignment lists (empty when it lists none).
     prior: {
       type: "array",
@@ -205,6 +212,9 @@ export interface Finding {
   proof?: FindingProof;
   /** An earlier head's finding that this sweep re-judges (design §9.3), not one it raised; never in an aspect record's `findings`. */
   prior?: boolean;
+  /** The lead the reviewer raised it from (design-pr-review-split §4.3), and its kind: an `untested-feature` finding may be drafted at P1. */
+  lead?: string;
+  leadKind?: LeadKind;
   state: FindingState;
   /** The passes that raised it again by name. */
   reaffirmed: number[];
@@ -230,6 +240,8 @@ export interface PassContext {
   prior?: ReadonlySet<string>;
   /** The longest test file a comment's `repro` may carry, in bytes (the profile's `review.repro.maxTestBytes`). */
   maxTestBytes?: number;
+  /** The ids of the leads this pass was given (the maintainability aspect's first pass): each needs exactly one status in `leads`. */
+  leads?: ReadonlySet<string>;
 }
 
 export interface ParsedPass {
@@ -237,6 +249,8 @@ export interface ParsedPass {
   summary: PassSummary;
   /** The pass's judgment of each earlier finding it was given. */
   prior: Array<{ finding: string; status: PriorStatus; reason: string }>;
+  /** The status of each lead it was given. */
+  leads: LeadEntry[];
 }
 
 /** An earlier head's open finding as the first pass is given it: re-anchored to this head, or outdated (no longer anchored to its diff). */
@@ -316,6 +330,12 @@ export function parsePass(output: unknown, ctx: PassContext): ParsedPass | { pro
     const left = [...priorIds].filter((id) => !seen.has(id));
     if (left.length > 0) problems.push(`prior must judge every earlier finding listed to you; missing ${left.join(", ")}`);
   }
+  let leads: LeadEntry[] = [];
+  if (ctx.leads !== undefined && ctx.leads.size > 0) {
+    const read = parseLeadStatuses(output.leads, ctx.leads, Array.isArray(output.comments) ? (output.comments as Array<{ finding?: unknown }>) : []);
+    if ("problems" in read) problems.push(...read.problems);
+    else leads = read.entries;
+  }
   const s = output.summary as Record<string, unknown>;
   const skipped = Array.isArray(s.skipped) ? (s.skipped as Array<{ path?: unknown; reason?: unknown }>) : [];
   if (!Number.isSafeInteger(s.total_files) || !Number.isSafeInteger(s.reviewed_files)) problems.push("summary.total_files and summary.reviewed_files must be integers");
@@ -323,7 +343,7 @@ export function parsePass(output: unknown, ctx: PassContext): ParsedPass | { pro
     problems.push(`the pass must review every one of the ${ctx.scope.size} file(s) in scope and skip none (it reported ${String(s.reviewed_files)} of ${String(s.total_files)} reviewed, ${skipped.length} skipped)`);
   }
   if (problems.length > 0) return { problems };
-  return { comments, summary: { total_files: s.total_files as number, reviewed_files: s.reviewed_files as number, skipped: [] }, prior };
+  return { comments, summary: { total_files: s.total_files as number, reviewed_files: s.reviewed_files as number, skipped: [] }, prior, leads };
 }
 
 /** A verifier's result against the pending findings: one verdict each, or every problem at once (a finding left out is judged later, as disputed). */
@@ -426,7 +446,7 @@ export interface PassRecord {
 
 /** What an aspect's sweep recorded: everything the draft and the validators need, without the agent evidence. */
 export interface AspectRecord {
-  schema: "pr-review-aspect-v1";
+  schema: typeof ASPECT_RECORD_SCHEMA;
   aspect: Aspect;
   /** The harnesses that ran the aspect's reviewer passes and its verifier. */
   reviewer: string;
@@ -440,9 +460,11 @@ export interface AspectRecord {
   unsaturated: boolean;
   /** What this head's sweep concluded of each earlier finding it re-judged; absent for a run with none. */
   prior?: PriorOutcome[];
+  /** The leads of the aspect (design-pr-review-split §4.3): each with its status, or not given past the bound; empty for an aspect given none. */
+  leads: LeadRecord[];
 }
 
-export const ASPECT_RECORD_SCHEMA = "pr-review-aspect-v1";
+export const ASPECT_RECORD_SCHEMA = "pr-review-aspect-v2";
 export const aspectRecordId = (aspect: Aspect): string => `review-aspect-${aspect}`;
 export const aspectRecordJson = (r: AspectRecord): string => JSON.stringify(r);
 
@@ -450,7 +472,7 @@ export const aspectRecordJson = (r: AspectRecord): string => JSON.stringify(r);
 export function parseAspectRecord(json: string, aspect: Aspect): AspectRecord | undefined {
   try {
     const v: unknown = JSON.parse(json);
-    if (!isObj(v) || v.schema !== ASPECT_RECORD_SCHEMA || v.aspect !== aspect || !Array.isArray(v.passes) || !Array.isArray(v.findings) || !isObj(v.context)) return undefined;
+    if (!isObj(v) || v.schema !== ASPECT_RECORD_SCHEMA || v.aspect !== aspect || !Array.isArray(v.passes) || !Array.isArray(v.findings) || !isObj(v.context) || !Array.isArray(v.leads)) return undefined;
     return v as unknown as AspectRecord;
   } catch {
     return undefined;
@@ -461,12 +483,12 @@ export function parseAspectRecord(json: string, aspect: Aspect): AspectRecord | 
 export const quotePrefix = (aspect: Aspect, pass: number): string => `rvq-${aspect}-${pass}`;
 
 export type AspectFlow =
-  | { state: "pass"; n: number; feedback: string[]; known: Finding[]; /** The earlier findings the first pass judges. */ prior: PriorFinding[] }
+  | { state: "pass"; n: number; feedback: string[]; known: Finding[]; /** The earlier findings the first pass judges. */ prior: PriorFinding[]; /** The leads the first pass is given. */ leads: Lead[] }
   | { state: "repro"; finding: Finding; plan: ReproPlan; run: ReproRunSpec }
   | { state: "verify"; n: number; findings: Finding[]; feedback: string[] }
   | { state: "quotes"; commands: EnvironmentCommand[] }
   | { state: "supervise"; reason: string; refs: string[] }
-  | { state: "done"; findings: Finding[]; passes: PassRecord[]; unsaturated: boolean; refs: string[]; prior: PriorOutcome[] };
+  | { state: "done"; findings: Finding[]; passes: PassRecord[]; unsaturated: boolean; refs: string[]; prior: PriorOutcome[]; leads: LeadRecord[] };
 
 /** Where and how a finding's test runs: its language, the TypeScript workspace and the sandbox image. */
 export interface ReproPlan {
@@ -520,6 +542,8 @@ export interface AspectSpec {
   retryable?: (r: CommandRun) => boolean;
   /** The reviewers' tests (design §8.2); absent runs none, as `review.repro.enabled: false`. */
   repro?: ReproEnv;
+  /** The aspect's leads (design-pr-review-split §4.3), the given ones and the rest: the first pass gives each given one a status. */
+  leads?: readonly Lead[];
 }
 
 const sameArgv = (a: readonly string[], b: readonly string[]): boolean => a.length === b.length && a.every((x, i) => x === b[i]);
@@ -544,6 +568,12 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
   // The earlier findings are judged beside the new ones, but are never among them: they keep their ids and leave the sweep's numbering and saturation alone.
   const priors: Finding[] = given.map((p) => ({ id: p.id, aspect: spec.aspect, raisedBy: spec.aspect, pass: 1, path: p.path, side: p.side, startLine: p.startLine, endLine: p.endLine, severity: p.severity, kind: p.kind, content: p.text, suggestion: "", evidence: "", distinct: true, prior: true, state: "pending", reaffirmed: [], notes: [] }));
   const said = new Map<string, { status: PriorStatus; reason: string }>();
+  const allLeads = spec.leads ?? [];
+  const givenLeads = allLeads.filter((l) => l.given);
+  const leadIds = new Set(givenLeads.map((l) => l.id));
+  /** The first pass's status of each lead, and what became of the comment a raised one names. */
+  let leadEntries: LeadEntry[] = [];
+  const commentOutcome = new Map<number, string>();
   const known = (): Set<string> => new Set([...spec.earlier, ...findings, ...priors].map((f) => f.id));
   let next = (spec.firstId ?? 1) + spec.earlier.length;
   let phase: "start" | "verify" | "need-pass" | "saturated" | "unsaturated" = "start";
@@ -684,7 +714,7 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
         retries += 1;
         continue;
       }
-      const parsed = ev.run.contract?.status === "invalid" ? { problems: ev.run.contract.problems.slice(0, 20) } : parsePass(ev.run.output, { aspect: spec.aspect, scope: spec.scope, known: known(), ...(spec.repro !== undefined ? { maxTestBytes: spec.repro.config.maxTestBytes } : {}), ...(spec.principles !== undefined ? { principles: spec.principles } : {}), ...(passes.length === 0 && given.length > 0 ? { prior: new Set(given.map((p) => p.id)) } : {}) });
+      const parsed = ev.run.contract?.status === "invalid" ? { problems: ev.run.contract.problems.slice(0, 20) } : parsePass(ev.run.output, { aspect: spec.aspect, scope: spec.scope, known: known(), ...(spec.repro !== undefined ? { maxTestBytes: spec.repro.config.maxTestBytes } : {}), ...(spec.principles !== undefined ? { principles: spec.principles } : {}), ...(passes.length === 0 && given.length > 0 ? { prior: new Set(given.map((p) => p.id)) } : {}), ...(passes.length === 0 && leadIds.size > 0 ? { leads: leadIds } : {}) });
       if ("problems" in parsed) {
         retries += 1;
         feedback = parsed.problems;
@@ -699,9 +729,11 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
       let merged = 0;
       let suppressed = 0;
       for (const j of parsed.prior) said.set(j.finding, { status: j.status, reason: j.reason });
-      for (const c of parsed.comments) {
+      if (n === 1) leadEntries = parsed.leads;
+      for (const [k, c] of parsed.comments.entries()) {
         if (c.finding === "" && (spec.suppress ?? []).some((x) => overlaps({ path: c.path, side: c.side, start: c.start_line, end: c.end_line }, { path: x.path, side: x.side, start: x.start, end: x.end }))) {
           suppressed += 1;
+          if (n === 1) commentOutcome.set(k, "suppressed: it overlaps an earlier finding");
           continue;
         }
         if (c.finding !== "") {
@@ -712,11 +744,13 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
         }
         if (c.severity === "P3") {
           nits += 1;
+          if (n === 1) commentOutcome.set(k, "a nit (P3): not verified or posted");
           continue;
         }
         const span = { path: c.path, side: c.side, start: c.start_line, end: c.end_line };
         const twin = c.distinct ? undefined : raised.find((f) => !f.distinct && overlaps(span, { path: f.path, side: f.side, start: f.startLine, end: f.endLine }));
         if (twin !== undefined) {
+          if (n === 1) commentOutcome.set(k, twin.id);
           merged += 1;
           if (SEVERITIES.indexOf(c.severity) < SEVERITIES.indexOf(twin.severity)) twin.severity = c.severity;
           if (c.kind === "behavioral") twin.kind = "behavioral";
@@ -748,6 +782,19 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
         };
         raised.push(f);
         findings.push(f);
+        if (n === 1) commentOutcome.set(k, f.id);
+      }
+      // A raised lead marks the finding its comment became (design-pr-review-split §4.3).
+      if (n === 1) {
+        for (const e of leadEntries) {
+          if (e.status !== "raised") continue;
+          const target = findings.find((f) => f.id === commentOutcome.get(e.comment));
+          const lead = givenLeads.find((l) => l.id === e.lead);
+          if (target !== undefined && lead !== undefined && target.lead === undefined) {
+            target.lead = lead.id;
+            target.leadKind = lead.kind;
+          }
+        }
       }
       passes.push({ n, reviewed: parsed.summary.reviewed_files, raised: raised.map((f) => f.id), reaffirmed, nits, merged, ...(suppressed > 0 ? { suppressed } : {}) });
       reproFor = raised.filter((f) => f.kind === "behavioral" && hasTest(f.repro));
@@ -775,6 +822,14 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
     verdicts = read.verdicts;
   }
   const tail = refs.slice(-10);
+  /** Each lead as the record keeps it: its status from the first pass, the finding a raised one became, or not given. */
+  const leadRecords = (): LeadRecord[] =>
+    allLeads.map((l): LeadRecord => {
+      if (!l.given) return { ...l, status: NOT_GIVEN };
+      const e = leadEntries.find((x) => x.lead === l.id);
+      if (e === undefined) return { ...l, status: "not-an-issue", reason: "no status was recorded" };
+      return { ...l, status: e.status, ...(e.reason !== "" ? { reason: e.reason } : {}), ...(e.status === "raised" && commentOutcome.has(e.comment) ? { finding: commentOutcome.get(e.comment)! } : {}) };
+    });
   /** What the sweep concluded of each earlier finding: fixed when the reviewer said so or the verifier refuted it, else it stays open. */
   const outcomes = (): PriorOutcome[] =>
     priors.map((f, i): PriorOutcome => {
@@ -796,12 +851,12 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
     const r = resolve();
     if (r.kind === "quotes") return { state: "quotes", commands: r.commands };
     if (r.kind === "supervise") return { state: "supervise", reason: r.reason, refs: r.refs };
-    if (r.blocking && passes.length < MAX_SWEEP_PASSES) return { state: "pass", n: passes.length + 1, feedback: [], known: [...spec.earlier, ...findings], prior: [] };
-    return { state: "done", findings, passes, unsaturated: r.blocking, refs: tail, prior: outcomes() };
+    if (r.blocking && passes.length < MAX_SWEEP_PASSES) return { state: "pass", n: passes.length + 1, feedback: [], known: [...spec.earlier, ...findings], prior: [], leads: [] };
+    return { state: "done", findings, passes, unsaturated: r.blocking, refs: tail, prior: outcomes(), leads: leadRecords() };
   }
-  if (phase === "saturated" || phase === "unsaturated") return { state: "done", findings, passes, unsaturated: phase === "unsaturated", refs: tail, prior: outcomes() };
+  if (phase === "saturated" || phase === "unsaturated") return { state: "done", findings, passes, unsaturated: phase === "unsaturated", refs: tail, prior: outcomes(), leads: leadRecords() };
   if (retries > MAX_REVIEW_RETRIES) return { state: "supervise", reason: `the ${spec.aspect} reviewer's result still fails the contract or the deterministic rules after ${MAX_REVIEW_RETRIES} retries: ${feedback.slice(0, 3).join("; ")}`, refs: tail };
-  return { state: "pass", n: passes.length + 1, feedback, known: [...spec.earlier, ...findings], prior: passes.length === 0 ? [...given] : [] };
+  return { state: "pass", n: passes.length + 1, feedback, known: [...spec.earlier, ...findings], prior: passes.length === 0 ? [...given] : [], leads: passes.length === 0 ? givenLeads : [] };
 }
 
 /** The review's findings in id order across the aspects' records. */

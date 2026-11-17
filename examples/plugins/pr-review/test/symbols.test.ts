@@ -8,7 +8,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { GO_PACK, TS_PACK, effectivePacks } from "../src/kit/packs.js";
 import { parsePatch } from "../src/kit/patch.js";
-import { symbolOfRecord } from "../src/questions.js";
+import { symbolOfRecord } from "../src/leads.js";
 import { changedSymbols, declarationEnd, extractSymbols, goReceiver, maskCode, parseBaseDefinitions, touches, changedHeadLines } from "../src/kit/symbols.js";
 
 const GO = `package store

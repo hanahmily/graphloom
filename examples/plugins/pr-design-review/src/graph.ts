@@ -71,6 +71,7 @@ import {
   REVIEW_HTML,
   REVIEW_MD,
 } from "./kit/constants.js";
+import { claimRecordCommands } from "./kit/claimrecord.js";
 import { GRAPH_ID, GRAPH_VERSION } from "./version.js";
 import { checkBatch, DIAGRAMMER_JOB, DIAGRAMS_REFERENCES, DIAGRAMS_SCHEMA, DIAGRAMS_SCHEMA_NAME, diagramInputOf, planDiagrams, MAX_DIAGRAM_BYTES, MAX_DIAGRAMS, SKILL_DIR, skillMount } from "./kit/diagrams.js";
 import { commandRuns, describeCommand, environmentOutput, outputTail, succeeded, validatorEvidence, type CommandRun } from "./kit/evidence.js";
@@ -613,6 +614,12 @@ function report(ctx: Context, view: RunView): GraphDecision {
     }
     case "done": {
       // The diagrams are drawn and checked once the report's claims are (design §6.10); the plugin's own drawing stands in for one that fails.
+      // The claim checks are recorded first, so a reentry after a later review of the same candidate can accept the report again.
+      const checks = nextWrite(view, claimRecordCommands(view.evidence), { failed: "recording the claim checks failed", settle: "the recorded claim checks keep differing from the ones the evidence holds" });
+      if (checks !== undefined) {
+        if ("decision" in checks) return checks.decision;
+        return withPrivate(dispatch(commandJob(REPORT_STAGE, writeInstruction(checks.command, "Record the claim checks as evidence"), { commands: [checks.command] }), "record the report's claim checks, so a later review of the same candidate does not hide them from the report's validators"));
+      }
       const drawn = diagramStep(ctx, view, analysis, flow);
       return drawn ?? measureAndWrite(ctx, view, analysis, flow);
     }

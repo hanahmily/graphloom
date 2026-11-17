@@ -66,9 +66,9 @@ describe("pr-review reads externalized evidence exactly as it reads inline evide
       files: headFiles,
       maxSteps: 2_500,
       budgets: { agentInvocations: 400, jobs: 2_000, decisions: 4_000, corrections: 40 },
-      shadow: { records: lazyForm(stats), every: 4, compared },
+      shadow: { records: lazyForm(stats), every: 2, compared },
     });
-    expect(sim.final.action.type).toBe("stop");
+    expect(sim.final.action, JSON.stringify(sim.final).slice(0, 600)).toMatchObject({ type: "stop", stop: { reason: "complete" } });
 
     // Every sampled advance and every validation gave the same answer on both forms.
     const advances = compared.filter((c) => c.what === "advance");

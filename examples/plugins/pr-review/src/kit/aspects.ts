@@ -24,9 +24,10 @@ export const ASPECT_TEXT: Readonly<Record<Aspect, { focus: string; out: string }
     focus: "Each feature does what the report and the pull request say: logic, edge cases, error handling, concurrency, data integrity, API contracts.",
     out: "Readability and structure; exploitability.",
   },
+  // design-pr-review-split §4.4: no Q&A answers reuse, splits or missing tests any more, so their exclusion is gone.
   maintainability: {
-    focus: "Readability, structure and naming, duplication, coupling, test quality.",
-    out: "What the Q&A already answers (reuse, duplication against the codebase, complexity splits, missing tests), unless this pass adds something the answer lacks; whether behavior is correct or safe.",
+    focus: "Readability, structure and naming, duplication and reuse of existing code, coupling, complexity, test coverage and test quality, the leads it is given.",
+    out: "Whether a whole feature or mechanism already exists in the codebase, when the context source is the design review (round 1's existing-feature answers it); whether behavior is correct or safe.",
   },
   security: {
     focus: "Input validation, injection, authentication and authorization, secrets, unsafe deserialization, resource exhaustion and denial of service, dependency risk.",

@@ -20,11 +20,11 @@ import { clip, esc } from "./kit/escape.js";
 import { changeMapSvg, crapBarSvg, stateDiagramSvg, type BarRow } from "./kit/htmlsvg.js";
 import { brokenNote, effectiveConclusion, NECESSITY_ID, parseNecessityRecord, SKIPPED_NOTE, type NecessityRecord } from "./necessity.js";
 import { DIVE_COLUMNS, DIVE_COMMAND, DIVE_HEADING, DIVE_LINE, DIVE_TEXT, diveRow } from "./kit/dive.js";
-import { hotspots, hotspotText, needAuthor, openQuestions, SCOPE_KINDS, SCOPE_TITLES, scopeText, type Scope } from "./kit/scope.js";
-import { incrementalLine, type IncrementalNote } from "./incremental.js";
+import { hotspots, hotspotText, needAuthor, openQuestions, SCOPE_KINDS, SCOPE_TITLES, type Scope } from "./kit/scope.js";
 import { describeReasons, type ModeReason } from "./kit/mode.js";
 import { exceeds, LIMITS, originOf, type Metric } from "./kit/metrics/crap.js";
 import { draftMarkdown, parseDraft, scopeLine, type Draft } from "./draft.js";
+import { round1Lines } from "./context.js";
 import { proofOf } from "./proof.js";
 import { SEVERITIES, type Finding } from "./review.js";
 import type { MetricsRecord } from "./kit/metrics/record.js";
@@ -76,10 +76,8 @@ export interface QaDoc {
   mode?: string;
   modeReasons?: ModeReason[];
   necessity?: { skipped?: boolean; note?: string };
-  /** The operator chose `rounds: review-only` (design §3.2): no question was asked or answered, and the pages say so. */
-  roundsSkipped?: { reason: string; note: string };
-  /** What a later head asked and carried, or why it asked everything (design §6.7). */
-  incremental?: IncrementalNote;
+  /** No design review is the context of this run (design-pr-review-split §4.2: the prelude, or no report): the pages say so. */
+  noDesign?: { note: string };
   questions: Array<{ id: string; type: string; item: string; symbol?: string; function?: string; text: string; origin: string; carried?: { head: string }; answer?: QaAnswer }>;
 }
 
@@ -204,7 +202,8 @@ function reviewHtml(d: Draft | undefined, g: Github): string {
   });
   const body = [
     `<p>Recommended verdict: <strong>${esc(d.recommended)}</strong>${d.recommended === "approve" ? " (drafted as comment)" : ""}. Scope: ${esc(scopeLine({ source: d.review.scope.source as never, areas: d.review.scope.areas, files: { length: d.review.scope.files } }))}. The draft is draft.md in .graphloom/review/; the Publish stage posts its comments.</p>`,
-    `<p class="muted">${esc(counts)} · ${d.comments.filter((c) => c.kind === "question").length} question(s) for the author. ${esc(d.review.context.reason[0]!.toUpperCase() + d.review.context.reason.slice(1))}.</p>`,
+    `<p class="muted">${esc(counts)} · leads: ${d.leads.given} given, ${d.leads.raised} raised. ${esc(d.review.context.reason[0]!.toUpperCase() + d.review.context.reason.slice(1))}.</p>`,
+    `<p>${round1Lines(d.round1, d.head).map(esc).join("<br>")}</p>`,
     ...(groups.length === 0 ? [para("No finding survived verification.")] : groups),
     ...(d.judgment.length > 0 ? [para(`${d.judgment.length} finding(s) need your judgment: confirmed but not proven by a test, or disputed. The appendix lists them with the draft.`)] : []),
   ].join("");
@@ -218,6 +217,7 @@ function reviewAppendixHtml(d: Draft | undefined, g: Github): string {
   const body = [
     `<h3>Aspects</h3><div class="scroll"><table><thead><tr><th>Aspect</th><th>Reviewer</th><th>Verifier</th><th>Passes</th><th>Confirmed</th><th>Disputed</th><th>Dismissed</th><th>Nits not verified</th></tr></thead><tbody>${aspects}</tbody></table></div>`,
     `<h3>Findings</h3>${d.review.findings.length === 0 ? para("None raised.") : d.review.findings.map((f) => findingHtml(f, d, g, true)).join("")}`,
+    `<h3>Leads</h3>${d.review.leads.length === 0 ? para("None: no lead was computed for the review's scope.") : `<div class="scroll"><table><thead><tr><th>Lead</th><th>Kind</th><th>Place</th><th>Facts</th><th>Status</th></tr></thead><tbody>${d.review.leads.map((l) => `<tr><td>${esc(l.id)}</td><td>${esc(l.kind)}</td><td>${citeLink(g, { path: l.path, side: "head", start: l.line, end: l.endLine })}</td><td>${esc(clip(l.facts.join("; "), 400))}</td><td>${esc(l.status)}${l.finding !== undefined ? ` (${esc(l.finding)})` : ""}${l.reason !== undefined ? `<div class="muted">${esc(clip(l.reason, 240))}</div>` : ""}</td></tr>`).join("")}</tbody></table></div>`}`,
     `<h3>Draft</h3><pre><code>${esc(draftMarkdown(d))}</code></pre>`,
   ].join("");
   return details("<h2>Review: findings and draft</h2>", body, false, "sec");
@@ -244,8 +244,8 @@ function headerHtml(i: HtmlInput, g: Github, nav: string): string {
 
 // ---- necessity ----
 
-function necessityHtml(n: NecessityRecord | undefined, g: Github, skipped?: QaDoc["roundsSkipped"]): string {
-  if (n === undefined && skipped !== undefined) return details(`<h2>Necessity</h2> ${badge("grey", "skipped")}`, para(skipped.note), true, "sec");
+function necessityHtml(n: NecessityRecord | undefined, g: Github, skipped?: QaDoc["noDesign"]): string {
+  if (n === undefined && skipped !== undefined) return details(`<h2>Necessity</h2> ${badge("grey", "not in this run")}`, para(skipped.note), true, "sec");
   if (n === undefined) return details(`<h2>Necessity</h2> ${badge("grey", "pending")}`, para("N1, the necessity question, is asked after the report; this file is rewritten when it is answered."), false, "sec");
   const a = n.final;
   const nec = a.necessity!;
@@ -332,9 +332,9 @@ function verdictHtml(i: HtmlInput): string {
   const principles = n?.final.necessity?.principles ?? [];
   const asked = (i.qa?.questions ?? []).filter((q) => q.id !== NECESSITY_ID);
   const need = needAuthor(asked);
-  const skipped = i.qa?.roundsSkipped;
+  const skipped = i.qa?.noDesign;
   if (skipped !== undefined) {
-    return [`<div class="verdict">`, `<div><span class="label">N1: is it necessary?</span> ${badge("grey", "skipped")}</div>`, `<div><span class="label">Questions and answers</span> ${badge("grey", "skipped")} <span class="muted">by the operator's choice (${esc(skipped.reason)})</span></div>`, `</div>`].join("");
+    return [`<div class="verdict">`, `<div><span class="label">N1: is it necessary?</span> ${badge("grey", "not in this run")}</div>`, `<div><span class="label">Design review</span> ${badge("grey", "not in this run")} <span class="muted">${esc(skipped.note)}</span></div>`, `</div>`].join("");
   }
   return [
     `<div class="verdict">`,
@@ -407,7 +407,7 @@ function areasHtml(r: ReportDoc): string {
 function openQuestionsHtml(i: HtmlInput): string {
   const qa = i.qa;
   if (qa === undefined) return details(`<h2>Open questions</h2> ${badge("grey", "pending")}`, para("The Questions and Answers stages follow the report; this file is rewritten when the answers are checked."), true, "sec");
-  if (qa.roundsSkipped !== undefined) return details(`<h2>Open questions</h2> ${badge("grey", "skipped")}`, para(qa.roundsSkipped.note), true, "sec");
+  if (qa.noDesign !== undefined) return details(`<h2>Open questions</h2> ${badge("grey", "not in this run")}`, para(qa.noDesign.note), true, "sec");
   const n1 = i.necessity !== undefined ? effectiveConclusion(i.necessity.final) : undefined;
   const sel = openQuestions(qa.questions, { id: NECESSITY_ID, conclusion: n1 });
   const rows = sel.open.map((q) => {
@@ -580,7 +580,7 @@ function answerHtml(a: QaAnswer, g: Github): string {
 
 function qaHtml(r: ReportDoc, qa: QaDoc | undefined, g: Github): string {
   if (qa === undefined) return details(`<h2>Q&amp;A</h2> ${badge("grey", "pending")}`, para("The Questions and Answers stages follow the report; this file is rewritten when the answers are checked."), false, "sec");
-  if (qa.roundsSkipped !== undefined) return details(`<h2>Q&amp;A</h2> ${badge("grey", "skipped")}`, para(qa.roundsSkipped.note), true, "sec");
+  if (qa.noDesign !== undefined) return details(`<h2>Q&amp;A</h2> ${badge("grey", "not in this run")}`, para(qa.noDesign.note), true, "sec");
   if (qa.necessity?.skipped === true) return details("<h2>Q&amp;A</h2>", para(`${NECESSITY_ID} is answered above, under Necessity.`) + para(qa.necessity.note ?? SKIPPED_NOTE), true, "sec");
   const asked = qa.questions.filter((q) => q.id !== NECESSITY_ID);
   const count = (s: string): number => asked.filter((q) => q.answer?.status === s).length;
@@ -590,7 +590,6 @@ function qaHtml(r: ReportDoc, qa: QaDoc | undefined, g: Github): string {
   for (const q of asked) groups.set(q.item, [...(groups.get(q.item) ?? []), q]);
   const body = [
     qa.mode === "large" ? para(`Mode: large (${describeReasons(qa.modeReasons ?? [])}).`) : "",
-    qa.incremental !== undefined ? para(incrementalLine(qa.incremental)) : "",
     para(`${asked.length} question${asked.length === 1 ? "" : "s"}: ${count("answered")} answered, ${count("partially answered")} partially answered, ${count("needs author")} needs author.`),
     ...[...groups].map(([item, qs]) => {
       const it = items.get(item);
@@ -709,7 +708,7 @@ export function renderAppendixHtml(i: HtmlInput): string {
     openQuestionsHtml(i),
     reviewHtml(i.review, g),
     details("<h2>Summary</h2>", overviewHtml(r), true, "sec"),
-    necessityHtml(i.necessity, g, i.qa?.roundsSkipped),
+    necessityHtml(i.necessity, g, i.qa?.noDesign),
     changeMapHtml(r),
     itemsHtml(r, c),
     measurementsHtml(r),
@@ -736,20 +735,20 @@ export function appendixHtmlFrom(reportJson: string, qaJson?: string, necessityJ
 const rendered = new Map<string, { review: string; appendix: string } | undefined>();
 
 /** Both files rendered from the same documents, which are parsed once. */
-export function htmlPagesFrom(reportJson: string, qaJson?: string, necessityJson?: string, draftJson?: string): { review: string; appendix: string } | undefined {
-  const key = `${reportJson}\u0000${qaJson ?? ""}\u0000${necessityJson ?? ""}\u0000${draftJson ?? ""}`;
+export function htmlPagesFrom(reportJson: string, qaJson?: string, necessityJson?: string, draftJson?: string, opts: { noDesign?: string } = {}): { review: string; appendix: string } | undefined {
+  const key = `${reportJson}\u0000${qaJson ?? ""}\u0000${necessityJson ?? ""}\u0000${draftJson ?? ""}\u0000${opts.noDesign ?? ""}`;
   if (rendered.has(key)) return rendered.get(key);
-  const input = htmlInputFrom(reportJson, qaJson, necessityJson, draftJson);
+  const input = htmlInputFrom(reportJson, qaJson, necessityJson, draftJson, opts.noDesign);
   const pages = input === undefined ? undefined : { review: renderReviewHtml(input), appendix: renderAppendixHtml(input) };
   if (rendered.size >= 4) rendered.delete(rendered.keys().next().value!);
   rendered.set(key, pages);
   return pages;
 }
 
-function htmlInputFrom(reportJson: string, qaJson?: string, necessityJson?: string, draftJson?: string): HtmlInput | undefined {
+function htmlInputFrom(reportJson: string, qaJson?: string, necessityJson?: string, draftJson?: string, noDesign?: string): HtmlInput | undefined {
   const report = parseReportDoc(reportJson);
   if (report === undefined) return undefined;
-  const qa = qaJson === undefined ? undefined : parseQaDoc(qaJson);
+  const qa: QaDoc | undefined = noDesign !== undefined ? { questions: [], noDesign: { note: noDesign } } : qaJson === undefined ? undefined : parseQaDoc(qaJson);
   const necessity = necessityJson === undefined ? undefined : parseNecessityRecord(necessityJson);
   const review = draftJson === undefined ? undefined : parseDraft(draftJson);
   return { report, ...(qa !== undefined ? { qa } : {}), ...(necessity !== undefined ? { necessity } : {}), ...(review !== undefined ? { review } : {}) };
@@ -780,7 +779,7 @@ const ATTR = /\s+([^\s"'<>\/=]+)(?:\s*=\s*"([^"<>]*)")?/y;
  * a `url(` or `@import` that points anywhere but inside the document, and a link that is not an `href` to this pull
  * request, one of its commits, or one of its files at the pinned head or base on GitHub. Empty when it is inert.
  */
-export function htmlProblems(html: string, github: { owner: string; repo: string; head: string; base?: string | undefined }): string[] {
+export function htmlProblems(html: string, github: { owner: string; repo: string; head: string; base?: string | undefined; /** Commits the page may also link to: the design head and its base whose report it renders (design-pr-review-split §4.2). */ also?: readonly string[] }): string[] {
   const problems: string[] = [];
   const add = (p: string): void => {
     if (problems.length < 20 && !problems.includes(p)) problems.push(p);
@@ -788,7 +787,7 @@ export function htmlProblems(html: string, github: { owner: string; repo: string
   if (Buffer.byteLength(html, "utf8") > MAX_HTML_BYTES) add(`the file is larger than ${MAX_HTML_BYTES} bytes`);
   if (/<\s*script/i.test(html)) add("it holds a <script");
   const rootRe = `https://github\\.com/${github.owner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/${github.repo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`;
-  const shas = [github.head, ...(github.base !== undefined ? [github.base] : [])].map((s) => s.replace(/[^0-9a-f]/gi, ""));
+  const shas = [github.head, ...(github.base !== undefined ? [github.base] : []), ...(github.also ?? [])].map((s) => s.replace(/[^0-9a-f]/gi, "")).filter((s) => s !== "");
   const allowed = new RegExp(`^${rootRe}/(?:pull/\\d+|commit/(?:${shas.join("|")})|blob/(?:${shas.join("|")})/[^\\s"<>]*)$`);
   const local = /^(?:(?:review|review-appendix)\.html(?:#[A-Za-z0-9_.:-]+)?|#[A-Za-z0-9_.:-]+)$/;
   const badCss = (css: string): string | undefined => {

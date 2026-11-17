@@ -1,8 +1,8 @@
 # Splitting pr-review into `pr-design-review` and `pr-review`
 
 Status: proposed, 2026-11-17; §5 (ledger v2) is implemented in pr-review 0.27.0, the kit
-in 0.27.1, and §3 in `pr-design-review` 0.1.0 ([§11](#11-implementation-plan) items 1 to 4);
-`pr-review` 1.0 (§4) is not. It changes the
+in 0.27.1, §3 in `pr-design-review` 0.1.0, and §4 in `pr-review` 1.0.0
+([§11](#11-implementation-plan) items 1 to 5); the skills and documents (item 6) are not. It changes the
 [PR-review graph](design-pr-review-graph.md) as of pr-review 0.26.5; that
 document keeps describing 0.26.x until the implementation pull requests of
 [§11](#11-implementation-plan) rewrite it. Each section below says what changes
@@ -285,6 +285,15 @@ A missing test is not a round-1 item any more. The record's kinds are
   ([§6](#6-chaining)).
 
 ## 4. `pr-review` 1.x: round 2
+
+**Status:** implemented in pr-review 1.0.0 ([§11](#11-implementation-plan) item 5). The
+Checks stage is not in the stage list: the profile still refuses `checks` as a later
+version's field, so no profile has checks. Mutation testing is not measured yet, so a
+`weak-test` lead comes only from a measurement record that carries surviving mutants.
+`comments.minSeverity`, `nits`, `maxComments` and `suggestions` are refused as a later
+version's; `comments.footer` is read. `claims-checked` is not bound as a separate
+reviewer, since a run whose context is the design review's has no claim check of its own;
+its validator requires that a prelude's checks are read-only review jobs.
 
 ### 4.1 Stages and requirements
 

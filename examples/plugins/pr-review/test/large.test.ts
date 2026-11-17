@@ -22,12 +22,11 @@ import { claimTargets, readClaimCheck } from "../src/kit/claims.js";
 import { emptyBriefing } from "../src/kit/briefing.js";
 import { readTreeQuotes, treeQuotePlan } from "../src/kit/treequotes.js";
 import { ProfileError, parseProfile } from "../src/kit/profile.js";
-import { answerBatches } from "../src/qaflow.js";
 import { LARGE_LIMITS, REHEARSAL_HEAD } from "../src/rehearsal.js";
-import type { Question } from "../src/questions.js";
 import { readResult, READS, snapshotState } from "../src/kit/snapshot.js";
 import { recordCommand, writeChunks } from "../src/kit/write.js";
 import { validatorById } from "../src/validators.js";
+import { recordedAspect, recordedScope } from "../src/reviewdraft.js";
 import { BANYANDB, assignmentOf, candidateEvidence, profileOf, scenarioWith, simulate, type Simulation } from "./support.js";
 
 const LARGE = { limits: LARGE_LIMITS };
@@ -35,7 +34,6 @@ const stopOf = (s: Simulation) => (s.final.action.type === "stop" ? s.final.acti
 const run = (change?: (s: Parameters<typeof scenarioWith>[1] extends (s: infer S) => void ? S : never) => void, config: Record<string, unknown> = LARGE, extra: { budgets?: Record<string, number> } = {}): Simulation =>
   simulate({ scenario: scenarioWith("large-pull-request", change ?? (() => undefined), config), config, maxSteps: 250, ...(extra.budgets !== undefined ? { budgets: extra.budgets } : {}) });
 const report = (sim: Simulation) => JSON.parse(sim.written!.json) as Record<string, any>;
-const qa = (sim: Simulation) => JSON.parse(sim.qa!.json) as Record<string, any>;
 const agents = (sim: Simulation, schema: string): JobSpec[] => sim.jobs.filter((j) => j.resultSchema === schema);
 const harnessOf = (j: JobSpec): string => (j.input as { harness: string }).harness;
 const commandIds = (j: JobSpec): string[] => ((j.input as { commands?: Array<{ id: string }> }).commands ?? []).map((c) => c.id);
@@ -46,9 +44,9 @@ describe("a large pull request, reported at a high level (design §6.9)", () => 
   const sim = run();
 
   it("runs to the end: every receipt valid, one report", () => {
-    expect(stopOf(sim)).toMatchObject({ reason: "answers accepted" });
+    expect(stopOf(sim)).toMatchObject({ reason: "complete" });
     expect(sim.receipts.every((r) => r.valid)).toBe(true);
-    expect(sim.receipts.map((r) => r.stageId).filter((s, i, a) => a.indexOf(s) === i)).toEqual(["fetch", "report", "questions", "answers"]);
+    expect(sim.receipts.map((r) => r.stageId).filter((s, i, a) => a.indexOf(s) === i)).toEqual(["fetch", "report", "review", "draft", "publish"]);
   });
 
   it("makes exactly one reporter job and one claim check: no area job, no synthesis, no record", () => {
@@ -138,7 +136,7 @@ describe("a large pull request, reported at a high level (design §6.9)", () => 
     expect(other).toContain("api/gen/types.pb.go changed (+5 −0 lines); generated code, not summarised");
     expect(other).toContain("assets/logo.png changed (+1 −0 lines); patch not provided by GitHub");
     expect(r.omitted).toEqual(["assets/logo.png"]);
-    expect(stopOf(sim)!.reason).toBe("answers accepted");
+    expect(stopOf(sim)!.reason).toBe("complete");
   });
 
   it("lists the areas in the briefing, with the reporter's label for each and the command that opens the reporter's session", () => {
@@ -158,59 +156,15 @@ describe("a large pull request, reported at a high level (design §6.9)", () => 
     expect(html).toContain("<td>A2</td><td>changes under pkg/alpha</td><td>1</td>");
   });
 
-  it("asks the questions in large mode and answers them in batches of at most 15 that continue one session, checked in fresh sessions", () => {
-    const q = qa(sim);
-    expect(q.mode).toBe("large");
-    expect(q.modeReasons).toEqual([{ limit: "maxFiles", value: 5, max: 2 }]);
-    const answerers = agents(sim, "answers-v1");
-    expect(answerers.length).toBeGreaterThanOrEqual(1);
-    for (const j of answerers) expect(Number(/Questions \((\d+)\):/.exec(assignmentOf(j))![1])).toBeLessThanOrEqual(15);
-    expect(answerers[0]!.continueFrom).toBeUndefined();
-    const checkers = sim.jobs.filter((j) => j.stageId === "answers" && j.resultSchema === "answer-check-v1");
-    expect(checkers).toHaveLength(answerers.length);
-    for (const j of checkers) {
-      expect(j.continueFrom).toBeUndefined();
-      expect(j.jobId).toBeUndefined();
-    }
-    // qa.json and review.md are written once, after the last batch.
-    expect(sim.jobs.filter((j) => commandIds(j).includes("qa-write"))).toHaveLength(1);
-    expect(sim.receipts.filter((r) => r.stageId === "answers").every((r) => r.valid)).toBe(true);
-  });
-
-  it("asks exactly the high-level questions, even though functions exceed the limits: N1, then per high-level change the one existence/reuse/common-logic question, purpose and missing-test", () => {
-    const q = qa(sim);
-    const questions = q.questions as Array<{ id: string; type: string; item: string; symbol?: string; text: string; answer?: { status: string; answer: string; parts?: unknown } }>;
-    const types = new Set(questions.filter((x) => x.id !== "N1").map((x) => x.type));
-    expect([...types].sort()).toEqual(["existing-reuse-common", "missing-test", "purpose"]);
-    expect(questions[0]!.id).toBe("N1");
-    // Not asked in large mode: split-function, complexity-coverage, anything per symbol or per function.
-    expect(questions.filter((x) => x.type === "split-function" || x.type === "complexity-coverage" || x.type === "weak-test")).toEqual([]);
-    expect(questions.filter((x) => x.symbol !== undefined)).toEqual([]);
-    // The unit is the high-level change: one per capability of the briefing's whatsNew, W1... in order, with the questions of each.
-    const changes = report(sim).briefing.whatsNew as Array<{ text: string; cites: Array<{ path: string }> }>;
-    expect(changes.length).toBeGreaterThan(0);
-    const ids = changes.map((_, n) => `W${n + 1}`);
-    expect(new Set(questions.filter((x) => x.id !== "N1").map((x) => x.item))).toEqual(new Set(ids));
-    for (const id of ids) expect(questions.filter((x) => x.item === id).map((x) => x.type).sort()).toEqual(["existing-reuse-common", "missing-test", "purpose"]);
-    expect(questions.length).toBe(1 + 3 * changes.length);
-    // The question names the change and its cites, and asks all three concerns at once.
-    const reuse = questions.filter((x) => x.type === "existing-reuse-common");
-    expect(reuse).toHaveLength(changes.length);
-    reuse.forEach((x, n) => {
-      expect(x.text).toContain(`W${n + 1} "`);
-      expect(x.text).toContain(changes[n]!.cites[0]!.path);
-      expect(x.text).toMatch(/already have the same or an equivalent.*existing internal package or an already-declared third-party library.*common logic/s);
-    });
-    // One question, one answer: a single statement with one status, and no parts.
-    for (const x of reuse) {
-      expect(x.answer!.status).toMatch(/^(answered|partially answered|needs author)$/);
-      expect(x.answer!.answer.length).toBeGreaterThan(0);
-      expect(x.answer!.parts).toBeUndefined();
-    }
-    const missing = questions.filter((x) => x.type === "missing-test");
-    expect(new Set(missing.map((x) => x.item)).size).toBe(missing.length);
-    // The test map's findings in the cited files are listed in the question.
-    expect(missing.some((x) => /found none in the pull request for: /.test(x.text))).toBe(true);
+  it("reviews the areas the briefing cites, and computes the leads of their files from the measurements and the test map", () => {
+    const scope = recordedScope(sim.evidence);
+    if (scope.state !== "read") throw new Error("no scope record");
+    expect(scope.value).toMatchObject({ mode: "large", contextSource: "prelude" });
+    expect(scope.value.areas.length).toBeGreaterThan(0);
+    const m = recordedAspect(sim.evidence, "maintainability");
+    if (m.state !== "read") throw new Error("no maintainability record");
+    for (const l of m.value.leads) expect(scope.value.files).toContain(l.path);
+    expect(m.value.leads.every((l) => l.status === "not-an-issue" || l.status === "raised")).toBe(true);
   });
 
   it("shows every function in the measurements, the over-limit ones included", () => {
@@ -218,16 +172,6 @@ describe("a large pull request, reported at a high level (design §6.9)", () => 
     expect(m.records.length).toBeGreaterThanOrEqual(8);
   });
 
-  it("keeps the questions a standard run asks, per symbol, when the pull request is small", () => {
-    const standard = simulate({ scenario: scenarioWith("large-pull-request", () => undefined, {}), config: {}, maxSteps: 250 });
-    expect(stopOf(standard)!.reason).toBe("answers accepted");
-    const q = qa(standard);
-    expect(q.mode).toBe("standard");
-    // One existence/reuse/common-logic question for each new symbol, not three.
-    expect(q.questions.filter((x: { type: string; symbol?: string }) => x.type === "existing-reuse-common" && x.symbol !== undefined)).toHaveLength(8);
-    expect(q.questions.filter((x: { type: string }) => ["existing-equivalent", "reuse-library", "common-logic"].includes(x.type))).toEqual([]);
-    expect(q.questions.filter((x: { type: string }) => x.type === "missing-test")).toHaveLength(8);
-  });
 });
 
 
@@ -242,7 +186,6 @@ describe("standard mode is what it was", () => {
     expect(sim.jobs.some((j) => commandIds(j).some((c) => c.startsWith("area-record") || c === "synthesis-record" || c.startsWith("answers-record")))).toBe(false);
     expect(sim.jobs.some((j) => j.resultSchema === "change-synthesis-v1")).toBe(false);
     expect(agents(sim, "change-report-v1").map((j) => j.jobId)).toEqual(["reporter"]);
-    expect(JSON.parse(sim.qa!.json).mode).toBe("standard");
   });
 });
 
@@ -409,7 +352,7 @@ describe("the budget pre-check before the reporter job (design §6.9)", () => {
   it("completes a large simulated run end to end within the plugin's default budgets", () => {
     const defaults = definitionFor(profileOf(LARGE)).defaultBudgets!;
     const sim = run(undefined, LARGE, { budgets: { agentInvocations: defaults.agentInvocations!, jobs: defaults.jobs!, decisions: defaults.decisions! } });
-    expect(stopOf(sim)).toMatchObject({ reason: "answers accepted" });
+    expect(stopOf(sim)).toMatchObject({ reason: "complete" });
     expect(sim.receipts.every((r) => r.valid)).toBe(true);
     expect(sim.jobs.filter((j) => j.kind === "agent").length).toBeLessThanOrEqual(defaults.agentInvocations!);
     expect(sim.jobs.length).toBeLessThanOrEqual(defaults.jobs!);
@@ -440,26 +383,27 @@ describe("the limits (design §6.9)", () => {
 
   it("goes large, not refused, over maxFiles or maxPatchBytes, and refuses only over the hard caps", () => {
     const over = simulate({ config: { limits: { maxFiles: 3 } }, maxSteps: 250 });
-    expect(stopOf(over)?.reason).toBe("answers accepted");
+    expect(stopOf(over)?.reason).toBe("complete");
     expect(assignmentOf(over.jobs.find((j) => j.resultSchema === "change-report-v1")!)).toContain("describe the pull request at a high level");
     expect(report(over).modeReasons).toEqual([{ limit: "maxFiles", value: 5, max: 3 }]);
     const bytes = simulate({ config: { limits: { maxPatchBytes: 100 } }, maxSteps: 250 });
-    expect(stopOf(bytes)?.reason).toBe("answers accepted");
+    expect(stopOf(bytes)?.reason).toBe("complete");
     expect(report(bytes).modeReasons).toEqual([{ limit: "maxPatchBytes", value: expect.any(Number), max: 100 }]);
     expect(stopOf(simulate({ config: { limits: { maxFiles: 3, hardMaxFiles: 4 } } }))!.blocker).toMatch(/5 files, past the profile's limits.hardMaxFiles of 4/);
     expect(stopOf(simulate({ config: { limits: { maxPatchBytes: 50, hardMaxPatchBytes: 50 } } }))!.blocker).toMatch(/patches are \d+ bytes, past the profile's limits.hardMaxPatchBytes of 50/);
   });
 
-  it("goes large for the questions alone over maxNewSymbols, keeping the standard report", () => {
+  it("runs no search and computes no reuse lead over maxNewSymbols, keeping the standard report", () => {
     const sim = simulate({ scenario: scenarioWith("large-pull-request", () => undefined, { limits: { maxNewSymbols: 3 } }), config: { limits: { maxNewSymbols: 3 } }, maxSteps: 250 });
-    expect(stopOf(sim)!.reason).toBe("answers accepted");
+    expect(stopOf(sim)!.reason).toBe("complete");
     expect(report(sim).mode).toBe("standard");
     expect(agents(sim, "change-report-v1").map((j) => j.jobId)).toEqual(["reporter"]);
-    const q = qa(sim);
-    expect(q.mode).toBe("large");
-    expect(q.modeReasons).toEqual([{ limit: "maxNewSymbols", value: 8, max: 3 }]);
-    expect(q.questions.filter((x: { type: string; symbol?: string }) => x.type === "existing-reuse-common" && x.symbol === undefined)).toHaveLength(2);
-    expect(q.questions.filter((x: { type: string }) => ["existing-equivalent", "reuse-library", "common-logic"].includes(x.type))).toEqual([]);
+    expect(sim.jobs.flatMap(commandIds).filter((id) => id.startsWith("search-"))).toEqual([]);
+    const m = recordedAspect(sim.evidence, "maintainability");
+    if (m.state !== "read") throw new Error("no maintainability record");
+    expect(m.value.leads.filter((l) => l.kind === "reuse")).toEqual([]);
+    const within = simulate({ scenario: scenarioWith("large-pull-request", () => undefined, {}), config: {}, maxSteps: 250 });
+    expect(within.jobs.flatMap(commandIds).filter((id) => id.startsWith("search-")).length).toBeGreaterThan(0);
   });
 });
 
@@ -558,48 +502,19 @@ describe("the evidence the validators recompute a large report from", () => {
 });
 
 
-describe("batches of questions", () => {
-  const q = (id: number, item: string): Question => ({ id: `Q${id}`, type: "other", item, text: "t", origin: "required", key: `k${id}` });
-  const ids = (b: Question[][]): string[][] => b.map((x) => x.map((y) => y.id));
-
-  it("groups the questions of a few items per batch, at most 15", () => {
-    const qs = [...Array.from({ length: 6 }, (_, i) => q(i + 1, "R1")), ...Array.from({ length: 6 }, (_, i) => q(i + 7, "R2")), ...Array.from({ length: 6 }, (_, i) => q(i + 13, "R3"))];
-    expect(ids(answerBatches(qs)).map((b) => b.length)).toEqual([12, 6]);
-    expect(answerBatches(qs).map((b) => [...new Set(b.map((x) => x.item))])).toEqual([["R1", "R2"], ["R3"]]);
-  });
-
-  it("cuts an item with more than a batch's worth into runs, and keeps every question once, in order", () => {
-    const qs = Array.from({ length: 40 }, (_, i) => q(i + 1, "R1"));
-    expect(answerBatches(qs).map((b) => b.length)).toEqual([15, 15, 10]);
-    expect(answerBatches(qs).flat().map((x) => x.id)).toEqual(qs.map((x) => x.id));
-    expect(answerBatches([])).toEqual([]);
-  });
-});
-
-
 describe("the requirements say what large mode does", () => {
   const d = definitionFor(profileOf());
   const text = (id: string): string => d.requirements.find((r) => r.id === id)!.statement;
-  it("describes the snapshot, the report, the claim check, the questions and the answers", () => {
+  it("describes the snapshot, the report and the claim check", () => {
     expect(text("pr-snapshot")).toMatch(/hardMaxFiles|1000 files/);
     expect(text("pr-snapshot")).toContain("reviewed in large mode");
     expect(text("pr-snapshot")).toContain("partitioned into areas by a deterministic rule");
-    expect(text("change-report")).toContain("the report is high level: one reporter job");
-    expect(text("change-report")).toContain("the patches of the interface files only");
-    expect(text("change-report")).toContain("at most 200000 bytes of patch in all, the largest left out first with the files left out listed");
-    expect(text("change-report")).toContain("an item's text is at most 600 characters, as in standard mode");
-    expect(text("change-report")).toContain("graphloom session open <run> --stage report");
-    expect(text("change-report")).toContain("stops with those numbers");
+    expect(text("change-report")).toContain("In large mode (over the profile's maxFiles or maxPatchBytes) one reporter job is given a bounded digest");
+    expect(text("change-report")).toContain("an item's text is at most 600 characters");
     expect(text("change-report")).not.toContain("change-synthesis-v1");
-    expect(text("change-report")).not.toContain("area-reporter");
-    expect(text("claims-checked")).toContain("In large mode there is one check, of the one report");
-    expect(text("claims-checked")).toContain("verified against the tree each claim's cite names");
-    expect(text("claims-checked")).not.toContain("merge");
-    expect(text("questions-complete")).toContain("the questions are the high-level set");
-    expect(text("questions-complete")).toContain("split-function, complexity-coverage, weak-test, the per-symbol questions and the per-function missing-test are not asked");
-    expect(text("answers-complete")).toContain("batches of at most 15");
-    expect(text("answers-complete")).toContain("written once, after the last batch");
-    expect(text("answers-grounded")).toContain("fresh session");
+    expect(text("claims-checked")).toContain("in large mode against the trees its cites name");
+    expect(text("code-review")).toContain("in large mode it is the files of the areas");
+    expect(text("leads-judged")).toContain("none past 200 new symbols");
   });
 });
 
@@ -612,43 +527,6 @@ describe("the unread files of a large report", () => {
     const text = (id: string) => final.sections.find((s) => s.id === id)!.items.map((i) => i.text);
     expect(text("removed")).toHaveLength(1);
     expect(text("other")).toEqual(["api/gen/x.pb.go changed (+0 −2 lines); generated code, not summarised"]);
-  });
-});
-
-
-describe("recording an answered batch", () => {
-  type Reply = { output: { answers: Array<Record<string, any>> } };
-  const cite = (path: string) => ({ path, tree: "head", start: 1, end: 1, quote: "package" });
-
-  it("verifies and records the answers in question order, whatever order the answerer returned them in", () => {
-    const sim = run((s) => {
-      const b1 = structuredClone(s.results["answers-v1"]![0]!) as Reply;
-      b1.output.answers.reverse();
-      s.results["answers-v1"] = [b1 as never];
-    });
-    expect(stopOf(sim)).toMatchObject({ reason: "answers accepted" });
-    expect(sim.receipts.every((r) => r.valid)).toBe(true);
-  });
-
-  it("accepts a recorded downgrade: an answered missing-test answer the checker rejected twice becomes needs author without a test outline", () => {
-    const sim = run((s) => {
-      const b1 = structuredClone(s.results["answers-v1"]![0]!) as Reply;
-      const missing = b1.output.answers.find((a) => a.proposal.kind === "test")!;
-      Object.assign(missing, { status: "answered", answer: "pkg/alpha/alpha_test.go covers these functions.", citations: [cite("pkg/alpha/alpha_test.go")], proposal: { kind: "none", splits: [], testFile: "", testName: "", cases: [], assertion: "" } });
-      s.results["answers-v1"] = [b1 as never];
-      s.results["answers-revision-v1"] = [{ output: { answers: [missing] } }];
-      const checks = s.results["answer-check-v1"]!;
-      const round = structuredClone(checks[1]!) as { output: { verdicts: Array<Record<string, any>> } };
-      const v = round.output.verdicts.find((x) => x.question === missing.question)!;
-      Object.assign(v, { verdict: "unsupported", note: "the cited test does not exist", searches: [{ pattern: "alpha_test", tree: "base", paths: [], ignoreCase: false, hits: 0 }] });
-      s.results["answer-check-v1"] = [checks[0]!, round as never, round as never];
-      s.commands!["cite-b1-1"] = { exitCode: 0, stdout: "1 ok\nchecked 1\n" };
-    });
-    expect(stopOf(sim)).toMatchObject({ reason: "answers accepted" });
-    expect(sim.receipts.every((r) => r.valid)).toBe(true);
-    const q = qa(sim).questions.find((x: { type: string }) => x.type === "missing-test");
-    expect(q.answer.status).toBe("needs author");
-    expect(q.answer.check.verdict).toBe("downgraded");
   });
 });
 
@@ -675,44 +553,6 @@ describe("the item limit and the roles of large mode", () => {
     expect(options(agents(std, "change-report-v1")[0]!)).toEqual({ model: "opus", effort: "high" });
   });
 
-  it("runs the answer batches on the batch-answerer role (sonnet, high), N1 on the answerer (opus, high), and the checkers on the answer-checker, on another harness", () => {
-    const batches = agents(sim, "answers-v1");
-    expect(batches.length).toBeGreaterThan(0);
-    for (const j of batches) {
-      expect(j.stageId).toBe("answers");
-      expect(options(j)).toEqual({ model: "sonnet", effort: "high" });
-    }
-    for (const j of agents(sim, "necessity-v1")) expect(options(j)).toEqual({ model: "opus", effort: "high" });
-    const checkers = sim.jobs.filter((x) => x.resultSchema === "answer-check-v1");
-    expect(checkers.length).toBeGreaterThan(batches.length);
-    for (const j of checkers) expect(harnessOf(j)).not.toBe(harnessOf(batches[0]!));
-    // The batches continue one session: the batch-answerer's, which `session open --stage answers` forks.
-    expect(batches[0]!.continueFrom).toBeUndefined();
-    expect(new Set(batches.map((j) => j.jobId))).toEqual(new Set(["answerer"]));
-  });
-
-  it("uses the batch-answerer only in large mode: a standard run's answers stay on the answerer", () => {
-    for (const j of agents(std, "answers-v1")) expect(options(j)).toEqual({ model: "opus", effort: "high" });
-    expect(agents(std, "answers-v1").length).toBeGreaterThan(0);
-  });
-
-  it("falls back to the answerer's harness, model and effort when no batch-answerer is named", () => {
-    const harnesses = { reporter: { harness: "claude-code", model: "opus", effort: "high" }, "report-checker": "codex", questioner: "codex", answerer: { harness: "claude-code", model: "haiku", effort: "low" }, "answer-checker": "codex" };
-    const fallback = run(undefined, { ...LARGE, harnesses });
-    expect(stopOf(fallback)).toMatchObject({ reason: "answers accepted" });
-    const batches = agents(fallback, "answers-v1");
-    expect(batches.length).toBeGreaterThan(0);
-    for (const j of batches) {
-      expect(harnessOf(j)).toBe("claude-code");
-      expect(options(j)).toEqual({ model: "haiku", effort: "low" });
-    }
-    for (const j of agents(fallback, "necessity-v1")) expect(options(j)).toEqual({ model: "haiku", effort: "low" });
-  });
-
-  it("holds the batch-answerer to the distinct pair with the answer-checker", () => {
-    const harnesses = { reporter: "codex", "report-checker": "claude-code", questioner: "claude-code", answerer: "codex", "batch-answerer": "claude-code", "answer-checker": "claude-code" };
-    expect(() => profileOf({ harnesses })).toThrow(/answer-checker must differ from harnesses.batch-answerer/);
-  });
 });
 
 describe("quotes of a file cited on both sides, and of before/after rows (design §6.9)", () => {
