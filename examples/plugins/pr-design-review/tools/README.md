@@ -3,7 +3,7 @@
 Static code metrics for the pr-design-review graph (complexity and nesting only: coverage, CRAP and mutation are `pr-review`'s; a copy of `pr-review`'s `tools/gometrics`), defined in
 [code quality metrics](../../../../docs/design-code-quality-metrics.md) (§1 scope,
 §2.1 complexity, §2.2 nesting, §2.4 CRAP, §5 records) and used by the
-Measurements section of the [design review](../../../../docs/design-pr-review-split.md#34-measurements-in-round-1).
+Measurements section of the [design review](../../../../docs/design-pr-design-review.md#6-measurements-in-round-1).
 They parse; they never execute the measured code.
 
 | Tool | Where | Run |

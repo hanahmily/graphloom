@@ -26,7 +26,7 @@ repository holds them in top-level [`skills/`](../skills):
 
 `graphloom-run` prepares the task with `graphloom task new`
 ([core §16](design-typescript-core.md#16-preparing-a-task-graphloom-task-new))
-for a graph whose bundle implements `prepareTask` (pr-review), and still writes
+for a graph whose bundle implements `prepareTask` (pr-design-review, pr-review), and still writes
 `task.yaml` by hand for the others; it also covers a run that stops for a
 decision (`session list`, `session open`, `resume --decline`). The skill
 changed in the same change as the CLI, so the drift test (§4) keeps passing.

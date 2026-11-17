@@ -1,7 +1,7 @@
 # review-kit
 
 The pull-request review machinery that the review graphs share
-([design-pr-review-split.md §2](../../../docs/design-pr-review-split.md#2-two-graphs-two-plugins)).
+([PR-review design §14](../../../docs/design-pr-review-graph.md#14-the-review-kit)).
 It is a plain source tree, not a package: each plugin that uses it carries a
 byte-identical copy in its own `src/kit/`, so the copy is inside the plugin's
 manifest digest and a qualified repair in one plugin's run cannot change another

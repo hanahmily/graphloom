@@ -201,13 +201,13 @@ footer nav a:hover{color:var(--ink)}
         </ol>
       </article>
       <article class="card">
-        <header><h3>pr-review</h3><span class="kind">pull request → one review</span></header>
-        <p>Reviews an incoming pull request in two rounds and posts one COMMENT review whose first line is the verdict. Posting needs a GitHub token you configure for the run.</p>
+        <header><h3>pr-design-review, pr-review</h3><span class="kind">pull request → one review per graph</span></header>
+        <p>Two graphs, each its own run: <code>pr-design-review</code> is round 1, the design review, and <code>pr-review</code> is round 2, which also runs alone. Each posts one COMMENT review whose first line is the verdict; a clean design review posts nothing and names the <code>pr-review</code> command. Posting needs a GitHub token you configure for the run.</p>
         <ol class="track">
-          <li class="round">Round 1</li>
+          <li class="round">Round 1: pr-design-review</li>
           <li><b>Neutral change report</b></li>
           <li class="key"><b>Questions and answers</b><span class="meta">First: “Is this change necessary?”, checked against the project's design principles.</span></li>
-          <li class="round">Round 2</li>
+          <li class="round">Round 2: pr-review</li>
           <li><b>Reviewers</b><span class="par"><span class="chip">correctness</span><span class="chip">maintainability</span><span class="chip">security</span></span></li>
           <li class="key"><b>Independent verifier</b><span class="meta">on a different harness, confirms each finding</span></li>
           <li class="end"><b>One COMMENT review</b><span class="meta">first line is the verdict</span></li>
@@ -246,9 +246,10 @@ footer nav a:hover{color:var(--ink)}
 <span class="k">sh</span> install.sh --require-signature --allowed-signers allowed_signers</code></pre></li>
         <li><h3>Set up and check</h3><p>The installer runs <code>graphloom doctor</code> once; run these to configure and review.</p><pre><code><span class="k">graphloom</span> setup
 <span class="k">graphloom</span> doctor</code></pre></li>
-        <li><h3>Link the graph</h3><p>Use a working directory of your own, not the target repository. A task finds its graph under <code>plugins/&lt;graph&gt;</code> beside it; link the installed version's real path, never <code>current</code>. Use <code>plugins/pr-review</code> the same way for reviews.</p><pre><code><span class="k">mkdir</span> -p ~/graphloom-work/plugins &amp;&amp; <span class="k">cd</span> ~/graphloom-work
+        <li><h3>Link the graph</h3><p>Use a working directory of your own, not the target repository. A task finds its graph under <code>plugins/&lt;graph&gt;</code> beside it; link the installed version's real path, never <code>current</code>. Use <code>plugins/pr-design-review</code> and <code>plugins/pr-review</code> the same way for reviews.</p><pre><code><span class="k">mkdir</span> -p ~/graphloom-work/plugins &amp;&amp; <span class="k">cd</span> ~/graphloom-work
 <span class="k">ln</span> -s "$(graphloom version --root)/examples/plugins/issue-fix" plugins/issue-fix</code></pre></li>
-        <li><h3>Describe the task</h3><p>For <code>pr-review</code>, <code>graphloom task new</code> writes the task and needs <code>--profile</code>: a name looked up in <code>profiles/</code> beside you and then in the bundle (it ships <code>banyandb</code>), or a path to a JSON file. For another repository, copy a shipped profile and adjust it. For <code>issue-fix</code>, write <code>task.yaml</code> by hand (right) or let the <code>graphloom-run</code> skill write it.</p><pre><code><span class="k">graphloom</span> task new pr-review owner/repo#123 --repo ./clone --profile banyandb</code></pre></li>
+        <li><h3>Describe the task</h3><p>For <code>pr-design-review</code> and <code>pr-review</code>, <code>graphloom task new</code> writes the task and needs <code>--profile</code>: a name looked up in <code>profiles/</code> beside you and then in the bundle (it ships <code>banyandb</code>), or a path to a JSON file. For another repository, copy a shipped profile and adjust it. For <code>issue-fix</code>, write <code>task.yaml</code> by hand (right) or let the <code>graphloom-run</code> skill write it.</p><pre><code><span class="k">graphloom</span> task new pr-design-review owner/repo#123 --repo ./clone --profile banyandb
+<span class="k">graphloom</span> task new pr-review owner/repo#123 --repo ./clone --profile banyandb</code></pre></li>
         <li><h3>Run, watch, inspect</h3><pre><code><span class="k">graphloom</span> run task.yaml
 <span class="k">graphloom</span> watch &lt;run&gt;    <span class="c"># follow the run</span>
 <span class="k">graphloom</span> inspect &lt;run&gt;  <span class="c"># look inside the run</span></code></pre></li>

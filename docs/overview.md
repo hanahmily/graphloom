@@ -242,28 +242,32 @@ crashes; filesystem and execution scopes require host enforcement.
   repository, driven by a JSON profile the task names with `config:`; ships
   profiles for BanyanDB and for GraphLoom itself. It replaced the earlier
   BanyanDB-only fix graph.
-- [PR-review graph](design-pr-review-graph.md) (implemented as the `pr-review`
-  example plugin, 0.23): first a
+- [PR design review](design-pr-design-review.md) and
+  [PR-review graph](design-pr-review-graph.md) (implemented as the
+  `pr-design-review` 0.1 and `pr-review` 1.0 example plugins): two graphs, each
+  its own run, with no human in a run and no run starting another. Both write a
   neutral, cited change report on an incoming pull request (schema, background
-  work, features, dependencies, config, interfaces, deletions; no findings or verdict) and
-  questions answered by a separate agent from the whole codebase, all in one
-  file. The first question is whether the change is necessary (is its problem
-  real on the base, does the fix fit the design, is there a simpler way); an
-  unnecessary change, confirmed by a checker, skips the rest (purpose, existing
-  equivalents, reusable libraries, shared logic, missing tests). No human is in a
-  run: one run reviews one head in two rounds. Round 1 is that report and Q&A;
-  its issues are posted to the PR and end the run. Without any, round 2, three
-  aspect reviewers with verified findings, runs in the same run, and the run posts
-  one `COMMENT` review whose first line is the verdict (`Review passed` or `Changes
-  requested: <n> open`). Later pushes continue from a per-PR ledger ref: ids
-  continue, each earlier item is re-checked (fixed, or still open with a link to its
-  comment), round 2 waits until round 1's earlier issues are fixed, and the verdict
-  counts the items still open.
+  work, features, dependencies, config, interfaces, deletions; no findings or
+  verdict). `pr-design-review`, round 1, adds design-level questions answered by
+  a separate agent from the whole codebase. The first is whether the change is
+  necessary (is its problem real on the base, does the fix fit the design, is
+  there a simpler way); an unnecessary change, confirmed by a checker, skips the
+  rest (the purpose of each high-level change, whether the codebase already has
+  it, and design-level questions the questioner adds). It posts its open items as
+  one `COMMENT` review, posts nothing when clean, and then names the `pr-review`
+  command. `pr-review`, round 2, runs alone or after it: three aspect reviewers
+  with verified findings and deterministic leads (untested features, missing
+  tests, splits, CRAP, reuse), seeded with the design review's report when one
+  is usable, and one `COMMENT` review whose first line is the verdict
+  (`Review passed` or `Changes requested: <n> open`). Later pushes continue from
+  a per-PR ledger ref with a section per graph: ids continue, each earlier item
+  is re-checked (fixed, or still open with a link to its comment), and the
+  verdict counts the items still open.
 - [Code quality metrics](design-code-quality-metrics.md) (proposed):
   one definition of cyclomatic complexity (< 10), nesting depth (≤ 3), CRAP
   (threshold 30) and mutation survival for changed functions only, with
-  tools and confinement; issue-fix uses them as gates, pr-review as facts and
-  questions.
+  tools and confinement; issue-fix uses them as gates, the review graphs as
+  facts and leads.
 - [Installable releases](design-release.md) (phases R0 to R5 implemented; no
   release is published yet): a self-contained
   release tarball with a bundled Node runtime and the SDK tarball on GitHub

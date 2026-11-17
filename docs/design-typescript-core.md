@@ -1754,8 +1754,8 @@ Exit codes: 0 written (or printed, with `--dry-run`), 1 a step failed, 2 a
 usage error, a refusal or an invalid plan.
 
 **Adoption.** A graph implements the hook when its task needs such
-preparation. The [PR-review graph](design-pr-review-graph.md#31-task) is the
-first. issue-fix may adopt it later (for example `graphloom task new
+preparation. The [PR review graphs](design-pr-review-graph.md#31-task),
+`pr-design-review` and `pr-review`, are the first. issue-fix may adopt it later (for example `graphloom task new
 issue-fix owner/repo#N`); that is not part of this design. The
 [`graphloom-run` skill](design-agent-skills.md#1-skills) uses `task new` for
 a graph whose bundle implements it. That skill change lands with the
@@ -1814,7 +1814,7 @@ to be in `graphloom --help`.
   task with references unresolved; it writes no ref, link or file.
 - Plugin arguments are every token that is not one of the CLI's five flags
   (`--repo`, `--profile`, `--out`, `--dry-run`, `--force`, each also as
-  `--flag=value`), or follows `--`; so `--base main` and `--review` reach
+  `--flag=value`), or follows `--`; so `--base main` and `--no-report` reach
   pr-review untouched.
 
 ## 17. Operator approvals and their inputs
@@ -1826,7 +1826,8 @@ which records an `operator-approval` evidence record under the run lock and
 lifts a final stop that waited for it. The controller never reads what an
 approval means; the graph's `advance` does
 ([pr-review §11](design-pr-review-graph.md#11-approvals): pr-review declared the
-`review-layer` approval below until 0.21 and now declares none; the mechanism is
+`review-layer` approval below until 0.21, and neither pr-review nor
+pr-design-review declares one now; the mechanism is
 unchanged and these are its examples).
 
 **Inputs.** An approval may declare named values the operator gives with it:
