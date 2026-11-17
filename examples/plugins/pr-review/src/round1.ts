@@ -10,13 +10,13 @@
  * The computation is a pure function over the two artifacts, recorded once as `round1.json`; the validator recomputes it.
  */
 import { isTestPath } from "./answers.js";
-import { clip } from "./escape.js";
+import { clip } from "./kit/escape.js";
 import { citationLinks, composeParts, fitParts, proposalText, type GithubPin, type ItemParts, type ProposalLike } from "./answertext.js";
 import { anchored, scrub, type ItemCites } from "./draft.js";
-import type { FullPack } from "./packs.js";
+import type { FullPack } from "./kit/packs.js";
 import { effectiveConclusion, brokenNote, parseNecessityRecord, NECESSITY_ID, ROUNDS_SKIP_REASON } from "./necessity.js";
 import type { PriorItem } from "./prior.js";
-import type { PullFile } from "./snapshot.js";
+import type { PullFile } from "./kit/snapshot.js";
 
 export const ROUND1_SCHEMA = "pr-review-round1-v1";
 export const ROUND1_RECORD_ID = "round1";

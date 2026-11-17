@@ -9,7 +9,7 @@ import { LARGE_LIMITS, REHEARSAL_REQUEST } from "../src/rehearsal.js";
 import { parseDraft } from "../src/draft.js";
 import { passReply, verifyReply } from "../src/rehearsal-review.js";
 import { recordedAspect, recordedRound1, recordedScope } from "../src/reviewdraft.js";
-import { readParts } from "../src/parts.js";
+import { readParts } from "../src/kit/parts.js";
 import { quotePrefix, REVIEW_SCHEMA_NAME, VERIFY_SCHEMA_NAME } from "../src/review.js";
 import { codeReview, draftComposed } from "../src/reviewvalidators.js";
 import { BANYANDB, assignmentOf, candidateEvidence, scenarioWith, simulate, type Simulation } from "./support.js";

@@ -2,8 +2,8 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import type { PrepareTaskInput, PrepareTaskReply, TaskPlanStep } from "@graphloom/sdk";
-import { GRAPH_ID } from "./constants.js";
-import { parseProfile, ProfileError } from "./profile.js";
+import { GRAPH_ID } from "./version.js";
+import { parseProfile, ProfileError } from "./kit/profile.js";
 
 const USAGE = "graphloom task new pr-review <owner/repo#N | https://github.com/owner/repo/pull/N> --profile <name|path> [--base <branch>] [--all-questions] [--repo <clone>]";
 const NAME = "[A-Za-z0-9_.-]{1,100}";

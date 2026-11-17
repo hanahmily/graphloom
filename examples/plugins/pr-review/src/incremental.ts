@@ -9,13 +9,13 @@
  */
 import type { EnvironmentCommand, EvidenceRecord } from "@graphloom/sdk";
 import type { FinalAnswer } from "./answers.js";
-import { COMMAND } from "./constants.js";
-import { commandRuns, describeCommand, isObject, reportText, succeeded, type CommandRun } from "./evidence.js";
+import { COMMAND } from "./kit/constants.js";
+import { commandRuns, describeCommand, isObject, reportText, succeeded, type CommandRun } from "./kit/evidence.js";
 import { effectiveConclusion, NECESSITY_ID, necessityCitations, parseNecessityRecord, type Necessity, type NecessityRecord } from "./necessity.js";
 import { quoteInPinned, type PinnedText, type Question } from "./questions.js";
-import { sha256 } from "./parts.js";
+import { sha256 } from "./kit/parts.js";
 import type { PriorItem, PriorRegistry } from "./prior.js";
-import type { ViewItem } from "./reportview.js";
+import type { ViewItem } from "./kit/reportview.js";
 
 /** The last line the head-delta command prints: its absence means the output was cut. */
 export const DELTA_END = "graphloom-delta-end";

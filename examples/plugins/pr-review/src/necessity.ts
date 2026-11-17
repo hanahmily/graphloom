@@ -21,8 +21,8 @@
 import type { Answer, Citation, FinalAnswer, Search } from "./answers.js";
 import type { PinnedText, Question } from "./questions.js";
 import { quoteInPinned } from "./questions.js";
-import type { PrinciplesRecord } from "./principles.js";
-import { SEARCH_SCHEMA } from "./searches.js";
+import type { PrinciplesRecord } from "./kit/principles.js";
+import { SEARCH_SCHEMA } from "./kit/searches.js";
 
 export const NECESSITY_SCHEMA_NAME = "necessity-v1";
 /** The same shape, asked again after the answer check found part of it unsupported. */

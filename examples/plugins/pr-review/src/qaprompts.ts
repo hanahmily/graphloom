@@ -8,22 +8,22 @@
  */
 import type { Answer, FinalAnswer } from "./answers.js";
 import { NECESSITY_ID, NECESSITY_TEXT } from "./necessity.js";
-import { principlesFrom, type PrinciplesContext } from "./principles.js";
-import type { ContextRef } from "./profile.js";
+import { principlesFrom, type PrinciplesContext } from "./kit/principles.js";
+import type { ContextRef } from "./kit/profile.js";
 import { MAX_ANSWER_CHARS, MAX_COMBINED_ANSWER_CHARS, needsOwnSearch } from "./answers.js";
-import type { Groundwork } from "./groundwork.js";
-import { sourceStatus } from "./inventory.js";
-import type { MetricsRecord } from "./metrics/record.js";
-import { checkThresholds, LIMITS } from "./metrics/crap.js";
+import type { Groundwork } from "./kit/groundwork.js";
+import { sourceStatus } from "./kit/inventory.js";
+import type { MetricsRecord } from "./kit/metrics/record.js";
+import { checkThresholds, LIMITS } from "./kit/metrics/crap.js";
 import { MAX_QUESTION_CHARS, type Question, type RequiredQuestion } from "./questions.js";
-import { changeItems, type ReportView } from "./reportview.js";
-import type { PullRequest } from "./request.js";
-import { feedbackBlock, pullText, UNTRUSTED_PREAMBLE } from "./prompts.js";
-import { clipText, fitLines, reviewFile, shrinkToFit, spillOf, type FileSpill, type Fitted } from "./fit.js";
-import type { Snapshot } from "./snapshot.js";
-import { citeLabel } from "./report.js";
+import { changeItems, type ReportView } from "./kit/reportview.js";
+import type { PullRequest } from "./kit/request.js";
+import { feedbackBlock, pullText, UNTRUSTED_PREAMBLE } from "./kit/prompts.js";
+import { clipText, fitLines, reviewFile, shrinkToFit, spillOf, type FileSpill, type Fitted } from "./kit/fit.js";
+import type { Snapshot } from "./kit/snapshot.js";
+import { citeLabel } from "./kit/report.js";
 import { repliesBlock, type QuestionReplies } from "./replies.js";
-import { MAX_PATTERN_CHARS, MAX_RERUN_SEARCHES, MAX_SEARCH_PATHS, type Search } from "./searches.js";
+import { MAX_PATTERN_CHARS, MAX_RERUN_SEARCHES, MAX_SEARCH_PATHS, type Search } from "./kit/searches.js";
 
 const MAX_GROUNDWORK_CHARS = 120_000;
 const oneLine = (s: string): string => s.replace(/\s*\n\s*/g, " ").trim();

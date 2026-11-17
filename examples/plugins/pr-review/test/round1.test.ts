@@ -5,10 +5,10 @@ import { describe, expect, it } from "vitest";
 import type { FinalAnswer } from "../src/answers.js";
 import { defaultNecessity } from "../src/rehearsal-qa.js";
 import { necessityAnswer, necessityJson, type Necessity, type PrincipleVerdict } from "../src/necessity.js";
-import { effectivePacks } from "../src/packs.js";
+import { effectivePacks } from "../src/kit/packs.js";
 import { MAX_ITEM_TEXT, parseRound1Record, round1Json, round1Record, ROUND1_SCHEMA } from "../src/round1.js";
-import type { PullFile } from "../src/snapshot.js";
-import { parsePatch } from "../src/patch.js";
+import type { PullFile } from "../src/kit/snapshot.js";
+import { parsePatch } from "../src/kit/patch.js";
 
 const PACKS = effectivePacks({ symbols: [] });
 const PATCH = "@@ -0,0 +1,4 @@\n+package schema\n+\n+func ParseTTL() {}\n+// end";

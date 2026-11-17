@@ -7,7 +7,7 @@ import { parseDraft } from "../src/draft.js";
 import { maxReproRuns, parseVerification, parsePass, REVIEW_SCHEMA_NAME, VERIFY_SCHEMA_NAME } from "../src/review.js";
 import { passReply, reproStub, SANDBOX_GO_READY, verifyReply } from "../src/rehearsal-review.js";
 import { judgeRun, parseReproReport, reproProblems, reproSpec, reproSpecOf, sha256, type Repro } from "../src/repro.js";
-import { readParts } from "../src/parts.js";
+import { readParts } from "../src/kit/parts.js";
 import { recordedAspect } from "../src/reviewdraft.js";
 import { findingsProven } from "../src/reviewvalidators.js";
 import { BANYANDB, assignmentOf, candidateEvidence, scenarioWith, simulate, type Simulation } from "./support.js";

@@ -3,13 +3,13 @@
 
 import { describe, expect, it } from "vitest";
 import { fitParts, type ItemParts } from "../src/answertext.js";
-import { clip, clipKeep, cutAt } from "../src/escape.js";
-import { effectivePacks } from "../src/packs.js";
-import { parsePatch } from "../src/patch.js";
+import { clip, clipKeep, cutAt } from "../src/kit/escape.js";
+import { effectivePacks } from "../src/kit/packs.js";
+import { parsePatch } from "../src/kit/patch.js";
 import { createInput, planReview, findingMarker, MAX_INLINE_COMMENTS } from "../src/publish.js";
 import { MAX_EXECUTOR_INPUT_BYTES } from "@graphloom/sdk";
 import { MAX_ITEM_TEXT, round1Record, type Round1Record } from "../src/round1.js";
-import type { PullFile } from "../src/snapshot.js";
+import type { PullFile } from "../src/kit/snapshot.js";
 
 const HEAD = "a".repeat(40);
 const BASE = "b".repeat(40);

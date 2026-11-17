@@ -2,10 +2,10 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { describe, expect, it } from "vitest";
-import { isExcluded, partitionAreas } from "../src/areas.js";
-import { describeReasons, hardCapProblem, questionsMode, reportMode } from "../src/mode.js";
-import { DEFAULT_LIMITS } from "../src/profile.js";
-import { pullFile, type PullFile } from "../src/snapshot.js";
+import { isExcluded, partitionAreas } from "../src/kit/areas.js";
+import { describeReasons, hardCapProblem, questionsMode, reportMode } from "../src/kit/mode.js";
+import { DEFAULT_LIMITS } from "../src/kit/profile.js";
+import { pullFile, type PullFile } from "../src/kit/snapshot.js";
 
 /** A file whose patch is `bytes` bytes long. */
 function file(path: string, bytes: number, over: Record<string, unknown> = {}): PullFile {

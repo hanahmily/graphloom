@@ -6,16 +6,16 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { diagramCheckCommand, featureDiagramId, stateIds, DIAGRAM_CHECK_SCRIPT, diagramFlow, diagramInputOf, diagramSpecs, drawingOf, MAX_DIAGRAMS, MAX_DIAGRAM_BYTES, readAttempt, type DiagramInput } from "../src/diagrams.js";
-import { documentProblems, embeddedSvg, labelProblems, normalizeLabel, parseSvg, svgProblems, textNodes } from "../src/diagramsvg.js";
+import { diagramCheckCommand, featureDiagramId, stateIds, DIAGRAM_CHECK_SCRIPT, diagramFlow, diagramInputOf, diagramSpecs, drawingOf, MAX_DIAGRAMS, MAX_DIAGRAM_BYTES, readAttempt, type DiagramInput } from "../src/kit/diagrams.js";
+import { documentProblems, embeddedSvg, labelProblems, normalizeLabel, parseSvg, svgProblems, textNodes } from "../src/kit/diagramsvg.js";
 import { htmlProblems, parseReportDoc } from "../src/html.js";
-import { largeNeeds } from "../src/large.js";
-import { agentRuns } from "../src/evidence.js";
+import { largeNeeds } from "../src/kit/large.js";
+import { agentRuns } from "../src/kit/evidence.js";
 import { LARGE_LIMITS, REHEARSAL_HEAD, REHEARSAL_MERGE_BASE, rehearsal } from "../src/rehearsal.js";
 import { featureDocument, fixtureDiagrams, stateDocument } from "../src/rehearsal-diagrams.js";
-import { recordedAppendix, recordedHtml, recordedReport } from "../src/parts.js";
-import type { FinalFeature } from "../src/briefing.js";
-import type { StateEntry } from "../src/report.js";
+import { recordedAppendix, recordedHtml, recordedReport } from "../src/kit/parts.js";
+import type { FinalFeature } from "../src/kit/briefing.js";
+import type { StateEntry } from "../src/kit/report.js";
 import { BANYANDB, root, scenarioWith, simulate, type Simulation } from "./support.js";
 
 const MOUNT = path.join(root, "vendor", "diagram-design");

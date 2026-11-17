@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { describe, expect, it } from "vitest";
-import type { FinalBriefing } from "../src/briefing.js";
+import type { FinalBriefing } from "../src/kit/briefing.js";
 import { LARGE_LIMITS } from "../src/rehearsal.js";
 import { assignmentOf, scenarioWith, simulate } from "./support.js";
 

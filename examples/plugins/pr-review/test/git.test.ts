@@ -6,7 +6,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { checkoutCommand, GIT_ENV, GUARD_REFUSED, guardCommand, headTreeCommand, ledgerReadCommand, parseHeadTree, parseLedger, reviewDirCommand } from "../src/commands.js";
+import { checkoutCommand, GIT_ENV, GUARD_REFUSED, guardCommand, headTreeCommand, ledgerReadCommand, parseHeadTree, parseLedger, reviewDirCommand } from "../src/kit/commands.js";
 import { BANYANDB } from "./support.js";
 
 const dirs: string[] = [];

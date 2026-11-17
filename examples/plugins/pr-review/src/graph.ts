@@ -28,8 +28,8 @@ import {
   type ValidatorBinding,
 } from "@graphloom/sdk";
 import { attemptEvidence, noteAttempt, readAttempts } from "./attempt.js";
-import { analyze, reportFlowOf, type Analysis } from "./analysis.js";
-import { checkoutCommand, GIT_ENV, GUARD_REFUSED, guardCommand, headTreeCommand, ledgerReadCommand, pinnedBase, reviewDirCommand } from "./commands.js";
+import { analyze, reportFlowOf, type Analysis } from "./kit/analysis.js";
+import { checkoutCommand, GIT_ENV, GUARD_REFUSED, guardCommand, headTreeCommand, ledgerReadCommand, pinnedBase, reviewDirCommand } from "./kit/commands.js";
 import {
   ANSWERER_JOB,
   ANSWERS_STAGE,
@@ -67,30 +67,29 @@ import {
   REQUIREMENT_QUESTIONS,
   REQUIREMENT_REPORT,
   REQUIREMENT_SNAPSHOT,
-  GRAPH_ID,
-  GRAPH_VERSION,
   QA_JSON,
   REVIEW_APPENDIX_HTML,
   REVIEW_DIR,
   REVIEW_HTML,
   REVIEW_MD,
-} from "./constants.js";
-import { checkBatch, DIAGRAMMER_JOB, DIAGRAMS_REFERENCES, DIAGRAMS_SCHEMA, DIAGRAMS_SCHEMA_NAME, diagramInputOf, planDiagrams, MAX_DIAGRAM_BYTES, MAX_DIAGRAMS, SKILL_DIR, skillMount } from "./diagrams.js";
-import { commandRuns, describeCommand, environmentOutput, outputTail, succeeded, validatorEvidence, type CommandRun } from "./evidence.js";
-import { INTERFACE_PATCH_BYTES } from "./digest.js";
-import { LIMITS } from "./metrics/crap.js";
-import { CHANGE_REPORT_SCHEMA, MAX_ITEM_CHARS } from "./report.js";
-import { CLAIM_CHECK_SCHEMA } from "./claims.js";
-import { REPORTER_SCHEMA_NAME, REVISION_SCHEMA_NAME, reportSpec, type ReportFlow } from "./flow.js";
-import { budgetShortfall, largeNeeds } from "./large.js";
-import { largeCheckScope, planLargeReporter } from "./largeprompts.js";
-import { measurementState, metricsDiffCommand, staticBaseCommand, staticCommand } from "./measurements.js";
-import { coverageCommand, coverageConfinement, missingProbe, sandboxEnvironmentChecks, type CoveragePlan } from "./coverage.js";
-import { planChecker, planReporter } from "./prompts.js";
-import { assignmentProblem, type FileSpill } from "./fit.js";
-import { isLarge } from "./mode.js";
-import { harnessName, parseProfile, ProfileError, reviewerRole, verifierRole, ROLES, DISTINCT_PAIRS, type Profile, type Role } from "./profile.js";
-import { ASPECTS, ruleGroups, ruleFileText, type Aspect } from "./aspects.js";
+} from "./kit/constants.js";
+import { GRAPH_ID, GRAPH_VERSION } from "./version.js";
+import { checkBatch, DIAGRAMMER_JOB, DIAGRAMS_REFERENCES, DIAGRAMS_SCHEMA, DIAGRAMS_SCHEMA_NAME, diagramInputOf, planDiagrams, MAX_DIAGRAM_BYTES, MAX_DIAGRAMS, SKILL_DIR, skillMount } from "./kit/diagrams.js";
+import { commandRuns, describeCommand, environmentOutput, outputTail, succeeded, validatorEvidence, type CommandRun } from "./kit/evidence.js";
+import { INTERFACE_PATCH_BYTES } from "./kit/digest.js";
+import { LIMITS } from "./kit/metrics/crap.js";
+import { CHANGE_REPORT_SCHEMA, MAX_ITEM_CHARS } from "./kit/report.js";
+import { CLAIM_CHECK_SCHEMA } from "./kit/claims.js";
+import { REPORTER_SCHEMA_NAME, REVISION_SCHEMA_NAME, reportSpec, type ReportFlow } from "./kit/flow.js";
+import { budgetShortfall, largeNeeds } from "./kit/large.js";
+import { largeCheckScope, planLargeReporter } from "./kit/largeprompts.js";
+import { measurementState, metricsDiffCommand, staticBaseCommand, staticCommand } from "./kit/measurements.js";
+import { coverageCommand, coverageConfinement, missingProbe, sandboxEnvironmentChecks, type CoveragePlan } from "./kit/coverage.js";
+import { planChecker, planReporter } from "./kit/prompts.js";
+import { assignmentProblem, type FileSpill } from "./kit/fit.js";
+import { isLarge } from "./kit/mode.js";
+import { harnessName, parseProfile, ProfileError, reviewerRole, verifierRole, ROLES, DISTINCT_PAIRS, type Profile, type Role } from "./kit/profile.js";
+import { ASPECTS, ruleGroups, ruleFileText, type Aspect } from "./kit/aspects.js";
 import { reproEnv, reproJob, reproRunsIn } from "./reproplan.js";
 import { aspectFlow, aspectRecordId, aspectRecordJson, ASPECT_RECORD_SCHEMA, findingsOf, REVIEW_REFERENCES, REVIEW_SCHEMA, REVIEW_SCHEMA_NAME, VERIFY_REFERENCES, VERIFY_SCHEMA, VERIFY_SCHEMA_NAME, type AspectRecord } from "./review.js";
 import { chooseScope, FRESH_START_REASON, scopeRecordJson, SCOPE_RECORD_ID, SCOPE_SCHEMA, type ScopeRecord } from "./reviewscope.js";
@@ -104,22 +103,22 @@ import { aspectPrior } from "./priorreview.js";
 import { COMMENTS_READ, createInput, publishFlow, publishPlan, REVIEWS_READ } from "./publish.js";
 import { scopeLine, DRAFT_SCHEMA } from "./draft.js";
 import { prepareTask } from "./prepare.js";
-import { requestedPull, type PullRequest } from "./request.js";
+import { requestedPull, type PullRequest } from "./kit/request.js";
 import { secretFindings } from "./secrets.js";
-import { readInput, snapshotState, type PullFile, type ReadSpec } from "./snapshot.js";
-import { CLAIM_CHECK_SCHEMA_NAME } from "./claims.js";
+import { readInput, snapshotState, type PullFile, type ReadSpec } from "./kit/snapshot.js";
+import { CLAIM_CHECK_SCHEMA_NAME } from "./kit/claims.js";
 import { diagramsOf, outputsOf, validatorById, writtenHtmlProblems } from "./validators.js";
-import { appendixWriteCommands, htmlWriteCommands, necessityWriteCommands, partCommands, recordCommands, recordedNecessityJson, reportWriteCommands } from "./parts.js";
+import { appendixWriteCommands, htmlWriteCommands, necessityWriteCommands, partCommands, recordCommands, recordedNecessityJson, reportWriteCommands } from "./kit/parts.js";
 import { ANSWER_CHECK_REFERENCES, ANSWER_CHECK_SCHEMA, ANSWER_CHECK_SCHEMA_NAME, ANSWERS_REFERENCES, ANSWERS_REVISION_SCHEMA_NAME, ANSWERS_SCHEMA, ANSWERS_SCHEMA_NAME, answersFlow } from "./answers.js";
-import { baseDirIn } from "./basetree.js";
-import { sourceDirs } from "./inventory.js";
-import { ledgerRead, oldValue, priorState, writtenLedger } from "./ledger.js";
+import { baseDirIn } from "./kit/basetree.js";
+import { sourceDirs } from "./kit/inventory.js";
+import { ledgerRead, oldValue, priorState, writtenLedger } from "./kit/ledger.js";
 import { QUESTIONS_REFERENCES, QUESTIONS_SCHEMA, QUESTIONS_SCHEMA_NAME, requiredQuestions, type Question } from "./questions.js";
-import { CLAIM_CHECK_REFERENCES } from "./claims.js";
+import { CLAIM_CHECK_REFERENCES } from "./kit/claims.js";
 import { necessityQuestion, NECESSITY_ID, NECESSITY_REFERENCES, NECESSITY_REVISION_SCHEMA_NAME, NECESSITY_SCHEMA, NECESSITY_SCHEMA_NAME, parseNecessityRecord, ROUNDS_SKIP_REASON, roundsSkipJson, type NecessityRecord } from "./necessity.js";
-import { principlesContext, principlesReadCommand, principlesReading, type Principle, type PrinciplesContext } from "./principles.js";
+import { principlesContext, principlesReadCommand, principlesReading, type Principle, type PrinciplesContext } from "./kit/principles.js";
 import { planAnswerChecker, planAnswerer, planNecessity, planNecessityChecker, planQuestioner } from "./qaprompts.js";
-import { questionItems } from "./reportview.js";
+import { questionItems } from "./kit/reportview.js";
 import { afterNecessity, answerBatches, answerContext, batchedAnswers, batchRecordId, batchRecordJson, answerWrites, necessityFlow, necessityRecordCommands, necessityRecordOf, qaContext, qaOutputs, questionSet, questionerFlow, recordedNecessity, restFlow, skippedWrites, type AnswerWrites, type QaContext } from "./qaflow.js";
 
 export { GRAPH_ID, GRAPH_VERSION };

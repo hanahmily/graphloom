@@ -72,7 +72,7 @@ let tsReady = false;
 beforeAll(async () => {
   await execFileAsync("npm", ["run", "build", "-w", "@graphloom/plugin-pr-review"], { cwd: repoRoot });
   const load = async <T>(rel: string): Promise<T> => (await import(pathToFileURL(path.join(bundle, "dist", rel)).href)) as T;
-  const [coverage, graph, profile, reproplan, repro, review] = await Promise.all([load<Plugin["coverage"]>("coverage.js"), load<Plugin["graph"]>("graph.js"), load<Plugin["profile"]>("profile.js"), load<Plugin["reproplan"]>("reproplan.js"), load<Plugin["repro"]>("repro.js"), load<Plugin["review"]>("review.js")]);
+  const [coverage, graph, profile, reproplan, repro, review] = await Promise.all([load<Plugin["coverage"]>("kit/coverage.js"), load<Plugin["graph"]>("graph.js"), load<Plugin["profile"]>("kit/profile.js"), load<Plugin["reproplan"]>("reproplan.js"), load<Plugin["repro"]>("repro.js"), load<Plugin["review"]>("review.js")]);
   const banyandb = JSON.parse(await readFile(path.join(bundle, "profiles", "banyandb.json"), "utf8")) as Record<string, unknown>;
   plugin = { coverage, graph, profile, banyandb, reproplan, repro, review };
   tmp = await mkdtemp(path.join(os.tmpdir(), "gl-cover-docker-"));

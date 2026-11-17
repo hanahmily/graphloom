@@ -6,11 +6,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { validateResultShape, type EvidenceRecord, type GraphDecision, type JobSpec, type Receipt, type RehearsalScenario, type RunView } from "@graphloom/sdk";
 import { advancePullRequest, definitionFor } from "../src/graph.js";
-import { CODING_AGENT, CREATE_PULL_REVIEW, GET_VIEWER, LIST_PULL_REVIEWS, LIST_PULL_REVIEW_COMMENTS, PUBLISH_STAGE } from "../src/constants.js";
-import { parseProfile, type Profile } from "../src/profile.js";
+import { CODING_AGENT, CREATE_PULL_REVIEW, GET_VIEWER, LIST_PULL_REVIEWS, LIST_PULL_REVIEW_COMMENTS, PUBLISH_STAGE } from "../src/kit/constants.js";
+import { parseProfile, type Profile } from "../src/kit/profile.js";
 import { REHEARSAL_HEAD_FILES, REHEARSAL_REQUEST, rehearsal } from "../src/rehearsal.js";
 import { validatorById } from "../src/validators.js";
-import { writtenQa, writtenReport } from "../src/write.js";
+import { writtenQa, writtenReport } from "../src/kit/write.js";
 
 /** The login the fake GitHub's credential authenticates as. */
 export const FAKE_LOGIN = "graphloom-bot";

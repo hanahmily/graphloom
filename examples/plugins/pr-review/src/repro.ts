@@ -14,11 +14,11 @@
 import { createHash } from "node:crypto";
 import type { EnvironmentCommand } from "@graphloom/sdk";
 import { MAX_EXECUTOR_INPUT_BYTES } from "@graphloom/sdk";
-import { reportText, type CommandRun } from "./evidence.js";
-import { encodeArg } from "./metrics/coverage.js";
+import { reportText, type CommandRun } from "./kit/evidence.js";
+import { encodeArg } from "./kit/metrics/coverage.js";
 import { secretFindings } from "./secrets.js";
-import { toolchainMismatch, toolchainSentence } from "./toolchain.js";
-import { writeChunks } from "./write.js";
+import { toolchainMismatch, toolchainSentence } from "./kit/toolchain.js";
+import { writeChunks } from "./kit/write.js";
 
 export const REPRO_REPORT = "graphloom-repro-v1";
 /** The command id of a finding's run: findings have one id across the review, so one run per finding (the correction run is a later part). */

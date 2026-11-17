@@ -4,8 +4,8 @@
 import type { EvidenceRecord, JobSpec, RehearsalScenario } from "@graphloom/sdk";
 import { describe, expect, it } from "vitest";
 import { composeDraft, draftMarkdown, type DraftInput } from "../src/draft.js";
-import { readParts } from "../src/parts.js";
-import { principlesContext, type PrinciplesRead } from "../src/principles.js";
+import { readParts } from "../src/kit/parts.js";
+import { principlesContext, type PrinciplesRead } from "../src/kit/principles.js";
 import { REHEARSAL_REQUEST } from "../src/rehearsal.js";
 import { PRINCIPLES_FILE, PRINCIPLES_PATH } from "../src/rehearsal-fixtures.js";
 import { reviewScenarioParts } from "../src/rehearsal-review.js";

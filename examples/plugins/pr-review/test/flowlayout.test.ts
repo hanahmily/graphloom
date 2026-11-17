@@ -2,8 +2,8 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { describe, expect, it } from "vitest";
-import type { Flow, Stage } from "../src/briefing.js";
-import { BOX_H, BOX_W, featureSvg, layoutFlow, type FlowLayout, type PlacedNode } from "../src/flowlayout.js";
+import type { Flow, Stage } from "../src/kit/briefing.js";
+import { BOX_H, BOX_W, featureSvg, layoutFlow, type FlowLayout, type PlacedNode } from "../src/kit/flowlayout.js";
 
 const cite = { path: "pkg/a/x.go", side: "head" as const, start: 1, end: 1, symbol: "" };
 const stage = (id: string, over: Partial<Stage> = {}): Stage => ({ id, label: `Stage ${id}`, kind: "process", cite, ...over });

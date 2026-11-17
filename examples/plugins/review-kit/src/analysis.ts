@@ -7,7 +7,7 @@ import type { CommandRun } from "./evidence.js";
 import { detectFacts, type Fact } from "./detectors.js";
 import { reportFlow, type ReportFlow } from "./flow.js";
 import { largeContext, largeReportFlow } from "./large.js";
-import { pinnedTexts } from "./questions.js";
+import { pinnedTexts } from "./pinned.js";
 import { detectStateCandidates } from "./statecandidates.js";
 import { READS, readResult, snapshotState, type Snapshot } from "./snapshot.js";
 import type { Profile } from "./profile.js";

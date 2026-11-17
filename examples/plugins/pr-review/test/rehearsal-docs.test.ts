@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { formatHunkFile, validateMetricsDocument, type Hunks } from "../src/metrics/index.js";
+import { formatHunkFile, validateMetricsDocument, type Hunks } from "../src/kit/metrics/index.js";
 import { DOCS } from "../src/rehearsal-docs.js";
 import { BASE_FILES, NEW_HEAD_FILES, STREAM_CHANGED, STREAM_PATH, SYNC_CHANGED } from "../src/rehearsal-fixtures.js";
 

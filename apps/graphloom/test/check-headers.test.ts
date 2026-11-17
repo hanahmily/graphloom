@@ -62,6 +62,19 @@ describe("check-headers", () => {
     for (const rel of ["src/ok.ts", "src/untracked.ts", ...Object.keys(exempt)]) expect(result.output).not.toContain(rel);
   });
 
+  it("covers the review kit and each plugin's vendored copy of it in src/kit/, which are GraphLoom's own source", async () => {
+    const root = await repo({
+      "examples/plugins/review-kit/src/ledger.ts": "export const kit = 1;\n",
+      "examples/plugins/review-kit/vendor.mjs": "export {};\n",
+      "examples/plugins/pr-review/src/kit/ledger.ts": "export const copy = 1;\n",
+      "examples/plugins/pr-review/src/kit/metrics/record.ts": "export const copy = 1;\n",
+      ...exempt,
+    });
+    const result = check(root);
+    expect(result.status).toBe(1);
+    for (const rel of ["examples/plugins/review-kit/src/ledger.ts", "examples/plugins/review-kit/vendor.mjs", "examples/plugins/pr-review/src/kit/ledger.ts", "examples/plugins/pr-review/src/kit/metrics/record.ts"]) expect(result.output).toContain(rel);
+  });
+
   it("passes when every covered file has the header, including after a shebang and in shell syntax", async () => {
     const root = await repo({
       "src/a.ts": `${header}\nexport const a = 1;\n`,

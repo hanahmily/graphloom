@@ -18,31 +18,31 @@
  * reporter answers each detector fact of the profile it runs under.
  */
 import type { GraphRehearsal, RehearsalReply, RehearsalScenario } from "@graphloom/sdk";
-import { detectFacts, type Fact } from "./detectors.js";
-import { parseProfile, ProfileError, type Profile } from "./profile.js";
-import { baseTargets, withOutcome, withUnknownCoverage } from "./measurements.js";
-import { goFunctionCoverage, parseCoverageReport } from "./metrics/coverage.js";
-import type { FileIndex, MetricsRecord } from "./metrics/record.js";
-import { largeContext } from "./large.js";
-import type { Bullet, Briefing, Change, Feature } from "./briefing.js";
-import { treeQuotePlan } from "./treequotes.js";
-import { isTestFile } from "./scope.js";
-import { partitionAreas, type Partition } from "./areas.js";
-import { reportMode, type ReviewMode } from "./mode.js";
-import { claimTargets, readClaimCheck, type ClaimTarget } from "./claims.js";
+import { detectFacts, type Fact } from "./kit/detectors.js";
+import { parseProfile, ProfileError, type Profile } from "./kit/profile.js";
+import { baseTargets, withOutcome, withUnknownCoverage } from "./kit/measurements.js";
+import { goFunctionCoverage, parseCoverageReport } from "./kit/metrics/coverage.js";
+import type { FileIndex, MetricsRecord } from "./kit/metrics/record.js";
+import { largeContext } from "./kit/large.js";
+import type { Bullet, Briefing, Change, Feature } from "./kit/briefing.js";
+import { treeQuotePlan } from "./kit/treequotes.js";
+import { isTestFile } from "./kit/scope.js";
+import { partitionAreas, type Partition } from "./kit/areas.js";
+import { reportMode, type ReviewMode } from "./kit/mode.js";
+import { claimTargets, readClaimCheck, type ClaimTarget } from "./kit/claims.js";
 import { ALPHA_GO, BETA_GO, GENERATED_GO, GUIDE_MD, LARGE_HEAD_FILES, LARGE_LIMITS, largeDoc, OMITTED_PATH } from "./rehearsal-large.js";
-import { diagramInputOf, DIAGRAM_CHECK, diagramCheckId } from "./diagrams.js";
+import { diagramInputOf, DIAGRAM_CHECK, diagramCheckId } from "./kit/diagrams.js";
 import { fixtureDiagrams } from "./rehearsal-diagrams.js";
-import { assembleReport, asReporterOutput, numbered, type Cite, type FinalReport, type ReportContext, type ReportItem, type ReporterOutput, type StateEntry } from "./report.js";
-import { detectStateCandidates } from "./statecandidates.js";
+import { assembleReport, asReporterOutput, numbered, type Cite, type FinalReport, type ReportContext, type ReportItem, type ReporterOutput, type StateEntry } from "./kit/report.js";
+import { detectStateCandidates } from "./kit/statecandidates.js";
 import { DOCS } from "./rehearsal-docs.js";
 import { HUGE_BODY, HUGE_COMMITS, HUGE_TITLE, hugeDiff, hugeHeadFiles, hugeHits, hugeSources, hugeStaticDocs } from "./rehearsal-huge.js";
 import type { Necessity } from "./necessity.js";
 import { BASE_FILES, FLAGS_GO, NEW_HEAD_FILES, RETENTION_TTL_GO, BACKOFF_GO, JITTER_GO, LIMIT_GO, SYNC_GO, SYNC_CHANGED, STREAM_ADDED_LINES, STREAM_CHANGED, STREAM_PATH, STREAM_WRITE_BASE_GO, STREAM_WRITE_GO, WRITE_PATH_DOC, PRINCIPLES_FILE } from "./rehearsal-fixtures.js";
 import { pinnedTexts } from "./questions.js";
 import { qaScenario, type QaSpec } from "./rehearsal-qa.js";
-import { pullFile, type PullFile } from "./snapshot.js";
-import { reporterSections } from "./template.js";
+import { pullFile, type PullFile } from "./kit/snapshot.js";
+import { reporterSections } from "./kit/template.js";
 
 export const REHEARSAL_PULL = { owner: "apache", repo: "skywalking-banyandb", number: 7 } as const;
 export const REHEARSAL_HEAD = "0123456789abcdef0123456789abcdef01234567";

@@ -13,7 +13,7 @@ import {
   validateMetricsDocument,
   type Hunks,
   type MetricsDocument,
-} from "../src/metrics/index.js";
+} from "../src/kit/metrics/index.js";
 
 const toolDir = fileURLToPath(new URL("../tools/gometrics", import.meta.url));
 const tsCli = fileURLToPath(new URL("../dist/metrics/tsmetrics-cli.js", import.meta.url));

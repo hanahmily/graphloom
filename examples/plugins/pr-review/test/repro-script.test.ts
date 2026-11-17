@@ -8,7 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 import { judgeRun, parseReproReport, reproSpec, type Repro, type ReproLanguage } from "../src/repro.js";
-import { writeChunks } from "../src/write.js";
+import { writeChunks } from "../src/kit/write.js";
 
 /**
  * tools/repro/repro.sh run for real, without Docker (the container only adds confinement): the Go overlay mechanism and the
@@ -254,20 +254,20 @@ describe.skipIf(!hasGo)("repro.sh with Go and the profile's build tags: a packag
 
 describe.skipIf(!hasVitest)("repro.sh with TypeScript: a scratch file with the repository's config and a resolveId hook", () => {
   const dir = "examples/plugins/pr-review/src";
-  const ts = (name: string, expectation: string): Repro => ({ dir, name, expect: "assertion", oracle: "ids.ts's documented contract", text: `import { it, expect } from "vitest";\nimport { resolveId } from "./ids.js";\n\nit("${name}", () => {\n  ${expectation}\n});\n` });
+  const ts = (name: string, expectation: string): Repro => ({ dir, name, expect: "assertion", oracle: "secrets.ts's documented contract", text: `import { it, expect } from "vitest";\nimport { secretFindings } from "./secrets.js";\n\nit("${name}", () => {\n  ${expectation}\n});\n` });
 
   it("resolves the scratch file's relative imports as if it lived next to the module, and reports a failing assertion twice", () => {
-    const repro = ts("resolves an unlisted id", 'expect(resolveId("F99", new Set(["F1"])).id).toBe("F99");');
+    const repro = ts("finds a token in plain text", 'expect(secretFindings("no credential here")).toEqual(["line 1: a GitHub token"]);');
     const { text } = runScript(ROOT, "typescript", "F8", repro, "auto");
-    expect(judge(text, "F8", repro, "typescript", `${dir}/ids.ts`)).toMatchObject({ state: "proven", record: { at: "graphloom-repro-F8.test.ts:5", failure: expect.stringContaining("AssertionError") } });
+    expect(judge(text, "F8", repro, "typescript", `${dir}/secrets.ts`)).toMatchObject({ state: "proven", record: { at: "graphloom-repro-F8.test.ts:5", failure: expect.stringContaining("AssertionError") } });
     expect(existsSync(path.join(PLUGIN, "src/graphloom-repro-F8.test.ts"))).toBe(false);
   });
 
   it("does not reproduce a passing test, and cannot build one whose import does not resolve", () => {
-    const passes = ts("resolves a listed id", 'expect(resolveId("F1", new Set(["F1"])).id).toBe("F1");');
-    expect(judge(runScript(ROOT, "typescript", "F9", passes, "auto").text, "F9", passes, "typescript", `${dir}/ids.ts`)).toMatchObject({ state: "unproven", reason: "test does not fail" });
-    const missing = { ...passes, text: passes.text.replace("./ids.js", "./no-such-module.js") };
-    expect(judge(runScript(ROOT, "typescript", "F10", missing, "auto").text, "F10", missing, "typescript", `${dir}/ids.ts`)).toMatchObject({ state: "unproven", reason: "inconclusive (build failed)" });
+    const passes = ts("finds nothing in plain text", 'expect(secretFindings("no credential here")).toEqual([]);');
+    expect(judge(runScript(ROOT, "typescript", "F9", passes, "auto").text, "F9", passes, "typescript", `${dir}/secrets.ts`)).toMatchObject({ state: "unproven", reason: "test does not fail" });
+    const missing = { ...passes, text: passes.text.replace("./secrets.js", "./no-such-module.js") };
+    expect(judge(runScript(ROOT, "typescript", "F10", missing, "auto").text, "F10", missing, "typescript", `${dir}/secrets.ts`)).toMatchObject({ state: "unproven", reason: "inconclusive (build failed)" });
   });
 
   it("runs only the scratch test in a repository whose config defines projects", () => {

@@ -16,7 +16,7 @@ import { assembleBriefing, BRIEFING_PROPERTIES, BRIEFING_REQUIRED, briefingProbl
 import { CITE_SCHEMA, citeProblem, findFile, type Cite } from "./cites.js";
 import type { Fact } from "./detectors.js";
 import type { Side } from "./patch.js";
-import { quoteInPinned, type PinnedText } from "./questions.js";
+import { quoteInPinned, type PinnedText } from "./pinned.js";
 import { nameCovers, type StateCandidate } from "./statecandidates.js";
 import { fileNames, type PullFile } from "./snapshot.js";
 import type { Section } from "./template.js";

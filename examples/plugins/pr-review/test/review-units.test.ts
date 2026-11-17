@@ -2,14 +2,14 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { describe, expect, it } from "vitest";
-import { effectiveRules, ruleFileText, ruleGroups, shippedRules } from "../src/aspects.js";
+import { effectiveRules, ruleFileText, ruleGroups, shippedRules } from "../src/kit/aspects.js";
 import { anchored, clusters, composeDraft, draftMarkdown, scrub, type DraftInput } from "../src/draft.js";
 import { chooseScope } from "../src/reviewscope.js";
 import { keptSuggestion, parsePass, parseVerification, type AspectRecord, type Finding } from "../src/review.js";
 import { proofOf } from "../src/proof.js";
-import type { Partition } from "../src/areas.js";
-import type { PullFile } from "../src/snapshot.js";
-import { parsePatch } from "../src/patch.js";
+import type { Partition } from "../src/kit/areas.js";
+import type { PullFile } from "../src/kit/snapshot.js";
+import { parsePatch } from "../src/kit/patch.js";
 
 const file = (path: string, patch: string | null = "@@ -1,2 +1,3 @@\n a\n+b\n c"): PullFile => ({ path, status: "modified", previousPath: null, additions: 1, deletions: 0, patch, patchOmitted: patch === null, parsed: parsePatch(patch) });
 

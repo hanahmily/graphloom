@@ -13,23 +13,23 @@
 import { validateResultShape } from "@graphloom/sdk";
 import { createHash } from "node:crypto";
 import type { EnvironmentCommand, EvidenceRecord } from "@graphloom/sdk";
-import { COMMAND } from "./constants.js";
-import { agentRuns, commandRuns, reportText, succeeded, type AgentRun } from "./evidence.js";
-import type { Groundwork } from "./groundwork.js";
-import { sourceDirs } from "./inventory.js";
-import { resolveId } from "./ids.js";
-import { matchesGeneratedGlob } from "./metrics/generated.js";
-import type { FullPack } from "./packs.js";
-import type { MetricsRecord } from "./metrics/record.js";
-import { crapRounded } from "./metrics/crap.js";
+import { COMMAND } from "./kit/constants.js";
+import { agentRuns, commandRuns, reportText, succeeded, type AgentRun } from "./kit/evidence.js";
+import type { Groundwork } from "./kit/groundwork.js";
+import { sourceDirs } from "./kit/inventory.js";
+import { resolveId } from "./kit/ids.js";
+import { matchesGeneratedGlob } from "./kit/metrics/generated.js";
+import type { FullPack } from "./kit/packs.js";
+import type { MetricsRecord } from "./kit/metrics/record.js";
+import { crapRounded } from "./kit/metrics/crap.js";
 import { effectiveConclusion, NECESSITY_SCHEMA, NECESSITY_REVISION_SCHEMA_NAME, NECESSITY_SCHEMA_NAME, necessityAnswer, necessityProblems, statusOf, type Necessity, type PrincipleCheck } from "./necessity.js";
-import type { Principle } from "./principles.js";
+import type { Principle } from "./kit/principles.js";
 import type { PinnedText, Question } from "./questions.js";
-import type { ReportView } from "./reportview.js";
-import { MAX_RERUN_SEARCHES, readSearchReport, searchCommand, searchKey, searchProblems, searchWhere, SEARCH_SCHEMA, type MeasuredSearch, type Search } from "./searches.js";
-import { packOf, type SymbolDef } from "./symbols.js";
+import type { ReportView } from "./kit/reportview.js";
+import { MAX_RERUN_SEARCHES, readSearchReport, searchCommand, searchKey, searchProblems, searchWhere, SEARCH_SCHEMA, type MeasuredSearch, type Search } from "./kit/searches.js";
+import { packOf, type SymbolDef } from "./kit/symbols.js";
 
-export type { MeasuredSearch, Search } from "./searches.js";
+export type { MeasuredSearch, Search } from "./kit/searches.js";
 
 export const ANSWERS_SCHEMA_NAME = "answers-v1";
 /** The same shape, asked again after the answer check, so the evidence itself says which result is the correction. */

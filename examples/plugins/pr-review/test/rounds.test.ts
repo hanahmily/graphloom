@@ -4,11 +4,11 @@
 import type { EvidenceRecord } from "@graphloom/sdk";
 import { describe, expect, it } from "vitest";
 import { definitionFor } from "../src/graph.js";
-import { parseProfile, ROUNDS } from "../src/profile.js";
-import { ledgerJson } from "../src/ledger.js";
+import { parseProfile, ROUNDS } from "../src/kit/profile.js";
+import { ledgerJson } from "../src/designledger.js";
 import { ROUNDS_SKIP_NOTE, ROUNDS_SKIP_REASON, roundsSkipJson } from "../src/necessity.js";
 import { REHEARSAL_REQUEST } from "../src/rehearsal.js";
-import { recordedNecessityJson } from "../src/parts.js";
+import { recordedNecessityJson } from "../src/kit/parts.js";
 import { recordedRound1, writtenDraftFiles } from "../src/reviewdraft.js";
 import { validatorById } from "../src/validators.js";
 import { BANYANDB, candidateEvidence, profileOf, simulate } from "./support.js";

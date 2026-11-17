@@ -23,10 +23,10 @@ import {
   type Briefing,
   type Change,
   type Feature,
-} from "../src/briefing.js";
-import type { Cite } from "../src/cites.js";
-import { CHANGE_REPORT_SCHEMA } from "../src/report.js";
-import { pullFile, type PullFile } from "../src/snapshot.js";
+} from "../src/kit/briefing.js";
+import type { Cite } from "../src/kit/cites.js";
+import { CHANGE_REPORT_SCHEMA } from "../src/kit/report.js";
+import { pullFile, type PullFile } from "../src/kit/snapshot.js";
 
 const file = (path: string, patch: string | null): PullFile => pullFile({ path, status: "modified", patch, previousPath: null, additions: 2, deletions: 1, patchOmitted: patch === null })!;
 const PATCH = "@@ -10,3 +10,5 @@ func f() {\n a\n-old\n+new\n+newer\n+newest\n b";

@@ -3,12 +3,12 @@
 
 import { validateResultShape } from "@graphloom/sdk";
 import { describe, expect, it } from "vitest";
-import { emptyBriefing } from "../src/briefing.js";
-import { detectFacts } from "../src/detectors.js";
+import { emptyBriefing } from "../src/kit/briefing.js";
+import { detectFacts } from "../src/kit/detectors.js";
 import { pinnedTexts } from "../src/questions.js";
-import { assembleReport, asReporterOutput, CHANGE_REPORT_SCHEMA, MAX_ITEM_CHARS, MAX_ITEMS_PER_SECTION, MAX_LARGE_REPORTER_ITEMS, numbered, parseReporterOutput, renderReport, reportProblems, type Cite, type ReportContext, type ReportItem, type ReporterOutput } from "../src/report.js";
-import { pullFile, type PullFile } from "../src/snapshot.js";
-import { reporterSections } from "../src/template.js";
+import { assembleReport, asReporterOutput, CHANGE_REPORT_SCHEMA, MAX_ITEM_CHARS, MAX_ITEMS_PER_SECTION, MAX_LARGE_REPORTER_ITEMS, numbered, parseReporterOutput, renderReport, reportProblems, type Cite, type ReportContext, type ReportItem, type ReporterOutput } from "../src/kit/report.js";
+import { pullFile, type PullFile } from "../src/kit/snapshot.js";
+import { reporterSections } from "../src/kit/template.js";
 
 const file = (path: string, status: string, patch: string | null, extra: Record<string, unknown> = {}): PullFile =>
   pullFile({ path, status, patch, previousPath: null, additions: 2, deletions: 1, patchOmitted: patch === null, ...extra })!;

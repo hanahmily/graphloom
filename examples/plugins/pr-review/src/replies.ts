@@ -6,8 +6,8 @@
  * re-checks that issue's answer. They come from the review threads of the pull request snapshot, are the author's words and so untrusted
  * data, and are bounded. Nothing here decides whether the issue is fixed: the checker's verdict on the answer does.
  */
-import { clipText } from "./fit.js";
-import { isObject } from "./evidence.js";
+import { clipText } from "./kit/fit.js";
+import { isObject } from "./kit/evidence.js";
 import type { PriorItem } from "./prior.js";
 
 const MAX_REPLIES = 3;

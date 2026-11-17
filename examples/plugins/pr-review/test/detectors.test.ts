@@ -2,9 +2,9 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { describe, expect, it } from "vitest";
-import { detectFacts } from "../src/detectors.js";
-import { addedRanges, lineText, parsePatch, sideLines } from "../src/patch.js";
-import { pullFile, type PullFile } from "../src/snapshot.js";
+import { detectFacts } from "../src/kit/detectors.js";
+import { addedRanges, lineText, parsePatch, sideLines } from "../src/kit/patch.js";
+import { pullFile, type PullFile } from "../src/kit/snapshot.js";
 
 const file = (path: string, status: string, patch: string | null, extra: Record<string, unknown> = {}): PullFile =>
   pullFile({ path, status, patch, previousPath: null, additions: 0, deletions: 0, patchOmitted: patch === null, ...extra })!;

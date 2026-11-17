@@ -2,10 +2,10 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { describe, expect, it } from "vitest";
-import { DEFAULT_TS_IMAGE, resolveSandbox } from "../src/coverage.js";
+import { DEFAULT_TS_IMAGE, resolveSandbox } from "../src/kit/coverage.js";
 import { createGraph, definitionFor } from "../src/graph.js";
-import { parseProfile, ProfileError } from "../src/profile.js";
-import { requestedPull } from "../src/request.js";
+import { parseProfile, ProfileError } from "../src/kit/profile.js";
+import { requestedPull } from "../src/kit/request.js";
 import { BANYANDB, profileOf } from "./support.js";
 
 const refused = (over: Record<string, unknown>): string => {

@@ -4,7 +4,7 @@
 # awk -f goprofile.awk -v mp=<module path> -v root=<module root, repository-relative or .> spec.txt cover.out
 #
 # Reads the coverage spec (the `fn <path> <start> <end>` lines of formatSpec) and a Go coverprofile, and prints
-# the graphloom-coverage-v1 facts (src/metrics/coverage.ts): a `B` line for every block that starts in a changed
+# the graphloom-coverage-v1 facts (src/kit/metrics/coverage.ts): a `B` line for every block that starts in a changed
 # function's line range, and a `seen` line for every file the profile knows. File names in the profile start with
 # the module path; they are made repository-relative. With several test binaries `go test` appends one profile
 # after another, so a block can occur once per binary: in set mode it is covered when any occurrence is, and is

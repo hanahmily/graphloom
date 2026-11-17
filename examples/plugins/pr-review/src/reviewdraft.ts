@@ -7,18 +7,18 @@
  * The graph writes these and the validators recompute them with the same functions.
  */
 import type { EnvironmentCommand, EvidenceRecord } from "@graphloom/sdk";
-import { ASPECTS, ruleFileText, ruleGroups, type Aspect, type RuleGroups } from "./aspects.js";
-import type { Analysis } from "./analysis.js";
-import { DRAFT_JSON, DRAFT_MD, PART_BASE, REVIEW_APPENDIX_HTML, REVIEW_HTML, REVIEW_MD, ruleFilePath, REVIEW_DIR } from "./constants.js";
+import { ASPECTS, ruleFileText, ruleGroups, type Aspect, type RuleGroups } from "./kit/aspects.js";
+import type { Analysis } from "./kit/analysis.js";
+import { DRAFT_JSON, DRAFT_MD, PART_BASE, REVIEW_APPENDIX_HTML, REVIEW_HTML, REVIEW_MD, ruleFilePath, REVIEW_DIR } from "./kit/constants.js";
 import { composeDraft, draftJson, draftMarkdown, qaInputFrom, withReview, type Draft, type ItemCites } from "./draft.js";
 import { htmlPagesFrom, parseReportDoc } from "./html.js";
-import { partCommands, readParts, recordedNecessityJson, recordedQa, recordedRecord, recordedReport, type Written } from "./parts.js";
+import { partCommands, readParts, recordedNecessityJson, recordedQa, recordedRecord, recordedReport, type Written } from "./kit/parts.js";
 import { ROUNDS_SKIP_NOTE } from "./necessity.js";
-import { pinnedBase } from "./commands.js";
-import { effectivePacks } from "./packs.js";
+import { pinnedBase } from "./kit/commands.js";
+import { effectivePacks } from "./kit/packs.js";
 import { registryFromEvidence } from "./prior.js";
-import type { Profile } from "./profile.js";
-import type { PullRequest } from "./request.js";
+import type { Profile } from "./kit/profile.js";
+import type { PullRequest } from "./kit/request.js";
 import { aspectRecordId, parseAspectRecord, type AspectRecord } from "./review.js";
 import { parseScopeRecord, SCOPE_RECORD_ID, type ScopeRecord } from "./reviewscope.js";
 import { parseRound1Record, round1Record, round1Skipped, ROUND1_DIR, ROUND1_RECORD_ID, type Round1Record } from "./round1.js";

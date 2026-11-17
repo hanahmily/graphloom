@@ -3,9 +3,9 @@
 
 import { checkAssignmentFidelity, type EvidenceRecord, type JobSpec } from "@graphloom/sdk";
 import { describe, expect, it } from "vitest";
-import { ledgerReadCommand } from "../src/commands.js";
-import { priorChunkText, writtenLedger } from "../src/ledger.js";
-import { GIT_ENV } from "../src/commands.js";
+import { ledgerReadCommand } from "../src/kit/commands.js";
+import { priorChunkText, writtenLedger } from "../src/kit/ledger.js";
+import { GIT_ENV } from "../src/kit/commands.js";
 import { advancePullRequest } from "../src/graph.js";
 import { REHEARSAL_MERGE_BASE, rehearsal } from "../src/rehearsal.js";
 import { validatorById } from "../src/validators.js";

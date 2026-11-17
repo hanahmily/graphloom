@@ -2,15 +2,15 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { describe, expect, it } from "vitest";
-import { emptyBriefing } from "../src/briefing.js";
-import { claimTargets, readClaimCheck } from "../src/claims.js";
-import { detectFacts } from "../src/detectors.js";
+import { emptyBriefing } from "../src/kit/briefing.js";
+import { claimTargets, readClaimCheck } from "../src/kit/claims.js";
+import { detectFacts } from "../src/kit/detectors.js";
 import { pinnedTexts } from "../src/questions.js";
 import { STREAM_CHANGED, STREAM_PATH } from "../src/rehearsal-fixtures.js";
-import { assembleReport, asReporterOutput, citedLines, citeLabel, purposeLine, renderReport, reportProblems, type Cite, type FinalReport, type ReportContext, type ReportItem, type ReporterOutput, type StateEntry } from "../src/report.js";
-import { pullFile, type PullFile } from "../src/snapshot.js";
-import { detectStateCandidates } from "../src/statecandidates.js";
-import { reporterSections } from "../src/template.js";
+import { assembleReport, asReporterOutput, citedLines, citeLabel, purposeLine, renderReport, reportProblems, type Cite, type FinalReport, type ReportContext, type ReportItem, type ReporterOutput, type StateEntry } from "../src/kit/report.js";
+import { pullFile, type PullFile } from "../src/kit/snapshot.js";
+import { detectStateCandidates } from "../src/kit/statecandidates.js";
+import { reporterSections } from "../src/kit/template.js";
 import { assignmentOf, jobsOf, scenarioWith, simulate } from "./support.js";
 
 const file = (path: string, status: string, patch: string | null): PullFile => pullFile({ path, status, patch, previousPath: null, additions: 3, deletions: 0, patchOmitted: patch === null })!;

@@ -9,13 +9,13 @@
  * every finding was judged. The draft is recomputed from those records and must be what was written.
  */
 import type { ValidationInput, ValidationResult, Validator } from "@graphloom/sdk";
-import { ASPECTS, ruleFileText, type Aspect } from "./aspects.js";
-import { analyze, evidencePull } from "./analysis.js";
+import { ASPECTS, ruleFileText, type Aspect } from "./kit/aspects.js";
+import { analyze, evidencePull } from "./kit/analysis.js";
 import { htmlProblems } from "./html.js";
-import { pinnedBase } from "./commands.js";
-import { parseProfile, ProfileError, reviewerRole, verifierRole, type Profile } from "./profile.js";
+import { pinnedBase } from "./kit/commands.js";
+import { parseProfile, ProfileError, reviewerRole, verifierRole, type Profile } from "./kit/profile.js";
 import { MAX_SWEEP_PASSES, reproRunOf, type AspectRecord } from "./review.js";
-import { commandRuns } from "./evidence.js";
+import { commandRuns } from "./kit/evidence.js";
 import { hasTest, judgeRun, reproCommandId, reproSpec } from "./repro.js";
 import { reproPlanFor } from "./reproplan.js";
 import { FRESH_START_REASON } from "./reviewscope.js";

@@ -6,16 +6,16 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { GIT_ENV } from "../src/commands.js";
-import { commandRuns } from "../src/evidence.js";
+import { GIT_ENV } from "../src/kit/commands.js";
+import { commandRuns } from "../src/kit/evidence.js";
 import { effectiveConclusion, necessityDecision, necessityProblems, parseNecessityRecord, supportedBreaks, type Necessity, type PrincipleVerdict } from "../src/necessity.js";
-import { applies, MAX_GLOBS, MAX_PRINCIPLES, MAX_STATEMENT_CHARS, parsePrinciples, principlesContext, principlesReadCommand, principlesReading } from "../src/principles.js";
-import { parseProfile } from "../src/profile.js";
+import { applies, MAX_GLOBS, MAX_PRINCIPLES, MAX_STATEMENT_CHARS, parsePrinciples, principlesContext, principlesReadCommand, principlesReading } from "../src/kit/principles.js";
+import { parseProfile } from "../src/kit/profile.js";
 import { renderNecessity } from "../src/qa.js";
 import { defaultNecessity } from "../src/rehearsal-qa.js";
 import { PRINCIPLES_FILE, PRINCIPLES_PATH } from "../src/rehearsal-fixtures.js";
 import { REHEARSAL_HEAD, REHEARSAL_MERGE_BASE } from "../src/rehearsal.js";
-import { writtenNecessity } from "../src/write.js";
+import { writtenNecessity } from "../src/kit/write.js";
 import { assignmentOf, BANYANDB, jobsOf, scenarioWith, simulate, type Simulation } from "./support.js";
 
 const dirs: string[] = [];

@@ -10,26 +10,26 @@
  * no script, no external stylesheet, image or font, and its only links are `href`s to the pull request, its commits
  * and its files on GitHub at the pinned head and base, and to the other of the two report files. `htmlProblems` enforces that on the written bytes.
  */
-import { CHECK_LISTS, CHECK_TITLES, type Bullet, type FinalBriefing, type FinalFeature } from "./briefing.js";
-import type { ChangeCard } from "./cards.js";
-import { featureSvg } from "./flowlayout.js";
-import { stateIds, type DiagramsDoc, type DrawnDiagram } from "./diagrams.js";
-import type { FinalItem, RemovedItem, RemovedPart, StateEntry } from "./report.js";
-import { describeChecks } from "./report.js";
-import { clip, esc } from "./escape.js";
-import { changeMapSvg, crapBarSvg, stateDiagramSvg, type BarRow } from "./htmlsvg.js";
+import { CHECK_LISTS, CHECK_TITLES, type Bullet, type FinalBriefing, type FinalFeature } from "./kit/briefing.js";
+import type { ChangeCard } from "./kit/cards.js";
+import { featureSvg } from "./kit/flowlayout.js";
+import { stateIds, type DiagramsDoc, type DrawnDiagram } from "./kit/diagrams.js";
+import type { FinalItem, RemovedItem, RemovedPart, StateEntry } from "./kit/report.js";
+import { describeChecks } from "./kit/report.js";
+import { clip, esc } from "./kit/escape.js";
+import { changeMapSvg, crapBarSvg, stateDiagramSvg, type BarRow } from "./kit/htmlsvg.js";
 import { brokenNote, effectiveConclusion, NECESSITY_ID, parseNecessityRecord, SKIPPED_NOTE, type NecessityRecord } from "./necessity.js";
-import { DIVE_COLUMNS, DIVE_COMMAND, DIVE_HEADING, DIVE_LINE, DIVE_TEXT, diveRow } from "./dive.js";
-import { hotspots, hotspotText, needAuthor, openQuestions, SCOPE_KINDS, SCOPE_TITLES, scopeText, type Scope } from "./scope.js";
+import { DIVE_COLUMNS, DIVE_COMMAND, DIVE_HEADING, DIVE_LINE, DIVE_TEXT, diveRow } from "./kit/dive.js";
+import { hotspots, hotspotText, needAuthor, openQuestions, SCOPE_KINDS, SCOPE_TITLES, scopeText, type Scope } from "./kit/scope.js";
 import { incrementalLine, type IncrementalNote } from "./incremental.js";
-import { describeReasons, type ModeReason } from "./mode.js";
-import { exceeds, LIMITS, originOf, type Metric } from "./metrics/crap.js";
+import { describeReasons, type ModeReason } from "./kit/mode.js";
+import { exceeds, LIMITS, originOf, type Metric } from "./kit/metrics/crap.js";
 import { draftMarkdown, parseDraft, scopeLine, type Draft } from "./draft.js";
 import { proofOf } from "./proof.js";
 import { SEVERITIES, type Finding } from "./review.js";
-import type { MetricsRecord } from "./metrics/record.js";
-import { isTestPath } from "./metrics/record.js";
-import { searchWhere, type MeasuredSearch } from "./searches.js";
+import type { MetricsRecord } from "./kit/metrics/record.js";
+import { isTestPath } from "./kit/metrics/record.js";
+import { searchWhere, type MeasuredSearch } from "./kit/searches.js";
 import { VISUAL_CSS, visualHeader, visualSections, type VisualLinks } from "./visual.js";
 
 // ---- the documents it renders ----

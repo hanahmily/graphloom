@@ -12,7 +12,7 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { parseSpec, rangesOf, reduceIstanbul } from "./coverage.js";
+import { parseSpec, rangesOf, reduceIstanbul } from "../kit/metrics/coverage.js";
 
 /** `@vitest/coverage-v8@<version>` as the workspace resolves it, or undefined. */
 function providerOf(workspace: string): string | undefined {

@@ -18,11 +18,11 @@
  * keeps it open, refuted makes it fixed). A new comment that overlaps a closed or an earlier finding is suppressed before it is verified.
  */
 import type { EnvironmentCommand, EvidenceRecord } from "@graphloom/sdk";
-import { isAspect, type Aspect } from "./aspects.js";
-import { agentRuns, commandRuns, succeeded, reportText, type AgentRun, type CommandRun } from "./evidence.js";
+import { isAspect, type Aspect } from "./kit/aspects.js";
+import { agentRuns, commandRuns, succeeded, reportText, type AgentRun, type CommandRun } from "./kit/evidence.js";
 import { overlaps as priorOverlaps } from "./prior.js";
 import { hasTest, judgeRun, reproCommandId, reproProblems, REPRO_SCHEMA, reproSpec, type FindingProof, type Repro, type ReproLanguage, type ReproRunSpec } from "./repro.js";
-import { treeQuotePlan, readTreeQuotes, type TreeQuotePlan } from "./treequotes.js";
+import { treeQuotePlan, readTreeQuotes, type TreeQuotePlan } from "./kit/treequotes.js";
 
 export const REVIEW_SCHEMA_NAME = "pr-code-review-v1";
 export const VERIFY_SCHEMA_NAME = "pr-finding-verification-v1";

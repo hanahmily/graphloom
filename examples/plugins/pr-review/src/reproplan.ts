@@ -7,9 +7,9 @@
  * the sandbox cannot run says why, and the finding is `unproven (sandbox unavailable)`: no test ever runs outside the sandbox.
  */
 import type { DockerConfinement, EnvironmentCommand, EvidenceRecord, JobSpec } from "@graphloom/sdk";
-import { coverageConfinement, dockerRefusal, languageReadiness, type CoveragePlan } from "./coverage.js";
-import { commandRuns } from "./evidence.js";
-import type { Profile } from "./profile.js";
+import { coverageConfinement, dockerRefusal, languageReadiness, type CoveragePlan } from "./kit/coverage.js";
+import { commandRuns } from "./kit/evidence.js";
+import type { Profile } from "./kit/profile.js";
 import { reproLanguage, REPRO_ID_PREFIX, reproCommand, type ReproRunSpec } from "./repro.js";
 import type { ReproEnv, ReproPlan } from "./review.js";
 

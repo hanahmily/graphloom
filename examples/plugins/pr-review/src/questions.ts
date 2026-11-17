@@ -11,18 +11,20 @@
  */
 import { validateResultShape } from "@graphloom/sdk";
 import type { EvidenceRecord } from "@graphloom/sdk";
-import { agentRuns, type AgentRun } from "./evidence.js";
-import type { Groundwork } from "./groundwork.js";
-import { checkThresholds, exceeds, LIMITS, originText, type Metric } from "./metrics/crap.js";
-import type { MetricsRecord } from "./metrics/record.js";
-import { changeItems, questionItems, type ReportView, type ViewItem } from "./reportview.js";
-import type { SymbolDef } from "./symbols.js";
+import { agentRuns, type AgentRun } from "./kit/evidence.js";
+import type { Groundwork } from "./kit/groundwork.js";
+import { checkThresholds, exceeds, LIMITS, originText, type Metric } from "./kit/metrics/crap.js";
+import type { MetricsRecord } from "./kit/metrics/record.js";
+import { changeItems, questionItems, type ReportView, type ViewItem } from "./kit/reportview.js";
+import type { SymbolDef } from "./kit/symbols.js";
+import { quoteInPinned, type PinnedText } from "./kit/pinned.js";
+
+export { pinnedTexts, quoteInPinned, type PinnedText } from "./kit/pinned.js";
 
 export const QUESTIONS_SCHEMA_NAME = "questions-v1";
 export const MAX_QUESTION_CHARS = 500;
 export const MAX_ADDED_QUESTIONS = 30;
 export const MAX_QUESTION_CORRECTIONS = 2;
-const MIN_QUOTE_CHARS = 12;
 
 export const QUESTION_TYPES = ["necessity", "purpose", "existing-reuse-common", "missing-test", "split-function", "complexity-coverage", "weak-test", "other"] as const;
 export type QuestionType = (typeof QUESTION_TYPES)[number];
@@ -70,20 +72,7 @@ export interface QuestionerOutput {
   questions: Array<{ key: string; type: QuestionType; item: string; symbol: string; text: string }>;
 }
 
-/** The pull request's own text, which a stated purpose must quote. */
-export interface PinnedText {
-  source: "title" | "body" | "commit";
-  text: string;
-}
-
 const collapse = (s: string): string => s.replace(/\s+/g, " ").trim();
-
-/** Whether `quote`, with whitespace collapsed, lies inside the pinned text of that source. */
-export function quoteInPinned(quote: string, source: PinnedText["source"], pinned: readonly PinnedText[]): boolean {
-  const q = collapse(quote);
-  if (q.length < MIN_QUOTE_CHARS) return false;
-  return pinned.some((p) => p.source === source && collapse(p.text).includes(q));
-}
 
 export interface PurposeRecord {
   item: string;
@@ -319,11 +308,6 @@ export function finalQuestions(required: readonly RequiredQuestion[], output: Qu
     out.push({ type: q.type, item: q.item, ...(q.symbol !== "" && symbols.has(q.symbol) ? { symbol: q.symbol } : {}), text: q.text.trim(), origin: "added", key: `added:${n}` });
   }
   return out.map((q, i) => ({ id: `Q${i + 1}`, ...q }));
-}
-
-/** The pinned text a stated purpose may quote: the title, the body and each commit message. */
-export function pinnedTexts(pull: { title: string; body: string }, commits: ReadonlyArray<{ message: string }>): PinnedText[] {
-  return [{ source: "title", text: pull.title }, { source: "body", text: pull.body }, ...commits.map((c): PinnedText => ({ source: "commit", text: c.message }))];
 }
 
 export type QuestionsFlow =
