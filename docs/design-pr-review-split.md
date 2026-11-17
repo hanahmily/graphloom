@@ -505,10 +505,15 @@ Each graph advances only its own section, by compare-and-swap on the ref. The
 write command, one read-only command job as today:
 
 1. reads the ref's current value `cur` (absent: the zero id);
-2. checks that `cur`'s tree has, at its own section, exactly the tree Fetch read
-   at the old value `old` (both absent counts as equal). When it does not, a run
-   of the same graph advanced the section since Fetch: the command exits
-   `LEDGER_MOVED` and the run stops retryably "ledger moved", as today;
+2. checks that `cur`'s tree has, at its own section, exactly the section's
+   **baseline**: the subtree this run's own latest accepted ledger write produced
+   (each graph writes its section twice in a run, after the Q&A or the draft and
+   again in Publish, `ledger-published`), or, before its first write, the
+   subtree Fetch read at the old value `old` (both absent counts as equal). The
+   baseline is named in the command's argv, so it is evidence. When `cur`'s
+   section differs from it, another run of the same graph advanced the section:
+   the command exits `LEDGER_MOVED` and the run stops retryably "ledger moved",
+   as today;
 3. builds the new root tree from `cur`'s, with its own section's subtree replaced
    (and, when `cur` is absent or a v1 commit, the migrated layout of
    [§5.4](#54-migrating-a-v1-ledger)), and a commit whose parent is `cur`;
@@ -517,7 +522,9 @@ write command, one read-only command job as today:
 
 A concurrent run of the other graph on the same pull request therefore never
 stops this one: its section is carried over from `cur` unchanged. The command's
-record names `old`, `cur` and the new commit, and `ledger-cas` recomputes that
+record names `old`, the baseline, `cur` and the new commit, and `ledger-cas`
+recomputes that the baseline is the previous accepted write's subtree (or
+Fetch's), that
 the other section's subtree is `cur`'s and this section's is the one written.
 
 Reads follow the same split. Fetch reads the section files it needs with the
@@ -552,7 +559,7 @@ commit, and the validators recompute it.
 
 | v1 | v2 |
 |---|---|
-| `heads[]` | Every head goes to `design.heads`: v1 `round1: "issues"` becomes `items`, `clean` stays, `skipped` becomes `clean` with `note: "round 1 skipped (rounds: review-only)"`. A head with `reviewed: true` also goes to `review.heads`, with its `reviewId`, `verdict` and `open` and `context: { source: "design-review", head: <sha> }`. A head whose review was a round-1 post keeps its `reviewId` in `design` |
+| `heads[]` | Every head goes to `design.heads`: v1 `round1: "issues"` becomes `items`, `clean` stays, `skipped` becomes `clean` with `note: "round 1 skipped (rounds: review-only)"`. A head with `reviewed: true` also goes to `review.heads`, with its `reviewId`, `verdict` and `open`, and `context: { source: "design-review", head: <sha> }` (`prelude` when round 1 was skipped). A head whose review was a round-1 post keeps its `reviewId` in `design` |
 | `qa[]`, `purposes` | `design.qa`, `design.purposes`. The key of a high-level `existing-reuse-common` question (`existing-reuse-common\|item\|<path>`, a `W` change's first cited path) is rewritten to `existing-feature\|item\|<path>` |
 | `findings[]` with an `N1` or `Q<n>` id | `design.items`, with the state rules below |
 | `findings[]` with an `F<n>` id | `review.findings`, unchanged |
@@ -574,10 +581,10 @@ with its reason and the link to its earlier comment, and never again.
 
 **0.26.x and a v2 ledger.** 0.26.x reads a ledger only when its schema is
 `graphloom-pr-ledger-v1` (`priorState` in `src/ledger.ts`); any other schema
-stops its run in Fetch as unreadable. Once a new graph has written a pull
-request's ledger, 0.26.x cannot review that pull request again, and it never
-overwrites the v2 ledger. A pull request the new graphs have not touched can
-still be reviewed by 0.26.x. This is one-way on purpose: a v1 writer would drop
+stops its run in Fetch as unreadable. Once a v2 writer (pr-review 0.27 or later,
+or `pr-design-review`) has written a pull request's ledger, 0.26.x cannot review
+that pull request again, and it never overwrites the v2 ledger. A pull request
+no v2 writer has touched can still be reviewed by 0.26.x. This is one-way on purpose: a v1 writer would drop
 the sections it does not know.
 
 ## 6. Chaining
@@ -666,7 +673,7 @@ The validators of each graph see its pinned config only, as today.
   separate `--out` workspace,
   `ln -s <that version's root>/examples/plugins/pr-review plugins/pr-review`
   ([release §4.6](design-release.md#46-operator-plugins-and-profiles)). A 0.26.x
-  run cannot use a pull request's ledger once a new graph wrote it
+  run cannot use a pull request's ledger once a v2 writer wrote it
   ([§5.4](#54-migrating-a-v1-ledger)).
 - **Runs in flight** stay on the version they pinned. `resume --update-plugin`
   from 0.26.x onto 1.x is refused by the controller's existing check that a
@@ -745,7 +752,9 @@ and keeps `npm test`, `npm run typecheck` and `npm run build` passing.
    keys. Tests: the migration of the v1 ledgers the rehearsal scenarios and
    `rereview.test.ts` build, field by field; real-Git tests of the write (the
    other section advanced between Fetch and the write is carried over; the same
-   section advanced stops "ledger moved"; a lost `update-ref` race retries; the
+   section advanced stops "ledger moved"; a run's second write (Publish's
+   `ledger-published`) builds on its own first write, also when the other
+   section moved in between; a lost `update-ref` race retries; the
    top-level `ledger.json` never changes); part reads of each section file; the
    publish reconcile ignores a review with the other marker; the validators
    recompute a migrated tree.
