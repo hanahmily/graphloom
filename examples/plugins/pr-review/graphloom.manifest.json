@@ -16,7 +16,7 @@
     "vitest": "^4.1.12"
   },
   "digests": {
-    "sourceTree": "91866bb728708b4c3f2348e6697bb43455e7d9b7d5577f722150aa024c93ef8f",
+    "sourceTree": "5546beed3ea401c99a8e75fcadb9d2aaf6572c2a945a0f144ee133e0ef709dfe",
     "packageLock": "1123e4e7d6011e4d012ec8a7d176b90952dd9efc98c832e27e3c856aad263108",
     "files": {
       "package.json": "7df63cfd7c8551cda0949401f18303c2e351cde84eb3c25be343b6eb89d82151",
@@ -58,7 +58,7 @@
       "vendor/diagram-design/references/type-state.md": "9c8ed85762d5bbb3672907bc1664ebf94bcc72850efbacf33d5ee12731053122",
       "vendor/diagram-design/scripts/self_check.py": "444851f6e53f83d50920381df17cdd5f1b7a23cfba9c0ddda27786d78e53e2de",
       "vendor/diagram-design/scripts/verify-geometry.py": "33fb89edbdc8b9cf625a388ba47147bf46ec9e8ae84b7110e240de165732001f",
-      "src/context.ts": "dd2b9376de2890c1bc82fa936935032e7bdcc8941a14f31c8becf04dd951bb39",
+      "src/context.ts": "22fbddf7c834744ef0bfb6903a917f69721c139b69eb72cf3a8a51e71665e10c",
       "src/draft.ts": "a808e773f373696fe1125a3d31b03af76274f0ab7aad7057d7f1831a4afe4cb7",
       "src/graph.ts": "456e2a57f5c708053fa19affec44a6fe3382451973a08d48076aae5f8a0b41fb",
       "src/html.ts": "998fa90a2546eb510b4eb11d26c8a49aba8d7f6133f5be97d67f83e7e4729d20",
@@ -201,7 +201,7 @@
       "test/repro-script.test.ts": "45f74d1872276f1d2f158828b4f2a47c6b07d26822f60a5db4f137931250906a",
       "test/repro.test.ts": "e71e3f7d757ba68a19d3ad32f0058b7f2d2919c356f6cd14f332b5c91dc47065",
       "test/rereview.test.ts": "12bab8a0cafe80479ef6958f3df57cc55339b666da825d6397a487885ce1a2e1",
-      "test/review-links.test.ts": "85ae37d91b12ed406be435ed509c1600cd2b39bbc6e37091ee164b2e350e3531",
+      "test/review-links.test.ts": "0d8ff91e21fcdef96c62440574ccfa59c9db613c5168e5d9d439d5d5701bfa02",
       "test/review-principles.test.ts": "9db6185c9bd763089c7ada7f167ebb51d544152f08e975b506e59d699898bb30",
       "test/review-units.test.ts": "be0bf98a4a6e29176cd21cceabadd80ba96fe9c062455913c7d456f4dcc08ce3",
       "test/review.test.ts": "f5d9c232d0d1a5465d37470b8e3fab5d2e1ba06df1dfb00c3dc00e0e3efc5f55",

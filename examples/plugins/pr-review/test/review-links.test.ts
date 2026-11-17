@@ -7,6 +7,7 @@ import type { SymbolDef } from "../src/kit/symbols.js";
 import { REHEARSAL_DESIGN_HEAD, REHEARSAL_HEAD } from "../src/rehearsal.js";
 import { writtenDraftFiles } from "../src/reviewdraft.js";
 import { simulate } from "./support.js";
+import { citeText } from "../src/context.js";
 
 const sym = (id: string, kind: string, body: string, path = "pkg/a/a.go"): SymbolDef => ({ id, path, language: "go", scope: "a", dir: "pkg/a", kind, name: id, qualified: `a.${id}`, exported: true, startLine: 1, endLine: 3, signature: body.split("\n")[0]!, body, change: "new" });
 
@@ -35,5 +36,14 @@ describe("a design report of an earlier head", () => {
     expect(findings).toContain(`/blob/${REHEARSAL_HEAD}/`);
     expect(findings).not.toContain(`/blob/${REHEARSAL_DESIGN_HEAD}/`);
     expect(html).toContain(`/blob/${REHEARSAL_DESIGN_HEAD}/`);
+  });
+});
+
+describe("the design seed's citations", () => {
+  it("keep the tree of a Q&A citation (base, head, dependency) and the side of a report cite", () => {
+    expect(citeText({ path: "pkg/a.go", tree: "base", start: 3, end: 5 })).toBe("pkg/a.go:3-5 (base)");
+    expect(citeText({ path: "github.com/x/y/z.go", tree: "dependency", start: 1, end: 1 })).toBe("github.com/x/y/z.go:1 (dependency)");
+    expect(citeText({ path: "pkg/a.go", tree: "head", start: 2, end: 2 })).toBe("pkg/a.go:2");
+    expect(citeText({ path: "pkg/a.go", side: "base", start: 2, end: 2 })).toBe("pkg/a.go:2 (base)");
   });
 });

@@ -394,11 +394,13 @@ export function preludeMarkdown(reportMarkdown: string): string {
 
 const oneLine = (s: string): string => s.replace(/\s+/g, " ").trim();
 
-const citeText = (c: unknown): string => {
+export const citeText = (c: unknown): string => {
   if (!isObject(c) || typeof c.path !== "string") return "";
   const start = typeof c.start === "number" ? c.start : 0;
   const end = typeof c.end === "number" ? c.end : start;
-  return `${c.path}${start >= 1 ? (end > start ? `:${start}-${end}` : `:${start}`) : ""}${c.side === "base" ? " (base)" : ""}`;
+  // A report cite names its `side`; a Q&A citation its `tree` (base, head or a dependency's source).
+  const where = c.side ?? c.tree;
+  return `${c.path}${start >= 1 ? (end > start ? `:${start}-${end}` : `:${start}`) : ""}${where === "base" ? " (base)" : where === "dependency" ? " (dependency)" : ""}`;
 };
 
 /** The design review's Q&A as the seed lists it: each question with its answer's status, text and citations. */
