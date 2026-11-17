@@ -16,14 +16,14 @@
     "vitest": "^4.1.12"
   },
   "digests": {
-    "sourceTree": "eb531cf1870249937a4eae556c550b96e8ce3190c084c7565fe0001ccfab18e2",
+    "sourceTree": "7304b94750e3a6fb3cdc83fb0f018b54ba8746e9ae7b36384797ec39d45e9230",
     "packageLock": "6abe1ee61ea10688f7d8ae11564051daae1d0265442a48530dd14bbc87667461",
     "files": {
       "package.json": "8e32d3539178752bed86af389f4c2bfaca409f4afe26b1e1a82d0cc3c2748551",
       "package-lock.json": "6abe1ee61ea10688f7d8ae11564051daae1d0265442a48530dd14bbc87667461",
       "tsconfig.json": "d166142bd5d917d1eb7d3011cf6423c652f30e2989881deec6147a997bf41597",
       "profiles/banyandb.json": "2de57656d7dcaf2b1543306ad5a597e0f71a87d9109ce9a5a241b5fb88e89201",
-      "tools/README.md": "d1fee7f73a4bed590501d1f112cc5274e2e8a3abc8063d06c347910c7b2a3ea3",
+      "tools/README.md": "17a011626681c3cd1cda7fa95ed3897b65a3b567e01e61273fe645b06a389e70",
       "tools/gometrics/analyze.go": "008fc603a06eefdcdd571678b06950fe14e15f965b64d542ea7666ea35512722",
       "tools/gometrics/analyze_test.go": "8a006b1b148465e96a1a118b7273c58748956cfd09f2cfb3e7d2b00666db5abb",
       "tools/gometrics/go.mod": "e69465589b932234fb2c0a390d23b100007d84af33ecefa3a85c1d4bd902089f",
