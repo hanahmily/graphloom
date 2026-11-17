@@ -524,8 +524,7 @@ A concurrent run of the other graph on the same pull request therefore never
 stops this one: its section is carried over from `cur` unchanged. The command's
 record names `old`, the baseline, `cur` and the new commit, and `ledger-cas`
 recomputes that the baseline is the previous accepted write's subtree (or
-Fetch's), that
-the other section's subtree is `cur`'s and this section's is the one written.
+Fetch's), that the other section's subtree is `cur`'s and this section's is the one written.
 
 Reads follow the same split. Fetch reads the section files it needs with the
 part reads of 0.26 (`ledger-prior`, `ledger-prior-<k>`, a header with the digest
