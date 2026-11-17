@@ -8,28 +8,29 @@
  * files the Answers stage writes.
  */
 import type { EnvironmentCommand, EvidenceRecord } from "@graphloom/sdk";
-import { analyze, type Analysis } from "./analysis.js";
+import { analyze, type Analysis } from "./kit/analysis.js";
 import { ANSWER_KIND, answerProblems, answersFlow, NECESSITY_KIND, verificationOutcome, verificationPlan, type AnswerContext, type AnswersFlow, type FinalAnswer } from "./answers.js";
-import { pinnedBase } from "./commands.js";
+import { pinnedBase } from "./kit/commands.js";
 import { carryNecessity, carryOf, incrementalReads, openIssueIds, type Carried, type CarriedNecessity, type CarryEnv, type IncrementalNote, type IncrementalReads } from "./incremental.js";
-import { isLarge, questionsMode, type ReviewMode } from "./mode.js";
-import { COMMAND, QUESTION_BATCH_SIZE, REVIEW_DIR } from "./constants.js";
-import { commandRuns, succeeded, type CommandRun } from "./evidence.js";
+import { isLarge, questionsMode, type ReviewMode } from "./kit/mode.js";
+import { COMMAND, QUESTION_BATCH_SIZE, REVIEW_DIR } from "./kit/constants.js";
+import { commandRuns, succeeded, type CommandRun } from "./kit/evidence.js";
 import { necessityDecision, necessityJson, necessityQuestion, parseNecessityRecord, roundsSkipJson, type NecessityRecord } from "./necessity.js";
-import { principlesContext, principlesReading, principlesRecord, type PrinciplesContext } from "./principles.js";
+import { principlesContext, principlesReading, principlesRecord, type PrinciplesContext } from "./kit/principles.js";
 import { continueIds, questionKeys, registryFromEvidence, type PriorRegistry } from "./prior.js";
-import { ledgerJson, ledgerMarkdown, ledgerRead, ledgerWriteCommands, migrationOf, oldValue, priorState, readBaselines, type Migration, type PriorLedger } from "./ledger.js";
+import { ledgerJson, ledgerMarkdown } from "./designledger.js";
+import { ledgerRead, ledgerWriteCommands, migrationOf, oldValue, priorState, readBaselines, type Migration, type PriorLedger } from "./kit/ledger.js";
 import { htmlPagesFrom } from "./html.js";
-import { appendixWriteCommands, htmlWriteCommands, necessityWriteCommands, qaWriteCommands, readParts, recordedNecessityJson, recordedReport } from "./parts.js";
-import { withQa } from "./output.js";
-import { necessityWriteCommand, writtenRecord } from "./write.js";
-import { groundworkState, type Groundwork, type GroundworkState } from "./groundwork.js";
-import { effectivePacks } from "./packs.js";
-import type { Profile } from "./profile.js";
+import { appendixWriteCommands, htmlWriteCommands, necessityWriteCommands, qaWriteCommands, readParts, recordedNecessityJson, recordedReport } from "./kit/parts.js";
+import { withQa } from "./kit/output.js";
+import { necessityWriteCommand, writtenRecord } from "./kit/write.js";
+import { groundworkState, type Groundwork, type GroundworkState } from "./kit/groundwork.js";
+import { effectivePacks } from "./kit/packs.js";
+import type { Profile } from "./kit/profile.js";
 import { briefingQa, qaJson, renderNecessity, renderQa, skippedQa, type QaInput } from "./qa.js";
 import { finalQuestions, itemOfSymbol, pinnedTexts, questionerProblems, questionsFlow, requiredQuestions, statedPurposes, type PinnedText, type PurposeRecord, type Question, type QuestionerOutput, type QuestionsFlow } from "./questions.js";
-import { changeItems, reportView, type ReportView } from "./reportview.js";
-import type { PullRequest } from "./request.js";
+import { changeItems, reportView, type ReportView } from "./kit/reportview.js";
+import type { PullRequest } from "./kit/request.js";
 
 export interface QaContext {
   analysis: Analysis;

@@ -2,9 +2,9 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { describe, expect, it } from "vitest";
-import { claimTargets, quoteMatches, readClaimCheck, type ClaimTarget } from "../src/claims.js";
-import type { ReporterOutput } from "../src/report.js";
-import { pullFile, type PullFile } from "../src/snapshot.js";
+import { claimTargets, quoteMatches, readClaimCheck, type ClaimTarget } from "../src/kit/claims.js";
+import type { ReporterOutput } from "../src/kit/report.js";
+import { pullFile, type PullFile } from "../src/kit/snapshot.js";
 
 const file = (path: string, patch: string | null, extra: Record<string, unknown> = {}): PullFile =>
   pullFile({ path, status: "modified", patch, previousPath: null, additions: 1, deletions: 1, patchOmitted: patch === null, ...extra })!;

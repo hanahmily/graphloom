@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { describe, expect, it } from "vitest";
-import { checkThresholds, coverageFraction, crapRounded, crapValue, type Coverage } from "../src/metrics/index.js";
+import { checkThresholds, coverageFraction, crapRounded, crapValue, type Coverage } from "../src/kit/metrics/index.js";
 
 const measured = (covered: number, total: number): Coverage => ({ source: "measured", covered, total });
 const unknown: Coverage = { source: "unknown", reason: "docker unavailable" };

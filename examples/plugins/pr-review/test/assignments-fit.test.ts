@@ -3,17 +3,17 @@
 
 import type { EnvironmentCommand, JobSpec } from "@graphloom/sdk";
 import { beforeAll, describe, expect, it } from "vitest";
-import { recordedQa } from "../src/parts.js";
-import { assignmentProblem, ASSIGNMENT_BUDGET_CHARS, ASSIGNMENT_MARGIN_CHARS, fitLines, MAX_ASSIGNMENT_CHARS, shrinkToFit } from "../src/fit.js";
-import { diagramSpecs, MAX_DIAGRAM_DATA_CHARS } from "../src/diagrams.js";
-import type { Fact } from "../src/detectors.js";
-import type { ClaimTarget } from "../src/claims.js";
-import { planChecker, planReporter, pullText } from "../src/prompts.js";
+import { recordedQa } from "../src/kit/parts.js";
+import { assignmentProblem, ASSIGNMENT_BUDGET_CHARS, ASSIGNMENT_MARGIN_CHARS, fitLines, MAX_ASSIGNMENT_CHARS, shrinkToFit } from "../src/kit/fit.js";
+import { diagramSpecs, MAX_DIAGRAM_DATA_CHARS } from "../src/kit/diagrams.js";
+import type { Fact } from "../src/kit/detectors.js";
+import type { ClaimTarget } from "../src/kit/claims.js";
+import { planChecker, planReporter, pullText } from "../src/kit/prompts.js";
 import type { Answer } from "../src/answers.js";
 import { planAnswerChecker, planAnswerer, planNecessity, planNecessityChecker } from "../src/qaprompts.js";
-import { reporterSections } from "../src/template.js";
+import { reporterSections } from "../src/kit/template.js";
 import type { Question } from "../src/questions.js";
-import type { Groundwork } from "../src/groundwork.js";
+import type { Groundwork } from "../src/kit/groundwork.js";
 
 import { hugeRehearsal } from "../src/rehearsal.js";
 import { HUGE_AREAS, HUGE_LIMITS, hugeSymbolNames } from "../src/rehearsal-huge.js";

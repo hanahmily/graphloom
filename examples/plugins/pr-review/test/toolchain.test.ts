@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { describe, expect, it } from "vitest";
-import { compareGoVersions, parseGoVersion, toolchainMismatch, toolchainSentence } from "../src/toolchain.js";
+import { compareGoVersions, parseGoVersion, toolchainMismatch, toolchainSentence } from "../src/kit/toolchain.js";
 
 const ERROR = "go: go.mod requires go >= 1.26.11 (running go 1.26.10; GOTOOLCHAIN=local)";
 

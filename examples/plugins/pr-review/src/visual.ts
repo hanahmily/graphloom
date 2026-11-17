@@ -8,17 +8,17 @@
  * anything longer is a tooltip (an SVG `<title>`, an HTML `title` attribute) and is in the appendix, which stays the
  * full detail. Plugin code only, deterministic, no script: every text goes through `esc`.
  */
-import { CHECK_LISTS, type CheckList, type FinalFeature } from "./briefing.js";
-import type { ChangeCard, Excerpt } from "./cards.js";
-import type { DrawnDiagram } from "./diagrams.js";
+import { CHECK_LISTS, type CheckList, type FinalFeature } from "./kit/briefing.js";
+import type { ChangeCard, Excerpt } from "./kit/cards.js";
+import type { DrawnDiagram } from "./kit/diagrams.js";
 import type { Draft } from "./draft.js";
-import { clip, esc } from "./escape.js";
-import { featureSvg } from "./flowlayout.js";
+import { clip, esc } from "./kit/escape.js";
+import { featureSvg } from "./kit/flowlayout.js";
 import type { HtmlInput, ReportDoc } from "./html.js";
 import { effectiveConclusion, NECESSITY_ID } from "./necessity.js";
 import { proofOf } from "./proof.js";
 import { SEVERITIES, type Finding } from "./review.js";
-import { hotspots, hotspotText, SCOPE_KINDS, SCOPE_TITLES, type ScopeKind } from "./scope.js";
+import { hotspots, hotspotText, SCOPE_KINDS, SCOPE_TITLES, type ScopeKind } from "./kit/scope.js";
 import { squarify } from "./treemap.js";
 
 /** The places the page links to: the pull request, its commits, and the other file of the report. */

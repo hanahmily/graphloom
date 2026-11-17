@@ -37,11 +37,11 @@ let runner: Runner;
 
 beforeAll(async () => {
   await execFileAsync("npm", ["run", "build", "-w", "@graphloom/plugin-pr-review"], { cwd: repoRoot });
-  const measurements = (await import(pathToFileURL(path.join(bundle, "dist", "measurements.js")).href)) as Pick<Plugin, "staticCommand">;
+  const measurements = (await import(pathToFileURL(path.join(bundle, "dist", "kit", "measurements.js")).href)) as Pick<Plugin, "staticCommand">;
   const rehearsal = (await import(pathToFileURL(path.join(bundle, "dist", "rehearsal.js")).href)) as Pick<Plugin, "FLAGS_DOC" | "REHEARSAL_HEAD_FILES">;
   plugin = { ...measurements, ...rehearsal };
-  const base = (await import(pathToFileURL(path.join(bundle, "dist", "measurements.js")).href)) as Pick<BasePlugin, "baseFileCommand" | "staticBaseCommand">;
-  const commands = (await import(pathToFileURL(path.join(bundle, "dist", "commands.js")).href)) as Pick<BasePlugin, "GIT_ENV">;
+  const base = (await import(pathToFileURL(path.join(bundle, "dist", "kit", "measurements.js")).href)) as Pick<BasePlugin, "baseFileCommand" | "staticBaseCommand">;
+  const commands = (await import(pathToFileURL(path.join(bundle, "dist", "kit", "commands.js")).href)) as Pick<BasePlugin, "GIT_ENV">;
   const fixtures = (await import(pathToFileURL(path.join(bundle, "dist", "rehearsal-fixtures.js")).href)) as Pick<BasePlugin, "BASE_FILES">;
   const docs = (await import(pathToFileURL(path.join(bundle, "dist", "rehearsal-docs.js")).href)) as Pick<BasePlugin, "DOCS">;
   basePlugin = { ...base, ...commands, ...fixtures, ...docs };

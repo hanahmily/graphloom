@@ -7,14 +7,14 @@
  * stage (`publish.ts`) posts the draft's comments that are findings; nothing here writes to GitHub. The summary is plain text
  * from the ledger, at most 1,200 characters.
  */
-import { ASPECTS, DRAFT_ORDER, type Aspect } from "./aspects.js";
+import { ASPECTS, DRAFT_ORDER, type Aspect } from "./kit/aspects.js";
 import { citationLinks, composeParts, proposalText, type GithubPin, type ProposalLike } from "./answertext.js";
-import { clip } from "./escape.js";
+import { clip } from "./kit/escape.js";
 import { proofOf, type Proof } from "./proof.js";
 import { findingsOf, keptSuggestion, MAX_SWEEP_PASSES, SEVERITIES, type AspectRecord, type Finding, type Severity } from "./review.js";
 import type { ScopeRecord } from "./reviewscope.js";
-import { sideLines, parsePatch } from "./patch.js";
-import type { PullFile } from "./snapshot.js";
+import { sideLines, parsePatch } from "./kit/patch.js";
+import type { PullFile } from "./kit/snapshot.js";
 
 export const DRAFT_SCHEMA = "pr-review-draft-v1";
 export const MAX_SUMMARY_CHARS = 1_200;

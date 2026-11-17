@@ -4,8 +4,8 @@
 import { checkAssignmentFidelity, type EvidenceRecord } from "@graphloom/sdk";
 import { existsSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { parseProfile } from "../src/profile.js";
-import { requestedPull } from "../src/request.js";
+import { parseProfile } from "../src/kit/profile.js";
+import { requestedPull } from "../src/kit/request.js";
 import { REHEARSAL_HEAD_FILES, REHEARSAL_REQUEST, rehearsal } from "../src/rehearsal.js";
 import { defaultNecessity } from "../src/rehearsal-qa.js";
 import { STREAM_PATH, STREAM_WRITE_BASE_GO, STREAM_WRITE_GO, WRITE_PATH_DOC } from "../src/rehearsal-fixtures.js";

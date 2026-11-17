@@ -6,10 +6,10 @@
  * re-anchored to its patch; the ones settled without a model (the file is no longer in the change, or it lies outside this review's
  * scope); and the places where a new comment is suppressed, because an earlier finding, open or closed, already covers them.
  */
-import type { Aspect } from "./aspects.js";
+import type { Aspect } from "./kit/aspects.js";
 import { aspectOfItem, reanchor, type PriorItem, type PriorRegistry } from "./prior.js";
 import type { PriorFinding, PriorOutcome } from "./review.js";
-import type { PullFile } from "./snapshot.js";
+import type { PullFile } from "./kit/snapshot.js";
 
 export interface AspectPrior {
   /** The findings the first pass judges. */

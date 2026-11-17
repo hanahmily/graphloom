@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import type { EvidenceRecord, RunView } from "@graphloom/sdk";
-import { isObject, producer } from "./evidence.js";
+import { isObject, producer } from "./kit/evidence.js";
 
 /**
  * What the graph remembers between calls (the run's private state): for each stage it has seen reentered, the

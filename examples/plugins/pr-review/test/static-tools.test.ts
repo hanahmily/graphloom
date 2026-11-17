@@ -6,12 +6,12 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { GIT_ENV } from "../src/commands.js";
-import { MAX_DIFF_BYTES, measurementState, staticCommand, metricsDiffCommand, type Batch } from "../src/measurements.js";
+import { GIT_ENV } from "../src/kit/commands.js";
+import { MAX_DIFF_BYTES, measurementState, staticCommand, metricsDiffCommand, type Batch } from "../src/kit/measurements.js";
 import { FLAGS_DOC, FLAGS_GO, REHEARSAL_HEAD_FILES, TTL_DOC, TTL_GO } from "../src/rehearsal.js";
-import { pullFile } from "../src/snapshot.js";
-import { hunksFromUnifiedDiff, parseHunkFile } from "../src/metrics/hunks.js";
-import { validateMetricsDocument } from "../src/metrics/validate.js";
+import { pullFile } from "../src/kit/snapshot.js";
+import { hunksFromUnifiedDiff, parseHunkFile } from "../src/kit/metrics/hunks.js";
+import { validateMetricsDocument } from "../src/kit/metrics/validate.js";
 import { profileOf, root } from "./support.js";
 
 const go = spawnSync("go", ["version"], { encoding: "utf8" }).status === 0;

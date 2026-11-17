@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 /** How a search reads in the Q&A (design §7.4): the plugin's measured count is the fact, the agent's own is flagged. */
-import { searchKey, searchWhere, type MeasuredSearch, type Search } from "./searches.js";
+import { searchKey, searchWhere, type MeasuredSearch, type Search } from "./kit/searches.js";
 
 const flat = (s: string, n: number): string => {
   const one = s.replace(/\s*\n\s*/g, " ").trim();

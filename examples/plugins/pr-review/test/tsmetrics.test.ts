@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { describe, expect, it } from "vitest";
-import { analyzeTypeScript, type MeasuredFunction } from "../src/metrics/index.js";
+import { analyzeTypeScript, type MeasuredFunction } from "../src/kit/metrics/index.js";
 
 function measure(source: string, file = "src/m.ts"): Map<string, MeasuredFunction> {
   return new Map(analyzeTypeScript(file, source).map((f) => [f.name, f]));

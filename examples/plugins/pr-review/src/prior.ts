@@ -8,13 +8,13 @@
  * a pure function of the ledger's value and the snapshot, so the graph and the validators agree.
  */
 import { createHash } from "node:crypto";
-import { COMMAND } from "./constants.js";
-import { ledgerRead, oldValue, priorState } from "./ledger.js";
-import { isObject } from "./evidence.js";
-import { FEATURE_TYPE, LEDGER_V1, LEDGER_V2, migrateV1 } from "./ledgerv2.js";
+import { COMMAND } from "./kit/constants.js";
+import { ledgerRead, oldValue, priorState } from "./kit/ledger.js";
+import { isObject } from "./kit/evidence.js";
+import { FEATURE_TYPE, LEDGER_V1, LEDGER_V2, migrateV1 } from "./kit/ledgerv2.js";
 import { REUSE_TYPE } from "./questions.js";
-import { lineText, parsePatch } from "./patch.js";
-import type { PullFile } from "./snapshot.js";
+import { lineText, parsePatch } from "./kit/patch.js";
+import type { PullFile } from "./kit/snapshot.js";
 import type { EvidenceRecord } from "@graphloom/sdk";
 
 /**

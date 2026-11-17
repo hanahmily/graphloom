@@ -3,11 +3,11 @@
 
 import { MAX_EXECUTOR_INPUT_BYTES } from "@graphloom/sdk";
 import { describe, expect, it } from "vitest";
-import { partitionAreas } from "../src/areas.js";
-import { buildDigest, INTERFACE_PATCH_BYTES, interfaceGlobs, newExportedSymbols } from "../src/digest.js";
-import { largeReporterInstruction, MAX_ASSIGNMENT_CHARS } from "../src/largeprompts.js";
-import { pullFile, type PullFile } from "../src/snapshot.js";
-import { reporterSections } from "../src/template.js";
+import { partitionAreas } from "../src/kit/areas.js";
+import { buildDigest, INTERFACE_PATCH_BYTES, interfaceGlobs, newExportedSymbols } from "../src/kit/digest.js";
+import { largeReporterInstruction, MAX_ASSIGNMENT_CHARS } from "../src/kit/largeprompts.js";
+import { pullFile, type PullFile } from "../src/kit/snapshot.js";
+import { reporterSections } from "../src/kit/template.js";
 import { profileOf } from "./support.js";
 
 const profile = profileOf();

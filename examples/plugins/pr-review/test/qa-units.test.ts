@@ -2,17 +2,17 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { describe, expect, it } from "vitest";
-import { evidencePull } from "../src/analysis.js";
+import { evidencePull } from "../src/kit/analysis.js";
 import { answerProblems, functionOf, inventoryLimitNote, readAnswerCheck, verificationPlan, type Answer } from "../src/answers.js";
-import { GO_PACK, TS_PACK } from "../src/packs.js";
-import { nameVariants, nameWords, planFor, rareTokens, signaturePattern, signatureTypes, tokenPopulation, excludeSpecs } from "../src/queries.js";
+import { GO_PACK, TS_PACK } from "../src/kit/packs.js";
+import { nameVariants, nameWords, planFor, rareTokens, signaturePattern, signatureTypes, tokenPopulation, excludeSpecs } from "../src/kit/queries.js";
 import { afterNecessity, answerContext, qaContext, questionSet, questionerFlow, type QaContext } from "../src/qaflow.js";
 import { finalQuestions, quoteInPinned, requiredQuestions, statedPurposes, type QuestionerOutput } from "../src/questions.js";
-import { jaccard, shingles, similarity, tokensOf } from "../src/similarity.js";
-import { extractSymbols, type SymbolDef } from "../src/symbols.js";
-import { mapTests, testMapContext } from "../src/testmap.js";
-import { parsePatch } from "../src/patch.js";
-import type { PullFile } from "../src/snapshot.js";
+import { jaccard, shingles, similarity, tokensOf } from "../src/kit/similarity.js";
+import { extractSymbols, type SymbolDef } from "../src/kit/symbols.js";
+import { mapTests, testMapContext } from "../src/kit/testmap.js";
+import { parsePatch } from "../src/kit/patch.js";
+import type { PullFile } from "../src/kit/snapshot.js";
 import { profileOf, simulate } from "./support.js";
 
 describe("the query builder (design 7.2 item 2)", () => {

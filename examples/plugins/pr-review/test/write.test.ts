@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { MAX_EXECUTOR_INPUT_BYTES } from "@graphloom/sdk";
 import { afterAll, describe, expect, it } from "vitest";
-import { reportWriteCommand, writeChunks, writtenReport } from "../src/write.js";
+import { reportWriteCommand, writeChunks, writtenReport } from "../src/kit/write.js";
 import { secretFindings } from "../src/secrets.js";
 
 const dirs: string[] = [];

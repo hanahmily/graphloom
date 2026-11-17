@@ -9,7 +9,7 @@ They parse; they never execute the measured code.
 | Tool | Where | Run |
 |---|---|---|
 | `gometrics` | `tools/gometrics/` (Go standard library only, no `require`) | `go run . --head <dir> --hunks <file> [--generated <globs>]` |
-| `tsmetrics` | `src/metrics/tsmetrics*.ts`, built to `dist/metrics/tsmetrics-cli.js` | `node dist/metrics/tsmetrics-cli.js --head <dir> --hunks <file> [--generated <globs>]` |
+| `tsmetrics` | `src/kit/metrics/tsmetrics.ts` with the entry `src/metrics/tsmetrics-cli.ts`, built to `dist/metrics/tsmetrics-cli.js` | `node dist/metrics/tsmetrics-cli.js --head <dir> --hunks <file> [--generated <globs>]` |
 
 `tsmetrics` loads the `typescript` package (a dependency of this package, as
 of `@graphloom/cli`) and nothing else.
@@ -73,15 +73,17 @@ command's exit status):
 | `tools/cover/go.sh <n> <spec chunk…>` | `go test -coverprofile -covermode=set -coverpkg=<touched> <touched>` once per module, then `goprofile.awk` reduces the profile to the changed functions | the image's `go`, the host module cache (read-only), `GOFLAGS=-mod=readonly GOPROXY=off GOTOOLCHAIN=local` |
 | `tools/cover/ts.sh <n> <spec chunk…>` | the repository's own `vitest run --coverage.enabled --coverage.provider=v8 --coverage.reporter=json` in one workspace, installing its locked dependencies first with `npm ci --offline --ignore-scripts` when the checkout has no `node_modules`; `dist/metrics/tscover-cli.js` reduces `coverage-final.json` | the image's `node` and `npm`, the host npm cache (read-only); `@vitest/coverage-v8` in the repository, at vitest's major |
 
-The spec (`pkg`, `ws`, `file`, `fn` lines; `formatSpec` in `src/metrics/coverage.ts`) travels in the command's
-argv. `src/metrics/coverage.ts` also holds the report parser and the attribution that the graph and the
+The spec (`pkg`, `ws`, `file`, `fn` lines; `formatSpec` in `src/kit/metrics/coverage.ts`) travels in the command's
+argv. `src/kit/metrics/coverage.ts` also holds the report parser and the attribution that the graph and the
 `measurements` validator share. `awk -f tools/cover/goprofile.awk -v mp=<module path> -v root=<module root> spec.txt cover.out` runs on its own.
 
 ## Library and validation
 
-`src/metrics/` is the shared library, exported as `@graphloom/plugin-pr-review/metrics`.
-Everything in it except `tsmetrics.ts` is dependency-free so it can be vendored
-into the issue-fix review kit:
+`src/kit/metrics/` is the shared library, exported as `@graphloom/plugin-pr-review/metrics`;
+it is part of the review kit (`examples/plugins/review-kit`), vendored as source, and its
+command-line entries `tsmetrics-cli.ts` and `tscover-cli.ts` stay in this plugin's `src/metrics/`,
+so the tools' paths under `dist/metrics/` are unchanged.
+Everything in it except `tsmetrics.ts` is dependency-free:
 
 - `record.ts`: the record types, decision and nesting kinds, `isTestPath`.
 - `crap.ts`: `crapValue`, `crapRounded`, `checkThresholds` (complexity < 10,

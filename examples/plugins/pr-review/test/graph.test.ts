@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { JobSpec, RehearsalScenario } from "@graphloom/sdk";
-import { GIT_ENV } from "../src/commands.js";
+import { GIT_ENV } from "../src/kit/commands.js";
 import { advancePullRequest, agentConfigMasks } from "../src/graph.js";
 import { REHEARSAL_HEAD, REHEARSAL_HEAD_FILES, REHEARSAL_REQUEST } from "../src/rehearsal.js";
 import { validatorById } from "../src/validators.js";

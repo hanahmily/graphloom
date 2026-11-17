@@ -6,7 +6,7 @@
  * 800 new symbols in 24 areas), for the test that every agent assignment fits the executor's bound (`fit.ts`). The files
  * are Go sources of trivial functions, so the symbols, the measurements and the searches are all derived by the plugin.
  */
-import { BATCH_FILES } from "./measurements.js";
+import { BATCH_FILES } from "./kit/measurements.js";
 import { trivialDoc } from "./rehearsal-large.js";
 
 export const HUGE_AREAS = 24;

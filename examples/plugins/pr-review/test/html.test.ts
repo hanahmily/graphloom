@@ -3,10 +3,10 @@
 
 import { describe, expect, it } from "vitest";
 import { appendixHtmlFrom, htmlProblems, parseQaDoc, parseReportDoc, renderAppendixHtml, renderReviewHtml, reviewHtmlFrom, type QaDoc, type ReportDoc } from "../src/html.js";
-import { stateDiagramSvg } from "../src/htmlsvg.js";
+import { stateDiagramSvg } from "../src/kit/htmlsvg.js";
 import { LARGE_LIMITS, REHEARSAL_HEAD, REHEARSAL_MERGE_BASE } from "../src/rehearsal.js";
-import { recordedAppendix, recordedHtml, recordedNecessityJson, recordedQa, recordedReport } from "../src/parts.js";
-import type { StateEntry } from "../src/report.js";
+import { recordedAppendix, recordedHtml, recordedNecessityJson, recordedQa, recordedReport } from "../src/kit/parts.js";
+import type { StateEntry } from "../src/kit/report.js";
 import { simulate, type Simulation } from "./support.js";
 
 const GITHUB = { owner: "apache", repo: "skywalking-banyandb", head: REHEARSAL_HEAD, base: REHEARSAL_MERGE_BASE };

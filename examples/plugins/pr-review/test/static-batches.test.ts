@@ -7,10 +7,10 @@ import os from "node:os";
 import path from "node:path";
 import type { EvidenceRecord } from "@graphloom/sdk";
 import { afterAll, describe, expect, it } from "vitest";
-import { COMMAND } from "../src/constants.js";
-import { BATCH_FILES, batchesOf, measurable, measurementState, metricsDiffCommand, renderMeasurements, splitBatch, staticCommand, type Batch } from "../src/measurements.js";
-import { parseHunkFile } from "../src/metrics/hunks.js";
-import { pullFile } from "../src/snapshot.js";
+import { COMMAND } from "../src/kit/constants.js";
+import { BATCH_FILES, batchesOf, measurable, measurementState, metricsDiffCommand, renderMeasurements, splitBatch, staticCommand, type Batch } from "../src/kit/measurements.js";
+import { parseHunkFile } from "../src/kit/metrics/hunks.js";
+import { pullFile } from "../src/kit/snapshot.js";
 import { BANYANDB, profileOf, root } from "./support.js";
 
 const dirs: string[] = [];

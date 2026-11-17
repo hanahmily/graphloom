@@ -3,15 +3,15 @@
 
 import { applyReferenceEnums, checkContract, type EvidenceRecord, type JobSpec } from "@graphloom/sdk";
 import { describe, expect, it } from "vitest";
-import { evidencePull } from "../src/analysis.js";
+import { evidencePull } from "../src/kit/analysis.js";
 import { answerProblems, parseAnswers, readAnswerCheck, searchItems, unmeasuredAbsences, verificationPlan, type Answer, type FinalAnswer } from "../src/answers.js";
-import { readClaimCheck, type ClaimTarget } from "../src/claims.js";
+import { readClaimCheck, type ClaimTarget } from "../src/kit/claims.js";
 import { definitionFor } from "../src/graph.js";
-import { resolveId } from "../src/ids.js";
-import { parseProfile } from "../src/profile.js";
+import { resolveId } from "../src/kit/ids.js";
+import { parseProfile } from "../src/kit/profile.js";
 import { answerContext, qaContext, questionSet, afterNecessity, type QaContext } from "../src/qaflow.js";
 import { REHEARSAL_MERGE_BASE, rehearsal } from "../src/rehearsal.js";
-import { ereProblem, MAX_RERUN_SEARCHES, pathProblem, readSearchReport, searchProblems, type Search } from "../src/searches.js";
+import { ereProblem, MAX_RERUN_SEARCHES, pathProblem, readSearchReport, searchProblems, type Search } from "../src/kit/searches.js";
 import { searchLine } from "../src/searchview.js";
 import { assignmentOf, BANYANDB, jobsOf, profileOf, scenarioWith, simulate, type Simulation } from "./support.js";
 

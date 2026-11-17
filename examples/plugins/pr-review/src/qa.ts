@@ -10,16 +10,16 @@
  * item, each with its searches.
  */
 import type { FinalAnswer } from "./answers.js";
-import type { Groundwork } from "./groundwork.js";
+import type { Groundwork } from "./kit/groundwork.js";
 import { brokenNote, effectiveConclusion, NECESSITY_ID, ROUNDS_SKIP_NOTE, ROUNDS_SKIP_REASON, SKIPPED_NOTE, supportedBreaks, type NecessityRecord } from "./necessity.js";
 import { incrementalLine, type IncrementalNote } from "./incremental.js";
-import { describeReasons, type ReviewMode } from "./mode.js";
+import { describeReasons, type ReviewMode } from "./kit/mode.js";
 import type { PurposeRecord, Question } from "./questions.js";
-import { needAuthor, openQuestions } from "./scope.js";
+import { needAuthor, openQuestions } from "./kit/scope.js";
 import { searchLine, withMeasure } from "./searchview.js";
-import { questionItems, type ReportView } from "./reportview.js";
-import type { PullRequest } from "./request.js";
-import type { SymbolDef } from "./symbols.js";
+import { questionItems, type ReportView } from "./kit/reportview.js";
+import type { PullRequest } from "./kit/request.js";
+import type { SymbolDef } from "./kit/symbols.js";
 
 export const QA_FILE_SCHEMA = "pr-qa-v1";
 /** What the Q&A says of weak-test questions, which a surviving mutant raises and mutation testing (a later version) produces. */

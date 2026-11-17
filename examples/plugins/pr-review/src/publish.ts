@@ -17,25 +17,25 @@
  * outdated; it counts toward the verdict, so `Review passed` means no round-1 issue and no round-2 finding is open, earlier ones included.
  */
 import { MAX_EXECUTOR_INPUT_BYTES, type EnvironmentCommand, type EvidenceRecord } from "@graphloom/sdk";
-import { COMMAND, CREATE_PULL_REVIEW, GET_VIEWER, LEDGER_MOVED, PART_BASE, PUBLISH_PATCH_FILE, PUBLISH_STAGE, ledgerRef } from "./constants.js";
+import { COMMAND, CREATE_PULL_REVIEW, GET_VIEWER, LEDGER_MOVED, PART_BASE, PUBLISH_PATCH_FILE, PUBLISH_STAGE, ledgerRef } from "./kit/constants.js";
 import { fitParts, type ItemParts } from "./answertext.js";
-import { clip, clipKeep, withoutFences } from "./escape.js";
-import { partCommands, readParts } from "./parts.js";
+import { clip, clipKeep, withoutFences } from "./kit/escape.js";
+import { partCommands, readParts } from "./kit/parts.js";
 import { anchored, severityLabel, type Draft, type DraftEntry } from "./draft.js";
-import { commandRuns, isObject, producer, reportText, succeeded, type CommandRun } from "./evidence.js";
-import type { Analysis } from "./analysis.js";
-import { ledgerRead, oldValue, parseSectionRecord, priorState, readBaselines, SECTION_PRELUDE, SECTION_RECORD } from "./ledger.js";
-import { LEDGER_V2, REVIEW_SCHEMA, reviewMarkdown, SKIPPED_NOTE, type Section } from "./ledgerv2.js";
-import { pinnedBase } from "./commands.js";
+import { commandRuns, isObject, producer, reportText, succeeded, type CommandRun } from "./kit/evidence.js";
+import type { Analysis } from "./kit/analysis.js";
+import { ledgerRead, oldValue, parseSectionRecord, priorState, readBaselines, SECTION_PRELUDE, SECTION_RECORD } from "./kit/ledger.js";
+import { LEDGER_V2, REVIEW_SCHEMA, reviewMarkdown, SKIPPED_NOTE, type Section } from "./kit/ledgerv2.js";
+import { pinnedBase } from "./kit/commands.js";
 import { draftWrites, recordedRound1 } from "./reviewdraft.js";
 import { anchorInfo, findingKey, registryFromEvidence, type PriorItem, type PriorRegistry } from "./prior.js";
-import { ASPECTS } from "./aspects.js";
+import { ASPECTS } from "./kit/aspects.js";
 import { findingsOf, type AspectRecord } from "./review.js";
 import { recordedAspect } from "./reviewdraft.js";
-import type { PullFile } from "./snapshot.js";
+import type { PullFile } from "./kit/snapshot.js";
 import { MAX_ITEM_TEXT, type Round1Covered, type Round1Record } from "./round1.js";
-import type { PullRequest } from "./request.js";
-import { READS, readResult, type ReadSpec } from "./snapshot.js";
+import type { PullRequest } from "./kit/request.js";
+import { READS, readResult, type ReadSpec } from "./kit/snapshot.js";
 
 export const PUBLISH_SCHEMA = "pr-review-publish-v1";
 /**

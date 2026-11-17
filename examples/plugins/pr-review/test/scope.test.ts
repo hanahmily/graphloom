@@ -2,8 +2,8 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { describe, expect, it } from "vitest";
-import type { MetricsRecord } from "../src/metrics/record.js";
-import { hotspots, hotspotText, isDocFile, isTestFile, needAuthor, openQuestions, scopeKindOf, scopeOf, scopeText } from "../src/scope.js";
+import type { MetricsRecord } from "../src/kit/metrics/record.js";
+import { hotspots, hotspotText, isDocFile, isTestFile, needAuthor, openQuestions, scopeKindOf, scopeOf, scopeText } from "../src/kit/scope.js";
 
 const GENERATED = { excludeRoots: ["**/*.pb.go", "api/gen"], globs: ["**/zz_generated*.go"] };
 

@@ -9,9 +9,9 @@
  * plugin's label rule, so a rehearsal exercises the whole diagram flow with a drawing that stands. They are test data, not a
  * layout engine: each stage's connectors leave and enter its right side, one lane each.
  */
-import type { FinalFeature } from "./briefing.js";
-import { diagramSpecs, featureDiagramId, type DiagramInput, type DiagramSpec } from "./diagrams.js";
-import { esc, wrap } from "./escape.js";
+import type { FinalFeature } from "./kit/briefing.js";
+import { diagramSpecs, featureDiagramId, type DiagramInput, type DiagramSpec } from "./kit/diagrams.js";
+import { esc, wrap } from "./kit/escape.js";
 
 const MONO = "ui-monospace, monospace";
 const SANS = "system-ui, sans-serif";

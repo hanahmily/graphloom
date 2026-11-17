@@ -6,16 +6,16 @@
  * reaches a reviewer: it starts a fresh session seeded with review.md only. An assignment is fitted to the executor's bound
  * like every other: bulk input is a file the agent reads (written before the job), the rest is a compact index.
  */
-import { ASPECT_TEXT, type Aspect, type RuleGroup } from "./aspects.js";
-import { clipText, fitLines, reviewFile, shrinkToFit, spillOf, type FileSpill, type Fitted } from "./fit.js";
-import { feedbackBlock, pullText, UNTRUSTED_PREAMBLE } from "./prompts.js";
+import { ASPECT_TEXT, type Aspect, type RuleGroup } from "./kit/aspects.js";
+import { clipText, fitLines, reviewFile, shrinkToFit, spillOf, type FileSpill, type Fitted } from "./kit/fit.js";
+import { feedbackBlock, pullText, UNTRUSTED_PREAMBLE } from "./kit/prompts.js";
 import type { NecessityRecord } from "./necessity.js";
-import { principlesFrom, type Principle, type PrinciplesContext } from "./principles.js";
+import { principlesFrom, type Principle, type PrinciplesContext } from "./kit/principles.js";
 import { fitPrinciples, howToRead } from "./qaprompts.js";
-import type { PullRequest } from "./request.js";
+import type { PullRequest } from "./kit/request.js";
 import { reproLanguage } from "./repro.js";
 import { MAX_SUGGESTION_LINES, type Finding, type PriorFinding } from "./review.js";
-import type { Snapshot } from "./snapshot.js";
+import type { Snapshot } from "./kit/snapshot.js";
 
 /** What a reviewer does after the per-file review: the change as a whole, across files (the defects a file-by-file review misses). */
 export const WHOLE_CHANGE_CHECK =

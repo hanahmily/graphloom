@@ -13,7 +13,7 @@ import {
   type Hunks,
   type MetricsDocument,
   type MetricsRecord,
-} from "../src/metrics/index.js";
+} from "../src/kit/metrics/index.js";
 
 const A_TS = [
   "export function small(a: number) {", // 1

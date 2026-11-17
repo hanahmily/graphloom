@@ -9,8 +9,8 @@ import { describe, expect, it } from "vitest";
 import { ANSWERS_SCHEMA, ANSWER_CHECK_SCHEMA, answerProblems, assemble, inventoryLimitNote, readAnswerCheck, unmeasuredAbsences, verificationPlan, type Answer, type AnswerContext, type FinalAnswer } from "../src/answers.js";
 import { QUESTION_TYPES, REUSE_TYPE, finalQuestions, questionerProblems, requiredQuestions, type Question } from "../src/questions.js";
 import { planQuestioner } from "../src/qaprompts.js";
-import { coarsestChanges, highLevelId, type ReportView, type ViewItem } from "../src/reportview.js";
-import { evidencePull } from "../src/analysis.js";
+import { coarsestChanges, highLevelId, type ReportView, type ViewItem } from "../src/kit/reportview.js";
+import { evidencePull } from "../src/kit/analysis.js";
 import { qaContext, type QaContext } from "../src/qaflow.js";
 import { profileOf, simulate } from "./support.js";
 

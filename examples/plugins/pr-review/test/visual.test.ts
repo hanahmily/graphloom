@@ -9,7 +9,7 @@ import { describe, expect, it } from "vitest";
 import type { Draft } from "../src/draft.js";
 import { htmlPagesFrom, htmlProblems, parseReportDoc, renderReviewHtml, type ReportDoc } from "../src/html.js";
 import { LARGE_LIMITS, REHEARSAL_HEAD, REHEARSAL_MERGE_BASE } from "../src/rehearsal.js";
-import { recordedAppendix, recordedHtml } from "../src/parts.js";
+import { recordedAppendix, recordedHtml } from "../src/kit/parts.js";
 import { squarify } from "../src/treemap.js";
 import { areaAnchor, areaReasons, areaRisk, checkCounts, questionGroups, riskAreas, scopeBarSvg, TYPE_ABBREVIATIONS, type QuestionTile } from "../src/visual.js";
 import { simulate } from "./support.js";

@@ -2,29 +2,29 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import type { EvidenceRecord, ValidationInput, ValidationResult, Validator } from "@graphloom/sdk";
-import { analyze, evidencePull, reportFlowOf, type Analysis } from "./analysis.js";
-import { checkoutCommand, guardCommand, headTreeCommand, parseHeadTree, parseLedger, pinnedBase } from "./commands.js";
-import { COMMAND, ENV_PLUGIN_ROOT, LEDGER_JSON_FILE, LEDGER_MD_FILE, LEDGER_REVIEW_JSON_FILE, LEDGER_REVIEW_MD_FILE, PART_BASE, QA_JSON, REPORT_JSON, REVIEW_MD } from "./constants.js";
-import { diagramFlow, diagramInputOf, type DiagramFlow } from "./diagrams.js";
-import { commandRuns, describeCommand, environmentOutput, outputTail, reportText, succeeded, type CommandRun } from "./evidence.js";
-import type { ReportFlow } from "./flow.js";
-import { measurementState, type MeasurementState } from "./measurements.js";
-import { reportJson, reviewMarkdown } from "./output.js";
-import { parseProfile, ProfileError, type Profile } from "./profile.js";
-import type { PullRequest } from "./request.js";
+import { analyze, evidencePull, reportFlowOf, type Analysis } from "./kit/analysis.js";
+import { checkoutCommand, guardCommand, headTreeCommand, parseHeadTree, parseLedger, pinnedBase } from "./kit/commands.js";
+import { COMMAND, ENV_PLUGIN_ROOT, LEDGER_JSON_FILE, LEDGER_MD_FILE, LEDGER_REVIEW_JSON_FILE, LEDGER_REVIEW_MD_FILE, PART_BASE, QA_JSON, REPORT_JSON, REVIEW_MD } from "./kit/constants.js";
+import { diagramFlow, diagramInputOf, type DiagramFlow } from "./kit/diagrams.js";
+import { commandRuns, describeCommand, environmentOutput, outputTail, reportText, succeeded, type CommandRun } from "./kit/evidence.js";
+import type { ReportFlow } from "./kit/flow.js";
+import { measurementState, type MeasurementState } from "./kit/measurements.js";
+import { reportJson, reviewMarkdown } from "./kit/output.js";
+import { parseProfile, ProfileError, type Profile } from "./kit/profile.js";
+import type { PullRequest } from "./kit/request.js";
 import { afterNecessity, answerContext, batchedAnswers, answerWrites, necessityFlow, qaContext, questionSet, questionerFlow, recordedNecessity, restFlow, skippedWrites, type AnswerWrites, type QaContext } from "./qaflow.js";
 import { answersFlow, type FinalAnswer } from "./answers.js";
 import { admissibleDecision, effectiveConclusion, necessityJson, NECESSITY_ID, ROUNDS_SKIP_REASON, roundsSkipJson, type NecessityRecord } from "./necessity.js";
-import { describeReasons, isLarge } from "./mode.js";
+import { describeReasons, isLarge } from "./kit/mode.js";
 import { requiredQuestions, statedPurposes } from "./questions.js";
-import { principlesRecord } from "./principles.js";
+import { principlesRecord } from "./kit/principles.js";
 import { htmlPagesFrom, htmlProblems } from "./html.js";
-import { ledgerRead, parseSectionRecord, writtenLedger } from "./ledger.js";
-import { blobId, treeId } from "./ledgerv2.js";
+import { ledgerRead, parseSectionRecord, writtenLedger } from "./kit/ledger.js";
+import { blobId, treeId } from "./kit/ledgerv2.js";
 import { incrementalReads } from "./incremental.js";
 import { registryFromEvidence } from "./prior.js";
 import { codeReview, draftComposed, findingsProven, reviewPublished, round1Gated } from "./reviewvalidators.js";
-import { readParts, recordedAppendix, recordedHtml, recordedNecessityJson, recordedQa, recordedReport, sha256 } from "./parts.js";
+import { readParts, recordedAppendix, recordedHtml, recordedNecessityJson, recordedQa, recordedReport, sha256 } from "./kit/parts.js";
 
 const passed = (reason: string): ValidationResult => ({ status: "passed", reason });
 const failed = (reason: string): ValidationResult => ({ status: "failed", reason });

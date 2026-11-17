@@ -7,12 +7,12 @@
  * bounded code), and that the page stays inert.
  */
 import { describe, expect, it } from "vitest";
-import type { Change } from "../src/briefing.js";
-import { buildCards, citedHunk, MAX_CARD_EXCERPT_LINES, MAX_EXCERPT_LINE_CHARS, MAX_EXCERPT_LINES, MAX_SYNCED_LISTED } from "../src/cards.js";
-import type { Cite } from "../src/cites.js";
+import type { Change } from "../src/kit/briefing.js";
+import { buildCards, citedHunk, MAX_CARD_EXCERPT_LINES, MAX_EXCERPT_LINE_CHARS, MAX_EXCERPT_LINES, MAX_SYNCED_LISTED } from "../src/kit/cards.js";
+import type { Cite } from "../src/kit/cites.js";
 import { htmlProblems, renderReviewHtml, type ReportDoc } from "../src/html.js";
 import { REHEARSAL_HEAD, REHEARSAL_MERGE_BASE } from "../src/rehearsal.js";
-import { pullFile, type PullFile } from "../src/snapshot.js";
+import { pullFile, type PullFile } from "../src/kit/snapshot.js";
 
 const GITHUB = { owner: "apache", repo: "skywalking-banyandb", head: REHEARSAL_HEAD, base: REHEARSAL_MERGE_BASE };
 const file = (path: string, patch: string | null, over: Partial<{ status: string; previousPath: string | null }> = {}): PullFile =>

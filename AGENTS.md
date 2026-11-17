@@ -68,6 +68,13 @@ The plugin also vendors the third-party diagram-design agent skill
 [§12.4](docs/design-pr-review-graph.md#124-the-vendored-diagram-design-skill)),
 which its diagram job draws with; `vendor/` directories are exempt from the SPDX
 header check and listed in `THIRD_PARTY_NOTICES`.
+The review machinery the two graphs will share (Fetch, the ledger, the change
+report, measurements, groundwork, the profile parser) is the review kit,
+`examples/plugins/review-kit/src`, a plain source tree copied byte for byte into
+`examples/plugins/pr-review/src/kit/` (split design
+[§2](docs/design-pr-review-split.md#2-two-graphs-two-plugins)): edit the kit, never
+the copy, then `npm run vendor -w @graphloom/plugin-pr-review` and regenerate the
+manifest; the plugin's `kit-drift.test.ts` fails, naming the file, when they differ.
 
 Installable releases (tarball, install layout, upgrade, local release
 procedure) follow the [release design](docs/design-release.md).

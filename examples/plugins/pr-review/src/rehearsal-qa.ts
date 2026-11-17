@@ -11,26 +11,26 @@
  */
 import type { RehearsalCommandResult, RehearsalReply } from "@graphloom/sdk";
 import { needsOwnSearch, searchItems, verificationPlan, type Answer, type CheckVerdict, type VerifyItem } from "./answers.js";
-import { COMMAND } from "./constants.js";
-import { isLarge, questionsMode, STANDARD, type ReviewMode } from "./mode.js";
+import { COMMAND } from "./kit/constants.js";
+import { isLarge, questionsMode, STANDARD, type ReviewMode } from "./kit/mode.js";
 import { answerBatches, batchCitePrefix, batchRecordId } from "./qaflow.js";
 import { effectiveConclusion, necessityAnswer, necessityQuestion, type Necessity, type PrincipleVerdict } from "./necessity.js";
-import { applies, parsePrinciples } from "./principles.js";
-import { candidatePlan, type Groundwork } from "./groundwork.js";
-import { declaredDependencies, parseManifests, siteCommands } from "./inventory.js";
-import type { MetricsRecord } from "./metrics/record.js";
-import { effectivePacks } from "./packs.js";
-import type { Profile } from "./profile.js";
-import { parseSearch, type SearchSection } from "./queries.js";
+import { applies, parsePrinciples } from "./kit/principles.js";
+import { candidatePlan, type Groundwork } from "./kit/groundwork.js";
+import { declaredDependencies, parseManifests, siteCommands } from "./kit/inventory.js";
+import type { MetricsRecord } from "./kit/metrics/record.js";
+import { effectivePacks } from "./kit/packs.js";
+import type { Profile } from "./kit/profile.js";
+import { parseSearch, type SearchSection } from "./kit/queries.js";
 import { REUSE_TYPE, finalQuestions, itemOfSymbol, pinnedTexts, requiredQuestions, statedPurposes, type Question, type QuestionerOutput, type QuestionType } from "./questions.js";
-import { changeItems, highLevelId, type ReportView } from "./reportview.js";
-import type { ReporterOutput } from "./report.js";
-import { numbered } from "./report.js";
-import type { PullFile } from "./snapshot.js";
-import { changedSymbols, parseBaseDefinitions, type SymbolDef } from "./symbols.js";
-import { sourceFiles } from "./groundwork.js";
-import { mapTests } from "./testmap.js";
-import type { Section } from "./template.js";
+import { changeItems, highLevelId, type ReportView } from "./kit/reportview.js";
+import type { ReporterOutput } from "./kit/report.js";
+import { numbered } from "./kit/report.js";
+import type { PullFile } from "./kit/snapshot.js";
+import { changedSymbols, parseBaseDefinitions, type SymbolDef } from "./kit/symbols.js";
+import { sourceFiles } from "./kit/groundwork.js";
+import { mapTests } from "./kit/testmap.js";
+import type { Section } from "./kit/template.js";
 
 export interface Hit {
   path: string;

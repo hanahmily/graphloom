@@ -8,8 +8,8 @@
 
 import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
-import { parseHunkFile } from "./hunks.js";
-import { runTsMetrics } from "./tsmetrics.js";
+import { parseHunkFile } from "../kit/metrics/hunks.js";
+import { runTsMetrics } from "../kit/metrics/tsmetrics.js";
 
 function main(): number {
   const { values } = parseArgs({

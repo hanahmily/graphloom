@@ -7,11 +7,11 @@
  * conversation reaches a reviewer). All of it is recorded once, in the `review-scope` record, so a stop and a resume keep it.
  */
 import { createHash } from "node:crypto";
-import type { Area, Partition } from "./areas.js";
-import type { Bullet } from "./briefing.js";
-import { isObject } from "./evidence.js";
-import type { ReviewMode } from "./mode.js";
-import type { PullFile } from "./snapshot.js";
+import type { Area, Partition } from "./kit/areas.js";
+import type { Bullet } from "./kit/briefing.js";
+import { isObject } from "./kit/evidence.js";
+import type { ReviewMode } from "./kit/mode.js";
+import type { PullFile } from "./kit/snapshot.js";
 
 export const SCOPE_SCHEMA = "pr-review-scope-v1";
 export const SCOPE_RECORD_ID = "review-scope";

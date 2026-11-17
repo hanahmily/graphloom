@@ -11,7 +11,7 @@ import {
   matchesGeneratedGlob,
   parseHunkFile,
   unquoteGitPath,
-} from "../src/metrics/index.js";
+} from "../src/kit/metrics/index.js";
 
 describe("hunks", () => {
   it("round-trips the hunk file and rejects bad lines", () => {

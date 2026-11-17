@@ -8,8 +8,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { confinementProblem, type EvidenceRecord, type JobSpec } from "@graphloom/sdk";
 import { describe, expect, it } from "vitest";
-import { coverageCommand, coverageConfinement, coverageState, DEFAULT_TS_IMAGE, goTestTimeoutSeconds, majorOf, measuredSpec, missingProbe, recordKey, sandboxEnvironmentChecks, sandboxProbeCommands, type CoverageInput, type CoverageState } from "../src/coverage.js";
-import { coverageNotes, withOutcome } from "../src/measurements.js";
+import { coverageCommand, coverageConfinement, coverageState, DEFAULT_TS_IMAGE, goTestTimeoutSeconds, majorOf, measuredSpec, missingProbe, recordKey, sandboxEnvironmentChecks, sandboxProbeCommands, type CoverageInput, type CoverageState } from "../src/kit/coverage.js";
+import { coverageNotes, withOutcome } from "../src/kit/measurements.js";
 import {
   formatSpec,
   goFunctionCoverage,
@@ -20,8 +20,8 @@ import {
   reduceIstanbul,
   tsFunctionCoverage,
   type CoverageReport,
-} from "../src/metrics/coverage.js";
-import type { FunctionIndexEntry, MetricsRecord } from "../src/metrics/record.js";
+} from "../src/kit/metrics/coverage.js";
+import type { FunctionIndexEntry, MetricsRecord } from "../src/kit/metrics/record.js";
 import { requiredQuestions } from "../src/questions.js";
 import { validatorById } from "../src/validators.js";
 import { BANYANDB, candidateEvidence, profileOf, simulate } from "./support.js";
