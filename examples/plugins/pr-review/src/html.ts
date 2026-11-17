@@ -192,8 +192,10 @@ function findingHtml(f: Finding, d: Draft, g: Github, full: boolean): string {
 }
 
 /** The Review part of the briefing: the findings by severity with counts, each collapsed except the blocking ones. */
-function reviewHtml(d: Draft | undefined, g: Github): string {
+function reviewHtml(d: Draft | undefined, report: Github): string {
   if (d === undefined) return "";
+  // The findings and the leads are this head's: linked at the draft's head and base, whatever head the context report is of.
+  const g: Github = { ...report, head: d.head, base: d.base };
   const live = d.review.findings.filter((f) => f.state !== "dismissed");
   const counts = `${d.review.findings.filter((f) => f.state === "confirmed").length} confirmed · ${d.review.findings.filter((f) => f.state === "disputed").length} disputed · ${d.review.findings.filter((f) => f.state === "dismissed").length} dismissed`;
   const groups = SEVERITIES.flatMap((sev) => {
@@ -211,8 +213,10 @@ function reviewHtml(d: Draft | undefined, g: Github): string {
 }
 
 /** The appendix's Review part: every finding in full, with its verdict, and the draft. */
-function reviewAppendixHtml(d: Draft | undefined, g: Github): string {
+function reviewAppendixHtml(d: Draft | undefined, report: Github): string {
   if (d === undefined) return "";
+  // The findings and the leads are this head's: linked at the draft's head and base, whatever head the context report is of.
+  const g: Github = { ...report, head: d.head, base: d.base };
   const aspects = d.review.aspects.map((a) => `<tr><td>${esc(a.aspect)}</td><td>${esc(a.reviewer)}</td><td>${esc(a.verifier)}</td><td>${a.passes}${a.unsaturated ? " (not saturated)" : ""}</td><td>${a.confirmed}</td><td>${a.disputed}</td><td>${a.dismissed}</td><td>${a.nits}</td></tr>`).join("");
   const body = [
     `<h3>Aspects</h3><div class="scroll"><table><thead><tr><th>Aspect</th><th>Reviewer</th><th>Verifier</th><th>Passes</th><th>Confirmed</th><th>Disputed</th><th>Dismissed</th><th>Nits not verified</th></tr></thead><tbody>${aspects}</tbody></table></div>`,

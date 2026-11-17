@@ -60,8 +60,13 @@ export function symbolOfRecord(r: Pick<MetricsRecord, "path" | "function" | "sta
 /** The record of a symbol, when one was measured. */
 const recordOfSymbol = (s: SymbolDef, records: readonly MetricsRecord[]): MetricsRecord | undefined => records.find((r) => r.path === s.path && (r.function === s.qualified || (r.startLine === s.startLine && r.endLine === s.endLine)));
 
-/** A function the test rule applies to: not a type or an interface, and not in a test file. */
-const isFunction = (s: SymbolDef): boolean => s.kind !== "type" && s.kind !== "interface" && !isTestPath(s.path);
+/** The symbol kinds of the packs that are callable: a Go func or method, a TypeScript function, method, constructor or class member. */
+const CALLABLE: ReadonlySet<string> = new Set(["func", "method", "function", "constructor", "member"]);
+/** A function-valued `const`, `let` or `var` (`const f = (x) => …`, `= async function …`), which is callable too. */
+const FUNCTION_VALUE = /=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*(?::[^=]*)?=>|[A-Za-z_$][\w$]*\s*=>)/;
+
+/** A function the test rule applies to: a callable declaration (not a type, an interface, a class or a plain constant), not in a test file. */
+const isFunction = (s: SymbolDef): boolean => (CALLABLE.has(s.kind) || ((s.kind === "const" || s.kind === "let" || s.kind === "var") && FUNCTION_VALUE.test(s.body))) && !isTestPath(s.path);
 
 export interface LeadInput {
   records: readonly MetricsRecord[];

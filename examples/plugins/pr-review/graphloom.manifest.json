@@ -16,7 +16,7 @@
     "vitest": "^4.1.12"
   },
   "digests": {
-    "sourceTree": "326eba1e22a41f156516775aedba4b3efe310aef62c669b04ff88d9949b2a7e5",
+    "sourceTree": "acc7a3925af5ed3163dc12e1f60561adaa1884eac9b87fc26596a1f84f0c613a",
     "packageLock": "1123e4e7d6011e4d012ec8a7d176b90952dd9efc98c832e27e3c856aad263108",
     "files": {
       "package.json": "7df63cfd7c8551cda0949401f18303c2e351cde84eb3c25be343b6eb89d82151",
@@ -61,7 +61,7 @@
       "src/context.ts": "dd2b9376de2890c1bc82fa936935032e7bdcc8941a14f31c8becf04dd951bb39",
       "src/draft.ts": "a808e773f373696fe1125a3d31b03af76274f0ab7aad7057d7f1831a4afe4cb7",
       "src/graph.ts": "9899943896e7e35bcdcc0a48ba4dea574082a2d50dbd0270ed6e56b789cff564",
-      "src/html.ts": "e4085ae4d423b4ae59ebcbd020f072c6079240c40e9381131698f9cc17ccab1b",
+      "src/html.ts": "998fa90a2546eb510b4eb11d26c8a49aba8d7f6133f5be97d67f83e7e4729d20",
       "src/index.ts": "70879220b9d758df6ae508987dce0a944164b1cb4956d2c65f85aa08e68fe1d8",
       "src/kit/analysis.ts": "98e49401ab61e25e0663a6b8aeecf0903eca7e12b81f859654c08332fde597fa",
       "src/kit/answertext.ts": "6bea1ec706ae22d177b3d76f4a747c33fe406d22b5a73a5ea3277fd1726db2a3",
@@ -133,7 +133,7 @@
       "src/kit/treemap.ts": "bf92e7a65ccede1f6dc2a2ba719ec580d57b9ca6586a64b57ac68776e577d97e",
       "src/kit/treequotes.ts": "6bd09220894b486e1d11ed9e4520885c793f94a95b22f6d5eb3ccf4e7bbe8be7",
       "src/kit/write.ts": "9018145e2a9a54ab15365779fb208b336348bed05eefabb644da75b5c2657778",
-      "src/leads.ts": "c4f036a1e88cf35259f34b8211aa58def7382f3f04bad0fcfcd0b8bcadaa4e17",
+      "src/leads.ts": "0e439c4c0232afb7c42087cc33f9e8e17079539850adbf669fb6b756fd239a1a",
       "src/metrics/tscover-cli.ts": "04f6844ef6ce028b8e14151d3ba46a31779a6422b9dd8902d24c5ab23c9095d6",
       "src/metrics/tsmetrics-cli.ts": "410ec84f60f91b8507b7c2dd7a237f5f85c18e98d0ec635820e3f409b0b3ceb6",
       "src/necessity.ts": "4ae1283c0d7d0b9c151ca8a6da90381777586f5705f84baa528b034aff0696a3",
@@ -201,6 +201,7 @@
       "test/repro-script.test.ts": "45f74d1872276f1d2f158828b4f2a47c6b07d26822f60a5db4f137931250906a",
       "test/repro.test.ts": "e71e3f7d757ba68a19d3ad32f0058b7f2d2919c356f6cd14f332b5c91dc47065",
       "test/rereview.test.ts": "12bab8a0cafe80479ef6958f3df57cc55339b666da825d6397a487885ce1a2e1",
+      "test/review-links.test.ts": "85ae37d91b12ed406be435ed509c1600cd2b39bbc6e37091ee164b2e350e3531",
       "test/review-principles.test.ts": "9db6185c9bd763089c7ada7f167ebb51d544152f08e975b506e59d699898bb30",
       "test/review-units.test.ts": "be0bf98a4a6e29176cd21cceabadd80ba96fe9c062455913c7d456f4dcc08ce3",
       "test/review.test.ts": "f5d9c232d0d1a5465d37470b8e3fab5d2e1ba06df1dfb00c3dc00e0e3efc5f55",
