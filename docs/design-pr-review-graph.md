@@ -36,6 +36,12 @@ plugin would live in `examples/plugins/pr-review`. It reuses the review
 machinery of the [issue-fix graph](design-issue-fix-graph.md) and needs these
 generic platform changes ([§15](#15-generic-platform-changes)).
 
+**Split designed, not implemented.** The [PR-review split](design-pr-review-split.md)
+divides this graph into two: `pr-design-review` (round 1, narrowed to design-level
+questions) and `pr-review` 1.x (round 2 only, runnable alone, with the detail
+questions as leads for its reviewers). This document describes pr-review 0.26.x
+until the split lands; the split's implementation rewrites it.
+
 ## 1. Purpose and fixed decisions
 
 `pr-review` helps the maintainer of a repository understand an **incoming**

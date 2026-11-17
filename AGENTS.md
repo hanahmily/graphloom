@@ -58,6 +58,10 @@ review whose first line is the verdict) follows the
 [PR-review design](docs/design-pr-review-graph.md); its shared review machinery
 is vendored source, not a dependency. Its one write, the review, needs the runner
 config's `github.writeTokenEnv`; the plugin never sees the token.
+Splitting it into two graphs, `pr-design-review` (round 1, design-level questions)
+and `pr-review` 1.x (round 2 only, runnable alone), with one ledger per pull request
+and a section per graph, is designed in [the PR-review split](docs/design-pr-review-split.md)
+and not implemented yet.
 The plugin also vendors the third-party diagram-design agent skill
 (`examples/plugins/pr-review/vendor/diagram-design`, MIT, unmodified, with its
 `LICENSE` and a `VENDORED.md` naming source and commit; design
