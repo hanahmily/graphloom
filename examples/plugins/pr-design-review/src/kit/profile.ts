@@ -147,6 +147,11 @@ export const ROLES: readonly Role[] = [
   ...ASPECTS.map(reviewerRole), ...ASPECTS.map(verifierRole),
 ];
 
+/** The roles only the design review runs (design-pr-review-split §7.2): `pr-review` accepts their `harnesses` entries unread. */
+export const DESIGN_ROLES: readonly Role[] = ["questioner", "answerer", "batch-answerer", "answer-checker"];
+/** The roles `pr-review` runs: the report-only prelude's, and each aspect's reviewer and verifier. */
+export const REVIEW_ROLES: readonly Role[] = ROLES.filter((r) => !DESIGN_ROLES.includes(r));
+
 /** The harness each role defaults to (design §13.1). */
 const DEFAULT_ROLES: Record<Role, string> = {
   reporter: "claude-code",
@@ -158,7 +163,7 @@ const DEFAULT_ROLES: Record<Role, string> = {
   // Optional: absent, it takes the answerer's harness, model and effort too (checkRoles).
   "batch-answerer": "claude-code",
   "answer-checker": "codex",
-  // The review layer's roles resolve from the answerer's harness (checkRoles): the reviewer's, then the verifier's other one.
+  // A reviewer runs on Claude Code unless the profile names another (design-pr-review-split §7.2); a verifier takes the first other harness of its preference (checkRoles).
   "reviewer-correctness": "claude-code",
   "reviewer-maintainability": "claude-code",
   "reviewer-security": "claude-code",
@@ -199,10 +204,6 @@ const EFFORTS: Readonly<Record<string, readonly string[]>> = {
   codex: ["minimal", "low", "medium", "high", "xhigh"],
 };
 
-/** The rounds a run does (design §3.2): every run has the same stages; `review-only` passes Questions, Answers and Round 1 on a recorded skip. */
-export const ROUNDS = ["both", "review-only"] as const;
-export type Rounds = (typeof ROUNDS)[number];
-
 export interface ProfileData {
   name: string;
   description?: string;
@@ -210,8 +211,6 @@ export interface ProfileData {
   project: string;
   /** The branch pull requests are made against, for `graphloom task new` (default `main`); `--base` overrides it. */
   baseBranch?: string;
-  /** Which rounds the run does (design §3.2, version 0.23): `both` (default) or `review-only`. */
-  rounds?: Rounds;
   issues?: { owner: string; repo: string };
   environment: { checks: EnvironmentCommand[] };
   report?: { sections: SectionConfig[] };
@@ -234,8 +233,6 @@ export interface Profile {
   project: string;
   /** The branch pull requests are made against (`task new`); `main` unless the profile names another. */
   baseBranch: string;
-  /** `both`: round 1 (report, Q&A) gates round 2; `review-only`: the report, then round 2, with the Q&A and round 1 skipped by the operator's choice. */
-  rounds: Rounds;
   owner: string;
   repo: string;
   environment: { checks: EnvironmentCommand[] };
@@ -255,7 +252,7 @@ export interface Profile {
   agentTimeoutMs?: number;
   /** The review layer's settings (design §8.1). */
   review: ReviewConfig;
-  /** The design review's comment settings (design-pr-review-split §7.2); empty for pr-review, which refuses comments in this version. */
+  /** The comment settings (design-pr-review-split §7.2): the footer both graphs append, and the design review's `designPassedNote`. */
   comments: CommentsConfig;
 }
 
@@ -305,7 +302,6 @@ const HARNESSES: Readonly<Record<string, string>> = { "claude-code": "Claude Cod
 const LATER_FIELDS: Readonly<Record<string, string>> = {
   rules: "the review layer",
   checks: "the Checks stage",
-  comments: "the review layer",
 };
 
 export class ProfileError extends Error {
@@ -321,7 +317,7 @@ export class ProfileError extends Error {
 /**
  * Which graph a profile is parsed for (design-pr-review-split §7.2). One operator profile may serve both review graphs: the
  * design review's parser accepts the keys only `pr-review` reads, without reading or checking them, and refuses any key neither
- * reads. `pr-review` is this version's two-round graph, whose parser is unchanged.
+ * reads. `pr-review` is round 2 (1.x): it accepts the design review's keys unread the same way.
  */
 export type ProfileGraph = "pr-review" | "pr-design-review";
 
@@ -338,11 +334,12 @@ const REVIEW_COMMENT_KEYS: readonly string[] = ["minSeverity", "nits", "maxComme
 const MAX_FOOTER_CHARS = 1_000;
 /** The top-level keys only `pr-review` reads, which the design review accepts unread. */
 const REVIEW_ONLY_KEYS: readonly string[] = ["review", "rules", "checks"];
-/** What the design review says of `rounds`, which neither graph reads after the split. */
+/** What both graphs say of `rounds`, which neither reads after the split (design-pr-review-split §7.2, §8). */
 const ROUNDS_GONE = "rounds is gone: a run of pr-design-review is round 1 (the design review) and a run of pr-review is round 2 (the PR review); drop rounds and run the graph you want (review-only meant: run pr-review)";
 
-/** The design review's `comments`, or the empty setting; `comments.questions` is refused, `pr-review`'s own keys are accepted unread. */
-function checkComments(raw: unknown): CommentsConfig {
+/** `comments` as a graph reads it: `comments.questions` is refused by both, the other graph's keys are accepted unread. */
+function checkComments(raw: unknown, graph: ProfileGraph): CommentsConfig {
+  if (graph === "pr-review") return checkReviewComments(raw);
   if (raw === undefined) return { designPassedNote: false };
   need(isObject(raw), "comments must be an object");
   const c = raw as Record<string, unknown>;
@@ -351,6 +348,21 @@ function checkComments(raw: unknown): CommentsConfig {
   need(c.designPassedNote === undefined || typeof c.designPassedNote === "boolean", "comments.designPassedNote must be true or false");
   need(c.footer === undefined || (isString(c.footer) && (c.footer as string).length <= MAX_FOOTER_CHARS && !(c.footer as string).includes("<!--")), `comments.footer must be text of at most ${MAX_FOOTER_CHARS} characters, with no HTML comment`);
   return { designPassedNote: (c.designPassedNote as boolean | undefined) ?? false, ...(c.footer !== undefined ? { footer: c.footer as string } : {}) };
+}
+
+/**
+ * `pr-review`'s `comments`: the footer is read; `designPassedNote` is the design review's, accepted unread; `questions` is refused (no
+ * Q&A item is drafted); `minSeverity`, `nits`, `maxComments` and `suggestions` belong to a later version and are refused with that reason.
+ */
+function checkReviewComments(raw: unknown): CommentsConfig {
+  if (raw === undefined) return { designPassedNote: false };
+  need(isObject(raw), "comments must be an object");
+  const c = raw as Record<string, unknown>;
+  need(c.questions === undefined, "comments.questions is not a field: no Q&A item is drafted (the design review, pr-design-review, posts round 1's items)");
+  for (const key of REVIEW_COMMENT_KEYS) need(c[key] === undefined, `comments.${key} is not supported in this version of pr-review`);
+  onlyKeys(c, "comments", ["footer", "designPassedNote"]);
+  need(c.footer === undefined || (isString(c.footer) && (c.footer as string).length <= MAX_FOOTER_CHARS && !(c.footer as string).includes("<!--")), `comments.footer must be text of at most ${MAX_FOOTER_CHARS} characters, with no HTML comment`);
+  return { designPassedNote: false, ...(c.footer !== undefined ? { footer: c.footer as string } : {}) };
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
@@ -677,9 +689,10 @@ function checkSupervisor(raw: unknown): SupervisorPreference {
 
 function checkRoles(raw: unknown, graph: ProfileGraph = "pr-review"): { roles: Record<Role, string>; settings: Partial<Record<Role, RoleSettings>> } {
   need(raw === undefined || isObject(raw), "harnesses must be an object");
-  // The design review has no reviewer or verifier: their entries are accepted unread, and those roles keep the defaults below.
-  const reviewLayer = new Set<string>(ROLES.filter((r) => r.startsWith("reviewer-") || r.startsWith("verifier-")));
-  const h = Object.fromEntries(Object.entries((raw ?? {}) as Record<string, unknown>).filter(([k]) => graph === "pr-review" || !reviewLayer.has(k)));
+  // Each graph accepts the other's roles unread (design-pr-review-split §7.2): the design review has no reviewer or verifier, and
+  // pr-review no questioner or answerer. Those roles keep the defaults below and take part in no check.
+  const unread = new Set<string>(graph === "pr-review" ? DESIGN_ROLES : ROLES.filter((r) => r.startsWith("reviewer-") || r.startsWith("verifier-")));
+  const h = Object.fromEntries(Object.entries((raw ?? {}) as Record<string, unknown>).filter(([k]) => !unread.has(k)));
   for (const key of Object.keys(h)) need((ROLES as readonly string[]).includes(key), `harnesses.${key} is not a role; the roles of this version are ${ROLES.join(", ")}`);
   const roles = { ...DEFAULT_ROLES };
   const settings: Partial<Record<Role, RoleSettings>> = {};
@@ -710,25 +723,20 @@ function checkRoles(raw: unknown, graph: ProfileGraph = "pr-review"): { roles: R
     roles["batch-answerer"] = roles.answerer;
     if (settings.answerer !== undefined) settings["batch-answerer"] = { ...settings.answerer };
   }
-  // The review layer's roles (design §13.1). A reviewer takes the answerer's harness, model and effort unless the profile
-  // sets it; the base session it forks (once forking exists) runs on the answerer's harness, so a reviewer on another one is refused.
-  for (const a of ASPECTS) {
-    const r = reviewerRole(a);
-    if (h[r] === undefined) {
-      roles[r] = roles.answerer;
-      if (settings.answerer !== undefined) settings[r] = { ...settings.answerer };
-    }
-    need(roles[r] === roles.answerer, `harnesses.${r} must be the answerer's harness (${roles.answerer}; it is ${roles[r]}): a reviewer starts from the answerer's session, and a session continues only on its own harness`);
-  }
+  // A reviewer runs on Claude Code unless the profile names another (design-pr-review-split §7.2): the constraint that it share the
+  // answerer's harness went with the answerer.
   // A verifier takes the first harness of its preference that is not its reviewer's.
   for (const a of ASPECTS) {
     const v = verifierRole(a);
     if (h[v] === undefined) roles[v] = VERIFIER_PREFERENCE[a].find((x) => x !== roles[reviewerRole(a)])!;
   }
   // The maintainer opens the answerer's session (design §13.1; in large mode the batch-answerer's), and a Pi session has no interactive restore.
-  need(roles.answerer !== "pi", 'harnesses.answerer must be claude-code or codex: a Pi session cannot be opened by the maintainer, so the review layer could not continue from it');
-  need(roles["batch-answerer"] !== "pi", 'harnesses.batch-answerer must be claude-code or codex: a Pi session cannot be opened by the maintainer, so the review layer could not continue from it');
+  if (graph === "pr-design-review") {
+    need(roles.answerer !== "pi", 'harnesses.answerer must be claude-code or codex: a Pi session cannot be opened by the maintainer, so the review layer could not continue from it');
+    need(roles["batch-answerer"] !== "pi", 'harnesses.batch-answerer must be claude-code or codex: a Pi session cannot be opened by the maintainer, so the review layer could not continue from it');
+  }
   for (const [checked, author] of DISTINCT_PAIRS) {
+    if (unread.has(checked) || unread.has(author)) continue;
     need(roles[checked] !== roles[author], `harnesses.${checked} must differ from harnesses.${author} (both are ${roles[checked]}): an artifact is checked on a harness other than its author's`);
   }
   return { roles, settings };
@@ -806,18 +814,17 @@ function parseFor(config: unknown, graph: ProfileGraph): Profile {
   if (config === undefined) throw new ProfileError("the task names no profile: set config: to a profile JSON file in the task file");
   need(isObject(config), "the config must be a JSON object");
   const p = config as Record<string, unknown>;
-  if (design) need(p.rounds === undefined, ROUNDS_GONE);
+  need(p.rounds === undefined, ROUNDS_GONE);
   for (const key of design ? [] : Object.keys(p)) {
     if (LATER_FIELDS[key] !== undefined) throw new ProfileError(`${key} is not supported in this version: it belongs to ${LATER_FIELDS[key]}`);
   }
   const common = ["name", "description", "project", "baseBranch", "issues", "environment", "report", "symbols", "questions", "metrics", "context", "privateRepos", "harnesses", "supervisor", "budgets", "limits", "agent"];
-  onlyKeys(p, "", design ? [...common, "comments", ...REVIEW_ONLY_KEYS] : [...common.slice(0, 4), "rounds", ...common.slice(4), "review"]);
+  onlyKeys(p, "", design ? [...common, "comments", ...REVIEW_ONLY_KEYS] : [...common, "comments", "review"]);
   need(isString(p.name), "name is required");
   need(typeof p.description === "undefined" || isString(p.description), "description must be text");
   need(typeof p.project === "string" && REPO_NAME.test(p.project), 'project is required, as "owner/name"');
   const [owner, repo] = (p.project as string).split("/") as [string, string];
   need(p.baseBranch === undefined || (typeof p.baseBranch === "string" && BRANCH_NAME.test(p.baseBranch) && !(p.baseBranch as string).includes("..") && !(p.baseBranch as string).endsWith("/") && !(p.baseBranch as string).endsWith(".lock")), "baseBranch must be a branch name");
-  need(p.rounds === undefined || (ROUNDS as readonly unknown[]).includes(p.rounds), `rounds must be ${ROUNDS.map((r) => JSON.stringify(r)).join(" or ")}`);
   if (p.issues !== undefined) {
     need(isObject(p.issues), "issues must be an object");
     onlyKeys(p.issues as Record<string, unknown>, "issues", ["owner", "repo"]);
@@ -831,15 +838,16 @@ function parseFor(config: unknown, graph: ProfileGraph): Profile {
     need(isObject(p.questions), "questions must be an object");
     const q = p.questions as Record<string, unknown>;
     onlyKeys(q, "questions", ["excludeRoots", "similarity", "maxCandidates", "designDocs", "principles", "incremental"]);
-    need(q.incremental === undefined || typeof q.incremental === "boolean", "questions.incremental must be true or false");
+    // questions.designDocs and questions.incremental are the design review's: pr-review accepts them unread.
+    need(!design || q.incremental === undefined || typeof q.incremental === "boolean", "questions.incremental must be true or false");
     need(q.excludeRoots === undefined || isStrings(q.excludeRoots), "questions.excludeRoots must be a list of paths");
     // They travel in one argument of each search command, which a command allows 4,096 characters.
     need(q.excludeRoots === undefined || (q.excludeRoots as string[]).join("\n").length <= 3_000, "questions.excludeRoots is too long: at most 3,000 characters in all");
     need(design || q.similarity === undefined || (typeof q.similarity === "number" && q.similarity > 0 && q.similarity <= 1), "questions.similarity must be a number above 0 and at most 1");
     need(design || q.maxCandidates === undefined || isCount(q.maxCandidates), "questions.maxCandidates must be a positive integer");
-    need(q.designDocs === undefined || isStrings(q.designDocs), "questions.designDocs must be a list of repository-relative globs");
-    need(q.designDocs === undefined || (q.designDocs as string[]).every((g) => g.trim() !== "" && !g.startsWith("/") && !g.split("/").includes("..") && !/[\n\u0000]/.test(g)), "questions.designDocs globs are repository-relative, without \"..\" or empty entries");
-    need(q.designDocs === undefined || (q.designDocs as string[]).join("\n").length <= 3_000, "questions.designDocs is too long: at most 3,000 characters in all");
+    need(!design || q.designDocs === undefined || isStrings(q.designDocs), "questions.designDocs must be a list of repository-relative globs");
+    need(!design || q.designDocs === undefined || (q.designDocs as string[]).every((g) => g.trim() !== "" && !g.startsWith("/") && !g.split("/").includes("..") && !/[\n\u0000]/.test(g)), "questions.designDocs globs are repository-relative, without \"..\" or empty entries");
+    need(!design || q.designDocs === undefined || (q.designDocs as string[]).join("\n").length <= 3_000, "questions.designDocs is too long: at most 3,000 characters in all");
     let principles: { path: string; ref?: string } | undefined;
     if (q.principles !== undefined) {
       need(isObject(q.principles), "questions.principles must be an object with a path and an optional ref");
@@ -849,7 +857,7 @@ function parseFor(config: unknown, graph: ProfileGraph): Profile {
       need(pr.ref === undefined || (isString(pr.ref) && (pr.ref as string).length <= 200 && /^[A-Za-z0-9._/-]+$/.test(pr.ref as string) && !(pr.ref as string).startsWith("-") && !(pr.ref as string).includes("..")), "questions.principles.ref must be a git ref name (letters, digits, . _ / -; at most 200 characters)");
       principles = { path: pr.path as string, ...(pr.ref !== undefined ? { ref: pr.ref as string } : {}) };
     }
-    questions = { excludeRoots: (q.excludeRoots as string[] | undefined) ?? [], similarity: design ? 0.5 : ((q.similarity as number | undefined) ?? 0.5), maxCandidates: design ? 5 : ((q.maxCandidates as number | undefined) ?? 5), designDocs: (q.designDocs as string[] | undefined) ?? [], incremental: (q.incremental as boolean | undefined) ?? true, ...(principles !== undefined ? { principles } : {}) };
+    questions = { excludeRoots: (q.excludeRoots as string[] | undefined) ?? [], similarity: design ? 0.5 : ((q.similarity as number | undefined) ?? 0.5), maxCandidates: design ? 5 : ((q.maxCandidates as number | undefined) ?? 5), designDocs: design ? ((q.designDocs as string[] | undefined) ?? []) : [], incremental: design ? ((q.incremental as boolean | undefined) ?? true) : true, ...(principles !== undefined ? { principles } : {}) };
   }
   // The design review measures statically only (design-pr-review-split §3.4): coverage, mutation and the sandbox are pr-review keys, accepted unread.
   const metrics: MetricsConfig = design ? { ...checkMetrics(without(p.metrics, ["coverage", "mutation", "sandbox"]), { generated: [], coverage: false, mutation: { enabled: false }, files: {} }), coverage: false, mutation: { enabled: false }, staticOnly: true } : checkMetrics(p.metrics, { generated: [], coverage: true, mutation: { enabled: true }, files: {} });
@@ -857,7 +865,7 @@ function parseFor(config: unknown, graph: ProfileGraph): Profile {
   need(p.privateRepos === undefined || (isStrings(p.privateRepos) && (p.privateRepos as string[]).every((r) => REPO_NAME.test(r))), 'privateRepos must be a list of "owner/name"');
   const { roles, settings: roleSettings } = checkRoles(p.harnesses, graph);
   const review = checkReview(design ? undefined : p.review);
-  const comments = design ? checkComments(p.comments) : { designPassedNote: false };
+  const comments = checkComments(p.comments, graph);
   const budgets = checkBudgets(p.budgets);
   const supervisorPreference = checkSupervisor(p.supervisor);
   let limits = { ...DEFAULT_LIMITS };
@@ -886,7 +894,6 @@ function parseFor(config: unknown, graph: ProfileGraph): Profile {
     ...(p.description !== undefined ? { description: p.description as string } : {}),
     project: p.project as string,
     baseBranch: (p.baseBranch as string | undefined) ?? "main",
-    rounds: (p.rounds as Rounds | undefined) ?? "both",
     owner,
     repo,
     environment,

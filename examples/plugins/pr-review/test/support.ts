@@ -10,13 +10,13 @@ import { CODING_AGENT, CREATE_PULL_REVIEW, GET_VIEWER, LIST_PULL_REVIEWS, LIST_P
 import { parseProfile, type Profile } from "../src/kit/profile.js";
 import { REHEARSAL_HEAD_FILES, REHEARSAL_REQUEST, rehearsal } from "../src/rehearsal.js";
 import { validatorById } from "../src/validators.js";
-import { writtenQa, writtenReport } from "../src/kit/write.js";
+import { writtenReport } from "../src/kit/write.js";
 
 /** The login the fake GitHub's credential authenticates as. */
 export const FAKE_LOGIN = "graphloom-bot";
 
-/** The reason the default simulation ends with: Fetch, Report, Questions and Answers are accepted, and round 1 is next. */
-export const ANSWERED = "answers accepted";
+/** The reason a simulation run `through: "review"` ends with: Fetch, Report and Review are accepted, and the draft is next. */
+export const REVIEWED = "review accepted";
 
 export const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const BANYANDB: Record<string, unknown> = JSON.parse(readFileSync(path.join(root, "profiles", "banyandb.json"), "utf8"));
@@ -52,8 +52,6 @@ export interface Simulation {
   final: GraphDecision;
   /** What the report-write command wrote. */
   written?: { json: string; markdown: string };
-  /** What the qa-write command wrote: qa.json and the whole review.md. */
-  qa?: { json: string; markdown: string };
 }
 
 interface Options {
@@ -64,11 +62,8 @@ interface Options {
   /** Replace the files the worktree holds, by path (the stubbed checkout writes none). */
   files?: Record<string, string>;
   maxSteps?: number;
-  /**
-   * How far to run: `answers` (the default) ends the simulation when the graph is about to decide round 1, after Answers
-   * were accepted (what most tests of Fetch, Report, Questions and Answers look at); `end` runs every stage.
-   */
-  through?: "answers" | "end";
+  /** How far to run: `end` (the default) runs every stage; `review` ends the simulation once Fetch, Report and Review are accepted. */
+  through?: "review" | "end";
   /** How many pages the Publish stage's read of the reviews takes (the pages after the first start at the cursor the previous one gave). */
   reviewPages?: number;
   /** How many whole reads of a review's comments show none of them (a read that lags the post); every later read shows them. */
@@ -158,7 +153,6 @@ function* simulationSteps(options: Options = {}): Generator<undefined, Simulatio
   let commentReads = 0;
   let nextCommentId = 9000;
   let written: Simulation["written"];
-  let qa: Simulation["qa"];
   let lastWork: string | undefined;
   let digest = "d0";
   let workDigest = "d1";
@@ -167,13 +161,13 @@ function* simulationSteps(options: Options = {}): Generator<undefined, Simulatio
   const attempts = new Map<string, number>();
   const reentries = [...(options.reentries ?? [])];
   let privateState: string | undefined;
-  for (let step = 0; step < (options.maxSteps ?? 60); step += 1) {
+  for (let step = 0; step < (options.maxSteps ?? 160); step += 1) {
     yield;
-    // Through Answers only: the stages up to Answers are accepted, and the run would decide round 1 next.
-    if ((options.through ?? "answers") === "answers" && ["fetch", "report", "questions", "answers"].every((id) => definition.stages.find((st) => st.id === id)!.requirementIds.every((r) => receipts.some((x) => x.stageId === id && x.requirementId === r && x.valid)))) {
-      const stop: GraphDecision = { action: { type: "stop", stop: { reason: ANSWERED, blocker: "Fetch, Report, Questions and Answers are accepted", retryable: false } }, reason: "the simulation ends after Answers" };
+    // Through Review only: the stages up to Review are accepted, and the run would draft next.
+    if (options.through === "review" && ["fetch", "report", "review"].every((id) => definition.stages.find((st) => st.id === id)!.requirementIds.every((r) => receipts.some((x) => x.stageId === id && x.requirementId === r && x.valid)))) {
+      const stop: GraphDecision = { action: { type: "stop", stop: { reason: REVIEWED, blocker: "Fetch, Report and Review are accepted", retryable: false } }, reason: "the simulation ends after Review" };
       decisions.push(stop);
-      return { decisions, jobs, evidence, receipts, final: stop, github, ...(written !== undefined ? { written } : {}), ...(qa !== undefined ? { qa } : {}) };
+      return { decisions, jobs, evidence, receipts, final: stop, github, ...(written !== undefined ? { written } : {}) };
     }
     if (options.reentries !== undefined) for (const e of evidence) if (e.generation === undefined) e.generation = generation;
     const view: RunView = {
@@ -218,7 +212,7 @@ function* simulationSteps(options: Options = {}): Generator<undefined, Simulatio
       }
       continue;
     }
-    if (action.type === "stop" || action.type === "supervise") return { decisions, jobs, evidence, receipts, final: decision, github, ...(written !== undefined ? { written } : {}), ...(qa !== undefined ? { qa } : {}) };
+    if (action.type === "stop" || action.type === "supervise") return { decisions, jobs, evidence, receipts, final: decision, github, ...(written !== undefined ? { written } : {}) };
     if (action.type === "observe") {
       for (const p of action.observe.paths ?? []) {
         const bytes = files[p];
@@ -236,9 +230,9 @@ function* simulationSteps(options: Options = {}): Generator<undefined, Simulatio
           const who = (review?.payload as { producer?: { readOnly: boolean; purpose: string; operationId: string } } | undefined)?.producer;
           if (who === undefined || !who.readOnly || who.purpose !== "review" || who.operationId === lastWork) throw new Error(`the controller would refuse ${id}: no independent review evidence`);
         }
-        const result = validatorById(binding.validatorId)!.evaluate({ requirementId: id, statement: "", evidence: candidateEvidence(evidence, digest), candidateDigest: digest, config });
+        const result = validatorById(binding.validatorId)!.evaluate({ requirementId: id, statement: "", evidence: candidateEvidence(evidence, digest), candidateDigest: digest, config, request: options.request ?? REHEARSAL_REQUEST });
         if (options.shadow !== undefined) {
-          const shadowResult = validatorById(binding.validatorId)!.evaluate({ requirementId: id, statement: "", evidence: options.shadow.records(candidateEvidence(evidence, digest)), history: [], candidateDigest: digest, config });
+          const shadowResult = validatorById(binding.validatorId)!.evaluate({ requirementId: id, statement: "", evidence: options.shadow.records(candidateEvidence(evidence, digest)), history: [], candidateDigest: digest, config, request: options.request ?? REHEARSAL_REQUEST });
           options.shadow.compared.push({ step, what: `validate ${id}`, recorded: JSON.stringify(result), shadow: JSON.stringify(shadowResult) });
         }
         receipts.push({ id: `r${(n += 1)}`, stageId: stage.id, requirementId: id, validatorBinding: binding, candidateFingerprint: "x", evidenceRefs: [], valid: result.status === "passed", candidateDigest: digest });
@@ -294,7 +288,6 @@ function* simulationSteps(options: Options = {}): Generator<undefined, Simulatio
         const stub = scenario.commands?.[c.id];
         if ((stub?.exitCode ?? 0) !== 0 && input.continueOnFailure !== true) stopped = true;
         if (c.id === "report-write") written = writtenReport(c.argv);
-        if (c.id === "qa-write") qa = writtenQa(c.argv);
         evidence.push({ ref: `e${(n += 1)}`, kind: "command", candidateDigest: digest, payload: { producer, command: { id: c.id, argv: c.argv, exitCode: stub?.exitCode ?? 0, stdoutTail: stub?.stdout ?? "", stderrTail: stub?.stderr ?? "" } } });
       }
     } else {

@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { emptyBriefing } from "../src/kit/briefing.js";
 import { claimTargets, readClaimCheck } from "../src/kit/claims.js";
 import { detectFacts } from "../src/kit/detectors.js";
-import { pinnedTexts } from "../src/questions.js";
+import { pinnedTexts } from "../src/kit/pinned.js";
 import { STREAM_CHANGED, STREAM_PATH } from "../src/rehearsal-fixtures.js";
 import { assembleReport, asReporterOutput, citedLines, citeLabel, purposeLine, renderReport, reportProblems, type Cite, type FinalReport, type ReportContext, type ReportItem, type ReporterOutput, type StateEntry } from "../src/kit/report.js";
 import { pullFile, type PullFile } from "../src/kit/snapshot.js";
@@ -288,8 +288,8 @@ describe("the state-lifecycle scenario: a #1443-like change is one analysed item
   };
   const items = json.sections.flatMap((s) => s.items.map((i) => ({ section: s.id, ...i })));
 
-  it("reaches answers accepted, with the checker judging every claim, the lifecycle entries and the behavior rows included", () => {
-    expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "answers accepted" } });
+  it("completes, with the checker judging every claim, the lifecycle entries and the behavior rows included", () => {
+    expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
     const check = assignmentOf(jobsOf(sim, "Check the report's")[0]!);
     for (const id of ["purpose", "overview", "R1 ", "R1.s1 ", "R1.s1.t1 ", "R1.s1.r1 ", "R1.s2 ", "R1.s2.t3 ", "R1.b1 ", "R1.b3 "]) expect(check).toContain(`\n${id}`);
     expect(json.removedParts).toEqual([]);
@@ -362,7 +362,7 @@ describe("the state-lifecycle scenario: a #1443-like change is one analysed item
     expect(kept.behavior).toHaveLength(3);
     expect(written.removedParts).toEqual([{ id: "R1.s2.t2", kind: "state", item: "R1", label: "firstErr", reason: "unsupported: the unsupported-type path sets firstErr unconditionally" }]);
     expect(out.written!.markdown).toContain("Removed by the claim check: the lifecycle of `firstErr`");
-    expect(out.final.action).toMatchObject({ type: "stop", stop: { reason: "answers accepted" } });
+    expect(out.final.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
   });
 
   it("asks the reporter for the analysis: one item per conceptual change, lifecycle, before/after, and the state the scan found", () => {

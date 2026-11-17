@@ -4,9 +4,11 @@
 /**
  * The review layer's part of the rehearsal scenarios (design §16): how the three aspect reviewers and their verifiers
  * reply. A scenario is data. The replies are consumed in the order the graph asks for them: each aspect's passes
- * (correctness, maintainability, security), and each aspect's verification after the pass that raised findings.
+ * (correctness, maintainability, security), and each aspect's verification after the pass that raised findings. The
+ * maintainability reviewer's first pass gives each lead it is given a status (design-pr-review-split §4.3).
  */
 import type { RehearsalReply, RehearsalScenario } from "@graphloom/sdk";
+import type { Lead, LeadEntry } from "./leads.js";
 import { REVIEW_SCHEMA_NAME, VERIFY_SCHEMA_NAME, quotePrefix, type ReviewComment } from "./review.js";
 import { NO_REPRO, sha256, type ReproLanguage, type RunOutcome } from "./repro.js";
 
@@ -66,9 +68,9 @@ const comment = (c: ScriptedComment): ReviewComment => ({
   ...c,
 } as ReviewComment);
 
-/** A pass's reply: the comments, a summary that says every one of the `total` files was reviewed, and the judgments of the earlier findings it was given (none by default). */
-export const passReply = (total: number, comments: readonly ScriptedComment[], prior: ReadonlyArray<{ finding: string; status: "still_present" | "fixed"; reason?: string }> = []): RehearsalReply => ({
-  output: { comments: comments.map(comment), summary: { total_files: total, reviewed_files: total, skipped: [] }, prior: prior.map((p) => ({ reason: "read the code at its place on this head", ...p })) },
+/** A pass's reply: the comments, a summary that says every one of the `total` files was reviewed, the judgments of the earlier findings it was given (none by default) and the statuses of the leads it was given (none by default). */
+export const passReply = (total: number, comments: readonly ScriptedComment[], prior: ReadonlyArray<{ finding: string; status: "still_present" | "fixed"; reason?: string }> = [], leads: readonly LeadEntry[] = []): RehearsalReply => ({
+  output: { comments: comments.map(comment), summary: { total_files: total, reviewed_files: total, skipped: [] }, prior: prior.map((p) => ({ reason: "read the code at its place on this head", ...p })), leads },
 });
 
 export interface ScriptedVerdict {
@@ -90,6 +92,20 @@ export const verifyReply = (verdicts: readonly ScriptedVerdict[]): RehearsalRepl
 export interface ReviewScript {
   total: number;
   path: string;
+  /** The leads the maintainability reviewer is given, as the plugin computes them for the scenario: each gets a status. */
+  leads?: readonly Lead[];
+  /** The leads it raises, each by a comment of its own at the lead's place (its own priority: P1 for an untested feature); the others are not an issue. */
+  raise?: readonly string[];
+}
+
+/** The maintainability reviewer's first pass: its own comment, a comment for each lead it raises, and a status for every lead given. */
+function maintainabilityPass(s: ReviewScript): RehearsalReply {
+  const own: ScriptedComment = { path: s.path, start_line: 14, end_line: 16, aspect: "maintainability", kind: "non-behavioral", severity: "P2", content: "The loop that adds 0+1+2 to n has no purpose a reader can find; remove it or say what it is for." };
+  const given = (s.leads ?? []).filter((l) => l.given);
+  const raised = given.filter((l) => (s.raise ?? []).includes(l.id));
+  const comments: ScriptedComment[] = [own, ...raised.map((l): ScriptedComment => ({ path: l.path, start_line: l.line, end_line: l.endLine, aspect: "maintainability", kind: "non-behavioral", severity: l.kind === "untested-feature" ? "P1" : "P2", distinct: true, content: l.kind === "untested-feature" ? `The new feature ${l.subject} has no test: no test of the pull request reaches any of its functions (${l.facts[1] ?? ""}). Add a test that exercises it.` : `${l.kind}: ${l.facts[0] ?? ""}` }))];
+  const leads: LeadEntry[] = given.map((l) => (raised.includes(l) ? { lead: l.id, status: "raised", comment: 1 + raised.indexOf(l), reason: "raised as a comment" } : { lead: l.id, status: "not-an-issue", comment: -1, reason: `read ${l.path}:${l.line}; not worth a comment in this change` }));
+  return passReply(s.total, comments, [], leads);
 }
 
 /**
@@ -105,7 +121,7 @@ export function reviewScenarioParts(s: ReviewScript): Pick<RehearsalScenario, "r
         { path: s.path, start_line: 8, end_line: 9, severity: "P2", content: "unit is read before it is set when the string has no letter, so a bare number is accepted as hours." },
       ]),
       passReply(s.total, []),
-      passReply(s.total, [{ path: s.path, start_line: 14, end_line: 16, aspect: "maintainability", kind: "non-behavioral", severity: "P2", content: "The loop that adds 0+1+2 to n has no purpose a reader can find; remove it or say what it is for." }]),
+      maintainabilityPass(s),
       passReply(s.total, []),
       passReply(s.total, []),
     ],
@@ -114,7 +130,10 @@ export function reviewScenarioParts(s: ReviewScript): Pick<RehearsalScenario, "r
         { finding: "F1", verdict: "confirmed", witness: `${s.path}:15`, reason: "ParseTTL returns errUnit for 'w', so 7w is refused.", fixes: false },
         { finding: "F2", verdict: "refuted", quotes: [{ path: s.path, line: 7, text: "unit := byte(0)" }], reason: "n starts at 0 and unit stays 0, which the switch leaves alone: a bare number is hours by contract." },
       ]),
-      verifyReply([{ finding: "F3", verdict: "confirmed", kind: "non-behavioral", witness: `${s.path}:14`, reason: "the loop adds a constant that nothing uses.", fixes: true }]),
+      verifyReply([
+        { finding: "F3", verdict: "confirmed", kind: "non-behavioral", witness: `${s.path}:14`, reason: "the loop adds a constant that nothing uses.", fixes: true },
+        ...(s.leads ?? []).filter((l) => l.given && (s.raise ?? []).includes(l.id)).map((l, n) => ({ finding: `F${4 + n}`, verdict: "confirmed" as const, kind: "non-behavioral" as const, witness: `${l.path}:${l.line}`, reason: "no test of the pull request or the base reaches it", fixes: false })),
+      ]),
     ],
   };
   // The refutation of F2 in the first correctness pass: its one quote is shown by the head.

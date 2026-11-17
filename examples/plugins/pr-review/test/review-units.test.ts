@@ -128,9 +128,9 @@ describe("the proof of a finding is the one place the reproducing tests plug in"
 
 describe("the draft", () => {
   const files = [file("pkg/a.go", "@@ -1,3 +1,6 @@\n a\n+b\n+c\n+d\n+e\n f"), file("docs/x.md", null)];
-  const record = (aspect: AspectRecord["aspect"], findings: Finding[], extra: Partial<AspectRecord> = {}): AspectRecord => ({ schema: "pr-review-aspect-v1", aspect, reviewer: "claude-code", verifier: "codex", context: { kind: "seeded", reason: "forking is not available in this version" }, scopeFiles: 2, passes: [{ n: 1, reviewed: 2, raised: findings.map((f) => f.id), reaffirmed: [], nits: 0, merged: 0 }], findings, unsaturated: false, ...extra });
-  const scope = { schema: "pr-review-scope-v1" as const, mode: "standard" as const, source: "whole" as const, areas: [], files: ["pkg/a.go", "docs/x.md"], base: { kind: "answerer" as const, stageId: "answers", sessionRef: "claude-job", chain: [] }, context: { kind: "seeded" as const, reason: "forking is not available in this version" }, summary: { sha256: "x", bytes: 0, cuts: 0, turns: 0 }, harnesses: {} };
-  const input = (records: AspectRecord[], extra: Partial<DraftInput> = {}): DraftInput => ({ pull: { owner: "o", repo: "r", number: 7 }, head: "a".repeat(40), files, scope, records, ...extra });
+  const record = (aspect: AspectRecord["aspect"], findings: Finding[], extra: Partial<AspectRecord> = {}): AspectRecord => ({ schema: "pr-review-aspect-v2", aspect, reviewer: "claude-code", verifier: "codex", context: { kind: "seeded", reason: "forking is not available in this version" }, scopeFiles: 2, passes: [{ n: 1, reviewed: 2, raised: findings.map((f) => f.id), reaffirmed: [], nits: 0, merged: 0 }], findings, unsaturated: false, leads: [], ...extra });
+  const scope = { schema: "pr-review-scope-v2" as const, mode: "standard" as const, source: "whole" as const, areas: [], files: ["pkg/a.go", "docs/x.md"], context: { kind: "seeded" as const, reason: "forking is not available in this version" }, contextSource: "prelude" as const, harnesses: {} };
+  const input = (records: AspectRecord[], extra: Partial<DraftInput> = {}): DraftInput => ({ pull: { owner: "o", repo: "r", number: 7 }, head: "a".repeat(40), files, scope, records, context: { source: "prelude" }, round1: null, ...extra });
 
   it("links confirmed findings of different aspects on overlapping lines into one entry, listing every aspect, under the first", () => {
     const a = finding({ id: "F1", aspect: "maintainability", raisedBy: "maintainability", startLine: 2, endLine: 4, severity: "P2" });
@@ -162,22 +162,28 @@ describe("the draft", () => {
     expect(d.summary.length).toBeLessThanOrEqual(1_200);
   });
 
-  it("takes the Q&A items: needs author is a pre-selected comment, the rest is not selected", () => {
-    const qa = {
-      symbols: [{ id: "S1", path: "pkg/a.go", startLine: 2, endLine: 5 }],
-      questions: [
-        { id: "N1", type: "necessity", text: "necessary?", answer: { answer: "yes", status: "answered" } },
-        { id: "Q1", type: "missing-test", symbol: "S1", text: "Which test covers ParseTTL?", answer: { answer: "none found in pkg/a_test.go", status: "needs author" } },
-        { id: "Q2", type: "split-function", symbol: "S1", text: "Split it?", answer: { answer: "split at 18", status: "answered" } },
-      ],
-    };
-    const d = composeDraft(input([record("correctness", [])], { qa }));
-    expect(d.comments.map((e) => [e.id, e.kind, e.anchored])).toEqual([["Q1", "question", true]]);
-    expect(d.notSelected.map((e) => e.id)).toEqual(["Q2"]);
-    expect(d.recommended).toBe("comment");
-    const md = draftMarkdown(d);
-    expect(md).toContain("### Questions\n#### Q1 · question · pkg/a.go:2 · RIGHT");
-    expect(md).toContain("## Not selected (move an entry into Comments to post it)\n### Q2");
+  it("drafts no Q&A item: round 1 is listed, or said not to have run (design-pr-review-split §4.5)", () => {
+    const none = composeDraft(input([record("correctness", [])]));
+    expect(none.comments).toEqual([]);
+    expect(none.round1).toBeNull();
+    expect(draftMarkdown(none)).toContain("## Design review (round 1)\nRound 1 (the design review) was not run on this pull request; the verdict counts this review's findings only.");
+    const open = composeDraft(input([record("correctness", [])], { round1: { head: "b".repeat(40), open: [{ id: "N1", link: "https://github.com/o/r/pull/7#discussion_r1" }, { id: "Q2" }] } }));
+    const md = draftMarkdown(open);
+    expect(md).toContain("Design review as of bbbbbbb; run pr-design-review on this head to re-check them: 2 open items:\n- N1: [comment](https://github.com/o/r/pull/7#discussion_r1)\n- Q2: not posted");
+    expect(open.comments).toEqual([]);
+    expect(open.recommended).toBe("approve");
+  });
+
+  it("drafts a confirmed untested-feature finding at P1 and recommends request-changes for it, and no other non-behavioral finding above P2", () => {
+    const uf = finding({ id: "F1", severity: "P1", kind: "non-behavioral", aspect: "maintainability", raisedBy: "maintainability", lead: "L1", leadKind: "untested-feature" });
+    const other = finding({ id: "F2", severity: "P1", kind: "non-behavioral", aspect: "maintainability", raisedBy: "maintainability", lead: "L2", leadKind: "missing-test", startLine: 40, endLine: 40 });
+    const d = composeDraft(input([record("maintainability", [uf, other])]));
+    expect(d.comments.map((e) => [e.id, e.severity, e.lead?.kind])).toEqual([["F1", "P1", "untested-feature"], ["F2", "P2", "missing-test"]]);
+    expect(d.recommended).toBe("request-changes");
+    const p0 = composeDraft(input([record("maintainability", [{ ...uf, severity: "P0" }])]));
+    expect(p0.comments[0]!.severity).toBe("P1");
+    const plain = composeDraft(input([record("maintainability", [other])]));
+    expect(plain.recommended).toBe("comment");
   });
 
   it("anchors a comment only inside a hunk on its side, and keeps the review's own bookkeeping out of a body", () => {
@@ -188,11 +194,12 @@ describe("the draft", () => {
     expect(scrub("see .graphloom/review/review.md:3 and `.graphloom/x`")).toBe("see [a review file]:3 and `[a review file]`");
   });
 
-  it("renders the sections of the design: Summary, Comments by aspect, Needs your judgment, Not selected, For the maintainer", () => {
+  it("renders the sections of the design: Summary, Design review (round 1), Comments by aspect, Needs your judgment, For the maintainer", () => {
     const f1 = finding({ id: "F1", aspect: "security", raisedBy: "security", suggestion: "safe()" });
     const f2 = finding({ id: "F2", startLine: 40, endLine: 40, aspect: "maintainability", raisedBy: "maintainability" });
     const md = draftMarkdown(composeDraft(input([record("correctness", []), record("maintainability", [f2]), record("security", [f1])])));
-    for (const h of ["## Summary", "## Comments", "### Security", "### Maintainability", "## Needs your judgment", "## Not selected", "## For the maintainer (never posted)"]) expect(md).toContain(h);
+    for (const h of ["## Summary", "## Design review (round 1)", "## Comments", "### Security", "### Maintainability", "## Needs your judgment", "## For the maintainer (never posted)"]) expect(md).toContain(h);
+    expect(md).not.toContain("## Not selected");
     expect(md.indexOf("### Security")).toBeLessThan(md.indexOf("### Maintainability"));
     expect(md).toContain("```suggestion\nsafe()\n```");
     expect(md).toContain("not in the diff (goes in the review body)");
@@ -201,7 +208,7 @@ describe("the draft", () => {
 
 describe("the findings a reviewer must not raise again", () => {
   const known = Array.from({ length: 120 }, (_, i) => finding({ id: `F${i + 1}`, content: `finding number ${i + 1} ${"x".repeat(200)}`, path: `pkg/f${i}.go` }));
-  const base = { pr: { mode: "review" as const, owner: "o", repo: "r", number: 1, head: "a".repeat(40) }, snapshot: { pull: { title: "t", body: "b" }, commits: [] } as never, aspect: "correctness" as const, pass: 2, files: ["pkg/a.go"], scopeLine: "the whole pull request", groups: [], summary: "", context: { kind: "seeded" as const, reason: "x" }, feedback: [], reviewDir: "/work/tree/.graphloom/review" };
+  const base = { pr: { mode: "review" as const, owner: "o", repo: "r", number: 1, head: "a".repeat(40) }, snapshot: { pull: { title: "t", body: "b" }, commits: [] } as never, aspect: "correctness" as const, pass: 2, files: ["pkg/a.go"], scopeLine: "the whole pull request", groups: [], feedback: [], reviewDir: "/work/tree/.graphloom/review", source: "prelude" as const };
 
   it("lists every known finding in a file when they do not fit inline, and tells the reviewer to read it", async () => {
     const { planReviewer } = await import("../src/reviewprompts.js");

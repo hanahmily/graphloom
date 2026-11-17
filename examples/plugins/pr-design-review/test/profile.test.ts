@@ -56,9 +56,9 @@ describe("the design review's profile parser (design-pr-review-split §7.2)", ()
     expect(refusal({ comments: { footer: "<!-- graphloom-design-review: x -->" } })).toContain("comments.footer must be text");
   });
 
-  it("leaves pr-review's own parser as it was: rounds read, comments refused", () => {
-    expect(parseProfile({ ...PR_REVIEW, rounds: "review-only" }).rounds).toBe("review-only");
-    expect(() => parseProfile({ ...PR_REVIEW, comments: { designPassedNote: true } })).toThrow("pr-review profile: comments is not supported in this version");
+  it("pr-review 1.x's parser refuses rounds too and accepts this graph's keys unread", () => {
+    expect(() => parseProfile({ ...PR_REVIEW, rounds: "review-only" })).toThrow("rounds is gone");
+    expect(parseProfile({ ...PR_REVIEW, comments: { designPassedNote: true } }).comments).toEqual({ designPassedNote: false });
     expect(parseProfile(PR_REVIEW).metrics.staticOnly).toBeUndefined();
   });
 });

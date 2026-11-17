@@ -7,6 +7,7 @@ import type { CommandRun } from "./evidence.js";
 import { detectFacts, type Fact } from "./detectors.js";
 import { reportFlow, type ReportFlow } from "./flow.js";
 import { largeContext, largeReportFlow } from "./large.js";
+import { withRecordedClaimChecks } from "./claimrecord.js";
 import { pinnedTexts } from "./pinned.js";
 import { detectStateCandidates } from "./statecandidates.js";
 import { READS, readResult, snapshotState, type Snapshot } from "./snapshot.js";
@@ -55,7 +56,9 @@ export function analyze(evidence: readonly EvidenceRecord[], profile: Profile, p
  * Where the report stands: the standard flow, which in large mode runs over the large context and ends with the account
  * of the areas (design §6.9). The graph and the validators both ask this, over the evidence they hold.
  */
-export function reportFlowOf(evidence: readonly EvidenceRecord[], analysis: Analysis, retryable?: (r: CommandRun) => boolean): ReportFlow {
+export function reportFlowOf(live: readonly EvidenceRecord[], analysis: Analysis, retryable?: (r: CommandRun) => boolean): ReportFlow {
+  // A claim check a later review of the same candidate superseded is read from the graph's record of it (`claimrecord.ts`).
+  const evidence = withRecordedClaimChecks(live);
   const partition = analysis.snapshot.partition;
   return analysis.snapshot.mode.mode === "large" && partition !== undefined ? largeReportFlow(evidence, analysis.ctx, partition, retryable) : reportFlow(evidence, analysis.ctx, retryable);
 }

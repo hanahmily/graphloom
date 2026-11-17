@@ -8,13 +8,14 @@ import { describe, expect, it } from "vitest";
 import { LARGE_LIMITS, REHEARSAL_REQUEST } from "../src/rehearsal.js";
 import { parseDraft } from "../src/draft.js";
 import { passReply, verifyReply } from "../src/rehearsal-review.js";
-import { recordedAspect, recordedRound1, recordedScope } from "../src/reviewdraft.js";
+import { recordedAspect, recordedScope } from "../src/reviewdraft.js";
+import { recordedContext } from "../src/runcontext.js";
 import { readParts } from "../src/kit/parts.js";
 import { quotePrefix, REVIEW_SCHEMA_NAME, VERIFY_SCHEMA_NAME } from "../src/review.js";
 import { codeReview, draftComposed } from "../src/reviewvalidators.js";
 import { BANYANDB, assignmentOf, candidateEvidence, scenarioWith, simulate, type Simulation } from "./support.js";
 
-export const REVIEW_REQUEST = REHEARSAL_REQUEST.replace("Report on", "Review on");
+export const REVIEW_REQUEST = REHEARSAL_REQUEST;
 export const stopOf = (s: Simulation) => (s.final.action.type === "stop" ? s.final.action.stop : undefined);
 const jobsFor = (sim: Simulation, schema: string): JobSpec[] => sim.jobs.filter((j) => j.resultSchema === schema);
 const agentKeys = (sim: Simulation): string[] => sim.jobs.filter((j) => j.stageId === "review" && j.kind === "agent").map((j) => `${j.jobId}`);
@@ -25,14 +26,14 @@ const scopeOf = (sim: Simulation) => {
   return r.value;
 };
 
-describe("the review layer, entered in the same run when round 1 found no issue", () => {
+describe("the review layer of pr-review 1.x, from a report-only prelude", () => {
   const sim = simulate({ scenarioName: "review-layer", request: REVIEW_REQUEST, through: "end", maxSteps: 400 });
 
-  it("runs Round 1, Review, Draft and Publish in one run, with no pause for a human, and ends with the posted verdict", () => {
+  it("runs Report, Review, Draft and Publish in one run, with no pause for a human, and ends with the posted verdict", () => {
     expect(stopOf(sim), JSON.stringify(sim.final).slice(0, 600)).toMatchObject({ reason: "complete", retryable: false });
-    expect(stopOf(sim)!.blocker).toMatch(/^round 2: changes requested: 1 open on apache\/skywalking-banyandb#7 at 0123456789ab; the review is posted \(https:/);
+    expect(stopOf(sim)!.blocker).toMatch(/^changes requested: 1 open on apache\/skywalking-banyandb#7 at 0123456789ab; the review is posted \(https:/);
     expect(sim.receipts.filter((r) => r.valid).map((r) => r.requirementId)).toEqual([
-      "pr-snapshot", "head-checked-out", "prior-ledger", "change-report", "measurements", "claims-checked", "questions-complete", "answers-complete", "answers-grounded", "round1-gated", "code-review", "findings-proven", "draft-composed", "review-published",
+      "pr-snapshot", "head-checked-out", "prior-ledger", "review-context", "change-report", "measurements", "claims-checked", "code-review", "leads-judged", "findings-proven", "draft-composed", "ledger-recorded", "review-published",
     ]);
   });
 
@@ -142,7 +143,7 @@ describe("the review layer, entered in the same run when round 1 found no issue"
     expect(md.value).toContain("## Review\nRecommended verdict: comment.");
     expect(md.value).toMatch(/### P1 \(1\)\n- F1 · correctness · pkg\/schema\/ttl\.go:26-30 · confirmed \(verifier codex: confirmed\) · unproven:/);
     expect(md.value).toContain("## Review: findings and draft");
-    expect(md.value.indexOf("## Review\n")).toBeLessThan(md.value.indexOf("## Open questions"));
+    expect(md.value.indexOf("## Review\n")).toBeLessThan(md.value.indexOf("## Review: findings and draft"));
     // review.html: the findings that stand as a grid of aspect by severity, coloured by state, each tile linking to its finding in the appendix.
     expect(html.value).toContain("<h2>Review</h2>");
     expect(html.value.indexOf("<h2>Review</h2>")).toBeGreaterThan(html.value.indexOf("<h2>Questions</h2>"));
@@ -168,8 +169,8 @@ describe("the review layer, entered in the same run when round 1 found no issue"
 
   it("passes both stages' validators on the recorded evidence and fails them when a record is tampered with", () => {
     const evidence = candidateEvidence(sim.evidence, "d1");
-    expect(codeReview.evaluate({ requirementId: "code-review", statement: "", evidence, candidateDigest: "d1", config: BANYANDB })).toMatchObject({ status: "passed" });
-    expect(draftComposed.evaluate({ requirementId: "draft-composed", statement: "", evidence, candidateDigest: "d1", config: BANYANDB })).toMatchObject({ status: "passed" });
+    expect(codeReview.evaluate({ requirementId: "code-review", statement: "", evidence, candidateDigest: "d1", config: BANYANDB, request: REVIEW_REQUEST })).toMatchObject({ status: "passed" });
+    expect(draftComposed.evaluate({ requirementId: "draft-composed", statement: "", evidence, candidateDigest: "d1", config: BANYANDB, request: REVIEW_REQUEST })).toMatchObject({ status: "passed" });
     const tamper = (id: string, change: (json: Record<string, unknown>) => void): EvidenceRecord[] =>
       evidence.map((e) => {
         const c = (e.payload as { command?: { id: string; argv: string[] } } | undefined)?.command;
@@ -182,19 +183,19 @@ describe("the review layer, entered in the same run when round 1 found no issue"
     const dismissedWithoutRefutation = tamper("review-aspect-correctness", (j) => {
       (j.findings as Array<{ verdict?: unknown }>)[1]!.verdict = undefined;
     });
-    expect(codeReview.evaluate({ requirementId: "code-review", statement: "", evidence: dismissedWithoutRefutation, candidateDigest: "d1", config: BANYANDB })).toMatchObject({ status: "failed", reason: expect.stringContaining("F2 is dismissed without a refutation") });
+    expect(codeReview.evaluate({ requirementId: "code-review", statement: "", evidence: dismissedWithoutRefutation, candidateDigest: "d1", config: BANYANDB, request: REVIEW_REQUEST })).toMatchObject({ status: "failed", reason: expect.stringContaining("F2 is dismissed without a refutation") });
     const sameHarness = tamper("review-aspect-security", (j) => {
       j.verifier = "claude-code";
     });
-    expect(codeReview.evaluate({ requirementId: "code-review", statement: "", evidence: sameHarness, candidateDigest: "d1", config: BANYANDB })).toMatchObject({ status: "failed", reason: expect.stringMatching(/security: the recorded harnesses/) });
+    expect(codeReview.evaluate({ requirementId: "code-review", statement: "", evidence: sameHarness, candidateDigest: "d1", config: BANYANDB, request: REVIEW_REQUEST })).toMatchObject({ status: "failed", reason: expect.stringMatching(/security: the recorded harnesses/) });
     const unseeded = tamper("review-scope", (j) => {
       (j.context as { reason: string }).reason = "";
     });
-    expect(codeReview.evaluate({ requirementId: "code-review", statement: "", evidence: unseeded, candidateDigest: "d1", config: BANYANDB })).toMatchObject({ status: "failed", reason: expect.stringContaining("fresh session seeded with review.md only") });
+    expect(codeReview.evaluate({ requirementId: "code-review", statement: "", evidence: unseeded, candidateDigest: "d1", config: BANYANDB, request: REVIEW_REQUEST })).toMatchObject({ status: "failed", reason: expect.stringContaining("fresh session seeded with review.md only") });
     const noFindings = tamper("review-aspect-maintainability", (j) => {
       j.findings = [];
     });
-    expect(draftComposed.evaluate({ requirementId: "draft-composed", statement: "", evidence: noFindings, candidateDigest: "d1", config: BANYANDB })).toMatchObject({ status: "failed", reason: expect.stringContaining("is not what the evidence recomputes") });
+    expect(draftComposed.evaluate({ requirementId: "draft-composed", statement: "", evidence: noFindings, candidateDigest: "d1", config: BANYANDB, request: REVIEW_REQUEST })).toMatchObject({ status: "failed", reason: expect.stringContaining("is not what the evidence recomputes") });
   });
 });
 
@@ -217,16 +218,24 @@ describe("the review jobs' assignments and commands", () => {
       expect(Buffer.byteLength(JSON.stringify(input), "utf8")).toBeLessThanOrEqual(256_000);
     }
   });
-  it("write everything the review leaves in the worktree with one job per command, the scope record after the rule files", () => {
+  it("read the groundwork first, then write everything the review leaves in the worktree with one job per command, the scope record after the rule files", () => {
     const ids = sim.jobs.filter((j) => j.stageId === "review" && j.kind === "command").flatMap((j) => ((j.input as { commands: Array<{ id: string }> }).commands ?? []).map((c) => c.id));
-    expect(ids.slice(0, 4)).toEqual(["review-rules-correctness-p1", "review-rules-maintainability-p1", "review-rules-security-p1", "review-scope"]);
+    // The groundwork the leads rest on is read first (design-pr-review-split §4.3), then the rule files and the scope record.
+    expect(ids[0]).toBe("base-export");
+    expect(ids.filter((id) => id.startsWith("review-")).slice(0, 4)).toEqual(["review-rules-correctness-p1", "review-rules-maintainability-p1", "review-rules-security-p1", "review-scope"]);
   });
 });
+
+/** The scenario's own lead statuses (the maintainability reviewer's first pass), on every scripted pass: a pass given no lead ignores them. */
+const withLeads = (s: RehearsalScenario, passes: unknown[]): never => {
+  const leads = (s.results[REVIEW_SCHEMA_NAME]!.find((r) => ((r.output as { leads?: unknown[] }).leads ?? []).length > 0)?.output as { leads?: unknown[] } | undefined)?.leads ?? [];
+  return (passes as Array<{ output: object }>).map((p) => ({ ...p, output: { ...p.output, leads } })) as never;
+};
 
 /** A scenario whose review replies are the given passes and verdicts, in the order the graph asks for them. */
 const withReplies = (passes: unknown[], verdicts: unknown[], commands: RehearsalScenario["commands"] = {}): RehearsalScenario =>
   scenarioWith("review-layer", (s) => {
-    s.results[REVIEW_SCHEMA_NAME] = passes as never;
+    s.results[REVIEW_SCHEMA_NAME] = withLeads(s, passes);
     s.results[VERIFY_SCHEMA_NAME] = verdicts as never;
     s.commands = { ...s.commands, ...commands };
   });
@@ -327,14 +336,13 @@ describe("the findings contract and the sweep", () => {
 
 describe("a large pull request: only the areas the briefing cites are reviewed", () => {
   const config = { limits: LARGE_LIMITS };
-  const scenario = scenarioWith("large-review-layer", (s) => {
-    s.results[REVIEW_SCHEMA_NAME] = [passReply(1, []), passReply(1, []), passReply(1, [])] as never;
+  const scenario = scenarioWith("large-pull-request", (s) => {
+    s.results[REVIEW_SCHEMA_NAME] = withLeads(s, [passReply(1, []), passReply(1, []), passReply(1, [])]);
   }, config);
   const sim = simulate({ scenario, config, request: REVIEW_REQUEST, through: "end", maxSteps: 700 });
 
-  it("is large, with a Q&A round 1 raises nothing on, so the same run goes on into the review layer", () => {
-    expect(stopOf(simulate({ scenarioName: "large-pull-request", config, maxSteps: 600 }))).toMatchObject({ reason: "answers accepted" });
-    expect(recordedRound1(sim.evidence)).toMatchObject({ state: "read", value: { issues: [] } });
+  it("is large, with no design review, so its context is the report-only prelude", () => {
+    expect(recordedContext(sim.evidence)).toMatchObject({ state: "read", value: { source: "prelude" } });
   });
 
   it("reviews the files of the areas the briefing's risks, behavior and compatibility entries cite, with no operator input, and tells the reviewers so", () => {
@@ -355,5 +363,73 @@ describe("a large pull request: only the areas the briefing cites are reviewed",
     expect(stopOf(sim)!.blocker).toMatch(/^review passed on /);
     expect(sim.github.creates).toHaveLength(1);
     expect(String(sim.github.creates[0]!.body).split("\n")[0]).toBe("Review passed");
+  });
+});
+
+describe("leads (design-pr-review-split §4.3)", () => {
+  const M1 = 2; // the maintainability reviewer's first pass, after correctness's two
+  const operationOf = (sim: Simulation, n: number): string => {
+    const r = sim.evidence.filter((e) => e.resultSchema === REVIEW_SCHEMA_NAME)[n]!;
+    return (r.payload as { producer: { operationId: string } }).producer.operationId;
+  };
+
+  it("sends a pass that leaves a lead without a status back as a correction in the same session, and accepts the corrected pass", () => {
+    const scenario = scenarioWith("review-layer", (s) => {
+      const passes = s.results[REVIEW_SCHEMA_NAME]!;
+      const good = passes[M1]!.output as { leads: Array<{ lead: string }> };
+      expect(good.leads.length).toBeGreaterThan(1);
+      const missing = { ...good, leads: good.leads.slice(1) };
+      s.results[REVIEW_SCHEMA_NAME] = [...passes.slice(0, M1), { output: missing }, ...passes.slice(M1)];
+    });
+    const sim = simulate({ scenario, request: REVIEW_REQUEST, through: "end", maxSteps: 400 });
+    expect(stopOf(sim), JSON.stringify(sim.final).slice(0, 400)).toMatchObject({ reason: "complete" });
+    const maintainability = sim.jobs.filter((j) => j.jobId === "reviewer-maintainability");
+    expect(maintainability.map((j) => j.instruction)).toEqual(["Review the maintainability aspect (pass 1)", "Review the maintainability aspect (pass 1)", "Review the maintainability aspect (pass 2)"]);
+    expect(maintainability[0]!.continueFrom).toBeUndefined();
+    // The correction continues the failed pass's own session, and names what is missing.
+    expect(maintainability[1]!.continueFrom).toBe(operationOf(sim, M1));
+    expect(assignmentOf(maintainability[1]!)).toMatch(/every lead you were given needs exactly one status in leads; missing L1/);
+    const rec = recordedAspect(sim.evidence, "maintainability");
+    if (rec.state !== "read") throw new Error(rec.state);
+    expect(rec.value.leads.length).toBeGreaterThan(1);
+    expect(rec.value.leads.every((l) => l.status === "not-an-issue" && (l.reason ?? "") !== "")).toBe(true);
+    expect(sim.receipts.some((r) => r.requirementId === "leads-judged" && r.valid)).toBe(true);
+  });
+
+  it("verifies a raised lead's finding like any other: confirmed, the untested feature is drafted at P1 and asks for changes", () => {
+    const sim = simulate({ scenarioName: "untested-feature", request: REVIEW_REQUEST, through: "end", maxSteps: 400 });
+    expect(stopOf(sim), JSON.stringify(sim.final).slice(0, 400)).toMatchObject({ reason: "complete" });
+    const rec = recordedAspect(sim.evidence, "maintainability");
+    if (rec.state !== "read") throw new Error(rec.state);
+    const lead = rec.value.leads.find((l) => l.kind === "untested-feature")!;
+    expect(lead).toMatchObject({ status: "raised", finding: "F4" });
+    const f4 = rec.value.findings.find((f) => f.id === "F4")!;
+    expect(f4).toMatchObject({ lead: lead.id, leadKind: "untested-feature", state: "confirmed", verdict: { verdict: "confirmed" } });
+    // The verifier was given it, with what an untested-feature finding needs confirming.
+    const verify = assignmentOf(jobsFor(sim, VERIFY_SCHEMA_NAME).at(-1)!);
+    expect(verify).toContain("F4 [maintainability, non-behavioral, P1]");
+    expect(verify).toContain("Raised from an untested-feature lead");
+    const d = parseDraft((readParts(sim.evidence, "draft-json", ".graphloom/review/draft.json") as { value: string }).value)!;
+    expect(d.comments.find((c) => c.id === "F4")).toMatchObject({ severity: "P1", lead: { id: lead.id, kind: "untested-feature" } });
+    expect(d.recommended).toBe("request-changes");
+    expect(sim.receipts.filter((r) => ["leads-judged", "findings-proven"].includes(r.requirementId) && r.valid)).toHaveLength(2);
+  });
+
+  it("verifies a raised lead's finding like any other: refuted with quotes the head shows, it is dismissed and not drafted", () => {
+    const scenario = scenarioWith("untested-feature", (s) => {
+      const verdicts = s.results[VERIFY_SCHEMA_NAME]!;
+      const m = verdicts.at(-1)!.output as { verdicts: Array<Record<string, unknown>> };
+      const refuted = m.verdicts.map((v) => (v.finding === "F4" ? { ...v, verdict: "refuted", witness: "", quotes: [{ path: "pkg/quota/limit_test.go", line: 3, text: "func TestLimit(t *testing.T) {" }], reason: "a test of the base covers it" } : v));
+      s.results[VERIFY_SCHEMA_NAME] = [...verdicts.slice(0, -1), { output: { verdicts: refuted } }];
+      s.commands = { ...s.commands, [`${quotePrefix("maintainability", 1)}-1`]: { exitCode: 0, stdout: "1 ok\nchecked 1\n" } };
+    });
+    const sim = simulate({ scenario, request: REVIEW_REQUEST, through: "end", maxSteps: 400 });
+    expect(stopOf(sim), JSON.stringify(sim.final).slice(0, 400)).toMatchObject({ reason: "complete" });
+    const rec = recordedAspect(sim.evidence, "maintainability");
+    if (rec.state !== "read") throw new Error(rec.state);
+    expect(rec.value.findings.find((f) => f.id === "F4")).toMatchObject({ leadKind: "untested-feature", state: "dismissed" });
+    const d = parseDraft((readParts(sim.evidence, "draft-json", ".graphloom/review/draft.json") as { value: string }).value)!;
+    expect(d.comments.map((c) => c.id)).not.toContain("F4");
+    expect(d.recommended).not.toBe("request-changes");
   });
 });

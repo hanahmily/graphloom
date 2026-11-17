@@ -14,6 +14,7 @@ import { htmlWriteCommands, MAX_PART_CHUNKS, partCommands, readParts, recordedAp
 import { htmlProblems } from "../src/html.js";
 import { validatorById } from "../src/validators.js";
 import { BANYANDB, candidateEvidence, simulate } from "./support.js";
+import { REHEARSAL_REQUEST } from "../src/rehearsal.js";
 
 const dirs: string[] = [];
 afterAll(() => dirs.forEach((d) => rmSync(d, { recursive: true, force: true })));
@@ -277,7 +278,7 @@ describe("a large pull request whose artifacts pass one write command", () => {
   const ids = (prefix: string): string[] => sim.jobs.flatMap((j) => (j.input as { commands?: Array<{ id: string }> }).commands?.map((c) => c.id) ?? []).filter((id) => id.startsWith(prefix));
 
   it("completes: report.json and the appendix are written in parts, no write fails for size, and every requirement is met", () => {
-    expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "answers accepted" } });
+    expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
     expect(sim.receipts.every((r) => r.valid)).toBe(true);
     expect(ids("report-json-p").length).toBeGreaterThanOrEqual(2);
     expect(ids("review-appendix-html-p").length).toBeGreaterThanOrEqual(2);
@@ -289,7 +290,7 @@ describe("a large pull request whose artifacts pass one write command", () => {
   // What the controller hands the validators when the Report stage is validated: the evidence up to the last Report job.
   const atReport = (evidence: EvidenceRecord[]): EvidenceRecord[] => evidence.slice(0, evidence.map((e, i) => ((e.payload as { producer?: { stageId?: string } } | undefined)?.producer?.stageId === "report" ? i : -1)).reduce((x, y) => Math.max(x, y), -1) + 1);
   const reported = atReport(sim.evidence);
-  const verdictOf = (id: string, evidence: EvidenceRecord[]) => validatorById(id)!.evaluate({ requirementId: id, statement: "", evidence: candidateEvidence(evidence, "d1"), candidateDigest: "d1", config: BANYANDB });
+  const verdictOf = (id: string, evidence: EvidenceRecord[]) => validatorById(id)!.evaluate({ requirementId: id, statement: "", evidence: candidateEvidence(evidence, "d1"), candidateDigest: "d1", config: BANYANDB, request: REHEARSAL_REQUEST });
   const commandOf = (e: EvidenceRecord): { id: string; argv: string[] } | undefined => (e.payload as { command?: { id: string; argv: string[] } }).command;
   const withCommand = (id: string, change: (argv: string[]) => string[]): EvidenceRecord[] =>
     reported.map((e) => (commandOf(e)?.id === id ? { ...e, payload: { ...(e.payload as object), command: { ...commandOf(e)!, argv: change([...commandOf(e)!.argv]) } } } : e));

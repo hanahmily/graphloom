@@ -27,6 +27,10 @@ export const REQUIREMENT_FINDINGS_PROVEN = "findings-proven";
 export const REQUIREMENT_DRAFT = "draft-composed";
 export const REQUIREMENT_ROUND1 = "round1-gated";
 export const REQUIREMENT_PUBLISHED = "review-published";
+/** pr-review 1.x (design-pr-review-split §4.1): the context source, the leads' statuses and the review section's write. */
+export const REQUIREMENT_CONTEXT = "review-context";
+export const REQUIREMENT_LEADS = "leads-judged";
+export const REQUIREMENT_LEDGER_RECORDED = "ledger-recorded";
 
 export const CODING_AGENT: ExecutorPin = { id: "graphloom.coding-agent/run", version: "1" };
 export const GET_PULL: ExecutorPin = { id: "graphloom.github/get-pull", version: "1" };
@@ -104,6 +108,12 @@ export const COMMAND = {
   reviewScope: "review-scope",
   /** The advance of the ledger ref with the published review's ids (design §9.1), after the review was posted. */
   ledgerPublished: "ledger-published",
+  /** pr-review's write of the ledger's `review` section after the draft (design-pr-review-split §4.1 `ledger-recorded`). */
+  reviewLedgerWrite: "ledger-review-write",
+  /** The read of the design section's `report.json` (parts `-<k>`): the context of round 2 (design-pr-review-split §4.2). */
+  ledgerPriorReport: "ledger-prior-report",
+  /** The check that the design head's base commit is in the review clone (design-pr-review-split §4.2, design §9.2 item 3). */
+  designBase: "design-base",
 } as const;
 
 /**
@@ -125,6 +135,12 @@ export const PART_BASE = {
   /** The review section a migration of a v1 ledger builds (design-pr-review-split §5.4), written before the first v2 write reads it. */
   ledgerReviewJson: "ledger-review-json",
   ledgerReviewMd: "ledger-review-md",
+  /** The design section a review write's migration of a v1 ledger builds (design-pr-review-split §5.4), written before the write reads it. */
+  ledgerDesignJson: "ledger-design-json",
+  ledgerDesignMd: "ledger-design-md",
+  /** pr-review's context record (design-pr-review-split §4.2) and its seed `review.md` when the source is not the prelude. */
+  contextJson: "context-json",
+  seedMd: "review-md-seed",
   /** The patch the Publish stage records in the ledger, as a part set (design §6.6): it can be far past one argument. */
   publishPatch: "publish-patch",
   /** The rule file of an aspect: `review-rules-<aspect>` (design §8.1). */
@@ -173,6 +189,11 @@ export const LEDGER_MD_FILE = `${REVIEW_DIR}/ledger/ledger.md`;
 /** The migrated review section's files (design-pr-review-split §5.4), which the first v2 write reads. */
 export const LEDGER_REVIEW_JSON_FILE = `${REVIEW_DIR}/ledger/review/ledger.json`;
 export const LEDGER_REVIEW_MD_FILE = `${REVIEW_DIR}/ledger/review/ledger.md`;
+/** The design section a review write migrates a v1 ledger to (design-pr-review-split §5.4). */
+export const LEDGER_DESIGN_JSON_FILE = `${REVIEW_DIR}/ledger/design/ledger.json`;
+export const LEDGER_DESIGN_MD_FILE = `${REVIEW_DIR}/ledger/design/ledger.md`;
+/** pr-review's context record (design-pr-review-split §4.2). */
+export const CONTEXT_JSON = `${REVIEW_DIR}/context.json`;
 
 /** `refs/graphloom/pr-review/<owner>/<repo>/<N>/ledger`: the per-PR ledger (design §9.1). */
 export const ledgerRef = (owner: string, repo: string, n: number): string => `refs/graphloom/pr-review/${owner}/${repo}/${n}/ledger`;

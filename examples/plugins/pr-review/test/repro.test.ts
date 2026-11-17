@@ -13,7 +13,7 @@ import { findingsProven } from "../src/reviewvalidators.js";
 import { BANYANDB, assignmentOf, candidateEvidence, scenarioWith, simulate, type Simulation } from "./support.js";
 import { REHEARSAL_REQUEST } from "../src/rehearsal.js";
 
-const REVIEW_REQUEST = REHEARSAL_REQUEST.replace("Report on", "Review on");
+const REVIEW_REQUEST = REHEARSAL_REQUEST;
 const stopOf = (s: Simulation) => (s.final.action.type === "stop" ? s.final.action.stop : undefined);
 
 const PATH = "pkg/schema/ttl.go";
@@ -37,7 +37,10 @@ const scenario = (passes: unknown[], verdicts: unknown[], commands: NonNullable<
   scenarioWith(
     "review-layer",
     (s) => {
-      s.results[REVIEW_SCHEMA_NAME] = passes as never;
+      // The maintainability reviewer's first pass gives each lead it is given a status (design-pr-review-split §4.3): the scenario's own
+      // statuses ride on every scripted pass, and a pass that is given no lead ignores them.
+      const leads = (s.results[REVIEW_SCHEMA_NAME]!.find((r) => ((r.output as { leads?: unknown[] }).leads ?? []).length > 0)?.output as { leads?: unknown[] } | undefined)?.leads ?? [];
+      s.results[REVIEW_SCHEMA_NAME] = (passes as Array<{ output: object }>).map((p) => ({ ...p, output: { ...p.output, leads } })) as never;
       s.results[VERIFY_SCHEMA_NAME] = verdicts as never;
       s.commands = { ...s.commands, ...SANDBOX_GO_READY, ...commands };
     },
@@ -223,7 +226,7 @@ describe("a behavioral finding with a test the graph ran", () => {
   });
 
   it("posts it as a proven finding: the verdict says changes requested and the comment says how it was proven", () => {
-    expect(stopOf(proven)!.blocker).toMatch(/^round 2: changes requested: 1 open/);
+    expect(stopOf(proven)!.blocker).toMatch(/^changes requested: 1 open/);
     const text = JSON.stringify(proven.github.creates[0]);
     expect(text).toContain("proven by a failing test");
   });

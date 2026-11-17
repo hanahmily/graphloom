@@ -34,15 +34,26 @@ also holds the post of one review (`post.ts`: the item and head markers, the
 reconcile before posting and the read-back of comment ids), the published-review
 ledger write (`PUBLISHED_WRITE`, `publishBaselines` in `ledger.ts`), the item
 text parts (`answertext.ts`), the secret scan, the treemap and the attempt
-bookkeeping.
+bookkeeping, and the record of the report's claim checks (`claimrecord.ts`): a
+validator sees only a candidate's latest review evidence, so each graph records the
+claim checks once the report is checked, and `reportFlowOf` puts a check a later
+review of the same candidate superseded back from that record, so a reentry to
+Fetch with the candidate unchanged can accept the Report stage again.
 
 Where the two graphs differ, the kit takes a parameter: `parseProfile(config,
-graph)` (the design review accepts `pr-review`'s keys unread, refuses `rounds`
-and reads `comments.designPassedNote`), `requestedPull(request, profile, graph)`,
+graph)` (each graph accepts the other's keys unread and refuses `rounds`; the
+design review reads `comments.designPassedNote`, pr-review the reviewers' harnesses,
+which default to `claude-code`), `requestedPull(request, profile, graph)`,
 the head marker a post carries (`PostSpec.marker`), `metrics.staticOnly` (set by
 the design review's parser: complexity and nesting only, hotspots by complexity
-then nesting), `groundworkState({ perSymbol })` and the ledger write's commit
-message.
+then nesting), `groundworkState({ perSymbol, maxSearched })` (pr-review runs the
+searches of its `reuse` leads only up to `limits.maxNewSymbols` new symbols), the
+section a ledger write advances (`ledgerWriteCommands` writes `design`,
+`reviewLedgerWriteCommands` writes `review`, each migrating a v1 ledger with the
+other section's migration) and the section `publishBaselines(evidence, pull, own)`
+takes from the run's own write. `reportViewOf(json)` reads a `report.json` text
+(pr-review reads the design section's), and `measurementsJson` is the
+measurements part of `report.json` (pr-review puts its own into a design report).
 
 The kit expects its consumer's bundle to provide `tools/gometrics/` and the built
 entry `dist/metrics/tsmetrics-cli.js`, and, for coverage (`pr-review` only),

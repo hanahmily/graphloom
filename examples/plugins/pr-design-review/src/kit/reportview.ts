@@ -41,10 +41,14 @@ export interface ReportView {
 export function reportView(evidence: readonly EvidenceRecord[]): ReportView | undefined {
   // `report.json` as the write recorded it: its single command, or the part set it was written as (design §6.6).
   const written = recordedReport(evidence);
-  if (written.state !== "read") return undefined;
+  return written.state !== "read" ? undefined : reportViewOf(written.value.json);
+}
+
+/** The view of a `report.json` text: this run's, or the one a ledger section keeps (pr-review reads the design review's). */
+export function reportViewOf(text: string): ReportView | undefined {
   let json: unknown;
   try {
-    json = JSON.parse(written.value.json);
+    json = JSON.parse(text);
   } catch {
     return undefined;
   }

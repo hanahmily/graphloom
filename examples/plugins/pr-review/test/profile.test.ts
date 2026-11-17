@@ -38,40 +38,31 @@ describe("the BanyanDB profile", () => {
     expect(p.sections.find((s) => s.id === "schema")!.routing).toContain("api/proto/**");
   });
 
-  it("describes a fixed stage list: Fetch, Report, Questions, Answers, Round 1, Review, Draft, Publish", () => {
+  it("describes a fixed stage list: Fetch, Report, Review, Draft, Publish (design-pr-review-split 4.1)", () => {
     const d = createGraph().describe(BANYANDB);
     expect(d.stages.map((s) => [s.id, s.requirementIds])).toEqual([
       ["fetch", ["pr-snapshot", "head-checked-out", "prior-ledger"]],
-      ["report", ["change-report", "measurements", "claims-checked"]],
-      ["questions", ["questions-complete"]],
-      ["answers", ["answers-complete", "answers-grounded"]],
-      ["round1", ["round1-gated"]],
-      ["review", ["code-review", "findings-proven"]],
-      ["draft", ["draft-composed"]],
+      ["report", ["review-context", "change-report", "measurements", "claims-checked"]],
+      ["review", ["code-review", "leads-judged", "findings-proven"]],
+      ["draft", ["draft-composed", "ledger-recorded"]],
       ["publish", ["review-published"]],
     ]);
     expect(d.requirements.map((r) => r.id)).toEqual(d.defaultValidators.map((b) => b.requirementId));
-    expect(new Set(d.requirements.map((r) => r.id)).size).toBe(14);
-    expect(d.resultContracts!.map((c) => [c.name, c.evidenceKind])).toEqual([["change-report-v1", "other"], ["change-report-revision-v1", "other"], ["diagrams-v1", "other"], ["claim-check-v1", "review"], ["questions-v1", "other"], ["answers-v1", "other"], ["answers-revision-v1", "other"], ["necessity-v1", "other"], ["necessity-revision-v1", "other"], ["answer-check-v1", "review"], ["pr-code-review-v1", "review"], ["pr-finding-verification-v1", "review"]]);
+    expect(new Set(d.requirements.map((r) => r.id)).size).toBe(13);
+    expect(d.resultContracts!.map((c) => [c.name, c.evidenceKind])).toEqual([["change-report-v1", "other"], ["change-report-revision-v1", "other"], ["diagrams-v1", "other"], ["claim-check-v1", "review"], ["pr-code-review-v2", "review"], ["pr-finding-verification-v1", "review"]]);
   });
-
-  it("declares the roles with their distinctFrom pairs, the supervisor preference and the budgets", () => {
+  it("declares pr-review's own roles with their distinctFrom pairs, the supervisor preference and the budgets", () => {
     const d = definitionFor(profileOf());
     expect(d.agentRoles).toEqual([
-      { role: "reporter", harness: "claude-code", access: "read", setting: "harnesses.reporter" },
-      { role: "diagrammer", harness: "claude-code", access: "read", setting: "harnesses.diagrammer (optional; falls back to harnesses.reporter)" },
-      { role: "report-checker", harness: "codex", access: "read", distinctFrom: ["reporter"], setting: "harnesses.report-checker" },
-      { role: "questioner", harness: "codex", access: "read", distinctFrom: ["reporter"], setting: "harnesses.questioner" },
-      { role: "answerer", harness: "claude-code", access: "read", distinctFrom: ["questioner"], setting: "harnesses.answerer" },
-      { role: "batch-answerer", harness: "claude-code", access: "read", setting: "harnesses.batch-answerer (optional; the answer batches of large mode; falls back to harnesses.answerer)" },
-      { role: "answer-checker", harness: "codex", access: "read", distinctFrom: ["answerer", "batch-answerer"], setting: "harnesses.answer-checker" },
-      ...(["correctness", "maintainability", "security"] as const).map((a) => ({ role: `reviewer-${a}`, harness: "claude-code", access: "read", setting: expect.stringContaining(`harnesses.reviewer-${a} (optional; the ${a} aspect's reviewer; falls back to harnesses.answerer`) })),
+      { role: "reporter", harness: "claude-code", access: "read", setting: "harnesses.reporter (the report-only prelude only)" },
+      { role: "diagrammer", harness: "claude-code", access: "read", setting: "harnesses.diagrammer (optional; falls back to harnesses.reporter; the report-only prelude only)" },
+      { role: "report-checker", harness: "codex", access: "read", distinctFrom: ["reporter"], setting: "harnesses.report-checker (the report-only prelude only)" },
+      ...(["correctness", "maintainability", "security"] as const).map((a) => ({ role: `reviewer-${a}`, harness: "claude-code", access: "read", setting: expect.stringContaining(`harnesses.reviewer-${a} (optional; the ${a} aspect's reviewer; defaults to claude-code`) })),
       ...(["correctness", "maintainability", "security"] as const).map((a) => ({ role: `verifier-${a}`, harness: "codex", access: "read", distinctFrom: [`reviewer-${a}`], setting: expect.stringContaining(`harnesses.verifier-${a} (optional;`) })),
     ]);
     expect(d.supervisor).toEqual({ harnesses: ["pi", "claude-code", "codex"] });
     expect(d.defaultBudgets).toMatchObject({ agentInvocations: 1200, jobs: 220, decisions: 240, corrections: 12 });
   });
-
   it("adds the graph's own environment checks to the profile's, which cannot use their ids", () => {
     const ids = definitionFor(profileOf()).environment!.checks!.map((c) => c.id);
     expect(ids).toEqual(["go", "git", "codex", "claude", "worktree", "plugin-root", "go-root", "docker-go", "docker-typescript"]);
@@ -113,10 +104,20 @@ describe("profile refusals", () => {
     expect(refused({ environment: { checks: [], extra: 1 } })).toMatch(/environment.extra/);
   });
 
-  it("says which later version a review-layer field belongs to", () => {
-    for (const key of ["rules", "checks", "comments"]) expect(refused({ [key]: {} })).toMatch(new RegExp(`${key} is not supported in this version`));
+  it("says which later version a field belongs to, refuses rounds naming both graphs, and comments.questions", () => {
+    for (const key of ["rules", "checks"]) expect(refused({ [key]: {} })).toMatch(new RegExp(`${key} is not supported in this version`));
+    expect(refused({ rounds: "review-only" })).toMatch(/rounds is gone: a run of pr-design-review is round 1.*pr-review is round 2/);
+    expect(refused({ comments: { questions: true } })).toMatch(/comments.questions is not a field: no Q&A item is drafted/);
+    for (const key of ["minSeverity", "nits", "maxComments", "suggestions"]) expect(refused({ comments: { [key]: 1 } })).toMatch(new RegExp(`comments.${key} is not supported in this version of pr-review`));
   });
 
+  it("accepts the design review's keys unread (design-pr-review-split 7.2) and reads comments.footer", () => {
+    const p = profileOf({ questions: { ...(BANYANDB.questions as object), designDocs: [42], incremental: "yes" }, comments: { designPassedNote: true, footer: "Reviewed by GraphLoom." }, harnesses: { ...(BANYANDB.harnesses as object), questioner: "claude-code", answerer: "pi", "batch-answerer": "pi", "answer-checker": "claude-code" } });
+    expect(p.comments).toEqual({ designPassedNote: false, footer: "Reviewed by GraphLoom." });
+    expect(p.questions.designDocs).toEqual([]);
+    expect(p.roles.answerer).toBe("claude-code");
+    expect(refused({ comments: { footer: "<!-- graphloom-review: x -->" } })).toMatch(/comments.footer must be text/);
+  });
   it("takes review.repro: on by default with the design's limits, and refuses what it cannot run", () => {
     expect(profileOf().review.repro).toEqual({ enabled: true, perFindingMs: 180_000, timeBudgetMs: 1_800_000, maxTestBytes: 16_384 });
     expect(profileOf({ review: { repro: { enabled: false, perFindingMs: 60_000 } } }).review.repro).toEqual({ enabled: false, perFindingMs: 60_000, timeBudgetMs: 1_800_000, maxTestBytes: 16_384 });
@@ -138,21 +139,17 @@ describe("profile refusals", () => {
     expect(refused({ review: { other: 1 } })).toMatch(/review.other is not a field/);
   });
 
-  it("resolves the review layer's roles (design 13.1): reviewers on the answerer's harness, verifiers on another", () => {
-    const base = { harnesses: { reporter: "claude-code", "report-checker": "codex", questioner: "codex", answerer: "claude-code", "answer-checker": "codex" } };
-    const p = profileOf(base);
-    expect(p.roles["reviewer-security"]).toBe("claude-code");
+  it("resolves the review layer's roles (design-pr-review-split 7.2): reviewers default to claude-code, verifiers on another harness", () => {
+    const p = profileOf({ harnesses: { reporter: "claude-code", "report-checker": "codex" } });
+    expect([p.roles["reviewer-correctness"], p.roles["reviewer-maintainability"], p.roles["reviewer-security"]]).toEqual(["claude-code", "claude-code", "claude-code"]);
     expect([p.roles["verifier-correctness"], p.roles["verifier-maintainability"], p.roles["verifier-security"]]).toEqual(["codex", "codex", "pi"]);
-    // The reviewers follow the answerer, model and effort included.
-    const codex = profileOf({ harnesses: { reporter: "codex", "report-checker": "claude-code", questioner: "claude-code", answerer: { harness: "codex", effort: "high" }, "answer-checker": "claude-code" } });
+    // No sameAs: a reviewer may run on another harness than the (unread) answerer's, and its verifier follows.
+    const codex = profileOf({ harnesses: { reporter: "claude-code", "report-checker": "codex", answerer: "claude-code", "reviewer-correctness": { harness: "codex", effort: "high" } } });
     expect(codex.roles["reviewer-correctness"]).toBe("codex");
     expect(codex.roleSettings["reviewer-correctness"]).toEqual({ effort: "high" });
     expect(codex.roles["verifier-correctness"]).toBe("claude-code");
-    expect(codex.roles["verifier-security"]).toBe("pi");
     expect(refused({ harnesses: { "verifier-security": "claude-code" } })).toMatch(/verifier-security must differ from harnesses.reviewer-security \(both are claude-code\)/);
-    expect(refused({ harnesses: { "reviewer-correctness": "codex" } })).toMatch(/reviewer-correctness must be the answerer's harness/);
   });
-
   it("refuses a section that cannot be removed or a measurements section with detectors", () => {
     expect(refused({ report: { sections: [{ id: "other", remove: true }] } })).toMatch(/no section may be removed/);
     expect(refused({ report: { sections: [{ id: "measurements", routing: ["a/**"] }] } })).toMatch(/built from records/);
@@ -166,16 +163,14 @@ describe("profile refusals", () => {
   });
 
   it("takes a harness id or an object with the harness, model and effort, and keeps inheriting what is omitted", () => {
-    const ids = { reporter: "claude-code", "report-checker": "codex", questioner: "codex", answerer: "claude-code", "answer-checker": "codex" };
-    expect(profileOf({ harnesses: ids }).roleSettings).toEqual({});
+    expect(profileOf({ harnesses: { reporter: "claude-code", "report-checker": "codex" } }).roleSettings).toEqual({});
     // The BanyanDB profile pins Opus at high effort for the authors and medium effort for the Codex checkers.
-    expect(profileOf().roleSettings).toEqual({ reporter: { model: "opus", effort: "high" }, diagrammer: { model: "opus", effort: "high" }, answerer: { model: "opus", effort: "high" }, "batch-answerer": { model: "sonnet", effort: "high" }, "report-checker": { effort: "medium" }, questioner: { effort: "medium" }, "answer-checker": { effort: "medium" }, "reviewer-correctness": { model: "opus", effort: "high" }, "reviewer-maintainability": { model: "opus", effort: "high" }, "reviewer-security": { model: "opus", effort: "high" }, "verifier-correctness": { effort: "medium" }, "verifier-maintainability": { effort: "medium" }, "verifier-security": { effort: "medium" } });
-    const p =profileOf({ harnesses: { reporter: { harness: "claude-code", model: "opus", effort: "max" }, "report-checker": { harness: "codex", effort: "minimal" }, questioner: { harness: "codex" }, answerer: "claude-code" } });
-    expect(p.roles).toEqual({ reporter: "claude-code", diagrammer: "claude-code", "report-checker": "codex", questioner: "codex", answerer: "claude-code", "batch-answerer": "claude-code", "answer-checker": "codex", "reviewer-correctness": "claude-code", "reviewer-maintainability": "claude-code", "reviewer-security": "claude-code", "verifier-correctness": "codex", "verifier-maintainability": "codex", "verifier-security": "pi" });
+    expect(profileOf().roleSettings).toEqual({ reporter: { model: "opus", effort: "high" }, diagrammer: { model: "opus", effort: "high" }, "report-checker": { effort: "medium" }, "reviewer-correctness": { model: "opus", effort: "high" }, "reviewer-maintainability": { model: "opus", effort: "high" }, "reviewer-security": { model: "opus", effort: "high" }, "verifier-correctness": { effort: "medium" }, "verifier-maintainability": { effort: "medium" }, "verifier-security": { effort: "medium" } });
+    const p = profileOf({ harnesses: { reporter: { harness: "claude-code", model: "opus", effort: "max" }, "report-checker": { harness: "codex", effort: "minimal" } } });
+    expect(p.roles).toMatchObject({ reporter: "claude-code", diagrammer: "claude-code", "report-checker": "codex", "reviewer-correctness": "claude-code", "reviewer-maintainability": "claude-code", "reviewer-security": "claude-code", "verifier-correctness": "codex", "verifier-maintainability": "codex", "verifier-security": "pi" });
     // With no diagrammer named it takes the reporter's settings.
     expect(p.roleSettings).toEqual({ reporter: { model: "opus", effort: "max" }, diagrammer: { model: "opus", effort: "max" }, "report-checker": { effort: "minimal" } });
   });
-
   it("refuses area-reporter: large mode has one reporter job, so the role is gone and an unknown role is refused", () => {
     const base = { reporter: { harness: "claude-code", model: "opus", effort: "high" }, "report-checker": "codex" };
     expect(refused({ harnesses: { ...base, "area-reporter": "claude-code" } })).toMatch(/harnesses\.area-reporter is not a role/);
@@ -188,21 +183,19 @@ describe("profile refusals", () => {
     expect(refused({ harnesses: { reporter: { harness: "claude-code", effort: "minimal" } } })).toMatch(/reporter\.effort must be one of low, medium, high, xhigh, max for claude-code/);
     expect(refused({ harnesses: { "report-checker": { harness: "codex", effort: "max" } } })).toMatch(/report-checker\.effort must be one of minimal, low, medium, high, xhigh for codex/);
     expect(refused({ harnesses: { reporter: { harness: "claude-code", temperature: 1 } } })).toMatch(/harnesses\.reporter\.temperature is not a field/);
-    expect(refused({ harnesses: { questioner: { harness: "pi" } } })).toMatch(/questioner\.harness must be one of claude-code, codex/);
+    expect(refused({ harnesses: { "reviewer-security": { harness: "pi" } } })).toMatch(/reviewer-security\.harness must be one of claude-code, codex/);
     expect(refused({ harnesses: { reporter: { effort: "high" } } })).toMatch(/reporter\.harness must be one of/);
     expect(refused({ harnesses: { reporter: { harness: "claude-code", model: "" } } })).toMatch(/reporter\.model must be a model name/);
     // The distinct-pair rule compares harness ids, whatever the object form says.
     expect(refused({ harnesses: { "report-checker": { harness: "claude-code", effort: "low" } } })).toMatch(/report-checker must differ from harnesses.reporter/);
   });
 
-  it("refuses two roles on one harness, naming the first unsatisfiable pair", () => {
+  it("refuses two roles on one harness, naming the first unsatisfiable pair, and never a pair of the design review's unread roles", () => {
     expect(refused({ harnesses: { "report-checker": "claude-code" } })).toMatch(/report-checker must differ from harnesses.reporter \(both are claude-code\)/);
-    expect(refused({ harnesses: { answerer: "codex" } })).toMatch(/answerer must differ from harnesses.questioner/);
     expect(refused({ harnesses: { reporter: "gpt" } })).toMatch(/must be one of/);
-    expect(refused({ harnesses: { "reviewer-security": "pi" } })).toMatch(/reviewer-security must be the answerer's harness/);
-    expect(refused({ harnesses: { answerer: "pi" } })).toMatch(/answerer must be claude-code or codex/);
+    expect(refused({ harnesses: { "reviewer-correctness": "codex", "verifier-correctness": "codex" } })).toMatch(/verifier-correctness must differ from harnesses.reviewer-correctness/);
+    expect(profileOf({ harnesses: { ...(BANYANDB.harnesses as object), answerer: "codex", questioner: "codex" } }).roles.reporter).toBe("claude-code");
   });
-
   it("checks symbol packs: patterns must compile and name the symbol, and a profile pack overrides only the fields it names", () => {
     const pack = (over: object) => ({ symbols: { packs: [{ language: "go", globs: ["**/*.go"], ...over }] } });
     expect(refused(pack({ definitions: ["^func (?<name>"] }))).toMatch(/not a regular expression/);
@@ -213,29 +206,9 @@ describe("profile refusals", () => {
     expect(profileOf(pack({ definitions: ["^fn\\s+(?<name>\\w+)"], testFiles: ["**/*_spec.go"] })).symbols[0]).toMatchObject({ language: "go", testFiles: ["**/*_spec.go"] });
   });
 
-  it("takes an optional batch-answerer for large mode's answer batches: absent it is the answerer (harness, model and effort), and it is held to the same distinct pair with the answer-checker", () => {
-    // Absent: the answerer's harness, model and effort.
-    const fallback = profileOf({ harnesses: { reporter: "claude-code", "report-checker": "codex", questioner: "codex", answerer: { harness: "claude-code", model: "opus", effort: "high" }, "answer-checker": "codex" } });
-    expect(fallback.roles["batch-answerer"]).toBe("claude-code");
-    expect(fallback.roleSettings["batch-answerer"]).toEqual({ model: "opus", effort: "high" });
-    // Named: its own harness, model and effort, in the string or the object form.
-    const named = profileOf({ harnesses: { reporter: "claude-code", "report-checker": "codex", questioner: "codex", answerer: { harness: "claude-code", model: "opus", effort: "high" }, "batch-answerer": { harness: "claude-code", model: "sonnet", effort: "medium" }, "answer-checker": "codex" } });
-    expect(named.roleSettings["batch-answerer"]).toEqual({ model: "sonnet", effort: "medium" });
-    expect(named.roleSettings.answerer).toEqual({ model: "opus", effort: "high" });
-    expect(profileOf({ harnesses: { reporter: "claude-code", "report-checker": "codex", questioner: "codex", answerer: "claude-code", "batch-answerer": "claude-code", "answer-checker": "codex" } }).roles["batch-answerer"]).toBe("claude-code");
-    // The answer-checker differs in harness from the batch-answerer as it must from the answerer.
-    expect(refused({ harnesses: { answerer: "claude-code", "batch-answerer": "codex", "answer-checker": "codex" } })).toMatch(/answer-checker must differ from harnesses.batch-answerer \(both are codex\)/);
-    expect(refused({ harnesses: { "batch-answerer": { harness: "codex", model: "x" } } })).toMatch(/answer-checker must differ from harnesses.batch-answerer/);
-    // Its session is the one the maintainer opens in large mode, so it is not a Pi session; its settings are checked like any role's.
-    expect(refused({ harnesses: { "batch-answerer": "pi" } })).toMatch(/batch-answerer must be claude-code or codex/);
-    expect(refused({ harnesses: { "batch-answerer": { harness: "claude-code", effort: "minimal" } } })).toMatch(/batch-answerer.effort must be one of/);
-    expect(refused({ harnesses: { "batch-answerer": { harness: "claude-code", colour: "red" } } })).toMatch(/batch-answerer/);
-  });
-
   it("accepts roles that satisfy every pair", () => {
-    expect(profileOf({ harnesses: { reporter: "pi", "report-checker": "codex", questioner: "claude-code", answerer: "codex", "answer-checker": "claude-code" } }).roles.reporter).toBe("pi");
+    expect(profileOf({ harnesses: { reporter: "pi", "report-checker": "codex" } }).roles.reporter).toBe("pi");
   });
-
   it("checks limits, budgets, the supervisor, privateRepos, metrics and context", () => {
     expect(refused({ limits: { maxFiles: 0 } })).toMatch(/limits.maxFiles/);
     expect(refused({ budgets: { agentInvocations: -1 } })).toMatch(/positive integer/);
@@ -398,26 +371,28 @@ describe("requestedPull", () => {
   const profile = { project: "apache/skywalking-banyandb" };
   const head = "0123456789abcdef0123456789abcdef01234567";
 
-  it("reads Report on owner/repo#N at <sha>.", () => {
-    expect(requestedPull(`Report on apache/skywalking-banyandb#1234 at ${head}.`, profile)).toEqual({ mode: "report", owner: "apache", repo: "skywalking-banyandb", number: 1234, head });
-  });
-
-  it("reads Review mode: the same request that continues into the review layer without pausing", () => {
-    expect(requestedPull(`Review on apache/skywalking-banyandb#1 at ${head}.`, profile)).toMatchObject({ mode: "review", number: 1 });
-    expect(requestedPull(`Report on apache/skywalking-banyandb#1 at ${head}.`, profile)).toMatchObject({ mode: "report" });
+  it("reads Review on owner/repo#N at <sha>., and the --no-report suffix", () => {
+    expect(requestedPull(`Review on apache/skywalking-banyandb#1234 at ${head}.`, profile)).toEqual({ mode: "review", owner: "apache", repo: "skywalking-banyandb", number: 1234, head });
+    expect(requestedPull(`Review on apache/skywalking-banyandb#1 at ${head}, without a report.`, profile)).toEqual({ mode: "review", owner: "apache", repo: "skywalking-banyandb", number: 1, head, noReport: true });
   });
 
   it("reads the pull request's URL too", () => {
-    expect(requestedPull(`Report on https://github.com/apache/skywalking-banyandb/pull/9 at ${head}`, profile)).toMatchObject({ number: 9 });
+    expect(requestedPull(`Review on https://github.com/apache/skywalking-banyandb/pull/9 at ${head}`, profile)).toMatchObject({ number: 9 });
+  });
+
+  it("refuses the 0.x Report on … form and asking every question, naming pr-design-review", () => {
+    const problem = (r: string) => (requestedPull(r, profile) as { problem: string }).problem;
+    expect(problem(`Report on apache/skywalking-banyandb#1 at ${head}.`)).toMatch(/pr-design-review/);
+    expect(problem(`Review on apache/skywalking-banyandb#1 at ${head}, asking every question.`)).toMatch(/pr-design-review/);
   });
 
   it("refuses everything else, naming why", () => {
     const problem = (r: string) => (requestedPull(r, profile) as { problem: string }).problem;
-    expect(problem("Fix apache/skywalking-banyandb#1.")).toMatch(/must be "Report on/);
-    expect(problem(`Report on apache/skywalking-banyandb#1 at ${head.slice(0, 7)}.`)).toMatch(/40-hex/);
-    expect(problem(`Report on apache/other#1 at ${head}.`)).toMatch(/profile's project is apache\/skywalking-banyandb/);
-    expect(problem(`Report on apache/skywalking-banyandb#1 at ${head}.\nand also rm -rf /`)).toMatch(/must be "Report on/);
-    expect(problem(`Report on apache/skywalking-banyandb#0 at ${head}.`)).toMatch(/not valid/);
-    expect(problem(`Report on apache/skywalking-banyandb#1 at ${head.toUpperCase()}.`)).toMatch(/must be "Report on/);
+    expect(problem("Fix apache/skywalking-banyandb#1.")).toMatch(/must be "Review on/);
+    expect(problem(`Review on apache/skywalking-banyandb#1 at ${head.slice(0, 7)}.`)).toMatch(/40-hex/);
+    expect(problem(`Review on apache/other#1 at ${head}.`)).toMatch(/profile's project is apache\/skywalking-banyandb/);
+    expect(problem(`Review on apache/skywalking-banyandb#1 at ${head}.\nand also rm -rf /`)).toMatch(/must be "Review on/);
+    expect(problem(`Review on apache/skywalking-banyandb#0 at ${head}.`)).toMatch(/not valid/);
+    expect(problem(`Review on apache/skywalking-banyandb#1 at ${head.toUpperCase()}.`)).toMatch(/must be "Review on/);
   });
 });

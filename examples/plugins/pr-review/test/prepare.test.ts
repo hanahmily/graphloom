@@ -48,15 +48,17 @@ describe("prepareTask", () => {
     expect(withBranch.steps[1]).toMatchObject({ refspec: "refs/heads/develop" });
   });
 
-  it("writes --all-questions into the request, which asks every follow-up question even when N1 judges the change unnecessary (design 7.5), and validates", () => {
-    const plan = prepareTask(input(["apache/skywalking-banyandb#7", "--all-questions"])) as { summary: string; steps: Array<Record<string, unknown>> };
-    expect(plan.steps[5]).toMatchObject({ fields: { request: "Review on apache/skywalking-banyandb#7 at ${headSha}, asking every question." } });
-    expect(plan.summary).toBe("review of apache/skywalking-banyandb#7 against main, asking every question even if the change is judged unnecessary");
+  it("writes --no-report into the request as \", without a report\" (design-pr-review-split 7.1), validates, and refuses --all-questions naming pr-design-review", () => {
+    const plan = prepareTask(input(["apache/skywalking-banyandb#7", "--no-report"])) as { summary: string; steps: Array<Record<string, unknown>> };
+    expect(plan.steps[5]).toMatchObject({ fields: { request: "Review on apache/skywalking-banyandb#7 at ${headSha}, without a report." } });
+    expect(plan.summary).toBe("review of apache/skywalking-banyandb#7 against main, without a report (no report-only prelude)");
     expect(() => validateTaskPlan(plan as never, "pr-review")).not.toThrow();
-    const both = prepareTask(input(["apache/skywalking-banyandb#7", "--review", "--all-questions"])) as { steps: Array<Record<string, unknown>> };
-    expect(both.steps[5]).toMatchObject({ fields: { request: "Review on apache/skywalking-banyandb#7 at ${headSha}, asking every question." } });
+    const both = prepareTask(input(["apache/skywalking-banyandb#7", "--review", "--no-report"])) as { steps: Array<Record<string, unknown>> };
+    expect(both.steps[5]).toMatchObject({ fields: { request: "Review on apache/skywalking-banyandb#7 at ${headSha}, without a report." } });
     const plain = prepareTask(input(["apache/skywalking-banyandb#7"])) as { steps: Array<Record<string, unknown>> };
     expect(plain.steps[5]).toMatchObject({ fields: { request: "Review on apache/skywalking-banyandb#7 at ${headSha}." } });
+    const refused = (prepareTask(input(["apache/skywalking-banyandb#7", "--all-questions"])) as { refused: string }).refused;
+    expect(refused).toContain("pr-design-review");
   });
 
   it("matches a remote's URL literally: a dot in the repository name is not a wildcard", () => {
@@ -84,6 +86,6 @@ describe("no human in the flow", () => {
   it("declares no approval: the pinned definition has none, and the stages end with Publish", () => {
     const definition = definitionFor(parseProfile(banyandb));
     expect(definition.approvals).toBeUndefined();
-    expect(definition.stages.map((s) => s.id)).toEqual(["fetch", "report", "questions", "answers", "round1", "review", "draft", "publish"]);
+    expect(definition.stages.map((s) => s.id)).toEqual(["fetch", "report", "review", "draft", "publish"]);
   });
 });

@@ -7,7 +7,6 @@ import os from "node:os";
 import path from "node:path";
 import type { EnvironmentCommand, EvidenceRecord } from "@graphloom/sdk";
 import { afterAll, describe, expect, it } from "vitest";
-import { verificationPlan, type Answer } from "../src/answers.js";
 import { GIT_ENV } from "../src/kit/commands.js";
 import { COMMAND } from "../src/kit/constants.js";
 import { AGENT_CONFIG_NAMES, baseExportCommand, parseBaseExport } from "../src/kit/basetree.js";
@@ -233,48 +232,6 @@ describe("the dependency inventory commands (design 7.2 item 3)", () => {
     expect(status("github.com/spf13/cobra")).toBe(path.join(cache, "github.com/spf13/cobra@v1.9.1"));
     expect(status("go.uber.org/multierr")).toBeUndefined();
     expect(status("lodash")).toBeUndefined();
-  });
-});
-
-describe("the answers' verification commands", () => {
-  const { dir, base } = repo();
-  const answer = (over: Partial<Answer>): Answer => ({ question: "Q1", answer: "x", status: "answered", none_found: false, citations: [], searches: [], inventory: [], metrics: [], proposal: { kind: "none", splits: [], testFile: "", testName: "", cases: [], assertion: "" }, ...over });
-  const ctx = { questions: [{ id: "Q1", type: "existing-reuse-common", item: "R1", text: "?", origin: "required", key: "k" }], groundwork: { symbols: [], inventory: { dependencies: [], packages: [], truncated: [] } }, view: { items: [], records: [] }, packs: [] } as never;
-
-  it("resolves each citation in the tree it names: the base commit, or the working tree for the head", () => {
-    const plan = verificationPlan(
-      [
-        answer({
-          citations: [
-            { path: "pkg/timestamp/duration.go", tree: "base", start: 3, end: 5, quote: "" },
-            { path: "pkg/timestamp/duration.go", tree: "head", start: 1, end: 2, quote: "" },
-            { path: "pkg/retention/ttl.go", tree: "head", start: 1, end: 5, quote: "" },
-            { path: "pkg/retention/ttl.go", tree: "base", start: 1, end: 1, quote: "" },
-            { path: "pkg/timestamp/duration.go", tree: "base", start: 9, end: 40, quote: "" },
-          ],
-        }),
-      ],
-      ctx,
-      base,
-    );
-    expect(plan).toHaveLength(1);
-    const r = run(dir, plan[0]!.command);
-    expect(r.report.trim().split("\n")).toEqual(["1 ok", "2 missing", "3 ok", "4 missing", "5 range 7", "checked 5"]);
-  });
-
-  it("finds a proposed name already defined as a class member in the package, in the base", () => {
-    const fn = { id: "S1", path: "ui/app.ts", language: "typescript", dir: "ui", name: "x", startLine: 1, endLine: 2, qualified: "ui/app.x", kind: "function", exported: true, scope: "ui/app", signature: "", body: "", change: "modified" };
-    const split = answer({ proposal: { kind: "split", splits: [{ name: "existingHelper", startLine: 1, endLine: 2, responsibility: "r" }, { name: "other", startLine: 3, endLine: 4, responsibility: "r" }, { name: "fresh", startLine: 5, endLine: 6, responsibility: "r" }], testFile: "", testName: "", cases: [], assertion: "" } });
-    const plan = verificationPlan([split], { ...(ctx as object), questions: [{ id: "Q1", type: "split-function", item: "R1", symbol: "S1", text: "?", origin: "required", key: "k" }], groundwork: { symbols: [fn], inventory: { dependencies: [], packages: [], truncated: [] } } } as never, base);
-    expect(run(dir, plan.find((p) => p.kind === "names")!.command).report.trim().split("\n")).toEqual(["exists existingHelper", "exists other", "checked 3"]);
-  });
-
-  it("finds a proposed name already defined in the package, in the base", () => {
-    const withSplit = answer({ proposal: { kind: "split", splits: [{ name: "baseOnlyHelper", startLine: 1, endLine: 2, responsibility: "r" }, { name: "freshName", startLine: 3, endLine: 4, responsibility: "r" }], testFile: "", testName: "", cases: [], assertion: "" } });
-    const fn = { id: "S1", path: "pkg/timestamp/duration.go", language: "go", dir: "pkg/timestamp", name: "ParseDuration", startLine: 3, endLine: 5, qualified: "timestamp.ParseDuration", kind: "func", exported: true, scope: "timestamp", signature: "", body: "", change: "modified" };
-    const names = verificationPlan([withSplit], { ...(ctx as object), questions: [{ id: "Q1", type: "split-function", item: "R1", symbol: "S1", text: "?", origin: "required", key: "k" }], groundwork: { symbols: [fn], inventory: { dependencies: [], packages: [], truncated: [] } } } as never, base);
-    const item = names.find((n) => n.kind === "names")!;
-    expect(run(dir, item.command).report.trim().split("\n")).toEqual(["exists baseOnlyHelper", "checked 2"]);
   });
 });
 

@@ -3,17 +3,13 @@
 
 import type { EnvironmentCommand, JobSpec } from "@graphloom/sdk";
 import { beforeAll, describe, expect, it } from "vitest";
-import { recordedQa } from "../src/kit/parts.js";
 import { assignmentProblem, ASSIGNMENT_BUDGET_CHARS, ASSIGNMENT_MARGIN_CHARS, fitLines, MAX_ASSIGNMENT_CHARS, shrinkToFit } from "../src/kit/fit.js";
 import { diagramSpecs, MAX_DIAGRAM_DATA_CHARS } from "../src/kit/diagrams.js";
 import type { Fact } from "../src/kit/detectors.js";
 import type { ClaimTarget } from "../src/kit/claims.js";
 import { planChecker, planReporter, pullText } from "../src/kit/prompts.js";
-import type { Answer } from "../src/answers.js";
-import { planAnswerChecker, planAnswerer, planNecessity, planNecessityChecker } from "../src/qaprompts.js";
+import { fitPrinciples, planReviewer } from "../src/reviewprompts.js";
 import { reporterSections } from "../src/kit/template.js";
-import type { Question } from "../src/questions.js";
-import type { Groundwork } from "../src/kit/groundwork.js";
 
 import { hugeRehearsal } from "../src/rehearsal.js";
 import { HUGE_AREAS, HUGE_LIMITS, hugeSymbolNames } from "../src/rehearsal-huge.js";
@@ -25,6 +21,8 @@ import { recordedScope } from "../src/reviewdraft.js";
 import { REHEARSAL_REQUEST } from "../src/rehearsal.js";
 
 const CONFIG = { limits: HUGE_LIMITS };
+/** The lead statuses a scenario's maintainability reviewer gives in its first pass. */
+const leadsOf = (s: { results: Record<string, Array<{ output?: unknown }>> }): unknown[] => (s.results[REVIEW_SCHEMA_NAME]!.find((r) => ((r.output as { leads?: unknown[] }).leads ?? []).length > 0)?.output as { leads?: unknown[] } | undefined)?.leads ?? [];
 /** What the briefing of the huge pull request cites, so what its default review scope is (areas and files). */
 const HUGE_SCOPE_FILES = HUGE_FILES_PER_AREA;
 
@@ -49,19 +47,11 @@ describe("every agent assignment fits the executor's bound on a pull request at 
     expect(HUGE_AREAS).toBeGreaterThanOrEqual(24);
   });
 
-  it("runs through Report, N1, Questions and Answers", () => {
-    expect(sim.final.action.type === "stop" ? sim.final.action.stop : sim.final.action).toMatchObject({ reason: "answers accepted" });
+  it("runs through Report, Review, Draft and Publish", () => {
+    expect(sim.final.action.type === "stop" ? sim.final.action.stop : sim.final.action).toMatchObject({ reason: "complete" });
     const schemas = new Set(agentJobs(sim).map((j) => j.resultSchema));
-    for (const s of ["change-report-v1", "claim-check-v1", "diagrams-v1", "necessity-v1", "questions-v1", "answers-v1", "answer-check-v1"]) expect(schemas.has(s)).toBe(true);
-  });
-
-  it("asks per high-level change, so the questions stay at about sixteen however many areas and symbols there are", () => {
-    const written = recordedQa(sim.evidence);
-    if (written.state !== "read") throw new Error("qa.json was not written whole");
-    const qa = JSON.parse(written.value.json) as { questions: Array<{ id: string; item: string }> };
-    expect(qa.questions.length).toBeLessThanOrEqual(16);
-    expect(qa.questions[0]!.id).toBe("N1");
-    for (const q of qa.questions.slice(1)) expect(q.item).toMatch(/^W[1-5]$/);
+    for (const s of ["change-report-v1", "claim-check-v1", "diagrams-v1", "pr-code-review-v2", "pr-finding-verification-v1"]) expect(schemas.has(s)).toBe(true);
+    for (const s of ["necessity-v1", "questions-v1", "answers-v1", "answer-check-v1"]) expect(schemas.has(s)).toBe(false);
   });
 
   it("dispatches every agent job with an assignment within the bound", () => {
@@ -90,7 +80,7 @@ describe("every agent assignment fits the executor's bound on a pull request at 
     }
     // The report's files and each kind of file the plugin writes for an agent are named by some job.
     const names = [...referenced].map((p) => p.slice(p.lastIndexOf("/") + 1));
-    for (const stem of ["review.md", "report.json", "groundwork-", "claims-"]) expect(names.some((n) => n.startsWith(stem)), `no job names a ${stem} file`).toBe(true);
+    for (const stem of ["review.md", "claims-"]) expect(names.some((n) => n.startsWith(stem)), `no job names a ${stem} file`).toBe(true);
   });
 });
 
@@ -169,42 +159,6 @@ describe("a job that would not fit points to a file the plugin writes first", ()
     expect(few.spills).toEqual([]);
   });
 
-  it("gives the answerer a file of the questions it cannot list, with every id there", () => {
-    const questions: Question[] = Array.from({ length: 900 }, (_, i) => ({ id: `Q${i + 1}`, type: "existing-reuse-common", item: "R1", text: `Is there an equivalent of function number ${i + 1} that the base already has?`, origin: "required", key: `k${i}` }));
-    const groundwork = { symbols: [], searches: new Map(), candidates: [], prSimilar: [], inventory: { dependencies: [], packages: [], truncated: [] }, testMap: new Map(), notes: [] } as unknown as Groundwork;
-    const plan = planAnswerer({ pr: PR, snapshot: pull, view: { items: [], records: [] }, groundwork, questions, kind: "first", feedback: [], mountedDirs: [], reviewDir: DIR });
-    expect(plan.text.length).toBeLessThanOrEqual(ASSIGNMENT_BUDGET_CHARS);
-    const spill = plan.spills.find((x) => x.name.startsWith("questions-"))!;
-    expect(plan.text).toContain(`${DIR}/${spill.name}`);
-    expect(spill.text).toContain("Q900 [existing-reuse-common]");
-    expect(plan.text).toContain("Questions (900):");
-  });
-
-  it("gives the answer checker a batch of 15 existence/reuse/common-logic questions, each answered with full evidence, within the bound, the answers as a file", () => {
-    const questions: Question[] = Array.from({ length: 15 }, (_, i) => ({ id: `Q${i + 1}`, type: "existing-reuse-common", item: `W${i + 1}`, text: `For the new functions and features of this change, W${i + 1} "the capability" (pkg/name.go:10): is there an equivalent, a library, common logic? ${"It cites pkg.Name (pkg/name.go:10), ".repeat(12)}`, origin: "required", key: `k${i}` }));
-    const search = (n: number) => ({ pattern: `pattern-${n}-${"x".repeat(150)}`, tree: "base" as const, paths: [], ignoreCase: false as const, hits: 0 });
-    const answers = new Map(questions.map((q) => [q.id, { question: q.id, answer: "No equivalent was found; the searches show none. ".repeat(30), status: "answered" as const, none_found: true, citations: Array.from({ length: 12 }, (_, k) => ({ path: `pkg/file${k}.go`, tree: "base" as const, start: 1, end: 9, quote: "q".repeat(300) })), searches: Array.from({ length: 12 }, (_, k) => search(k)), inventory: [], metrics: [], proposal: { kind: "none" as const, splits: [], testFile: "", testName: "", cases: [], assertion: "" } }] as [string, Answer]));
-    const groundwork = { symbols: [], searches: new Map(), candidates: [], prSimilar: [], inventory: { dependencies: [], packages: [], truncated: [] }, testMap: new Map(), notes: [] } as unknown as Groundwork;
-    const plan = planAnswerChecker({ pr: PR, snapshot: pull, groundwork, questions, answers, retry: false, mountedDirs: [], reviewDir: DIR });
-    expect(plan.text.length).toBeLessThanOrEqual(ASSIGNMENT_BUDGET_CHARS);
-    const spill = plan.spills.find((x) => x.name.startsWith("answers-"))!;
-    expect(plan.text).toContain(`${DIR}/${spill.name}`);
-    expect(spill.text).toContain("Q15 [existing-reuse-common]");
-    const asked = planAnswerer({ pr: PR, snapshot: pull, view: { items: [], records: [] }, groundwork, questions, kind: "first", feedback: [], mountedDirs: [], reviewDir: DIR });
-    expect(asked.text.length).toBeLessThanOrEqual(ASSIGNMENT_BUDGET_CHARS);
-    expect(asked.text).toContain("Q15 [existing-reuse-common]");
-  });
-
-  it("gives N1's checker the whole answer as a file when it is long", () => {
-    const step = (i: number) => ({ step: `step ${i} ${"shows what the base does here ".repeat(8)}`, path: "a.go", tree: "base" as const, start: 1, end: 2, quote: "q".repeat(100) });
-    const answer = { question: "N1", answer: "", status: "answered", none_found: false, citations: [], searches: [], inventory: [], metrics: [], proposal: { kind: "none" }, necessity: { conclusion: "necessary", rationale: "r", problem: { claim: "c", quotes: [], trace: Array.from({ length: 120 }, (_, i) => step(i)), canHappen: "yes", explanation: "e" }, reproduction: "none", principles: [], design: { statements: [], changed: [], effect: "unrelated", explanation: "e", searches: [] }, alternatives: { exists: false, explanation: "e", citations: [] }, searches: [] } } as never;
-    const plan = planNecessityChecker({ pr: PR, snapshot: pull, question: { id: "N1", type: "necessity", item: "", text: "Is it necessary?", origin: "required", key: "" } as Question, answer, designDocs: [], context: [], retry: false, reviewDir: DIR });
-    expect(plan.text.length).toBeLessThanOrEqual(ASSIGNMENT_BUDGET_CHARS);
-    expect(plan.spills).toHaveLength(1);
-    expect(plan.spills[0]!.text).toContain("T120 trace step");
-    expect(plan.text).toContain(`${DIR}/${plan.spills[0]!.name}`);
-  });
-
   it("leaves to the plugin the diagrams whose data does not fit one assignment", () => {
     const entry = (n: number) => ({ id: `state:R${n}:s`, item: `R${n}`, entry: { name: `state ${n}`, scope: "per call", initial: "0", transitions: Array.from({ length: 8 }, (_, i) => ({ when: `condition ${i} ${"w".repeat(230)}`, effect: `effect ${i} ${"e".repeat(230)}`, cite: { path: "a.go", side: "head" as const, start: 1, end: 1, symbol: "" } })), reads: [] } });
     const { drawn, overflow } = diagramSpecs({ features: [], states: Array.from({ length: 12 }, (_, i) => entry(i + 1)) });
@@ -217,7 +171,6 @@ describe("a job that would not fit points to a file the plugin writes first", ()
 
 describe("principles past the inline budget", () => {
   it("tell the agents to read them at the commit they were recorded from, not HEAD, when the profile names a ref", async () => {
-    const { fitPrinciples } = await import("../src/qaprompts.js");
     const many = Array.from({ length: 60 }, (_, i) => ({ id: `p-${i}`, statement: "x".repeat(400), why: "", applies: [], source: "maintainer" }));
     const ctx = { read: { path: "skills/design-principles/SKILL.md", ref: "docs/design-principles", commit: "13c5f4fb80df012a73c646a8e63a67d492e1c683", file: "present", text: "", truncated: false }, parsed: { principles: many, notes: [] }, applicable: many, inapplicable: [], changed: false } as never;
     const lines = fitPrinciples(ctx, (p: { id: string; statement: string }) => `- ${p.id}: ${p.statement}`, 1);
@@ -254,30 +207,22 @@ describe("a repair keeps every problem and every statement it is given", () => {
     expect(planReporter({ ...reporter, kind: "first", feedback }).spills.some((x) => x.name.startsWith("feedback-"))).toBe(false);
   });
 
-  it("does the same for N1's corrections", () => {
-    const feedback = problems(120);
-    const n1 = planNecessity({ pr: PR, snapshot, view: { items: [], records: [] }, designDocs: [], context: [], kind: "correction", feedback, reviewDir: DIR });
-    expect(n1.text.length).toBeLessThanOrEqual(ASSIGNMENT_BUDGET_CHARS);
-    expect(n1.spills.some((x) => x.name.startsWith("feedback-") && x.text.includes("(problem 120)"))).toBe(true);
-  });
-
   const principle = (i: number, n: number) => ({ id: `p-${i}`, statement: `${"s".repeat(n - 4)}#${String(i).padStart(2, "0")}`, why: "", applies: [], source: "maintainer" });
   const ctxOf = (many: ReturnType<typeof principle>[]) => ({ read: { path: "skills/design-principles/SKILL.md", ref: "r", commit: "13c5f4fb80df012a73c646a8e63a67d492e1c683", file: "present", text: "", truncated: false }, parsed: { principles: many, notes: [] }, applicable: many, inapplicable: [], changed: false }) as never;
-  const checkerBase = { pr: PR, snapshot, question: { id: "N1", type: "necessity", item: "", text: "Is it necessary?", origin: "required", key: "" } as Question, answer: { question: "N1", answer: "", status: "answered", none_found: false, citations: [], searches: [], inventory: [], metrics: [], proposal: { kind: "none" } } as never, designDocs: [], context: [], retry: false, reviewDir: DIR };
+  const reviewerBase = { pr: { ...PR, mode: "review" as const }, snapshot, aspect: "correctness" as const, pass: 1, files: ["pkg/a.go"], scopeLine: "the whole pull request", groups: [], known: [], feedback: [], reviewDir: DIR, source: "prelude" as const };
 
-  it("keeps principle statements whole when the assignment fits, in N1's answerer and checker", () => {
+  it("keeps principle statements whole when the assignment fits, in a reviewer's assignment", () => {
     const many = Array.from({ length: 8 }, (_, i) => principle(i, 1_000));
-    const answerer = planNecessity({ pr: PR, snapshot, view: { items: [], records: [] }, designDocs: [], context: [], kind: "first", feedback: [], principles: ctxOf(many), reviewDir: DIR });
-    const checker = planNecessityChecker({ ...checkerBase, principles: ctxOf(many) });
-    for (const text of [answerer.text, checker.text]) for (const p of many) expect(text).toContain(p.statement);
-    expect(answerer.text).not.toContain("[shortened");
+    const reviewer = planReviewer({ ...reviewerBase, principles: ctxOf(many) });
+    for (const p of many) expect(reviewer.text).toContain(p.statement);
+    expect(reviewer.text).not.toContain("[shortened");
   });
 
   it("shortens statements only when it must, and gives every shortened one its full-text source", () => {
     const many = Array.from({ length: 40 }, (_, i) => principle(i, 1_000));
-    const texts = [planNecessity({ pr: PR, snapshot, view: { items: [], records: [] }, designDocs: [], context: [], kind: "first", feedback: [], principles: ctxOf(many), reviewDir: DIR }).text, planNecessityChecker({ ...checkerBase, principles: ctxOf(many) }).text];
+    const texts = [planReviewer({ ...reviewerBase, principles: ctxOf(many) }).text];
     for (const text of texts) {
-      const lines = text.split("\n").filter((l) => /^\s*- p-\d+:/.test(l));
+      const lines = text.split("\n").filter((l) => /^\s*- p-\d+[ :]/.test(l));
       expect(lines.length).toBeGreaterThan(0);
       for (const l of lines) {
         expect(l.length).toBeLessThan(1_000);
@@ -288,8 +233,8 @@ describe("a repair keeps every problem and every statement it is given", () => {
 });
 
 describe("a review pass on a few areas of a pull request at the scale of #1445 fits the executor's bound", () => {
-  // Round 1 raises nothing on this pull request's Q&A, so the same run goes on into the review layer over the areas the briefing
-  // cites; their assignments carry the rule groups and the file list, none of which may push an assignment past the bound.
+  // The review layer reviews the areas the briefing cites; their assignments carry the rule groups, the file list and the leads,
+  // none of which may push an assignment past the bound.
   const { scenario, headFiles } = hugeRehearsal({ ...BANYANDB, ...CONFIG });
   const total = HUGE_SCOPE_FILES;
   const path = hugePath(3, 1);
@@ -298,13 +243,14 @@ describe("a review pass on a few areas of a pull request at the scale of #1445 f
     ...scenario,
     results: {
       ...scenario.results,
-      [REVIEW_SCHEMA_NAME]: [passReply(total, [finding]), passReply(total, []), passReply(total, []), passReply(total, []), passReply(total, [])] as never,
+      // The scenario's own lead statuses ride on every pass: the maintainability reviewer's first pass gives each lead it is given one.
+      [REVIEW_SCHEMA_NAME]: [passReply(total, [finding]), passReply(total, []), passReply(total, []), passReply(total, []), passReply(total, [])].map((r) => ({ ...r, output: { ...(r.output as object), leads: leadsOf(scenario) } })) as never,
       [VERIFY_SCHEMA_NAME]: [verifyReply([{ finding: "F1", verdict: "confirmed", witness: `${path}:3` }])] as never,
     },
   };
 
-  it("runs round 1, the review and the draft, and publishes, and records the scope", async () => {
-    const sim = await simulateYielding({ scenario: picked, config: CONFIG, files: headFiles, request: REHEARSAL_REQUEST.replace("Report on", "Review on"), through: "end", maxSteps: 3_000, budgets: { agentInvocations: 400, jobs: 2_000, decisions: 4_000, corrections: 40 } }, 10);
+  it("runs the review and the draft, and publishes, and records the scope", async () => {
+    const sim = await simulateYielding({ scenario: picked, config: CONFIG, files: headFiles, request: REHEARSAL_REQUEST, through: "end", maxSteps: 3_000, budgets: { agentInvocations: 400, jobs: 2_000, decisions: 4_000, corrections: 40 } }, 10);
     expect(sim.final.action.type === "stop" ? sim.final.action.stop : sim.final.action, JSON.stringify(sim.final).slice(0, 500)).toMatchObject({ reason: "complete" });
     const scope = recordedScope(sim.evidence);
     expect(scope.state === "read" && [scope.value.source, scope.value.areas.length, scope.value.files.length]).toEqual(["default", 1, total]);
@@ -320,7 +266,6 @@ describe("a review pass on a few areas of a pull request at the scale of #1445 f
         const w = writtenBy(c);
         if (w !== undefined) written.add(w);
         if (c.id === "report-write") for (const n of ["report.json", "review.md"]) written.add(`${WORKTREE}/.graphloom/review/${n}`);
-        if (c.id === "qa-write") for (const n of ["qa.json", "review.md"]) written.add(`${WORKTREE}/.graphloom/review/${n}`);
       }
       if (j.kind === "agent" && j.stageId === "review") for (const f of pathsOf(assignmentOf(j))) expect(written.has(f), `${f} is named by a review job before any command wrote it`).toBe(true);
     }

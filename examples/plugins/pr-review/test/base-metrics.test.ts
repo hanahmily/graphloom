@@ -14,7 +14,8 @@ import type { MetricsRecord } from "../src/kit/metrics/record.js";
 import { formatHunkFile } from "../src/kit/metrics/hunks.js";
 import { DOCS } from "../src/rehearsal-docs.js";
 import { BASE_FILES, STREAM_PATH } from "../src/rehearsal-fixtures.js";
-import { requiredQuestions } from "../src/questions.js";
+import { computeLeads } from "../src/leads.js";
+import { recordedAspect } from "../src/reviewdraft.js";
 import { pullFile } from "../src/kit/snapshot.js";
 import { validatorById } from "../src/validators.js";
 import { BANYANDB, candidateEvidence, profileOf, root, scenarioWith, simulate } from "./support.js";
@@ -136,23 +137,19 @@ describe("the Measurements table shows base → head for a modified function", (
   });
 });
 
-describe("the split-function question says whether the excess is inherited or introduced", () => {
-  const view = (r: MetricsRecord) => ({ items: [{ id: "R1", section: "features", text: "x", cites: [{ path: r.path, side: "head" as const, start: 10, end: 12, symbol: "" }], facts: [] }], records: [r] });
-  const groundwork = { symbols: [], testMap: new Map() } as never;
-  const text = (r: MetricsRecord) => requiredQuestions({ view: view(r), groundwork }, new Map()).find((q) => q.type === "split-function")!.text;
+describe("the split-function lead says whether the excess is inherited or introduced", () => {
+  const facts = (r: MetricsRecord): string => {
+    const leads = computeLeads({ records: [r], groundwork: { symbols: [], testMap: new Map(), candidates: [], prSimilar: [] }, changes: [], scope: new Set([r.path]), changed: new Set([r.path]), similarity: 0.5, searched: true });
+    return leads.find((l) => l.kind === "split-function")!.facts.join("; ");
+  };
 
   it("says made worse, introduced, inherited, or that the base is not known", () => {
-    expect(text(withBase(21, 4))).toContain("complexity: inherited and made worse");
-    expect(text(withBase(7, 2, { complexity: 12, nesting: 4 }))).toContain("complexity: the pull request introduced it");
-    expect(text(withBase(7, 2, { complexity: 12, nesting: 4 }))).toContain("nesting: the pull request introduced it");
-    expect(text(withBase(25, 4))).toContain("complexity: inherited: complexity was already 25 at the base");
-    expect(text(record({ base: { unavailable: "no function of this name at the base" } }))).toContain("the base value is not known (no function of this name at the base)");
-    expect(text(record({ change: "added" }))).toContain("a new function, so the complexity is the pull request's own");
-  });
-
-  it("puts the base value in the complexity-coverage question too", () => {
-    const q = requiredQuestions({ view: view(withBase(21, 4)), groundwork }, new Map()).find((x) => x.type === "complexity-coverage")!;
-    expect(q.text).toContain("Complexity 25 (21 at the base: inherited and made worse");
+    expect(facts(withBase(21, 4))).toContain("complexity: inherited and made worse");
+    expect(facts(withBase(7, 2, { complexity: 12, nesting: 4 }))).toContain("complexity: the pull request introduced it");
+    expect(facts(withBase(7, 2, { complexity: 12, nesting: 4 }))).toContain("nesting: the pull request introduced it");
+    expect(facts(withBase(25, 4))).toContain("complexity: inherited: complexity was already 25 at the base");
+    expect(facts(record({ base: { unavailable: "no function of this name at the base" } }))).toContain("the base value is not known (no function of this name at the base)");
+    expect(facts(record({ change: "added" }))).toContain("a new function, so the complexity is the pull request's own");
   });
 });
 
@@ -176,17 +173,16 @@ describe("state-lifecycle: the modified Rev function, measured at the base and a
   it("records the base values with the head's in report.json and shows base → head in the table", () => {
     const rev = json.measurements.records.find((r) => r.function === "stream.(*writeCallback).Rev")!;
     expect(rev.base).toMatchObject({ complexity: 7, nesting: 3, path: STREAM_PATH });
-    expect(sim.qa!.markdown).toContain("| 7 → 12 (over the limit of 10: introduced by the pull request) | 3 → 4 (over the limit of 3: introduced by the pull request) |");
+    expect(sim.written!.markdown).toContain("| 7 → 12 (over the limit of 10: introduced by the pull request) | 3 → 4 (over the limit of 3: introduced by the pull request) |");
   });
 
-  it("asks the split-function question with where the excess comes from", () => {
-    const q = JSON.parse(sim.qa!.json) as { questions: Array<{ type: string; text: string }> };
-    expect(q.questions.find((x) => x.type === "split-function")!.text).toContain("complexity: the pull request introduced it: complexity was 7 at the base, within the limit of < 10");
-  });
-
-  it("hands the answerer the record's base value", () => {
-    const text = (sim.jobs.find((j) => j.resultSchema === "answers-v1")!.input as { assignment: string }).assignment;
-    expect(text).toContain("[at the base: complexity 7, nesting 3]");
+  it("gives the maintainability reviewer a split-function lead with where the excess comes from", () => {
+    const m = recordedAspect(sim.evidence, "maintainability");
+    if (m.state !== "read") throw new Error("no maintainability record");
+    const lead = m.value.leads.find((l) => l.kind === "split-function")!;
+    expect(lead.facts.join("; ")).toContain("complexity: the pull request introduced it: complexity was 7 at the base, within the limit of < 10");
+    const text = (sim.jobs.find((j) => j.instruction === "Review the maintainability aspect (pass 1)")!.input as { assignment: string }).assignment;
+    expect(text).toContain("complexity was 7 at the base");
   });
 
   it("recomputes the base values from the base file's recorded text: a base document that does not recompute leaves the base unknown, and the written report no longer matches", () => {
@@ -206,7 +202,7 @@ describe("state-lifecycle: the modified Rev function, measured at the base and a
       doc.records[0]!.complexity = 2;
       return { ...e, payload: { ...(e.payload as object), command: { ...c, stdoutTail: JSON.stringify(doc) } } } as EvidenceRecord;
     });
-    const atReport = evidence.slice(0, evidence.findIndex((e) => e.resultSchema === "necessity-v1"));
+    const atReport = evidence.slice(0, evidence.findIndex((e) => e.resultSchema === "pr-code-review-v2"));
     const r = validatorById("change-report")!.evaluate({ requirementId: "change-report", statement: "", evidence: candidateEvidence(atReport, "d1"), candidateDigest: "d1", config: BANYANDB });
     expect(r).toMatchObject({ status: "failed", reason: expect.stringMatching(/not the report the evidence recomputes/) });
   });
@@ -218,14 +214,14 @@ describe("state-lifecycle: the modified Rev function, measured at the base and a
     const s2 = simulate({ scenario: unreadable });
     expect(s2.final.action.type).toBe("stop");
     expect(s2.jobs.some((j) => j.instruction.startsWith("Measure the modified functions at the base"))).toBe(false);
-    expect(s2.qa!.markdown).toContain("12 (over the limit of 10) (base not measured: the file cannot be read at the base)");
+    expect(s2.written!.markdown).toContain("12 (over the limit of 10) (base not measured: the file cannot be read at the base)");
     expect(s2.receipts.every((r) => r.valid)).toBe(true);
   });
 
   it("measures no base for an added function, and none when the base cannot be pinned", () => {
     const added = simulate({ scenarioName: "complex-function" });
     expect(added.jobs.some((j) => j.instruction.startsWith("Read the base versions"))).toBe(false);
-    expect(added.qa!.markdown).toContain("| added | 12 (over the limit of 10) | 4 (over the limit of 3) |");
+    expect(added.written!.markdown).toContain("| added | 12 (over the limit of 10) | 4 (over the limit of 3) |");
   });
 });
 

@@ -5,19 +5,32 @@ import { describe, expect, it } from "vitest";
 import { appendixHtmlFrom, htmlProblems, parseQaDoc, parseReportDoc, renderAppendixHtml, renderReviewHtml, reviewHtmlFrom, type QaDoc, type ReportDoc } from "../src/html.js";
 import { stateDiagramSvg } from "../src/kit/htmlsvg.js";
 import { LARGE_LIMITS, REHEARSAL_HEAD, REHEARSAL_MERGE_BASE } from "../src/rehearsal.js";
-import { recordedAppendix, recordedHtml, recordedNecessityJson, recordedQa, recordedReport } from "../src/kit/parts.js";
+import { readParts, recordedAppendix, recordedHtml, recordedReport } from "../src/kit/parts.js";
+import { PART_BASE, REVIEW_APPENDIX_HTML, REVIEW_HTML } from "../src/kit/constants.js";
 import type { StateEntry } from "../src/kit/report.js";
 import { simulate, type Simulation } from "./support.js";
 
 const GITHUB = { owner: "apache", repo: "skywalking-banyandb", head: REHEARSAL_HEAD, base: REHEARSAL_MERGE_BASE };
+/** review.html as the Report stage wrote it (the prelude's report: no design review in this run). */
 const htmlOf = (sim: Simulation): string => {
-  const h = recordedHtml(sim.evidence, true);
+  const h = recordedHtml(sim.evidence, false);
   if (h.state !== "read") throw new Error("no review.html was written whole");
   return h.value;
 };
 const appendixOf = (sim: Simulation): string => {
-  const h = recordedAppendix(sim.evidence, true);
+  const h = recordedAppendix(sim.evidence, false);
   if (h.state !== "read") throw new Error("no review-appendix.html was written whole");
+  return h.value;
+};
+/** The pages as the Draft stage wrote them, with the Review section: for a design-review context, rendered from the design review's records. */
+const finalHtml = (sim: Simulation): string => {
+  const h = readParts(sim.evidence, PART_BASE.finalHtml, REVIEW_HTML);
+  if (h.state !== "read") throw new Error("no final review.html");
+  return h.value;
+};
+const finalAppendix = (sim: Simulation): string => {
+  const h = readParts(sim.evidence, PART_BASE.finalAppendix, REVIEW_APPENDIX_HTML);
+  if (h.state !== "read") throw new Error("no final review-appendix.html");
   return h.value;
 };
 /** The sections of review.html, in the order the design gives: pictures only. */
@@ -33,13 +46,14 @@ describe("review.html, the visual report of a standard report (design 6.11)", ()
   const html = htmlOf(sim);
   const appendix = appendixOf(sim);
 
-  it("is written at the Report stage with the verdict and the questions pending, and whole at the Answers stage, beside review.md and the appendix", () => {
-    expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "answers accepted" } });
-    const early = recordedHtml(sim.evidence, false);
-    expect(early.state).toBe("read");
-    expect((early as { value: string }).value).toContain('<span class="tile grey" title="the Questions and Answers stages follow the report">pending</span>');
-    expect((early as { value: string }).value).toContain("<strong>pending</strong>");
+  it("is written at the Report stage saying there is no design review in this run, and again with the Review at the Draft stage", () => {
+    expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(html).toContain("no design review in this run");
+    expect(html).toContain("<strong>not in this run</strong>");
     expect(html).not.toContain(">pending<");
+    const final = finalHtml(sim);
+    expect(final).toContain("<h2>Review</h2>");
+    expect(final).toContain("no design review in this run");
     expect(sim.jobs.map((j) => j.instruction)).toEqual(expect.arrayContaining(["Write .graphloom/review/review.html", "Write .graphloom/review/review-appendix.html"]));
   });
 
@@ -91,9 +105,9 @@ describe("review.html, the visual report of a standard report (design 6.11)", ()
     expect((head.match(/<h1>/g) ?? []).length).toBe(1);
   });
 
-  it("shows N1 as a large tile, the principles as a grid, the scope as one stacked bar, and the counts as tiles", () => {
+  it("shows N1 as a large tile (not in this run), the principles as a grid, the scope as one stacked bar, and the counts as tiles", () => {
     const verdict = html.slice(html.indexOf("<h2>Verdict and scope</h2>"), html.indexOf("<h2>Changes</h2>"));
-    expect(verdict).toMatch(/<a class="tile (ok|warn|bad|grey) big" href="review-appendix.html#q-N1" title="[^"]*"><small>N1: is it necessary\?<\/small><strong>(necessary|questionable|unnecessary|needs author)<\/strong><\/a>/);
+    expect(verdict).toMatch(/<a class="tile grey big" href="review-appendix.html#q-N1" title="[^"]*"><small>N1: is it necessary\?<\/small><strong>not in this run<\/strong><\/a>/);
     expect(verdict).toContain("<h3>Principles</h3>");
     expect(verdict).toContain("<h3>Scope</h3>");
     expect(verdict).toContain('aria-label="Scope: +');
@@ -127,19 +141,20 @@ describe("review.html, the visual report of a standard report (design 6.11)", ()
   });
 
   it("writes review.md with the briefing first and the appendix under its own heading, complete", () => {
-    const md = recordedQa(sim.evidence);
+    const md = recordedReport(sim.evidence);
     expect(md.state).toBe("read");
     const text = (md as { value: { markdown: string } }).value.markdown;
-    const order = ["# Briefing", "## What's new", "## Scope that matters", "## Necessity and principles", "## Data flow per new feature", "## What you need to check", "## Hotspots", "## Areas", "## Open questions", "# Appendix", "## Necessity", "## Report", "## Measurements", "## Q&A"];
+    const order = ["# Briefing", "## What's new", "## Scope that matters", "## Design review", "## Data flow per new feature", "## What you need to check", "## Hotspots", "## Areas", "# Appendix", "## Report", "## Measurements"];
     order.forEach((h, i) => {
       expect(text, h).toContain(`\n${h}\n`);
       if (i > 0) expect(text.indexOf(`\n${h}\n`), h).toBeGreaterThan(text.indexOf(`\n${order[i - 1]}\n`));
     });
     expect(text).not.toContain("```mermaid");
     expect(text).toContain("### F1. Nightly retention sweep");
-    expect(text).toContain("### R1.");
     expect(text).toContain("`F1.f2`");
-    expect(text).toContain("answered — see the appendix.");
+    expect(text).toContain("No design review in this run");
+    expect(text).not.toContain("## Q&A");
+    expect(text).not.toContain("## Open questions");
     expect(text).toMatch(/- \*\*W1\*\* /);
   });
 });
@@ -160,9 +175,8 @@ describe("review-appendix.html holds the briefing in text (design 6.11)", () => 
     expect(brief).toContain("<h3>Scope that matters</h3>");
     for (const row of ["Production code", "Tests", "Docs", "Generated / other", "Total"]) expect(brief).toContain(`<th>${row}</th>`);
     expect(brief).toContain("<h3>Verdict</h3>");
-    expect(brief).toMatch(/N1: is it necessary\?<\/span> <span class="badge (ok|warn|bad|grey)">(necessary|questionable|unnecessary|needs author)<\/span>/);
-    expect(brief).toContain("Principles touched");
-    expect(brief).toContain("Questions that need the author");
+    expect(brief).toContain('N1: is it necessary?</span> <span class="badge grey">not in this run</span>');
+    expect(brief).toContain("No design review in this run");
   });
 
   it("lists what to check in five lists, with cites, and the hotspots, areas and open questions after", () => {
@@ -174,7 +188,7 @@ describe("review-appendix.html holds the briefing in text (design 6.11)", () => 
     expect(areas).toMatch(/<li>[^<]+: \d+ items?<\/li>/);
     expect(areas).toContain("graphloom session open &lt;run&gt; --stage report");
     const open = html.slice(html.indexOf("<h2>Open questions</h2>"));
-    expect(open).toMatch(/\d+ answered — see the appendix\./);
+    expect(open).toContain('<span class="badge grey">not in this run</span>');
   });
 });
 
@@ -196,9 +210,9 @@ describe("review-appendix.html (design 6.11)", () => {
     expect(items).toContain('class="cites"');
   });
 
-  it("holds the whole Q&A, collapsed by default, each question with an id the briefing links to", () => {
+  it("says there is no Q&A in this run", () => {
     const qa = html.slice(html.indexOf("<h2>Q&amp;A</h2>"));
-    expect(qa).toMatch(/<details id="q-[^"]+"( open)? class="qa">/);
+    expect(qa).toContain('<span class="badge grey">not in this run</span>');
   });
 
   it("is linked from the briefing and links back, and is inert and self-contained", () => {
@@ -210,11 +224,9 @@ describe("review-appendix.html (design 6.11)", () => {
     expect(hrefs.every((h) => h.startsWith("https://github.com/apache/skywalking-banyandb/") || h === "review.html" || /^review-appendix\.html#[\w.:-]+$/.test(h))).toBe(true);
   });
 
-  it("is written at the Report stage with the Necessity and the Q&A pending", () => {
-    const early = recordedAppendix(sim.evidence, false);
-    expect(early.state).toBe("read");
-    expect((early as { value: string }).value).toContain('<h2>Q&amp;A</h2> <span class="badge grey">pending</span>');
-    expect((early as { value: string }).value).toContain('<h2>Necessity</h2> <span class="badge grey">pending</span>');
+  it("is written at the Report stage with the Necessity and the Q&A not in this run", () => {
+    expect(html).toContain('<h2>Q&amp;A</h2> <span class="badge grey">not in this run</span>');
+    expect(html).toContain('<h2>Necessity</h2> <span class="badge grey">not in this run</span>');
   });
 });
 
@@ -256,44 +268,21 @@ describe("review.html of a large report", () => {
   });
 });
 
-describe("review.html when N1 stops the questions, and when a question needs the author", () => {
-  it("shows N1's three parts, the principles badges and the checker's judgment", () => {
-    const sim = simulate({ scenarioName: "necessity-principle-broken" });
-    const html = appendixOf(sim);
-    const necessity = html.slice(html.indexOf("<h2>Necessity</h2>"), html.indexOf("<h2>Change map</h2>"));
+describe("review.html with the design review's records, and the Q&A rendering", () => {
+  it("renders the design review's N1 and Q&A from the ledger's records when they are the context, with the needs-author question open", () => {
+    const sim = simulate({ scenarioName: "design-review" });
+    const appendix = finalAppendix(sim);
+    const necessity = appendix.slice(appendix.indexOf("<h2>Necessity</h2>"), appendix.indexOf("<h2>Change map</h2>"));
     expect(necessity).toContain("1. Is the problem real on the base?");
-    expect(necessity).toContain("2. Does the fix fit the system's design?");
-    expect(necessity).toContain("3. Is there a simpler or existing way?");
-    expect(necessity).toContain("Design principles");
-    expect(necessity).toContain('<span class="badge bad">breaks</span>');
-    expect(necessity).toContain("offline-idempotent");
-    expect(necessity).toContain("checker:");
-    expect(necessity).toMatch(/<ol class="trace">/);
-    expect(necessity).toContain('<span class="badge warn">questionable</span>');
-    expect(recordedNecessityJson(sim.evidence).state).toBe("read");
-    // The briefing shows the verdict: N1 questionable, the broken principle, and N1 among the open questions.
-    const brief = appendixOf(sim);
-    const verdict = brief.slice(brief.indexOf("<h3>Verdict</h3>"), brief.indexOf("<h2>Data flow per new feature</h2>"));
-    expect(verdict).toContain('<span class="badge warn">questionable</span>');
-    expect(verdict).toContain('<span class="badge bad">offline-idempotent: breaks</span>');
-    const open = brief.slice(brief.indexOf("<h2>Open questions</h2>"));
-    expect(open).toContain('<a href="review-appendix.html#q-N1"><strong>N1</strong></a>');
-    // review.html shows the same as tiles: N1 questionable, the principle as a red tile.
-    const visual = htmlOf(sim);
-    expect(visual).toMatch(/<a class="tile warn big" href="review-appendix.html#q-N1"[^>]*><small>N1: is it necessary\?<\/small><strong>questionable<\/strong>/);
-    expect(visual).toMatch(/<a class="tile bad sm" href="review-appendix.html#q-N1" title="offline-idempotent breaks: [^"]*">offline-idempotent<\/a>/);
-    // The link has a target: the appendix's Necessity section carries the id.
-    expect(html).toMatch(/<details id="q-N1"[^>]*><summary><h2>Necessity<\/h2>/);
-  });
-
-  it("opens a question that needs the author and collapses the others", () => {
-    const sim = simulate({ scenarioName: "needs-author-purpose" });
-    const html = appendixOf(sim);
-    const qa = html.slice(html.indexOf("<h2>Q&amp;A</h2>"));
-    expect(qa).toMatch(/<details id="q-[^"]+" open class="qa"><summary>[^]*?needs author<\/span>/);
-    const brief = appendixOf(sim);
-    expect(brief.slice(brief.indexOf("<h2>Open questions</h2>"))).toMatch(/<span class="badge bad">needs author<\/span>/);
-    expect(htmlOf(sim)).toMatch(/<a class="tile bad q" href="review-appendix.html#q-Q\d+"/);
+    expect(necessity).toContain('<span class="badge ok">necessary</span>');
+    expect(appendix).toMatch(/<details id="q-N1"[^>]*><summary><h2>Necessity<\/h2>/);
+    const qa = appendix.slice(appendix.indexOf("<h2>Q&amp;A</h2>"));
+    expect(qa).toMatch(/<details id="q-Q1" open class="qa"><summary>[^]*?needs author<\/span>/);
+    expect(appendix.slice(appendix.indexOf("<h2>Open questions</h2>"))).toMatch(/<span class="badge bad">needs author<\/span>/);
+    const visual = finalHtml(sim);
+    expect(visual).toMatch(/<a class="tile ok big" href="review-appendix.html#q-N1"[^>]*><small>N1: is it necessary\?<\/small><strong>necessary<\/strong>/);
+    expect(visual).toMatch(/<a class="tile bad q" href="review-appendix.html#q-Q1"/);
+    expect(htmlProblems(visual, GITHUB)).toEqual([]);
   });
 
   it("collapses answered and partially answered questions, with a badge each, and opens only those that need the author", () => {
@@ -349,12 +338,6 @@ describe("review.html when N1 stops the questions, and when a question needs the
     expect(body).toMatch(/href="https:\/\/github\.com\/apache\/skywalking-banyandb\/blob\/[0-9a-f]+\/pkg\/a\.go#L3"/);
   });
 
-  it("says the remaining questions were skipped when N1 concluded unnecessary", () => {
-    const sim = simulate({ scenarioName: "necessity-unnecessary" });
-    expect(appendixOf(sim)).toContain("Remaining questions skipped");
-    const open = appendixOf(sim).slice(appendixOf(sim).indexOf("<h2>Open questions</h2>"));
-    expect(open).toContain('<a href="review-appendix.html#q-N1"><strong>N1</strong></a>');
-  });
 });
 
 describe("measurements in review.html", () => {

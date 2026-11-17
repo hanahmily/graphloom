@@ -9,7 +9,8 @@ import { describe, expect, it } from "vitest";
 import type { Draft } from "../src/draft.js";
 import { htmlPagesFrom, htmlProblems, parseReportDoc, renderReviewHtml, type ReportDoc } from "../src/html.js";
 import { LARGE_LIMITS, REHEARSAL_HEAD, REHEARSAL_MERGE_BASE } from "../src/rehearsal.js";
-import { recordedAppendix, recordedHtml } from "../src/kit/parts.js";
+import { readParts, recordedAppendix, recordedHtml } from "../src/kit/parts.js";
+import { PART_BASE, REVIEW_APPENDIX_HTML, REVIEW_HTML } from "../src/kit/constants.js";
 import { squarify } from "../src/kit/treemap.js";
 import { areaAnchor, areaReasons, areaRisk, checkCounts, questionGroups, riskAreas, scopeBarSvg, TYPE_ABBREVIATIONS, type QuestionTile } from "../src/visual.js";
 import { simulate } from "./support.js";
@@ -123,13 +124,12 @@ describe("the question grid's order and labels", () => {
 
 describe("review.html of a large-mode run", () => {
   const sim = simulate({ scenarioName: "large-pull-request", config: { limits: LARGE_LIMITS }, maxSteps: 250 });
-  const written = recordedHtml(sim.evidence, true);
-  const appendixWritten = recordedAppendix(sim.evidence, true);
+  const written = recordedHtml(sim.evidence, false);
+  const appendixWritten = recordedAppendix(sim.evidence, false);
   if (written.state !== "read" || appendixWritten.state !== "read") throw new Error("the pages were not written");
   const html = written.value;
   const appendix = appendixWritten.value;
   const report = parseReportDoc(sim.written!.json)!;
-  const qa = JSON.parse(sim.qa!.json) as { questions: Array<{ id: string; type: string; item: string; text: string; answer?: { status: string } }> };
 
   it("has the four visual sections after the header strip, in order, and passes the inertness check", () => {
     const at = ["<header", "<h2>Verdict and scope</h2>", "<h2>Changes</h2>", "<h2>Risk map</h2>", "<h2>Questions</h2>"].map((s) => html.indexOf(s));
@@ -157,7 +157,7 @@ describe("review.html of a large-mode run", () => {
 
   it("is deterministic", () => {
     expect(renderReviewHtml({ report })).toBe(renderReviewHtml({ report }));
-    expect(htmlPagesFrom(sim.written!.json, sim.qa!.json)!.review).toBe(htmlPagesFrom(sim.written!.json, sim.qa!.json)!.review);
+    expect(htmlPagesFrom(sim.written!.json, undefined, undefined, undefined, { noDesign: "none" })!.review).toBe(htmlPagesFrom(sim.written!.json, undefined, undefined, undefined, { noDesign: "none" })!.review);
   });
 
   it("draws one rectangle for each area with changed lines, each sized by its lines and carrying a tooltip with its label", () => {
@@ -184,38 +184,30 @@ describe("review.html of a large-mode run", () => {
     for (const d of dots) expect(d[1]).toMatch(/CRAP .*complexity .*— .+:\d+$/);
   });
 
-  it("shows N1 and every question as a tile that links to its anchor in the appendix, grouped by high-level change", () => {
+  it("says in the question grid that there is no design review in this run", () => {
+    const grid = html.slice(html.indexOf("<h2>Questions</h2>"));
+    expect(grid).toContain("no design review in this run");
+    expect(grid).not.toMatch(/href="review-appendix.html#q-Q/);
+  });
+});
+
+describe("the question grid of a run whose context is the design review", () => {
+  const sim = simulate({ scenarioName: "design-review" });
+  const final = readParts(sim.evidence, PART_BASE.finalHtml, REVIEW_HTML);
+  const finalAppendix = readParts(sim.evidence, PART_BASE.finalAppendix, REVIEW_APPENDIX_HTML);
+  if (final.state !== "read" || finalAppendix.state !== "read") throw new Error("the pages were not written");
+  const html = final.value;
+
+  it("shows every question of the design review as a tile that links to its anchor in the appendix, grouped by high-level change", () => {
     const grid = html.slice(html.indexOf("<h2>Questions</h2>"));
     const tiles = [...grid.matchAll(/<a class="tile (ok|warn|bad|grey) (?:big|q)" href="review-appendix.html#q-([A-Za-z0-9]+)" title="([^"]*)">/g)];
-    expect(tiles).toHaveLength(qa.questions.length);
-    // N1 first; then the questions of W1, then W2.
-    expect(tiles[0]![2]).toBe("N1");
+    expect(tiles.map((t) => t[2])).toEqual(["Q1"]);
     const chips = [...grid.matchAll(/<span class="chip" title="[^"]*">([A-Za-z0-9]+)<\/span>/g)].map((m) => m[1]);
-    expect(chips).toEqual(["N1", "W1", "W2"]);
-    // Every link has its target in the appendix.
-    for (const t of tiles) expect(appendix).toMatch(new RegExp(`<details id="q-${t[2]}"`));
-    // Colour is the answer's status.
-    for (const x of qa.questions.filter((y) => y.id !== "N1")) {
-      const tone = { answered: "ok", "partially answered": "warn", "needs author": "bad" }[x.answer?.status ?? ""] ?? "grey";
-      expect(html).toContain(`<a class="tile ${tone} q" href="review-appendix.html#q-${x.id}"`);
-    }
-    // The legend counts each status.
-    for (const status of ["answered", "partially answered", "needs author", "unanswered"]) {
-      const n = qa.questions.filter((x) => (x.answer?.status ?? "unanswered") === status).length;
-      expect(grid).toContain(`</span>${status} ${n}</span>`);
-    }
-  });
-
-  it("carries the question in one line in each tile's tooltip, and the change's text in its chip's", () => {
-    const first = qa.questions.find((x) => x.item === "W1")!;
-    expect(html).toContain(`title="${first.id} [${first.type}] ${first.answer!.status}: `);
-    const w1 = report.briefing.whatsNew[0]!.text;
-    expect(html).toContain(`<span class="chip" title="${w1.replace(/&/g, "&amp;")}">W1</span>`);
-  });
-
-  it("asks at most 16 questions: N1 and three for each of at most five high-level changes", () => {
-    expect(qa.questions.length).toBeLessThanOrEqual(16);
-    expect(qa.questions.length).toBe(1 + 3 * report.briefing.whatsNew.length);
+    expect(chips).toEqual(["W1"]);
+    for (const t of tiles) expect(finalAppendix.value).toMatch(new RegExp(`<details id="q-${t[2]}"`));
+    expect(html).toContain('<a class="tile bad q" href="review-appendix.html#q-Q1"');
+    expect(html).toContain('title="Q1 [purpose] needs author: ');
+    expect(grid).toContain("</span>needs author 1</span>");
   });
 });
 

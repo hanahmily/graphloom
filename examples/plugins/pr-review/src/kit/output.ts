@@ -41,8 +41,6 @@ export function scopeFor(i: Pick<OutputInput, "snapshot" | "profile">): Scope {
 
 /** `report.json` (`pr-change-report-v1`): the machine-readable report the validators and later stages read. */
 export function reportJson(i: OutputInput): string {
-  const m = i.measurements;
-  const reasons = notRunReasons(i.profile);
   return JSON.stringify({
     schema: REPORT_FILE_SCHEMA,
     pull: { owner: i.pr.owner, repo: i.pr.repo, number: i.pr.number, head: i.pr.head, ...(i.base !== undefined ? { base: i.base } : {}), title: i.snapshot.pull.title, url: i.snapshot.pull.url, author: i.snapshot.pull.author },
@@ -61,14 +59,19 @@ export function reportJson(i: OutputInput): string {
     removed: i.final.removed,
     removedParts: i.final.removedParts,
     ...(i.diagrams !== undefined && (Object.keys(i.diagrams.features).length > 0 || Object.keys(i.diagrams.states).length > 0) ? { diagrams: i.diagrams } : {}),
-    measurements:
-      i.profile.metrics.staticOnly === true
-        ? // A static-only report (design-pr-review-split §3.4): complexity and nesting, and no coverage or mutation record.
-          { tools: "static", coverage: [STATIC_ONLY_NOTE], runs: [], mutation: STATIC_ONLY_NOTE, records: m.state === "ready" ? m.records : [], ...(m.state === "ready" ? {} : { none: m.state === "none" ? m.reason : "not measured" }) }
-        : m.state === "ready"
-          ? { tools: m.coverage.runs.some((r) => r.ran) ? "static+coverage" : "static", coverage: coverageNotes(m.coverage), runs: m.coverage.runs, mutation: reasons.mutation, records: m.records }
-          : { tools: "static", coverage: [reasons.coverage], runs: [], mutation: reasons.mutation, records: [], none: m.state === "none" ? m.reason : "not measured" },
+    measurements: measurementsJson(i.measurements, i.profile),
   });
+}
+
+/** The `measurements` part of `report.json`: what the records and the coverage runs say, or why there are none. */
+export function measurementsJson(m: MeasurementState, profile: Pick<Profile, "metrics">): Record<string, unknown> {
+  const reasons = notRunReasons(profile);
+  return profile.metrics.staticOnly === true
+    ? // A static-only report (design-pr-review-split §3.4): complexity and nesting, and no coverage or mutation record.
+      { tools: "static", coverage: [STATIC_ONLY_NOTE], runs: [], mutation: STATIC_ONLY_NOTE, records: m.state === "ready" ? m.records : [], ...(m.state === "ready" ? {} : { none: m.state === "none" ? m.reason : "not measured" }) }
+    : m.state === "ready"
+      ? { tools: m.coverage.runs.some((r) => r.ran) ? "static+coverage" : "static", coverage: coverageNotes(m.coverage), runs: m.coverage.runs, mutation: reasons.mutation, records: m.records }
+      : { tools: "static", coverage: [reasons.coverage], runs: [], mutation: reasons.mutation, records: [], none: m.state === "none" ? m.reason : "not measured" };
 }
 
 /** What the Verdict and Open questions of the briefing say until the Answers stage replaces them. */

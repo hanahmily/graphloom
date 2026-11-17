@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
+/**
+ * pr-review 1.x (design-pr-review-split §4): round 2 only, runnable alone. Fetch → Report → Review → Draft → Publish (the Checks
+ * stage exists only when the profile has `checks`, which this version refuses as a later field, so there is none). The reviewers'
+ * context is the design review's report of this head or of an earlier head with a usable delta, else a report-only prelude, else,
+ * only on `--no-report`, the pull request's metadata and patches (§4.2). The maintainability reviewer is given deterministic leads
+ * (§4.3). The run posts one `COMMENT` review whose first line is the verdict, counting round 1's open items when the design review
+ * ran on the pull request, and records it in the ledger's `review` section only (§4.5, §5).
+ */
 import { existsSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -31,95 +39,82 @@ import { attemptEvidence, noteAttempt, readAttempts } from "./kit/attempt.js";
 import { analyze, reportFlowOf, type Analysis } from "./kit/analysis.js";
 import { checkoutCommand, GIT_ENV, GUARD_REFUSED, guardCommand, headTreeCommand, ledgerReadCommand, pinnedBase, reviewDirCommand } from "./kit/commands.js";
 import {
-  ANSWERER_JOB,
-  ANSWERS_STAGE,
   CODING_AGENT,
+  COMMAND,
+  CONTEXT_JSON,
+  CREATE_PULL_REVIEW,
   DRAFT_JSON,
   DRAFT_MD,
   DRAFT_STAGE,
-  REQUIREMENT_CODE_REVIEW,
-  REQUIREMENT_DRAFT,
-  REQUIREMENT_FINDINGS_PROVEN,
-  REVIEW_STAGE,
-  COMMAND,
   ENV_PLUGIN_ROOT,
   ENV_WORKTREE,
   FETCH_STAGE,
+  GET_VIEWER,
   LEDGER_MOVED,
-  NECESSITY_JSON,
-  QUESTION_BATCH_SIZE,
-  QUESTIONER_JOB,
-  QUESTIONS_STAGE,
+  PART_BASE,
+  PUBLISH_STAGE,
   REPORTER_JOB,
   REPORT_STAGE,
-  REQUIREMENT_ANSWERS,
-  CREATE_PULL_REVIEW,
-  GET_VIEWER,
-  PUBLISH_STAGE,
-  REQUIREMENT_PUBLISHED,
-  REQUIREMENT_ROUND1,
-  ROUND1_STAGE,
   REQUIREMENT_CHECKED_OUT,
   REQUIREMENT_CLAIMS,
-  REQUIREMENT_GROUNDED,
+  REQUIREMENT_CODE_REVIEW,
+  REQUIREMENT_CONTEXT,
+  REQUIREMENT_DRAFT,
+  REQUIREMENT_FINDINGS_PROVEN,
+  REQUIREMENT_LEADS,
   REQUIREMENT_LEDGER,
+  REQUIREMENT_LEDGER_RECORDED,
   REQUIREMENT_MEASUREMENTS,
-  REQUIREMENT_QUESTIONS,
+  REQUIREMENT_PUBLISHED,
   REQUIREMENT_REPORT,
   REQUIREMENT_SNAPSHOT,
-  QA_JSON,
   REVIEW_APPENDIX_HTML,
   REVIEW_DIR,
   REVIEW_HTML,
   REVIEW_MD,
+  REVIEW_STAGE,
 } from "./kit/constants.js";
+import { claimRecordCommands } from "./kit/claimrecord.js";
 import { GRAPH_ID, GRAPH_VERSION } from "./version.js";
 import { checkBatch, DIAGRAMMER_JOB, DIAGRAMS_REFERENCES, DIAGRAMS_SCHEMA, DIAGRAMS_SCHEMA_NAME, diagramInputOf, planDiagrams, MAX_DIAGRAM_BYTES, MAX_DIAGRAMS, SKILL_DIR, skillMount } from "./kit/diagrams.js";
 import { commandRuns, describeCommand, environmentOutput, outputTail, succeeded, validatorEvidence, type CommandRun } from "./kit/evidence.js";
 import { INTERFACE_PATCH_BYTES } from "./kit/digest.js";
 import { LIMITS } from "./kit/metrics/crap.js";
 import { CHANGE_REPORT_SCHEMA, MAX_ITEM_CHARS } from "./kit/report.js";
-import { CLAIM_CHECK_SCHEMA } from "./kit/claims.js";
+import { CLAIM_CHECK_REFERENCES, CLAIM_CHECK_SCHEMA, CLAIM_CHECK_SCHEMA_NAME } from "./kit/claims.js";
 import { REPORTER_SCHEMA_NAME, REVISION_SCHEMA_NAME, reportSpec, type ReportFlow } from "./kit/flow.js";
 import { budgetShortfall, largeNeeds } from "./kit/large.js";
 import { largeCheckScope, planLargeReporter } from "./kit/largeprompts.js";
-import { measurementState, metricsDiffCommand, staticBaseCommand, staticCommand } from "./kit/measurements.js";
+import { measurementState, metricsDiffCommand, staticBaseCommand, staticCommand, type MeasurementState } from "./kit/measurements.js";
 import { coverageCommand, coverageConfinement, missingProbe, sandboxEnvironmentChecks, type CoveragePlan } from "./kit/coverage.js";
 import { planChecker, planReporter } from "./kit/prompts.js";
 import { assignmentProblem, type FileSpill } from "./kit/fit.js";
 import { isLarge } from "./kit/mode.js";
-import { harnessName, parseProfile, ProfileError, reviewerRole, verifierRole, ROLES, DISTINCT_PAIRS, type Profile, type Role } from "./kit/profile.js";
-import { ASPECTS, ruleGroups, ruleFileText, type Aspect } from "./kit/aspects.js";
+import { harnessName, parseProfile, ProfileError, REVIEW_ROLES, reviewerRole, verifierRole, DISTINCT_PAIRS, type Profile, type Role } from "./kit/profile.js";
+import { ASPECTS, ruleGroups, ruleFileText } from "./kit/aspects.js";
+import { groundworkState, type GroundworkState } from "./kit/groundwork.js";
+import { principlesContext, principlesReadCommand, principlesReading, type PrinciplesContext } from "./kit/principles.js";
+import { appendixWriteCommands, htmlWriteCommands, partCommands, recordCommands, reportWriteCommands } from "./kit/parts.js";
+import { requestedPull, type PullRequest } from "./kit/request.js";
+import { secretFindings } from "./kit/secrets.js";
+import { readInput, snapshotState, type PullFile, type ReadSpec } from "./kit/snapshot.js";
+import { ledgerRead, oldValue, priorState } from "./kit/ledger.js";
 import { reproEnv, reproJob, reproRunsIn } from "./reproplan.js";
 import { aspectFlow, aspectRecordId, aspectRecordJson, ASPECT_RECORD_SCHEMA, findingsOf, REVIEW_REFERENCES, REVIEW_SCHEMA, REVIEW_SCHEMA_NAME, VERIFY_REFERENCES, VERIFY_SCHEMA, VERIFY_SCHEMA_NAME, type AspectRecord } from "./review.js";
 import { chooseScope, FRESH_START_REASON, scopeRecordJson, SCOPE_RECORD_ID, SCOPE_SCHEMA, type ScopeRecord } from "./reviewscope.js";
 import { planReviewer, planVerifier, round1Verdicts } from "./reviewprompts.js";
-import { draftWrites, readingOrder, recordedAspect, recordedRound1, recordedRules, recordedScope, round1Computed, ruleCommands } from "./reviewdraft.js";
-import { round1Json, ROUND1_DIR, ROUND1_RECORD_ID } from "./round1.js";
-import { incrementalReads } from "./incremental.js";
+import { draftWrites, readingOrder, recordedAspect, recordedRules, recordedScope, ruleCommands } from "./reviewdraft.js";
 import { registryFromEvidence } from "./prior.js";
-import { authorReplies } from "./replies.js";
 import { aspectPrior } from "./priorreview.js";
 import { COMMENTS_READ, createInput, publishFlow, publishPlan, REVIEWS_READ } from "./publish.js";
 import { scopeLine, DRAFT_SCHEMA } from "./draft.js";
 import { prepareTask } from "./prepare.js";
-import { requestedPull, type PullRequest } from "./kit/request.js";
-import { secretFindings } from "./kit/secrets.js";
-import { readInput, snapshotState, type PullFile, type ReadSpec } from "./kit/snapshot.js";
-import { CLAIM_CHECK_SCHEMA_NAME } from "./kit/claims.js";
-import { diagramsOf, outputsOf, validatorById, writtenHtmlProblems } from "./validators.js";
-import { appendixWriteCommands, htmlWriteCommands, necessityWriteCommands, partCommands, recordCommands, recordedNecessityJson, reportWriteCommands } from "./kit/parts.js";
-import { ANSWER_CHECK_REFERENCES, ANSWER_CHECK_SCHEMA, ANSWER_CHECK_SCHEMA_NAME, ANSWERS_REFERENCES, ANSWERS_REVISION_SCHEMA_NAME, ANSWERS_SCHEMA, ANSWERS_SCHEMA_NAME, answersFlow } from "./answers.js";
+import { contextJson, decideContext, type ContextRecord } from "./context.js";
+import { computeLeads, correctnessContext, MAX_LEADS } from "./leads.js";
+import { contextReport, designState, recordedContext } from "./runcontext.js";
+import { reviewLedgerWrite } from "./reviewledger.js";
+import { contextOutputs, diagramsOf, groundworkOptions, leadInputOf, outputsOf, validatorById, writtenHtmlProblems } from "./validators.js";
 import { baseDirIn } from "./kit/basetree.js";
-import { sourceDirs } from "./kit/inventory.js";
-import { ledgerRead, oldValue, priorState, writtenLedger } from "./kit/ledger.js";
-import { QUESTIONS_REFERENCES, QUESTIONS_SCHEMA, QUESTIONS_SCHEMA_NAME, requiredQuestions, type Question } from "./questions.js";
-import { CLAIM_CHECK_REFERENCES } from "./kit/claims.js";
-import { necessityQuestion, NECESSITY_ID, NECESSITY_REFERENCES, NECESSITY_REVISION_SCHEMA_NAME, NECESSITY_SCHEMA, NECESSITY_SCHEMA_NAME, parseNecessityRecord, ROUNDS_SKIP_REASON, roundsSkipJson, type NecessityRecord } from "./necessity.js";
-import { principlesContext, principlesReadCommand, principlesReading, type Principle, type PrinciplesContext } from "./kit/principles.js";
-import { planAnswerChecker, planAnswerer, planNecessity, planNecessityChecker, planQuestioner } from "./qaprompts.js";
-import { questionItems } from "./kit/reportview.js";
-import { afterNecessity, answerBatches, answerContext, batchedAnswers, batchRecordId, batchRecordJson, answerWrites, necessityFlow, necessityRecordCommands, necessityRecordOf, qaContext, qaOutputs, questionSet, questionerFlow, recordedNecessity, restFlow, skippedWrites, type AnswerWrites, type QaContext } from "./qaflow.js";
 
 export { GRAPH_ID, GRAPH_VERSION };
 
@@ -130,15 +125,6 @@ const idSet = (ids: readonly string[], describe?: (id: string) => string): Refer
 const oneLineText = (s: string): string => s.replace(/\s+/g, " ").trim();
 /** Per-job id sets for a contract's reference paths; a path with no ids is left unconstrained (an empty enum would allow nothing). */
 const idRefs = (sets: Record<string, ReferenceSet>): Record<string, ReferenceSet> => Object.fromEntries(Object.entries(sets).filter(([, v]) => v.ids.length > 0));
-const principleRefs = (path: string, ps: readonly Principle[]): Record<string, ReferenceSet> => idRefs({ [path]: idSet(ps.map((p) => p.id), (id) => oneLineText(ps.find((p) => p.id === id)?.statement ?? "").slice(0, 300)) });
-const questionRefs = (path: string, qs: readonly Question[]): Record<string, ReferenceSet> => idRefs({ [path]: idSet(qs.map((q) => q.id), (id) => oneLineText(qs.find((q) => q.id === id)?.text ?? "")) });
-
-/** What N1's requirement says of the project's design principles (design §7.5.1), when the profile names a file. */
-function principlesText(profile: Profile): string {
-  const cfg = profile.questions.principles;
-  if (cfg === undefined) return "";
-  return `; the project's design principles file ${cfg.path} was read read-only at ${cfg.ref !== undefined ? `the ref ${cfg.ref}` : "the pinned base commit"}, never from the pull request's head, the ref resolved once to a commit and the file recorded whole as evidence (a missing file is recorded as absent and changes nothing, and a pull request that changes the file is flagged and still judged by the version read), and the answer gives one verdict (preserves, breaks or not-applicable) with an explanation and path:line citations for each principle that applies (its globs match a changed file, or it names none), each applicable principle exactly once, preserves and breaks each cited; when the answer checker supports a breaks verdict, a necessary conclusion becomes questionable and names the broken principle, every other conclusion stays as it is, no principle break skips a question, and a break the checker does not support is recorded with both statements and changes nothing`;
-}
 
 /** The defaults the design gives a pr-review run (design §13.3), under the profile's own and the task's. */
 const DEFAULT_BUDGETS: GraphBudgetDefaults = { agentInvocations: 1_200, jobs: 220, decisions: 240, corrections: 12, activeMs: 4 * 3_600_000, waitMs: 6 * 3_600_000 };
@@ -156,23 +142,7 @@ function generatedChecks(profile: Profile): EnvironmentCommand[] {
   ];
 }
 
-/** The graph definition for a profile. The stage list is fixed per plugin version, whatever the profile says. */
-/** What a requirement says more when the profile's `rounds` is `review-only` (design §3.2): the stages keep their identity and pass on a recorded skip. */
-function roundsNote(profile: Profile, which: "questions" | "answers" | "grounded" | "round1"): string {
-  if (profile.rounds !== "review-only") return "";
-  const why = `With the profile's rounds set to review-only (the operator's choice) this requirement passes on a recorded skip with the reason "${ROUNDS_SKIP_REASON}": `;
-  switch (which) {
-    case "questions":
-      return ` ${why}neither N1 nor any other question is asked, and necessity.json records the skip.`;
-    case "answers":
-      return ` ${why}no answer is given; qa.json, review.md, review.html and review-appendix.html say the Q&A was skipped by the operator's choice, and the ledger advances with no question.`;
-    case "grounded":
-      return ` ${why}there is no answer to check.`;
-    case "round1":
-      return ` ${why}round 1 records zero issues and its skip, so round 2 runs in the same run.`;
-  }
-}
-
+/** The graph definition for a profile. The stage list is fixed per plugin version, whatever the profile or the request says. */
 export function definitionFor(profile: Profile): GraphDefinition {
   const checker = harnessName(profile.roles["report-checker"]);
   const requirements: Requirement[] = [
@@ -188,62 +158,57 @@ export function definitionFor(profile: Profile): GraphDefinition {
     },
     {
       id: REQUIREMENT_LEDGER,
-      statement: "The pull request's ledger ref (refs/graphloom/pr-review/<owner>/<repo>/<N>/ledger) was read, or recorded absent. When it holds the Q&A of an earlier head, that head's qa.json and necessity.json and the delta since it (git diff -U0 between the two heads over the files that matter, reduced to its file and hunk headers, and for each base file the earlier answers cite whether it differs between the two bases) were read, with no repository code, so that round 1 asks only about what changed; or the reason a full round 1 is needed was recorded (no head, no necessity.json, a skipped or other-mode Q&A, an earlier commit that is not in the review clone, a delta that cannot be read, or questions.incremental false). The report is the whole pull request either way.",
+      statement: "The pull request's ledger ref (refs/graphloom/pr-review/<owner>/<repo>/<N>/ledger) was read, or recorded absent; a graphloom-pr-ledger-v1 ledger is migrated in memory. Its review section (the earlier findings) and its design section (the design review's heads and open items) were read, or recorded absent. When the design section holds a head D, D's report.json, qa.json and necessity.json were read from the ledger commit, and, when D is not this head, the delta from D to this head (git diff -U0 over this head's files and the files D's report cites, reduced to its file and hunk headers) and whether D's base is in the review clone, with no repository code; or the reason they are not usable was recorded (no design head, a file missing or not of D, D and this head not of one mode, D or its base not in the review clone, a delta that is cut or does not fit). The sandbox images were checked by digest.",
+      evidenceSchema: "command-report-v1",
+    },
+    {
+      id: REQUIREMENT_CONTEXT,
+      statement: `The reviewers' context source was decided by plugin code and recorded in ${CONTEXT_JSON} (pr-review-context-v1), the first that applies: design-review (the design section's report of D, used as it is when D is this head, or with the "Since this report" delta when D is an earlier head whose delta is usable; a round-1 report with open items is used all the same), else prelude (a report-only prelude of this run), else none, which is taken only when the task's request says "without a report" (graphloom task new pr-review … --no-report) and no design report is usable. The record names the source, D and its base for design-review, the delta's files and hunks, the reasons each earlier source was not used, and whether the request asked for no report; the validator recomputes it from the ledger reads, the delta and the pinned request.`,
       evidenceSchema: "command-report-v1",
     },
     {
       id: REQUIREMENT_REPORT,
-      statement: `Every template section is present, with cited items or an explicit None. Every citation lies inside the pull request's diff on the side it names. Every changed file (a renamed file under both names, a deleted file too) and every detector fact is cited, and no item carries a severity, finding or verdict (the result contract has no such field). report.json, ${REVIEW_MD}, ${REVIEW_HTML} and ${REVIEW_APPENDIX_HTML} hold exactly that report, with the mode (standard, or large with the limits passed) in report.json and in the header of ${REVIEW_MD}. In large mode (a pull request over the profile's maxFiles or maxPatchBytes) the report is high level: one reporter job (change-report-v1, the reporter role, a fresh read-only session with the head and base trees available read-only) is given a bounded digest and not the diff (the title, body and commit messages as untrusted blocks; the areas with their paths, files, lines added and deleted and patch bytes; the file list with its diffstat; the detector facts; the names of the exported symbols each area adds; and the patches of the interface files only, which are the files the profile's schema, config and interfaces routing globs match, **/*.proto, CHANGES.md and docs/**, at most ${INTERFACE_PATCH_BYTES} bytes of patch in all, the largest left out first with the files left out listed), describes the pull request at a high level (a purpose, an overview, the briefing fields, one item per conceptual change and the template sections; lifecycles and before/after rows are not required), may open any file of the head or the base to confirm a claim, and cites the files and lines each item rests on; an item's text is at most ${MAX_ITEM_CHARS} characters, as in standard mode. In large mode the reporter need not cite every changed file or list every detector fact: the plugin lists a file no item cites in "other" with its diffstat, and accounts for a fact the report leaves out with an item of its own; the generated files and a file for which the host gave no patch are listed in "other" with the reason. report.json records the areas with the number of items that cite each, and the Areas section of ${REVIEW_HTML} and ${REVIEW_MD} lists the areas (each with the reporter's label, its files and its lines added and deleted) and the command graphloom session open <run> --stage report, which opens the reporter's session. Before the reporter job the graph computes what large mode needs of the run's agent invocations, jobs and decisions and stops with those numbers when the remaining budgets cannot cover them. Every report, standard or large, opens with a briefing the reporter returns in its result: whatsNew (one entry for each new capability, a high-level change W1 to W5, 1 to 5, each with cites and the fields of its card on the visual report: a title of at most 80 characters, an overview of one sentence of at most 240 characters on what the situation was before and how it works now, 1 to 4 core files that are changed files the entry's own cites name, and the id of the feature whose data-flow diagram belongs to it or an empty string), features (at most 3, each a name, a summary, at most 8 stages (id, label, kind source, process, transport, store, external or sink, a cite) and at most 12 flows (from, to, label, a cite): the path the data takes through a new feature, from where it enters to where it is stored), check (five lists of at most 8 one-line entries with cites: surfaces, behavior, compatibility, risks, tests) and areas (a label for each area id of a large report). Deterministic validation requires the bounds, unique stage ids, flows between two stages of their feature, and citations inside the diff on the side they name (in large mode a repository-relative path and a range of lines, whose quotes the claim check verifies in the tree). Each what's-new entry (W1, whose claim includes its title and overview), feature (F1), stage (F1.s2), flow (F1.f3) and check entry (C.risks.1) is a claim of the claim check: an unsupported what's-new entry (with its card) or check entry is dropped, an unsupported stage with its flows, an unsupported flow alone, and a feature left with fewer than two stages or no flow whole, each recorded under "Removed by the claim check". Plugin code, never a model, computes the scope (lines added and deleted for production code, tests, docs and generated or other files, from the file list, the profile's excludeRoots and its generated globs), the hotspots (the five functions with the highest CRAP, then complexity, a modified function that got worse shown as base → head) and the open questions (those whose status is needs author or partially answered, or N1 when its conclusion is questionable or unnecessary; answered ones are a count). After the claim check, whatever the claim check left (each feature's data flow, and every lifecycle entry) is drawn by one read-only diagram job (diagrams-v1, on the optional diagrammer role's harness, model and effort, the reporter's when the profile sets none) with the vendored diagram-design skill (${SKILL_DIR}, mounted read-only): one Data flow for each feature and one State machine for each lifecycle entry, at most ${MAX_DIAGRAMS} diagrams, each a complete self-contained HTML document of at most ${MAX_DIAGRAM_BYTES} characters that uses the skill's default style, system fonts and no motion. Each document must pass, as recorded evidence, the skill's own self_check.py --offline and verify-geometry.py (python3 in a confined command job with no network, on a scratch file), the inertness check of the document and of the <svg> the report embeds, and the label rule (every visible text is a label of the checked data the job was given: stage ids, labels and kinds, flow labels, state names, scopes, initial values, transition conditions and effects, read descriptions, and the skill's fixed words). One correction goes back to the same session; a diagram that still fails is drawn by plugin code instead (a layered layout with longest-path layers, cycles broken at depth-first back edges, barycentre ordering, boxes coloured by the stage's kind, flow labels and a legend; a lifecycle diagram of its own), and the report says so ("drawn by the plugin: the diagram-design drawing failed its checks (<reason>)"); a diagram never stops the run. ${REVIEW_HTML} is the one-page briefing, in this order: the Briefing (the purpose, what is new, the scope, the verdict: N1's conclusion, the principles touched with their verdicts, the number of questions that need the author), the data flow of each new feature, what you need to check, the hotspots, the areas (the sections with their item counts for a report with a single area or none), and the open questions; ${REVIEW_APPENDIX_HTML} holds every change item with its lifecycles and tables, the necessity answer, the full measurements and coverage note, the claim check's removals, the notes and all Q&A, and each of the two links to the other. ${REVIEW_MD} mirrors the briefing in plain text and holds the appendix's content under an Appendix heading, so it stays complete for agents. Both HTML files are rendered by plugin code from report.json, qa.json and necessity.json (no model writes the report's HTML, and the code excerpts under each change's card are cut by plugin code from the patches of the snapshot (at most 12 lines for a cite, 36 for a card, with the number of lines left out stated); the only markup a model wrote that it holds is a skill diagram's <svg>, which plugin code re-serializes from an allow-list of elements and attributes, with its ids prefixed and its title and description its own) and is self-contained and inert, which a deterministic check on the written bytes enforces: no script, no external stylesheet, font or image, every text from a model or the pull request escaped, and their only links are hrefs to the pull request, its commits and its files on GitHub at the pinned head and base, and to each other. Each of report.json, ${REVIEW_MD}, ${REVIEW_HTML} and ${REVIEW_APPENDIX_HTML} is written by one command when it fits (about 236,000 characters), otherwise as a bounded multi-part write: one command per part, each recorded as evidence, appended in order and renamed into place by the last part after it checks the digest every part carries; the validators reconstruct each file by concatenating the recorded parts in order and checking that digest.`,
+      statement: `When the context source is prelude: every template section is present, with cited items or an explicit None; every citation lies inside the pull request's diff on the side it names; every changed file (a renamed file under both names, a deleted file too) and every detector fact is cited, and no item carries a severity, finding or verdict. report.json, ${REVIEW_MD}, ${REVIEW_HTML} and ${REVIEW_APPENDIX_HTML} hold exactly that report, rendered by plugin code (a briefing with what is new, the scope, the features' data flow drawn with the vendored diagram-design skill (${SKILL_DIR}) or by the plugin when a drawing fails its checks, at most ${MAX_DIAGRAMS} diagrams of at most ${MAX_DIAGRAM_BYTES} characters, what to check, the hotspots and the areas), the briefing's verdict line saying there is no design review in this run and no open questions or Q&A part. In large mode (over the profile's maxFiles or maxPatchBytes) one reporter job is given a bounded digest (the interface files' patches at most ${INTERFACE_PATCH_BYTES} bytes) and reports at a high level; an item's text is at most ${MAX_ITEM_CHARS} characters. When the source is design-review or none, the Report stage writes no report of its own: ${REVIEW_MD} is the reviewers' seed, rendered by plugin code from D's report, necessity and Q&A records with this run's measurements (and the delta when D is another head), or, for none, from the pull request's metadata as untrusted blocks, its file list with the diffstat and the patches of the files in the review's scope; it recomputes from the evidence. Every HTML file is self-contained and inert, and every file is written by one command or a bounded multi-part write that the validators reconstruct and check against its digest.`,
       evidenceSchema: "change-report-v1",
     },
     {
       id: REQUIREMENT_MEASUREMENTS,
-      statement: `For every function the pull request adds or modifies, complexity and nesting were measured by the pinned static tools (gometrics, tsmetrics) over the head tree, under bwrap with no network, and every value recomputes from its evidence. The files run in batches of at most 8, each tool printing compact JSON; a batch whose report does not fit one command report is split in two, down to one file, and a file whose own report still does not fit is listed as not measured (never a failed run). A modified function is also measured at the base: its file is read at the pinned base (git show <base>:<path>, read-only, recorded whole) and measured by the same tools, confined with no network and recomputed from the recorded text, so its row shows base → head and says whether an over-the-limit value was already there, or why the base is not known (a base that cannot be measured never fails the report). Coverage runs the pull request's own tests, so it runs only in the Docker sandbox (no network, a read-only dependency cache, a prepared checkout of the head, images pinned by digest and pulled in Fetch): ${profile.metrics.coverage ? "each function's statement coverage is attributed by line range from the sandbox's report (go test -coverprofile; the repository's own vitest with @vitest/coverage-v8), and its CRAP is recomputed, or the function says why it was not run (Docker or the image is not available, the profile's sandboxed setup failed, a package did not build offline, no vitest coverage provider in the repository) and its CRAP is shown as its upper bound" : "not run (coverage disabled by the profile), CRAP shown as its upper bound"}. Mutation arrives with a later version.`,
+      statement: `Whatever the context source: for every function the pull request adds or modifies, complexity and nesting were measured by the pinned static tools (gometrics, tsmetrics) over the head tree, under bwrap with no network, and every value recomputes from its evidence; a modified function is also measured at the base (its file read with git show <base>:<path>), or says why the base is not known. Coverage runs the pull request's own tests, so it runs only in the Docker sandbox (no network, a read-only dependency cache, a prepared checkout of the head, images pinned by digest and pulled in Fetch): ${profile.metrics.coverage ? "each function's statement coverage is attributed by line range from the sandbox's report, and its CRAP is recomputed, or the function says why it was not run and its CRAP is shown as its upper bound" : "not run (coverage disabled by the profile), CRAP shown as its upper bound"}. Mutation arrives with a later version. The leads are computed from these records.`,
       evidenceSchema: "graphloom-metrics-v1",
     },
     {
       id: REQUIREMENT_CLAIMS,
-      statement: `An independent ${checker} report checker, on a harness other than the reporter's, judged every report item against the diff, and every item left is supported with quotes that match the diff's text. An item that was not supported after one revision is removed and recorded, and its file is accounted for in "other". In large mode there is one check, of the one report, and the quotes of its claims are verified against the tree each claim's cite names (the head's working tree, or the base commit's file) by read-only commands whose output is evidence, not against patch text, since an item may cite lines that no patch shown to the reporter holds: a claim whose quote the tree does not show (no such file, no such text within three lines of the line given) is unsupported, with the revision and removal rules above. The briefing's claims (what is new W<n>, a feature F<n>, its stages F<n>.s<k> and flows F<n>.f<k>, the check entries C.<list>.<n>) are claims of the same check, dropped and recorded as the requirement above says.`,
+      statement: `When the context source is prelude: an independent ${checker} report checker, on a harness other than the reporter's, in a read-only review job, judged every report item and briefing claim against the diff (in large mode against the trees its cites name), and every item left is supported with quotes that match; an item not supported after one revision is removed and recorded. When the source is design-review or none, no report of this run's is checked and the requirement passes on the recorded source.`,
       evidenceSchema: CLAIM_CHECK_SCHEMA_NAME,
     },
     {
-      id: REQUIREMENT_QUESTIONS,
-      statement: `The necessity question N1 was asked first, before every other question: is the problem real on the base (the claimed problem quoted from the pull request's text, the base behavior traced through the base code with path:line citations, a failing test on the base optional and not available in this version), does the fix fit the system's design (the repository's design and architecture documents${profile.questions.designDocs.length > 0 ? ` (${profile.questions.designDocs.join(", ")})` : ""} and code comments searched, the design statement and the changed lines cited, and whether the change preserves or breaks them said)${principlesText(profile)}, and is there a simpler or existing way; it concludes necessary, questionable, unnecessary or needs author, in one line. An independent ${harnessName(profile.roles["answer-checker"])} answer checker verified each cited design statement, each trace step${profile.questions.principles !== undefined ? ", each principle verdict" : ""} and the conclusion, with searches of its own, and N1's checked answer and the decision it led to${profile.questions.principles !== undefined ? " (with the principles file's path, ref, commit and the verdicts)" : ""} are recorded in necessity.json. When N1 concludes unnecessary and the checker supports it, and the operator did not ask for every question, no other question is asked and the skip is recorded (only N1 is required). Otherwise every required question was asked, or, on a later head whose earlier Q&A and delta were read, carried (an earlier answered question that was not an open round-1 issue, whose subject and whose answer's citations the delta does not change, is kept with its recorded answer and the head it was answered on; N1 is carried by the same rule, and then no N1 job runs): purpose for each change item whose purpose the pull request's text does not state (a stated purpose is recorded with a quote that matches that text instead), existing-reuse-common for each new symbol (one question: does the codebase already have the same or an equivalent, can an existing internal package or declared library do it, is there common logic that could be shared), missing-test for each new or modified symbol the test map finds no covering test for, split-function for each changed function with complexity of ${LIMITS.complexity} or more or nesting over ${LIMITS.nesting}, complexity-coverage for each function with measured coverage and CRAP of ${LIMITS.crap} or more or with unknown coverage and complexity of ${LIMITS.complexity} or more (an upper-bound CRAP alone asks nothing), and weak-test for each surviving mutant (none in this version: mutation testing arrives later). The groundwork behind them (symbols from the language packs, whole-repository searches over the pinned base commit, similarity, the dependency inventory, the test map) was read by read-only commands, and every changed function has a measurement record. In large mode (the report is large, or the pull request adds more than ${profile.limits.maxNewSymbols} new symbols; it is refused past ${profile.limits.hardMaxNewSymbols}) the questions are the high-level set, recorded in qa.json: purpose for each high-level change whose purpose the pull request's text does not state, and for each high-level change (one for each capability of the briefing's whatsNew, 3 to 5, ids W1 to W5, each with its cites, whatever the number of files, areas or report items) the one existing-reuse-common question (does the codebase already have the same or an equivalent of what it adds, can an existing library do it, is there common logic) and missing-test (which tests cover it, listing the new or modified functions in the cited files that the test map finds no covering test for); split-function, complexity-coverage, weak-test, the per-symbol questions and the per-function missing-test are not asked, while the measurements still show every function, the over-limit ones visible in the table.${roundsNote(profile, "questions")}`,
-      evidenceSchema: QUESTIONS_SCHEMA_NAME,
-    },
-    {
-      id: REQUIREMENT_ANSWERS,
-      statement: `N1 has its recorded answer first (when it is the only question, because it concluded unnecessary and the checker supports it, the Q&A says the remaining questions were skipped). Every other question that is not carried has an answer from the ${harnessName(profile.roles.answerer)} answerer with evidence (citations that resolve in the tree they name, the searches run with their results, inventory entries) and a status of answered, partially answered or needs author. Every "none found" answer lists its whole-repository searches. The existing-reuse-common answer is one statement with one status and its evidence, addressing all three concerns (already exists, reusable library, common logic), and the checker judges it as a whole. Every cited metric equals its measurement record. Every proposal's line ranges lie inside its function and its names are new to the package. ${QA_JSON}, ${REVIEW_MD}, ${REVIEW_HTML} and ${REVIEW_APPENDIX_HTML} (rendered from report.json, qa.json and necessity.json, with the same inert check) are written, each by one command or as a bounded multi-part write that the validators reconstruct and check against its digest, and the pull request's ledger ref was advanced by compare-and-swap from the value Fetch read with this head's report.json and qa.json (a ledger.json or ledger.md too large for the one ledger command is first written as a part set the write reads). In large mode the ${harnessName(profile.roles["batch-answerer"])} batch-answerer (the answerer role unless the profile names a batch-answerer; N1 keeps the answerer in every mode) answers the questions in batches of at most ${QUESTION_BATCH_SIZE} (the questions of a few change items per job), continuing its own session from one batch to the next; each answered batch passes the same deterministic checks and citation verification as the standard answers and is recorded as evidence (answers-record-<n>) that recomputes; ${QA_JSON} and ${REVIEW_MD} are written once, after the last batch.${roundsNote(profile, "answers")}`,
-      evidenceSchema: ANSWERS_SCHEMA_NAME,
-    },
-    {
-      id: REQUIREMENT_GROUNDED,
-      statement: `An independent ${harnessName(profile.roles["answer-checker"])} answer checker, on a harness other than the answerer's (and the batch-answerer's), re-checked every cited equivalent, library, duplicate and covering test, and every "none found" claim (each part of a combined answer separately) with searches of its own, against the trees, and had verified N1's cited design statements, trace steps${profile.questions.principles !== undefined ? ", principle verdicts" : ""} and conclusion. Every answer left is supported or partial; an answer still unsupported after one correction is needs author, with both statements recorded (for N1, its conclusion becomes questionable and every question is asked). In large mode each batch of answers is checked by its own answer checker job in a fresh session, with the same correction and downgrade rules.${roundsNote(profile, "grounded")}`,
-      evidenceSchema: ANSWER_CHECK_SCHEMA_NAME,
-    },
-    {
       id: REQUIREMENT_CODE_REVIEW,
-      statement: `Unless round 1 found issues (the run then publishes round 1 and ends, and this requirement passes on that, see round1-gated): for each of the aspects correctness, maintainability and security, a read-only ${harnessName(profile.roles[reviewerRole("correctness")])} reviewer swept the review's scope with the aspect's rule file, and every finding it raised has a verdict from the aspect's verifier (${ASPECTS.map((a) => `${a}: ${harnessName(profile.roles[verifierRole(a)])}`).join(", ")}), a fresh read-only session on a harness other than the reviewer's. The Review stage is entered, in the same run, when round 1 found no issue; no human is asked. The scope is the whole pull request; in large mode it is the files of the areas that the briefing's risks, behavior and compatibility entries cite (every readable area when it cites none), and it is recorded once, in a review-scope record, with the reason every reviewer starts as it does: a fresh session seeded with review.md only (no conversation reaches a reviewer). Each aspect's effective rule file (the shipped rules with the profile's review.aspects.<aspect>.rules entries) is written to .graphloom/review/rules/<aspect>.json, every file of the scope falls under one of its entries, and the reviewer is told which. When the profile names a design principles file (design §8.1), each reviewer's assignment also lists the principles that apply to the review's scope (a glob matches a file of it, or the principle names none), with the file's path and commit and N1's verdict and the checker's judgment for each, and a comment that says the change breaks a principle names its id in the principle field (empty otherwise, and always empty when none applies); an id that was not given to the reviewer is rejected, and the verifier is shown the principle's statement and confirms only code that contradicts it as written. Each pass reviews every file of the scope and skips none, its comments are checked (a file of the scope, a side, a range, an aspect, a kind: a correctness finding is behavioral; a severity), and P3 nits are counted and not verified. The sweep follows issue-fix's review convergence on one candidate: every finding of a pass is verified in one pr-finding-verification-v1 job, a confirmation needs its own path:line witness, a refutation needs one to three quotes that the head's files show (otherwise the finding is disputed, as is one the verifier left uncertain or gave no verdict), another pass runs while a finding of the last pass is confirmed or disputed, at most 4 passes, and a sweep that ends at the cap is recorded unsaturated and does not fail the stage. A finding the verifier calls behavioral is unproven in this version (reproducing tests arrive with a later part of the review layer), so it is never drafted as P0 or P1. Each aspect's sweep is recorded in a review-aspect-<aspect> record, from which the validator recomputes the findings, their states and the harnesses.`,
+      statement: `For each of the aspects correctness, maintainability and security, a read-only reviewer (${ASPECTS.map((a) => `${a}: ${harnessName(profile.roles[reviewerRole(a)])}`).join(", ")}) swept the review's scope with the aspect's rule file, and every finding it raised has a verdict from the aspect's verifier (${ASPECTS.map((a) => `${a}: ${harnessName(profile.roles[verifierRole(a)])}`).join(", ")}), a fresh read-only session on a harness other than the reviewer's. The scope is the whole pull request; in large mode it is the files of the areas that the context report's risks, behavior and compatibility entries cite (a design review's cites mapped to this head, a cite whose file left the pull request dropped), every readable area when it cites none or there is no report. It is recorded once, in a review-scope record that names the context source, which equals ${CONTEXT_JSON}'s, with the reason every reviewer starts as it does: a fresh session seeded with ${REVIEW_MD} only. Each aspect's effective rule file is written to .graphloom/review/rules/<aspect>.json and covers the scope (the maintainability rule's focus includes reuse, complexity, test coverage and test quality, and the leads it is given; whether a whole feature already exists is out of its scope only when the context is the design review). The design principles that apply to the scope are listed with round 1's verdicts from D's necessity record when the source is design-review, and "round 1: not run" otherwise. The sweep follows issue-fix's review convergence (a confirmation needs its own path:line witness, a refutation one to three quotes the head shows, at most 4 passes; a sweep that ends at the cap is recorded unsaturated). The groundwork the leads rest on (symbols, the test map, and, up to ${profile.limits.maxNewSymbols} new symbols, the whole-repository searches over the pinned base) was read by read-only commands.`,
+      evidenceSchema: VERIFY_SCHEMA_NAME,
+    },
+    {
+      id: REQUIREMENT_LEADS,
+      statement: `Before the first pass, plugin code computed the leads of the review's scope from the measurement records, the test map and the search reports: untested-feature (a high-level change of the context report whose every new or modified function in the files its cites name has no covering test: the test map finds none and coverage, when measured, executed none of their statements; none without a report), missing-test (such a function outside an untested-feature lead), weak-test (a surviving mutant at a covered site; none when coverage was not measured), split-function (complexity of ${LIMITS.complexity} or more or nesting over ${LIMITS.nesting}, with whether the excess is inherited, made worse or introduced), crap (measured coverage and CRAP of ${LIMITS.crap} or more, or unknown coverage and complexity of ${LIMITS.complexity} or more) and reuse (a new symbol whose search found a name or signature hit, or a body at least ${profile.questions.similarity} similar, outside the changed files, or another new symbol over that similarity; none past ${profile.limits.maxNewSymbols} new symbols). At most ${MAX_LEADS} are given to the maintainability reviewer's first pass, untested-feature first, then by kind and path; the rest are recorded as not given. Every lead given has exactly one status from that reviewer: raised (naming the comment it raised, which is then an ordinary finding, verified and prioritized) or not-an-issue (with a reason); a missing, repeated or unknown lead goes back to the same session as a correction. The correctness reviewer was given the surviving mutants and untested functions of its scope as context. The leads and their statuses are recorded in review-aspect-maintainability (pr-review-aspect-v2) and recompute from the evidence.`,
       evidenceSchema: VERIFY_SCHEMA_NAME,
     },
     {
       id: REQUIREMENT_FINDINGS_PROVEN,
-      statement: `Unless round 1 found issues: every behavioral finding is \`proven\` only when the graph's own run of its reproducing test says so, recomputed from the recorded evidence and never from the reviewer's claim (design §8.2): the reviewer's test text (a Go _test.go file or a vitest file, at most ${profile.review.repro.maxTestBytes} bytes, with the directory, the one test's name, its expectation and the oracle its expected value comes from) was run by one command job in the Docker sandbox (no network, read-only dependency cache, a checkout of the head, the test never written into it: Go with go test -overlay, TypeScript as a scratch file with the repository's own vitest config) twice, built and ran exactly the named test, and failed in both runs; each failure is attributable to the cited behavior (an assertion reported at a line of the test's own file, or for expect: panic a panic with a frame in the cited file); the test text the verifier judged has the recorded SHA-256; and the verifier confirmed the finding and judged that the test demonstrates the claimed bug. A compile error, a build failure, a timeout, a sandbox kill, a failure elsewhere or a test that fails in one run only is inconclusive or flaky, not proven; a test that passes does not reproduce the finding. Every other behavioral finding is unproven with its reason (no test, test does not fail, inconclusive, flaky, does not demonstrate, sandbox unavailable, the sandbox setup failed (the step and its first error line: the profile's metrics.sandbox.go.setup runs before the test, as coverage runs it), ${profile.review.repro.enabled ? "repro budget exhausted" : "execution disabled by the profile (review.repro.enabled is false)"}), is never drafted as P0 or P1 and never makes the verdict request-changes; ${profile.review.repro.enabled ? `at most ${Math.floor(profile.review.repro.timeBudgetMs / profile.review.repro.perFindingMs)} tests run on one head (review.repro.timeBudgetMs over perFindingMs), P0 and P1 first` : "no test runs"}. The suggestion of a behavioral finding is not drafted in this version (its fix run, design §8.2, is a later part).`,
+      statement: `Every behavioral finding is proven only when the graph's own run of its reproducing test says so, recomputed from the recorded evidence (design §8.2): the reviewer's test text (at most ${profile.review.repro.maxTestBytes} bytes) was run twice by one command job in the Docker sandbox, built and ran exactly the named test, failed in both runs attributably to the cited behavior, and the verifier confirmed the finding and judged that the test demonstrates it. Every other behavioral finding is unproven with its reason, never drafted as P0 or P1 and never makes the verdict request-changes; ${profile.review.repro.enabled ? `at most ${Math.floor(profile.review.repro.timeBudgetMs / profile.review.repro.perFindingMs)} tests run on one head` : "no test runs (review.repro.enabled is false)"}. A finding raised from an untested-feature lead is proven by its recorded test map and coverage, not by a test: the lead recomputes from the evidence and the verifier confirmed that no test of the pull request or the base exercises the feature; it is the one non-behavioral finding that may be drafted at P1.`,
       evidenceSchema: VERIFY_SCHEMA_NAME,
     },
     {
       id: REQUIREMENT_DRAFT,
-      statement: `Unless round 1 found issues: the draft review is composed by plugin code from the aspects' records and the Q&A (no model writes it) and written whole to ${DRAFT_JSON} (pr-review-draft-v1, canonical) and ${DRAFT_MD} (its editable rendering), each as one command or a bounded multi-part write. Confirmed findings that claim no wrong behavior are the comments, grouped by aspect (correctness, security, maintainability), at most P2; confirmed findings of different aspects on overlapping lines of one file are one entry that lists every aspect; confirmed behavioral findings, which are unproven in this version, and disputed findings are listed under "Needs your judgment" and never drafted as P0 or P1; the Q&A items that need the author are pre-selected (none, once round 1 passed) and the rest listed under "Not selected"; a suggestion is kept only when the verifier says it fixes the finding, it is at most 20 lines and replaces exactly the commented RIGHT range; a comment outside a hunk of the file's patch is marked as going in the review body; the recommended verdict is request-changes only for a proven P0 or P1 finding (none in this version), approve only when nothing is open, and approve is drafted as comment; the summary is at most 1,200 characters. The draft holds no path inside .graphloom/ and no secret. ${REVIEW_MD}, ${REVIEW_HTML} and ${REVIEW_APPENDIX_HTML} are written again with a Review section: findings by severity with counts, each with its one-line claim, aspect badge, cite and checker verdict, collapsed except the P0 and P1 findings that stand, in the briefing; every finding in full and the draft in the appendix. They recompute from report.json, qa.json, necessity.json and the draft, with the same inert check. The Publish stage posts the draft's comments that are findings; this stage posts nothing.`,
+      statement: `The draft review is composed by plugin code from the aspects' records (no model writes it) and written whole to ${DRAFT_JSON} (pr-review-draft-v2, canonical) and ${DRAFT_MD}. Confirmed findings are the comments, grouped by aspect, at most P2 unless proven (or, for a confirmed untested-feature finding, P1); confirmed findings of different aspects on overlapping lines of one file are one entry; unproven behavioral and disputed findings are listed under "Needs your judgment". No Q&A item is drafted: the draft lists round 1's open items (the design section's latest head with a recorded outcome, each with a link to its comment or "not posted"), says the design review has no open item, or says round 1 was not run. The recommended verdict is request-changes only for a proven P0 or P1 finding or a confirmed untested-feature finding at P1, approve only when nothing is open, and approve is drafted as comment. ${REVIEW_MD}, ${REVIEW_HTML} and ${REVIEW_APPENDIX_HTML} (the HTML only when there is a report: not for none) are written again with a Review section and the leads in the appendix, with the same inert check.`,
       evidenceSchema: DRAFT_SCHEMA,
     },
     {
-      id: REQUIREMENT_ROUND1,
-      statement: `Round 1 (the report and the Q&A: the architecture and design level) is decided by plugin code from necessity.json and qa.json, with no model and no human, and recorded in round1/round1.json (pr-review-round1-v1). Its issues are: N1's conclusion when it is not necessary (questionable, unnecessary or needs author, a design principle the checker supports as broken included); every question whose answer needs the author; every partially answered question; every answer that found an existing equivalent, a reusable library or common logic (an existing-reuse-common answer that did not find "none"), even when it is fully answered; and every missing-test question whose answer cites no covering test, even when it is fully answered. Each issue carries its id (N1 or Q<n>), its kinds, the answer's status, its text and, where its place lies inside a hunk of the file's patch at the head, that anchor. Any issue blocks round 2: the run then publishes round 1 and ends (Review and Draft pass on that). With none, the same run continues into the review layer. The record recomputes from the recorded Q&A and necessity files and must equal what was written.${roundsNote(profile, "round1")}`,
-      evidenceSchema: "round1-v1",
+      id: REQUIREMENT_LEDGER_RECORDED,
+      statement: "The ledger's review section was advanced by compare-and-swap from the value Fetch read, with this head, its context source (and D), the round-1 head and open count it counts, and its lead counts; the design section was carried from the ref's current value unchanged (a v1 ledger is migrated by this write: the top-level ledger.json, the migrated design section with the v1 commit's report, Q&A and necessity record, and the review section). A section that moved since its baseline stops the run retryably (ledger moved).",
+      evidenceSchema: "command-report-v1",
     },
     {
       id: REQUIREMENT_PUBLISHED,
-      statement: `The review was posted to the pull request as exactly one GitHub review of event COMMENT (never APPROVE or REQUEST_CHANGES), pinned to head <sha>, by the graphloom.github/create-pull-review executor, whose credential the plugin never sees, or a review of this head carrying the graph's head marker was already there and was found by reading the pull request's reviews before any post (an attempt whose outcome is unknown is reconciled the same way, and never repeated blind). Its body's first line is the verdict: "Review passed" when round 1 has no open issue and round 2 no open postable finding, else "Changes requested: <n> open". It carries round 1's issues when round 1 found any, else round 2's postable findings (the draft's comments that are findings); an item with a diff anchor is an inline comment (at most 50), the rest are in the body; each item ends with its marker (<!-- graphloom-finding: F3 --> or Q3, N1) and the body's second line is the head marker of the round it posts, <!-- graphloom-design-review: <head> <nonce> --> for round 1's issues and <!-- graphloom-review: <head> <nonce> --> for round 2's findings. The review's comments were read back and the ledger records the review id and, for each item, the review and comment ids (github): round 1's outcome and items in its design section, round 2's head and findings in its review section, each advanced by compare-and-swap from its baseline. On a later head the body also lists what became of the items an earlier review posted (fixed in a commit, or still open with a link to the earlier comment), a still-open item is not posted again unless its old thread is outdated, and the verdict counts the earlier items still open. The review's items and verdict recompute from the recorded round 1, the aspects' records, the draft and the ledger's earlier items.`,
+      statement: "The review was posted to the pull request as exactly one GitHub review of event COMMENT (never APPROVE or REQUEST_CHANGES), pinned to head <sha>, by the graphloom.github/create-pull-review executor with the idempotency key review-<head12>, whose credential the plugin never sees, or a review of this head carrying <!-- graphloom-review: <head> <nonce> --> was already there and was found by reading the pull request's reviews before any post (a review carrying graphloom-design-review is never this graph's). Its body's first line is the verdict: \"Review passed\" when no finding (new or earlier) is open and no round-1 item is open, else \"Changes requested: <n> open\", n counting the open findings, earlier ones included, and the open round-1 items listed (without a round-1 record, the findings only). The body says what round 1 left open, with links, or that round 1 was not run; nothing of round 1 is posted again. Round 2's postable findings are inline when anchored (at most 50), the rest in the body, each with its <!-- graphloom-finding: F<n> --> marker; on a later head the body says what became of the earlier findings. The review's comments were read back and the ledger's review section records the review id, its verdict and each item's ids, advanced by compare-and-swap from this run's ledger-recorded write.",
       evidenceSchema: "publish-v1",
     },
   ];
@@ -251,18 +216,18 @@ export function definitionFor(profile: Profile): GraphDefinition {
     { requirementId: REQUIREMENT_SNAPSHOT, validatorId: "pr-snapshot", version: "1" },
     { requirementId: REQUIREMENT_CHECKED_OUT, validatorId: "head-tree", version: "1" },
     { requirementId: REQUIREMENT_LEDGER, validatorId: "review-scope", version: "1" },
+    { requirementId: REQUIREMENT_CONTEXT, validatorId: "review-context", version: "1" },
     { requirementId: REQUIREMENT_REPORT, validatorId: "change-report", version: "1" },
     { requirementId: REQUIREMENT_MEASUREMENTS, validatorId: "measurements", version: "1" },
-    { requirementId: REQUIREMENT_CLAIMS, validatorId: "claims-checked", version: "1", independence: "separate-reviewer" },
-    // N1's check is review evidence: the controller admits it only from a read-only review job on another operation.
-    { requirementId: REQUIREMENT_QUESTIONS, validatorId: "questions-complete", version: "1", independence: "separate-reviewer" },
-    { requirementId: REQUIREMENT_ANSWERS, validatorId: "answers-complete", version: "1" },
-    { requirementId: REQUIREMENT_GROUNDED, validatorId: "answers-grounded", version: "1", independence: "separate-reviewer" },
+    // Not bound as a separate reviewer: a run whose context is the design review's has no claim check of its own (the controller would
+    // find no review evidence in the Report stage), so the validator itself requires that a prelude's checks are read-only review jobs.
+    { requirementId: REQUIREMENT_CLAIMS, validatorId: "claims-checked", version: "1" },
     // The reviews' verifiers are independent reviewers: the controller admits it from review evidence of a read-only review job.
     { requirementId: REQUIREMENT_CODE_REVIEW, validatorId: "code-review", version: "1", independence: "separate-reviewer" },
+    { requirementId: REQUIREMENT_LEADS, validatorId: "leads-judged", version: "1" },
     { requirementId: REQUIREMENT_FINDINGS_PROVEN, validatorId: "findings-proven", version: "1" },
     { requirementId: REQUIREMENT_DRAFT, validatorId: "draft-composed", version: "1" },
-    { requirementId: REQUIREMENT_ROUND1, validatorId: "round1-gated", version: "1" },
+    { requirementId: REQUIREMENT_LEDGER_RECORDED, validatorId: "ledger-cas", version: "1" },
     { requirementId: REQUIREMENT_PUBLISHED, validatorId: "review-published", version: "1" },
   ];
   return {
@@ -274,28 +239,17 @@ export function definitionFor(profile: Profile): GraphDefinition {
       { name: REVISION_SCHEMA_NAME, schema: asSchema(CHANGE_REPORT_SCHEMA), evidenceKind: "other" },
       // The diagram job (design §6.10): the checked data flows and lifecycle entries drawn with the vendored diagram-design skill.
       { name: DIAGRAMS_SCHEMA_NAME, schema: asSchema(DIAGRAMS_SCHEMA), evidenceKind: "other", references: [...DIAGRAMS_REFERENCES] },
-      // Kind "review": the claims-checked requirement is judged by an independent reviewer, and the controller
-      // admits one only from the review evidence of a read-only review job.
+      // Kind "review": the claim check is judged by an independent reviewer, a read-only review job.
       { name: CLAIM_CHECK_SCHEMA_NAME, schema: asSchema(CLAIM_CHECK_SCHEMA), evidenceKind: "review", references: [...CLAIM_CHECK_REFERENCES] },
-      { name: QUESTIONS_SCHEMA_NAME, schema: asSchema(QUESTIONS_SCHEMA), evidenceKind: "other", references: [...QUESTIONS_REFERENCES] },
-      { name: ANSWERS_SCHEMA_NAME, schema: asSchema(ANSWERS_SCHEMA), evidenceKind: "other", references: [...ANSWERS_REFERENCES] },
-      { name: ANSWERS_REVISION_SCHEMA_NAME, schema: asSchema(ANSWERS_SCHEMA), evidenceKind: "other", references: [...ANSWERS_REFERENCES] },
-      { name: NECESSITY_SCHEMA_NAME, schema: asSchema(NECESSITY_SCHEMA), evidenceKind: "other", references: [...NECESSITY_REFERENCES] },
-      { name: NECESSITY_REVISION_SCHEMA_NAME, schema: asSchema(NECESSITY_SCHEMA), evidenceKind: "other", references: [...NECESSITY_REFERENCES] },
-      // Kind "review": answers-grounded is judged by an independent reviewer (a read-only review job on another harness).
-      { name: ANSWER_CHECK_SCHEMA_NAME, schema: asSchema(ANSWER_CHECK_SCHEMA), evidenceKind: "review", references: [...ANSWER_CHECK_REFERENCES] },
       // The review layer (design §8.1): an aspect reviewer's pass, and the verifier's verdicts on its findings. Both are read-only review jobs.
       { name: REVIEW_SCHEMA_NAME, schema: asSchema(REVIEW_SCHEMA), evidenceKind: "review", references: [...REVIEW_REFERENCES] },
       { name: VERIFY_SCHEMA_NAME, schema: asSchema(VERIFY_SCHEMA), evidenceKind: "review", references: [...VERIFY_REFERENCES] },
     ],
     stages: [
       { id: FETCH_STAGE, name: "Fetch", requirementIds: [REQUIREMENT_SNAPSHOT, REQUIREMENT_CHECKED_OUT, REQUIREMENT_LEDGER] },
-      { id: REPORT_STAGE, name: "Report", requirementIds: [REQUIREMENT_REPORT, REQUIREMENT_MEASUREMENTS, REQUIREMENT_CLAIMS] },
-      { id: QUESTIONS_STAGE, name: "Questions", requirementIds: [REQUIREMENT_QUESTIONS] },
-      { id: ANSWERS_STAGE, name: "Answers", requirementIds: [REQUIREMENT_ANSWERS, REQUIREMENT_GROUNDED] },
-      { id: ROUND1_STAGE, name: "Round 1", requirementIds: [REQUIREMENT_ROUND1] },
-      { id: REVIEW_STAGE, name: "Review", requirementIds: [REQUIREMENT_CODE_REVIEW, REQUIREMENT_FINDINGS_PROVEN] },
-      { id: DRAFT_STAGE, name: "Draft", requirementIds: [REQUIREMENT_DRAFT] },
+      { id: REPORT_STAGE, name: "Report", requirementIds: [REQUIREMENT_CONTEXT, REQUIREMENT_REPORT, REQUIREMENT_MEASUREMENTS, REQUIREMENT_CLAIMS] },
+      { id: REVIEW_STAGE, name: "Review", requirementIds: [REQUIREMENT_CODE_REVIEW, REQUIREMENT_LEADS, REQUIREMENT_FINDINGS_PROVEN] },
+      { id: DRAFT_STAGE, name: "Draft", requirementIds: [REQUIREMENT_DRAFT, REQUIREMENT_LEDGER_RECORDED] },
       { id: PUBLISH_STAGE, name: "Publish", requirementIds: [REQUIREMENT_PUBLISHED] },
     ],
     requirements,
@@ -308,23 +262,20 @@ export function definitionFor(profile: Profile): GraphDefinition {
 }
 
 /**
- * The roles the profile assigns harnesses to (design §13.1), for `graphloom
- * doctor --task`: the whole role set with its distinctness constraints.
+ * The roles the profile assigns harnesses to (design §13.1), for `graphloom doctor --task`: pr-review's own (the prelude's reporter,
+ * diagrammer and report-checker, and each aspect's reviewer and verifier) with their distinctness constraints.
  */
 export function agentRoles(profile: Profile): AgentRoleDeclaration[] {
-  return ROLES.map((role) => {
-    const distinctFrom = DISTINCT_PAIRS.filter(([checked]) => checked === role).map(([, author]) => author);
-    // diagrammer (the diagram job) is optional, falling back to the reporter's harness, model and effort.
+  return REVIEW_ROLES.map((role) => {
+    const distinctFrom = DISTINCT_PAIRS.filter(([checked, author]) => checked === role && REVIEW_ROLES.includes(author)).map(([, author]) => author);
     const setting =
       role === "diagrammer"
-        ? `harnesses.${role} (optional; falls back to harnesses.reporter)`
-        : role === "batch-answerer"
-          ? `harnesses.${role} (optional; the answer batches of large mode; falls back to harnesses.answerer)`
+        ? `harnesses.${role} (optional; falls back to harnesses.reporter; the report-only prelude only)`
+        : role === "reporter" || role === "report-checker"
+          ? `harnesses.${role} (the report-only prelude only)`
           : role.startsWith("reviewer-")
-            ? `harnesses.${role} (optional; the ${role.slice("reviewer-".length)} aspect's reviewer; falls back to harnesses.answerer, and must be on its harness: a reviewer starts from the answerer's session)`
-            : role.startsWith("verifier-")
-              ? `harnesses.${role} (optional; the ${role.slice("verifier-".length)} aspect's finding verifier; the first harness of the design's preference that is not its reviewer's)`
-              : `harnesses.${role}`;
+            ? `harnesses.${role} (optional; the ${role.slice("reviewer-".length)} aspect's reviewer; defaults to claude-code)`
+            : `harnesses.${role} (optional; the ${role.slice("verifier-".length)} aspect's finding verifier; the first harness of the design's preference that is not its reviewer's)`;
     return { role, harness: profile.roles[role], access: "read" as const, ...(distinctFrom.length > 0 ? { distinctFrom } : {}), setting };
   });
 }
@@ -361,40 +312,27 @@ function advance(view: RunView): GraphDecision {
   const stage = definition.stages.find((s) => !s.requirementIds.every((id) => view.receipts.some((r) => r.stageId === s.id && r.requirementId === id && r.valid)) || view.openAttempt?.[s.id] === true);
   const ctx: Context = { profile, definition, pr };
   if (stage === undefined) return finished(ctx, view);
-  // Round 2 (the review layer and its draft) runs in this run only when round 1 found no issue; with issues, their requirements pass on that and the run publishes round 1.
-  if (stage.id === REVIEW_STAGE || stage.id === DRAFT_STAGE) {
-    const round1 = recordedRound1(view.evidence);
-    if (round1.state === "failed") return supervise({ reason: `the round-1 record does not read back: ${round1.reason}`, evidenceRefs: round1.refs }, "escalate an unreadable round-1 record");
-    if (round1.state === "none") return supervise({ reason: "the review stage lost the round-1 record" }, "escalate a missing round-1 record");
-    if (round1.value.issues.length > 0) return withPrivate(validate({ stageId: stage.id }, `round 1 found ${round1.value.issues.length} issue(s): ${stage.name} passes, round 2 runs on a later head after they are fixed`));
-    return stage.id === REVIEW_STAGE ? review(ctx, view) : draftStage(ctx, view);
-  }
   switch (stage.id) {
     case FETCH_STAGE:
       return fetch(ctx, view);
     case REPORT_STAGE:
       return report(ctx, view);
-    case QUESTIONS_STAGE:
-      return questions(ctx, view);
-    case ANSWERS_STAGE:
-      return answers(ctx, view);
-    case ROUND1_STAGE:
-      return round1Stage(ctx, view);
+    case REVIEW_STAGE:
+      return review(ctx, view);
+    case DRAFT_STAGE:
+      return draftStage(ctx, view);
     default:
       return publishStage(ctx, view);
   }
 }
 
-/** Every stage is accepted: the run ends, with the verdict the posted review gives (design §9.4). */
+/** Every stage is accepted: the run ends, with the verdict the posted review gives (design-pr-review-split §4.5). */
 function finished(ctx: Context, view: RunView): GraphDecision {
-  const round1 = recordedRound1(view.evidence);
-  const issues = round1.state === "read" ? round1.value.issues.length : 0;
-  const a = analyze(view.evidence, ctx.profile, ctx.pr);
   const where = `${ctx.pr.owner}/${ctx.pr.repo}#${ctx.pr.number} at ${ctx.pr.head.slice(0, 12)}`;
-  const posted = a.state === "ready" ? postedReview(view, ctx, a.analysis) : undefined;
+  const posted = postedReview(view, ctx);
   const link = posted?.url !== null && posted?.url !== undefined ? ` (${posted.url})` : "";
-  const blocker = issues > 0 ? `round 1: changes requested: ${issues} issue${issues === 1 ? "" : "s"} open on ${where}; the review is posted${link}, and round 2 (the aspect reviewers) runs on a later head, once they are fixed` : `${posted?.verdict === "changes-requested" ? `round 2: changes requested: ${posted.open} open` : "review passed"} on ${where}; the review is posted${link}`;
-  return withPrivate(stop({ reason: "complete", blocker, retryable: false }, issues > 0 ? "round 1 found issues: the review is posted and the run ends" : ctx.profile.rounds === "review-only" ? "round 2 ran (round 1 skipped by the operator: rounds: review-only): the review is posted and the run ends" : "both rounds ran: the review is posted and the run ends"));
+  const blocker = `${posted === undefined ? "review" : posted.verdict === "changes-requested" ? `changes requested: ${posted.open} open` : "review passed"} on ${where}; the review is posted${link}`;
+  return withPrivate(stop({ reason: "complete", blocker, retryable: false }, "round 2 ran: the review is posted and the run ends"));
 }
 
 interface Context {
@@ -452,7 +390,7 @@ function fetch(ctx: Context, view: RunView): GraphDecision {
   }
   const s = snapshotState(view.evidence, pr, profile.limits, profile.questions.excludeRoots);
   if (s.state === "reading") return withPrivate(dispatch(githubJob(s.next, readInput(s.next, pr, s.cursor)), s.why));
-  if (s.state === "incompatible") return stop({ reason: "incompatible task", blocker: s.problem, evidenceRefs: s.refs.slice(-10), retryable: false }, "stop: this pull request cannot be reported");
+  if (s.state === "incompatible") return stop({ reason: "incompatible task", blocker: s.problem, evidenceRefs: s.refs.slice(-10), retryable: false }, "stop: this pull request cannot be reviewed");
   const ledger = commandState(view, COMMAND.ledger, ledgerReadCommand(pr.owner, pr.repo, pr.number));
   if (ledger.failed && !ledger.retry && ledger.run !== undefined) {
     return supervise({ reason: `the ledger read failed: ${describeCommand(ledger.run.command)}`, evidenceRefs: [ledger.run.record.ref] }, "escalate a failed ledger read");
@@ -460,20 +398,20 @@ function fetch(ctx: Context, view: RunView): GraphDecision {
   if (ledger.run === undefined || ledger.retry) {
     return withPrivate(dispatch(commandJob(FETCH_STAGE, "Read the pull request's ledger ref", { commands: [ledgerReadCommand(pr.owner, pr.repo, pr.number)], env: { ...GIT_ENV } }), "read the ledger ref, or record it absent"));
   }
-  // A ledger an earlier run left is read whole here (its heads, question keys and posted items), so this run continues its ids and re-checks its items (design §9).
+  // A ledger an earlier run left is read whole here: its two sections (a v1 ledger migrated in memory, design-pr-review-split §5.4).
   const ledgerValue = ledgerRead(view.evidence);
   if (ledgerValue !== undefined && ledgerValue.ledger.present) {
     const prior = priorState(view.evidence, oldValue(ledgerValue.ledger));
     if (prior.state === "missing" || (prior.state === "unreadable" && retryOf(view)(prior.run))) {
       const commands = prior.state === "missing" ? prior.next : [{ id: prior.run.command.id, argv: prior.run.command.argv }];
-      return withPrivate(dispatch(commandJob(FETCH_STAGE, "Read the prior ledger's ledger.json", { commands, continueOnFailure: true, env: { ...GIT_ENV } }), "read the prior ledger.json, so this run continues its ids and re-checks the items it posted"));
+      return withPrivate(dispatch(commandJob(FETCH_STAGE, "Read the prior ledger's sections", { commands, continueOnFailure: true, env: { ...GIT_ENV } }), "read the prior ledger's review and design sections, so this run continues its finding ids and lists round 1's open items"));
     }
-    if (prior.state === "unreadable") return supervise({ reason: `the prior ledger's ledger.json cannot be read (${prior.reason}); the ledger is not overwritten`, evidenceRefs: [prior.run.record.ref] }, "escalate a prior ledger that cannot be read");
-    // Round 1 on a later head asks only about what the update changed (design §9.2, §9.3): the earlier Q&A and the delta are read here.
-    // A read that cannot be made is not a stop: the round is then a full round 1, with the reason recorded.
-    const reads = incrementalReads(view.evidence, { ledger: ledgerValue.ledger.sha, registry: registryFromEvidence(view.evidence), enabled: profile.questions.incremental && profile.rounds !== "review-only", head: pr.head, files: s.snapshot.files.map((f) => f.path), base: pinnedBase(view.evidence), node: process.execPath });
-    if (reads.state === "run") return withPrivate(dispatch(commandJob(FETCH_STAGE, "Read the earlier Q&A and the delta since the last reviewed head (read-only git; no repository code)", { commands: reads.commands, continueOnFailure: true, env: { ...GIT_ENV } }), reads.why));
+    if (prior.state === "unreadable") return supervise({ reason: `the prior ledger cannot be read (${prior.reason}); the ledger is not overwritten`, evidenceRefs: [prior.run.record.ref] }, "escalate a prior ledger that cannot be read");
   }
+  // The design head's report, Q&A and necessity record, and the delta from it to this head (design-pr-review-split §4.2). A read
+  // that cannot be made is not a stop: the context is then the next source, with the reason recorded.
+  const reads = designState(view.evidence, pr, { snapshot: s.snapshot });
+  if (reads.state === "run") return withPrivate(dispatch(commandJob(FETCH_STAGE, "Read the design review's report, Q&A and necessity record, and the delta since its head (read-only git; no repository code)", { commands: reads.commands.slice(0, 16), continueOnFailure: true, env: { ...GIT_ENV } }), reads.why));
   // The project's design principles file, read from the profile's ref or the pinned base, never the head (design §7.5.1).
   const configured = profile.questions.principles;
   const pinned = pinnedBase(view.evidence);
@@ -521,7 +459,7 @@ function validateStage(ctx: Context, view: RunView, stageId: string): GraphDecis
   for (const id of stage.requirementIds) {
     const binding = ctx.definition.defaultValidators.find((b) => b.requirementId === id)!;
     const statement = ctx.definition.requirements.find((r) => r.id === id)!.statement;
-    const result = validatorById(binding.validatorId)!.evaluate({ requirementId: id, statement, evidence: validatorEvidence(view.evidence, view.candidateDigest), ...(view.candidateDigest !== undefined ? { candidateDigest: view.candidateDigest } : {}), config: view.config }) as ValidationResult;
+    const result = validatorById(binding.validatorId)!.evaluate({ requirementId: id, statement, evidence: validatorEvidence(view.evidence, view.candidateDigest), ...(view.candidateDigest !== undefined ? { candidateDigest: view.candidateDigest } : {}), config: view.config, request: view.task.request }) as ValidationResult;
     if (result.status !== "passed") failures.push(`${id}: ${result.reason}`);
   }
   if (failures.length > 0) {
@@ -609,6 +547,7 @@ function writeSpills(view: RunView, stageId: string, spills: readonly FileSpill[
   return withPrivate(dispatch(commandJob(stageId, writeInstruction(next.command, `Write ${part?.path ?? "a file for an agent to read"}`), { commands: [next.command] }), `write ${part?.path ?? "a file"} for the next agent job to read: its input does not fit the job's assignment`));
 }
 
+
 /** Where the base commit's files are exported for the agents (design §7.3), when the groundwork recorded the export. */
 function baseTreeDir(view: RunView, groundwork: { baseTree?: unknown }): string | undefined {
   const worktree = environmentOutput(view.evidence, ENV_WORKTREE);
@@ -638,6 +577,11 @@ function dispatchAgent(view: RunView, job: JobSpec, summary: string): GraphDecis
   return withPrivate(dispatch(job, summary));
 }
 
+/**
+ * The Report stage (design-pr-review-split §4.1): the context source first, decided by plugin code from Fetch's reads and the
+ * request and recorded in context.json; then the report-only prelude when the source is `prelude` (reporter, claim check, diagrams);
+ * then, whatever the source, the measurements; then the report's files (the prelude) or the reviewers' seed review.md.
+ */
 function report(ctx: Context, view: RunView): GraphDecision {
   const { profile, pr } = ctx;
   const a = analyze(view.evidence, profile, pr);
@@ -645,6 +589,15 @@ function report(ctx: Context, view: RunView): GraphDecision {
     return supervise({ reason: a.state === "pending" ? `the report stage lost the pull request snapshot: ${a.reason}` : a.problem }, "escalate a missing snapshot");
   }
   const { analysis } = a;
+  const reads = designState(view.evidence, pr, analysis);
+  if (reads.state === "run") return withPrivate(dispatch(commandJob(REPORT_STAGE, "Read the design review's report, Q&A and necessity record, and the delta since its head (read-only git; no repository code)", { commands: reads.commands.slice(0, 16), continueOnFailure: true, env: { ...GIT_ENV } }), reads.why));
+  const context = decideContext(reads, pr.noReport === true);
+  const recorded = nextWrite(view, partCommands(PART_BASE.contextJson, CONTEXT_JSON, contextJson(context)), { failed: "recording the context source failed", settle: "the recorded context source keeps differing from the one the evidence recomputes" });
+  if (recorded !== undefined) {
+    if ("decision" in recorded) return recorded.decision;
+    return withPrivate(dispatch(commandJob(REPORT_STAGE, writeInstruction(recorded.command, `Record the context source in ${CONTEXT_JSON}`), { commands: [recorded.command] }), `record the reviewers' context source: ${context.source}${context.reasons.length > 0 ? ` (${context.reasons[0]})` : ""}`));
+  }
+  if (context.source !== "prelude") return measureAndWrite(ctx, view, analysis, undefined, context);
   const flow = reportFlowOf(view.evidence, analysis, retryOf(view));
   switch (flow.state) {
     case "supervise":
@@ -672,7 +625,7 @@ function report(ctx: Context, view: RunView): GraphDecision {
       const from = flow.kind === "first" ? undefined : jobSession(view, REPORT_STAGE, REPORTER_JOB);
       const job = agentJob(ctx, view, { jobId: REPORTER_JOB, purpose: "diagnostic", instruction: large ? "Write the high-level change report" : "Write the change report", schema: flow.schema, harness: profile.roles.reporter, role: "reporter", assignment, ...(from !== undefined ? { continueFrom: from } : {}) }, analysis.snapshot.files);
       if ("problem" in job) return refused(job);
-      const why = { first: "write the change report (read-only, confined)", correction: "correct the report: deterministic validation found problems", revision: "revise the report: the claim check did not support some items" }[flow.kind];
+      const why = { first: "write the change report of the report-only prelude (read-only, confined)", correction: "correct the report: deterministic validation found problems", revision: "revise the report: the claim check did not support some items" }[flow.kind];
       return dispatchAgent(view, job, why);
     }
     case "checker": {
@@ -688,11 +641,18 @@ function report(ctx: Context, view: RunView): GraphDecision {
     }
     case "done": {
       // The diagrams are drawn and checked once the report's claims are (design §6.10); the plugin's own drawing stands in for one that fails.
+      // The claim checks are recorded first, so a reentry after a later review of the same candidate can accept the report again.
+      const checks = nextWrite(view, claimRecordCommands(view.evidence), { failed: "recording the claim checks failed", settle: "the recorded claim checks keep differing from the ones the evidence holds" });
+      if (checks !== undefined) {
+        if ("decision" in checks) return checks.decision;
+        return withPrivate(dispatch(commandJob(REPORT_STAGE, writeInstruction(checks.command, "Record the claim checks as evidence"), { commands: [checks.command] }), "record the report's claim checks, so a later review of the same candidate does not hide them from the report's validators"));
+      }
       const drawn = diagramStep(ctx, view, analysis, flow);
-      return drawn ?? measureAndWrite(ctx, view, analysis, flow);
+      return drawn ?? measureAndWrite(ctx, view, analysis, flow, context);
     }
   }
 }
+
 
 /**
  * The diagram job (design §6.10): a read-only agent draws the checked data flows and lifecycle entries with the skill, the
@@ -824,7 +784,8 @@ export function runtimePackageDirs(pluginRoot: string, names: readonly string[])
   return [...found];
 }
 
-function measureAndWrite(ctx: Context, view: RunView, analysis: Analysis, flow: Extract<ReportFlow, { state: "done" }>): GraphDecision {
+/** The measurements, whatever the context source, then the report's files (the prelude) or the reviewers' seed review.md (design-review, none). */
+function measureAndWrite(ctx: Context, view: RunView, analysis: Analysis, flow: Extract<ReportFlow, { state: "done" }> | undefined, context: ContextRecord): GraphDecision {
   const { profile, pr } = ctx;
   const m = measurementState(view.evidence, analysis.snapshot.files, profile, retryOf(view), environmentOutput(view.evidence, ENV_PLUGIN_ROOT));
   switch (m.state) {
@@ -887,6 +848,17 @@ function measureAndWrite(ctx: Context, view: RunView, analysis: Analysis, flow: 
     default:
       break;
   }
+  if (flow === undefined) {
+    // design-review or none: the reviewers' seed review.md, rendered by plugin code (design-pr-review-split §4.2).
+    const seed = contextOutputs(view.evidence, profile, pr, analysis, context, m);
+    if ("pending" in seed) return supervise({ reason: `the reviewers' seed cannot be written: ${seed.pending}` }, "escalate a context that does not read back");
+    const next = nextWrite(view, partCommands(PART_BASE.seedMd, REVIEW_MD, seed.markdown), { failed: "writing the reviewers' seed failed", settle: "the written seed keeps differing from the one the evidence recomputes" });
+    if (next === undefined) return validateStage(ctx, view, REPORT_STAGE);
+    if ("decision" in next) return next.decision;
+    const secrets = secretFindings(seed.markdown);
+    if (secrets.length > 0) return stop({ reason: "report refused", blocker: `the reviewers' seed would hold what looks like a credential (${[...new Set(secrets)].slice(0, 3).join("; ")}); it was not written`, retryable: false }, "refuse to write a seed that holds a secret");
+    return withPrivate(dispatch(commandJob(REPORT_STAGE, writeInstruction(next.command, `Write ${REVIEW_MD}, the reviewers' seed`), { commands: [next.command] }), context.source === "design-review" ? "write review.md from the design review's report, necessity answer and Q&A, with this run's measurements" : "write review.md from the pull request's metadata, its file list and the patches in scope (no report: --no-report)"));
+  }
   const outputs = outputsOf(view.evidence, profile, pr, analysis, flow, m);
   // report.json, review.md, review.html and review-appendix.html: each one command when it fits, else a bounded multi-part write (design §6.6).
   const commands = [...reportWriteCommands(outputs.json, outputs.markdown), ...htmlWriteCommands(outputs.html, false), ...appendixWriteCommands(outputs.appendix, false)];
@@ -900,19 +872,19 @@ function measureAndWrite(ctx: Context, view: RunView, analysis: Analysis, flow: 
   const inert = [...writtenHtmlProblems(outputs.html, pr, pinnedBase(view.evidence)), ...writtenHtmlProblems(outputs.appendix, pr, pinnedBase(view.evidence))];
   if (inert.length > 0) return supervise({ reason: `review.html or review-appendix.html would not be self-contained and inert: ${inert.slice(0, 3).join("; ")}` }, "escalate a report file that fails its own inertness check");
   const idNotes = flow.reading.notes.length > 0 ? `; claim-check ids normalized: ${flow.reading.notes.slice(0, 4).join("; ")}` : "";
-  return withPrivate(dispatch(commandJob(REPORT_STAGE, writeInstruction(next.command, `Write ${REVIEW_MD} and report.json`), { commands: [next.command] }), `write report.json, the readable review.md, the HTML briefing review.html and its appendix review-appendix.html${idNotes}`));
+  return withPrivate(dispatch(commandJob(REPORT_STAGE, writeInstruction(next.command, `Write ${REVIEW_MD} and report.json`), { commands: [next.command] }), `write the prelude's report.json, the readable review.md, the HTML briefing review.html and its appendix review-appendix.html${idNotes}`));
 }
 
 /** Whether a failed command may run again: the operator resumed since it failed. */
 const retryOf = (view: RunView) => (run: CommandRun): boolean => isStaleFailure(run.record, view);
 
 /** What the groundwork still needs, as the decision that gets it (or stops the run). */
-function groundworkDecision(step: Extract<ReturnType<typeof qaContext>, { state: "groundwork" }>["step"], stageId: string): GraphDecision {
+function groundworkDecision(step: Exclude<GroundworkState, { state: "ready" }>, stageId: string): GraphDecision {
   switch (step.state) {
     case "observe":
       return withPrivate(observe({ paths: step.paths }, "observe the changed source files the symbol extraction reads, so symbols come from the head's bytes"));
     case "run":
-      return withPrivate(dispatch(commandJob(stageId, "Read the base commit for the groundwork (declarations, searches, dependencies)", { commands: step.commands, env: { ...GIT_ENV } }), step.why));
+      return withPrivate(dispatch(commandJob(stageId, "Read the base commit for the groundwork of the leads (declarations, searches, dependencies)", { commands: step.commands, env: { ...GIT_ENV } }), step.why));
     case "failed":
       return supervise({ reason: `the groundwork could not be read: ${step.problems.join("; ")}`, evidenceRefs: step.refs.slice(-10) }, "hand a failed groundwork read to the supervisor");
     case "incompatible":
@@ -920,266 +892,50 @@ function groundworkDecision(step: Extract<ReturnType<typeof qaContext>, { state:
   }
 }
 
-/** `rounds: review-only` (design §3.2): Questions, N1 included, passes on a recorded skip; no groundwork is read and no agent runs. */
-function skipQuestions(ctx: Context, view: RunView): GraphDecision {
-  const next = nextWrite(view, necessityWriteCommands(roundsSkipJson()), { failed: "recording the skip of the Questions stage failed", settle: "the recorded skip keeps differing from the one the evidence recomputes" });
-  if (next === undefined) return validateStage(ctx, view, QUESTIONS_STAGE);
-  if ("decision" in next) return next.decision;
-  return withPrivate(dispatch(commandJob(QUESTIONS_STAGE, writeInstruction(next.command, `Record that the necessity question and the other questions are skipped (${ROUNDS_SKIP_REASON}) in ${NECESSITY_JSON}`), { commands: [next.command] }), `record the operator's choice (${ROUNDS_SKIP_REASON}): Questions, N1 included, is skipped`));
-}
-
-function questions(ctx: Context, view: RunView): GraphDecision {
-  const { profile, pr } = ctx;
-  if (profile.rounds === "review-only") return skipQuestions(ctx, view);
-  const c = qaContext(view.evidence, profile, pr, retryOf(view));
-  if (c.state === "pending") return supervise({ reason: `the Questions stage lost what it reads: ${c.reason}` }, "escalate a missing report or snapshot");
-  if (c.state === "groundwork") return groundworkDecision(c.step, QUESTIONS_STAGE);
-  const files = c.ctx.analysis.snapshot.files;
-  // N1, the necessity question, comes first (design §7.5): answered and checked before any other question is asked.
-  const nf = necessityFlow(view.evidence, c.ctx, retryOf(view));
-  switch (nf.state) {
-    case "supervise":
-      return supervise({ reason: nf.reason, evidenceRefs: nf.refs }, "hand the unresolved necessity answer to the supervisor");
-    case "answerer": {
-      const baseDir = baseTreeDir(view, c.ctx.groundwork);
-      const planned = planNecessity({ pr, snapshot: c.ctx.analysis.snapshot, view: c.ctx.view, designDocs: c.ctx.designDocs, context: c.ctx.context, kind: nf.kind, feedback: nf.feedback, ...(c.ctx.principles !== undefined ? { principles: c.ctx.principles } : {}), ...(baseDir !== undefined ? { baseDir } : {}), ...(reviewDirOf(view) !== undefined ? { reviewDir: reviewDirOf(view)! } : {}) });
-      const assignment = planned.text;
-      const written = writeSpills(view, QUESTIONS_STAGE, planned.spills);
-      if (written !== undefined) return written;
-      const from = nf.kind === "first" ? undefined : jobSession(view, QUESTIONS_STAGE, ANSWERER_JOB);
-      const references = principleRefs(NECESSITY_REFERENCES[0]!, c.ctx.principles?.applicable ?? []);
-      const job = agentJob(ctx, view, { jobId: ANSWERER_JOB, stageId: QUESTIONS_STAGE, purpose: "diagnostic", instruction: "Answer the necessity question N1 from the whole codebase", schema: nf.schema, harness: profile.roles.answerer, role: "answerer", assignment, references, ...(from !== undefined ? { continueFrom: from } : {}) }, files);
-      if ("problem" in job) return refused(job);
-      const why = { first: "answer the necessity question N1 (read-only, confined): is the problem real, does the fix fit the design, is there a simpler way", correction: "correct the necessity answer: deterministic validation found problems", revision: "revise the necessity answer: the answer checker did not support it" }[nf.kind];
-      return dispatchAgent(view, job, why);
-    }
-    case "verify":
-      return withPrivate(dispatch(commandJob(QUESTIONS_STAGE, "Check the necessity answer's citations against the trees", { commands: nf.commands.slice(0, 16), env: { ...GIT_ENV } }), "resolve each citation of the necessity answer in the tree it names"));
-    case "checker": {
-      const answer = nf.answers.get(NECESSITY_ID)!;
-      const baseDir = baseTreeDir(view, c.ctx.groundwork);
-      const planned = planNecessityChecker({ pr, snapshot: c.ctx.analysis.snapshot, question: necessityQuestion(), answer, replies: authorReplies(c.ctx.prior.items, c.ctx.analysis.snapshot.threads), designDocs: c.ctx.designDocs, context: c.ctx.context, retry: nf.retry, ...(c.ctx.principles !== undefined ? { principles: c.ctx.principles } : {}), ...(baseDir !== undefined ? { baseDir } : {}), ...(reviewDirOf(view) !== undefined ? { reviewDir: reviewDirOf(view)! } : {}) });
-      const assignment = planned.text;
-      const written = writeSpills(view, QUESTIONS_STAGE, planned.spills);
-      if (written !== undefined) return written;
-      const references = idRefs({ ...questionRefs(ANSWER_CHECK_REFERENCES[0]!, [necessityQuestion()]), ...principleRefs(ANSWER_CHECK_REFERENCES[1]!, c.ctx.principles?.applicable ?? []) });
-      const job = agentJob(ctx, view, { stageId: QUESTIONS_STAGE, purpose: "review", instruction: "Check the necessity answer against the trees", schema: ANSWER_CHECK_SCHEMA_NAME, harness: profile.roles["answer-checker"], role: "answer-checker", assignment, references }, files);
-      if ("problem" in job) return refused(job);
-      return dispatchAgent(view, job, `check the necessity answer with a fresh read-only ${harnessName(profile.roles["answer-checker"])} session`);
-    }
-    case "done":
-      break;
-  }
-  const record: NecessityRecord = necessityRecordOf(c.ctx, nf.final[0]!, pr.askAll === true);
-  // necessity.json: one command, or a bounded multi-part write when it does not fit one (design §6.6).
-  const necessityWrite = nextWrite(view, necessityRecordCommands(record), { failed: "recording the necessity answer failed", settle: "the recorded necessity answer keeps differing from the one the evidence recomputes" });
-  if (necessityWrite !== undefined) {
-    if ("decision" in necessityWrite) return necessityWrite.decision;
-    return withPrivate(dispatch(commandJob(QUESTIONS_STAGE, writeInstruction(necessityWrite.command, `Record N1's checked answer and its decision in ${NECESSITY_JSON}`), { commands: [necessityWrite.command] }), `record N1's outcome (${record.decision.action === "skip" ? "the other questions are skipped" : "every question is asked"}) as evidence`));
-  }
-  if (record.decision.action === "skip") return validateStage(ctx, view, QUESTIONS_STAGE);
-  const flow = questionerFlow(view.evidence, c.ctx);
-  switch (flow.state) {
-    case "supervise":
-      return supervise({ reason: flow.reason, evidenceRefs: flow.refs }, "hand the unresolved questions to the supervisor");
-    case "questioner": {
-      const required = requiredQuestions({ view: c.ctx.view, groundwork: c.ctx.groundwork, large: isLarge(c.ctx.mode) }, new Map());
-      const baseDir = baseTreeDir(view, c.ctx.groundwork);
-      const planned = planQuestioner({ pr, snapshot: c.ctx.analysis.snapshot, view: c.ctx.view, groundwork: c.ctx.groundwork, required, feedback: flow.feedback, kind: flow.kind, large: isLarge(c.ctx.mode), ...(baseDir !== undefined ? { baseDir } : {}), ...(reviewDirOf(view) !== undefined ? { reviewDir: reviewDirOf(view)! } : {}) });
-      const assignment = planned.text;
-      const written = writeSpills(view, QUESTIONS_STAGE, planned.spills);
-      if (written !== undefined) return written;
-      const from = flow.kind === "first" ? undefined : jobSession(view, QUESTIONS_STAGE, QUESTIONER_JOB);
-      const itemIds = questionItems(c.ctx.view).map((i) => i.id);
-      const symbolIds = c.ctx.groundwork.symbols.map((x) => x.id);
-      const references = idRefs({ "purposes[].item": idSet(itemIds), "questions[].item": idSet(itemIds), "questions[].symbol": idSet(["", ...symbolIds]) });
-      const job = agentJob(ctx, view, { jobId: QUESTIONER_JOB, stageId: QUESTIONS_STAGE, purpose: "diagnostic", instruction: "Ask the questions (ask only; never answer)", schema: QUESTIONS_SCHEMA_NAME, harness: profile.roles.questioner, role: "questioner", assignment, references, ...(from !== undefined ? { continueFrom: from } : {}) }, files);
-      if ("problem" in job) return refused(job);
-      return dispatchAgent(view, job, flow.kind === "first" ? "ask the questions (read-only, confined)" : "correct the questions: deterministic validation found problems");
-    }
-    case "done":
-      return validateStage(ctx, view, QUESTIONS_STAGE);
-  }
-}
-
 const sameArgv = (a: readonly string[], b: readonly string[]): boolean => a.length === b.length && a.every((x, i) => x === b[i]);
 
-function answers(ctx: Context, view: RunView): GraphDecision {
-  const { profile, pr } = ctx;
-  if (profile.rounds === "review-only") {
-    // The skipped Q&A is written from the report and the snapshot alone: qa.json, review.md, the HTML pages and the ledger.
-    const a = analyze(view.evidence, profile, pr);
-    if (a.state !== "ready") return supervise({ reason: a.state === "pending" ? `the Answers stage lost the pull request snapshot: ${a.reason}` : a.problem }, "escalate a missing snapshot");
-    const base = pinnedBase(view.evidence);
-    return writeAnswerFiles(ctx, view, skippedWrites(view.evidence, a.analysis, pr, base), base);
-  }
-  const c = qaContext(view.evidence, profile, pr, retryOf(view));
-  if (c.state === "pending") return supervise({ reason: `the Answers stage lost what it reads: ${c.reason}` }, "escalate a missing report or snapshot");
-  if (c.state === "groundwork") return supervise({ reason: `the Answers stage lost the groundwork the questions rest on (${c.step.state})` }, "escalate a missing groundwork");
-  // N1's checked answer and decision are the recorded evidence of the Questions stage (design §7.5).
-  const rec = recordedNecessity(view.evidence);
-  if (rec.state !== "read") return supervise({ reason: `the Answers stage lost the necessity record (${rec.state === "failed" ? rec.reason : "none was written"})` }, "escalate a missing necessity record");
-  const skipped = rec.record.decision.action === "skip";
-  let output: Parameters<typeof questionSet>[1];
-  if (!skipped) {
-    const qf = questionerFlow(view.evidence, c.ctx);
-    if (qf.state !== "done") return supervise({ reason: `the Answers stage lost the questions (${qf.state})` }, "escalate missing questions");
-    output = qf.output;
-  }
-  const set = questionSet(c.ctx, output, skipped);
-  // A confirmed unnecessary N1 is the only question: nothing else is answered or checked.
-  if (skipped) return writeAnswers(ctx, view, c.ctx, set, [rec.record.final], rec.record);
-  const rest = afterNecessity(set);
-  // Large mode (design §7.6): the answerer takes the questions in batches, and each answered batch is recorded as evidence.
-  if (isLarge(c.ctx.mode)) {
-    const b = batchedAnswers(view.evidence, c.ctx, rest, retryOf(view));
-    switch (b.state) {
-      case "supervise":
-        return supervise({ reason: b.reason, evidenceRefs: b.refs }, "hand the unresolved answers to the supervisor");
-      case "record": {
-        const id = batchRecordId(b.index);
-        return recordStep(view, ANSWERS_STAGE, id, recordCommands(id, "answers", batchRecordJson(b.record)), `answer batch ${b.index + 1}`);
-      }
-      case "done":
-        return writeAnswers(ctx, view, c.ctx, set, [rec.record.final, ...b.final], rec.record);
-      case "batch":
-        // qa.json and review.md are written once, after the last batch.
-        return answerStep(ctx, view, c.ctx, b.questions, b.flow, { continueFirst: b.index > 0, batch: `batch ${b.index + 1} of ${b.total}` });
-    }
-  }
-  // Questions an earlier head answered and the update did not touch are carried (design §9.3): only the others are answered, and with none left no job runs.
-  const flow = restFlow(view.evidence, c.ctx, rest, retryOf(view));
-  if (flow.state === "done") return writeAnswers(ctx, view, c.ctx, set, [rec.record.final, ...set.carried, ...flow.final], rec.record);
-  return answerStep(ctx, view, c.ctx, rest, flow, { continueFirst: false });
-}
-
-/** The agent or command job an answers flow asks for: the answerer, the citation check, or the answer checker. In large mode `questions` is one batch. */
-function answerStep(ctx: Context, view: RunView, c: QaContext, rest: readonly Question[], flow: Exclude<ReturnType<typeof answersFlow>, { state: "done" }>, opts: { continueFirst: boolean; batch?: string }): GraphDecision {
-  const { profile, pr } = ctx;
-  const files = c.analysis.snapshot.files;
-  const of = opts.batch !== undefined ? ` (${opts.batch})` : "";
-  // Large mode's batches have their own answerer role (design §13.1), which falls back to the answerer; N1 and standard mode use the answerer.
-  const answerRole: Role = opts.batch !== undefined ? "batch-answerer" : "answerer";
-  switch (flow.state) {
-    case "supervise":
-      return supervise({ reason: flow.reason, evidenceRefs: flow.refs }, "hand the unresolved answers to the supervisor");
-    case "answerer": {
-      const mounted = sourceDirs(c.groundwork.inventory);
-      const baseDir = baseTreeDir(view, c.groundwork);
-      const planned = planAnswerer({ pr, snapshot: c.analysis.snapshot, view: c.view, groundwork: c.groundwork, questions: rest, kind: flow.kind, feedback: flow.feedback, ...(flow.only !== undefined ? { only: flow.only } : {}), mountedDirs: mounted, ...(baseDir !== undefined ? { baseDir } : {}), ...(reviewDirOf(view) !== undefined ? { reviewDir: reviewDirOf(view)! } : {}) });
-      const assignment = planned.text;
-      const written = writeSpills(view, ANSWERS_STAGE, planned.spills);
-      if (written !== undefined) return written;
-      const from = flow.kind === "first" && !opts.continueFirst ? undefined : jobSession(view, ANSWERS_STAGE, ANSWERER_JOB);
-      // Untrusted-read confinement, with the dependency source mounted read-only (design §7.3).
-      const references = questionRefs(ANSWERS_REFERENCES[0]!, flow.only !== undefined ? rest.filter((q) => flow.only!.includes(q.id)) : rest);
-      const job = agentJob(ctx, view, { jobId: ANSWERER_JOB, stageId: ANSWERS_STAGE, purpose: "diagnostic", instruction: `Answer the questions${of} from the whole codebase`, schema: flow.schema, harness: profile.roles[answerRole], role: answerRole, assignment, readOnlyBinds: mounted, references, ...(from !== undefined ? { continueFrom: from } : {}) }, files);
-      if ("problem" in job) return refused(job);
-      const why = { first: `answer the questions${of} (read-only, confined, dependency source mounted read-only)`, correction: "correct the answers: deterministic validation found problems", revision: "revise the answers: the answer checker did not support some" }[flow.kind];
-      return dispatchAgent(view, job, why);
-    }
-    case "verify":
-      return withPrivate(dispatch(commandJob(ANSWERS_STAGE, "Check the answers' citations and proposed names against the trees", { commands: flow.commands.slice(0, 16), env: { ...GIT_ENV } }), "resolve each citation in the tree it names, and each proposed name in the package"));
-    case "checker": {
-      const mounted = sourceDirs(c.groundwork.inventory);
-      const baseDir = baseTreeDir(view, c.groundwork);
-      const planned = planAnswerChecker({ pr, snapshot: c.analysis.snapshot, groundwork: c.groundwork, replies: authorReplies(c.prior.items, c.analysis.snapshot.threads), questions: rest, answers: flow.answers, retry: flow.retry, mountedDirs: mounted, ...(baseDir !== undefined ? { baseDir } : {}), ...(reviewDirOf(view) !== undefined ? { reviewDir: reviewDirOf(view)! } : {}) });
-      const assignment = planned.text;
-      const written = writeSpills(view, ANSWERS_STAGE, planned.spills);
-      if (written !== undefined) return written;
-      // The same dependency source, read-only, so a library or dependency citation can be re-checked where it points.
-      const job = agentJob(ctx, view, { stageId: ANSWERS_STAGE, purpose: "review", instruction: `Check the answers${of} against the trees`, schema: ANSWER_CHECK_SCHEMA_NAME, harness: profile.roles["answer-checker"], role: "answer-checker", assignment, readOnlyBinds: mounted, references: questionRefs(ANSWER_CHECK_REFERENCES[0]!, rest) }, files);
-      if ("problem" in job) return refused(job);
-      return dispatchAgent(view, job, `check every answer${of} with a fresh read-only ${harnessName(profile.roles["answer-checker"])} session`);
-    }
-  }
-}
-
-/** After the answers: write qa.json and review.md, advance the ledger by compare-and-swap, then validate the stage. */
-function writeAnswers(ctx: Context, view: RunView, c: QaContext, set: ReturnType<typeof questionSet>, final: Parameters<typeof qaOutputs>[2], necessity: NecessityRecord): GraphDecision {
-  return writeAnswerFiles(ctx, view, answerWrites(view.evidence, c, set, final, necessity), c.base);
-}
-
-/** The Answers stage's writes: qa.json, the whole review.md and the two HTML pages, then the ledger. */
-function writeAnswerFiles(ctx: Context, view: RunView, w: AnswerWrites, base: string | undefined): GraphDecision {
-  if (w.qa === undefined || w.texts === undefined) return stop({ reason: "incompatible task", blocker: w.problem ?? "the Q&A cannot be written", retryable: false }, "stop: the Q&A cannot be written");
-  // qa.json, the whole review.md and review.html: each one command when it fits, else a bounded multi-part write (design §6.6).
-  const next = nextWrite(view, w.qa, { failed: "writing the Q&A failed", settle: "the written Q&A keeps differing from the one the evidence recomputes" });
-  if (next === undefined) return recordLedger(ctx, view, w);
-  if ("decision" in next) return next.decision;
-  const secrets = [...secretFindings(w.texts.json), ...secretFindings(w.texts.markdown), ...secretFindings(w.texts.html), ...secretFindings(w.texts.appendix)];
-  if (secrets.length > 0) {
-    return stop({ reason: "report refused", blocker: `the Q&A would hold what looks like a credential (${[...new Set(secrets)].slice(0, 3).join("; ")}); it was not written`, retryable: false }, "refuse to write a Q&A that holds a secret");
-  }
-  const inert = [...writtenHtmlProblems(w.texts.html, ctx.pr, base), ...writtenHtmlProblems(w.texts.appendix, ctx.pr, base)];
-  if (inert.length > 0) return supervise({ reason: `review.html or review-appendix.html would not be self-contained and inert: ${inert.slice(0, 3).join("; ")}` }, "escalate a report file that fails its own inertness check");
-  return withPrivate(dispatch(commandJob(ANSWERS_STAGE, writeInstruction(next.command, `Write ${QA_JSON} and ${REVIEW_MD}`), { commands: [next.command] }), "write qa.json, the whole review.md (Briefing, Appendix) and the HTML briefing review.html with its appendix review-appendix.html"));
-}
-
-function recordLedger(ctx: Context, view: RunView, w: AnswerWrites): GraphDecision {
-  const read = ledgerRead(view.evidence);
-  const lw = commandState(view, COMMAND.ledgerWrite);
-  if (read === undefined || w.old === undefined) return supervise({ reason: w.problem ?? "the ledger value Fetch read is not in the evidence" }, "escalate a missing ledger read");
-  const ref = writtenLedger(lw.run?.command.argv ?? [])?.ref ?? "the ledger ref";
-  if (lw.run !== undefined && lw.failed) {
-    if (!lw.retry) {
-      if (lw.run.command.exitCode === LEDGER_MOVED) {
-        return stop({ reason: "ledger moved", blocker: `another run advanced ${ref} after Fetch read it; resume to read it again and record this head after it`, evidenceRefs: [lw.run.record.ref], retryable: true }, "stop: lost the compare-and-swap on the ledger");
-      }
-      return supervise({ reason: `advancing the ledger failed: ${describeCommand(lw.run.command)}: ${outputTail(lw.run.command)}`, evidenceRefs: [lw.run.record.ref] }, "escalate a failed ledger write");
-    }
-    // After the operator's resume: read the ledger again first, since the value the write swapped from was stale.
-    const at = (r: string): number => view.evidence.findIndex((e) => e.ref === r);
-    if (at(read.run.record.ref) < at(lw.run.record.ref)) {
-      return withPrivate(dispatch(commandJob(ANSWERS_STAGE, "Read the pull request's ledger ref again", { commands: [ledgerReadCommand(ctx.pr.owner, ctx.pr.repo, ctx.pr.number)], env: { ...GIT_ENV } }), "read the ledger ref again: it moved since Fetch read it"));
-    }
-  }
-  const lr = commandState(view, COMMAND.ledger, ledgerReadCommand(ctx.pr.owner, ctx.pr.repo, ctx.pr.number));
-  if (lr.failed && lr.run !== undefined) return supervise({ reason: `the ledger read failed: ${describeCommand(lr.run.command)}`, evidenceRefs: [lr.run.record.ref] }, "escalate a failed ledger read");
-  if (w.prior?.state === "missing" || (w.prior?.state === "unreadable" && retryOf(view)(w.prior.run))) {
-    return withPrivate(dispatch(commandJob(ANSWERS_STAGE, "Read the prior ledger's ledger.json", { commands: w.prior?.state === "missing" ? w.prior.next : [{ id: w.prior!.run.command.id, argv: w.prior!.run.command.argv }], continueOnFailure: true, env: { ...GIT_ENV } }), "read the prior ledger.json, so the new one keeps its heads"));
-  }
-  if (w.prior?.state === "unreadable") {
-    return supervise({ reason: w.problem ?? "the prior ledger cannot be read", evidenceRefs: [w.prior.run.record.ref] }, "escalate a prior ledger that cannot be read: it is never overwritten");
-  }
-  if (w.ledger === undefined) return stop({ reason: "incompatible task", blocker: w.problem ?? "the ledger files cannot be written", retryable: false }, "stop: the ledger files do not fit one command");
-  if (lw.run !== undefined && !lw.failed && sameArgv(lw.run.command.argv, w.ledger.argv)) return validateStage(ctx, view, ANSWERS_STAGE);
-  if (commandRuns(view.evidence, COMMAND.ledgerWrite).length >= 6) return supervise({ reason: "the ledger write keeps differing from the one the evidence recomputes" }, "escalate a ledger write that does not settle");
-  // The files the write reads are written first as part sets (design §6.6): the review section a migration of a v1 ledger builds (design-pr-review-split §5.4), and a design ledger.json or ledger.md too large for the write's one command.
-  const parts = nextWrite(view, w.ledgerParts ?? [], { failed: "writing the ledger files failed", settle: "the written ledger files keep differing from the ones the evidence recomputes" });
-  if (parts !== undefined) {
-    if ("decision" in parts) return parts.decision;
-    return withPrivate(dispatch(commandJob(ANSWERS_STAGE, writeInstruction(parts.command, "Write the ledger files"), { commands: [parts.command] }), "write the ledger files the section write reads, as parts: a migrated review section, or a design section too large for its one command"));
-  }
-  return withPrivate(dispatch(commandJob(ANSWERS_STAGE, "Advance the pull request's ledger ref by compare-and-swap (no repository code runs)", { commands: [w.ledger], env: { ...GIT_ENV } }), "record this head's report and Q&A in the ledger, from the value Fetch read"));
-}
-
-// ---- the review layer (design §8) ----
+// ---- the review layer (design §8; design-pr-review-split §4.3) ----
 
 const REVIEW_COMMAND_WORDS = { failed: "recording the review failed", settle: "the review's record keeps differing from the one the evidence recomputes" };
 
-/** The review: the scope, base and rule files first, then each aspect's sweep (passes, verification, the check of refutations' quotes), each recorded when it ends. */
-function review(ctx: Context, view: RunView): GraphDecision {
+/** What the Review, Draft and Publish stages read of the run so far: the snapshot, the recorded context and the measurements. */
+function reviewInputs(ctx: Context, view: RunView, stage: string): { analysis: Analysis; context: ContextRecord; m: MeasurementState } | { decision: GraphDecision } {
   const { profile, pr } = ctx;
   const a = analyze(view.evidence, profile, pr);
-  if (a.state !== "ready") return supervise({ reason: a.state === "pending" ? `the review stage lost the pull request snapshot: ${a.reason}` : a.problem }, "escalate a missing snapshot");
-  const { analysis } = a;
-  const flow = reportFlowOf(view.evidence, analysis, retryOf(view));
-  if (flow.state !== "done") return supervise({ reason: "the review stage lost the finished report" }, "escalate a missing report");
+  if (a.state !== "ready") return { decision: supervise({ reason: a.state === "pending" ? `the ${stage} stage lost the pull request snapshot: ${a.reason}` : a.problem }, "escalate a missing snapshot") };
+  const c = recordedContext(view.evidence);
+  if (c.state !== "read") return { decision: supervise({ reason: `the ${stage} stage lost the context record: ${c.state === "failed" ? c.reason : "context.json was not written"}`, ...(c.state === "failed" ? { evidenceRefs: c.refs } : {}) }, "escalate a missing context record") };
+  const m = measurementState(view.evidence, a.analysis.snapshot.files, profile);
+  if (m.state !== "ready" && m.state !== "none") return { decision: supervise({ reason: `the ${stage} stage lost the measurements (${m.state})` }, "escalate missing measurements") };
+  return { analysis: a.analysis, context: c.value, m };
+}
+
+/** The review: the groundwork and the scope, base and rule files first, then each aspect's sweep (passes, verification, the check of refutations' quotes), each recorded when it ends. */
+function review(ctx: Context, view: RunView): GraphDecision {
+  const { profile, pr } = ctx;
+  const inputs = reviewInputs(ctx, view, "review");
+  if ("decision" in inputs) return inputs.decision;
+  const { analysis, context, m } = inputs;
+  const report = contextReport(view.evidence, pr, analysis, context, m, profile);
+  if ("pending" in report) return supervise({ reason: `the review stage cannot read its context's report: ${report.pending}` }, "escalate a missing context report");
+  const base = pinnedBase(view.evidence);
+  if (base === undefined) return supervise({ reason: "the review stage lost the pinned base" }, "escalate a missing base");
+  // The groundwork the leads rest on (design-pr-review-split §4.3): symbols, the test map and the searches, read-only over the base.
+  const g = groundworkState(groundworkOptions(view.evidence, analysis, profile, base, retryOf(view)));
+  if (g.state !== "ready") return groundworkDecision(g, REVIEW_STAGE);
   const scope = recordedScope(view.evidence);
   if (scope.state === "failed") return supervise({ reason: `the review's scope record does not read back: ${scope.reason}`, evidenceRefs: scope.refs }, "escalate an unreadable scope record");
-  if (scope.state === "none") return startReview(ctx, view, analysis, flow.final.briefing.check);
+  if (scope.state === "none") return startReview(ctx, view, analysis, report.check, context);
   const s = scope.value;
-  const base = pinnedBase(view.evidence);
   const files = new Set(s.files);
-  // The design principles that apply to the review's scope, and what round 1 concluded of them (design §8.1); none when the profile names no file or none applies.
+  const leads = leadsOf(analysis, profile, s.files, report, m, g.groundwork);
+  // The design principles that apply to the review's scope, and what round 1 concluded of them when it is the context (design §8.1).
   const configured = profile.questions.principles;
-  const reading = configured !== undefined && base !== undefined ? principlesReading(view.evidence, configured, base) : undefined;
+  const reading = configured !== undefined ? principlesReading(view.evidence, configured, base) : undefined;
   const scoped: PrinciplesContext | undefined = reading?.state === "read" ? principlesContext(reading.read, analysis.snapshot.files.filter((f) => files.has(f.path))) : undefined;
   const reviewPrinciples = scoped !== undefined && scoped.read.file === "present" && scoped.applicable.length > 0 ? scoped : undefined;
   const principleIds = new Set((reviewPrinciples?.applicable ?? []).map((p) => p.id));
-  const necessityRecord = recordedNecessityJson(view.evidence);
-  const round1 = round1Verdicts(necessityRecord.state === "read" ? parseNecessityRecord(necessityRecord.value) : undefined);
+  const round1 = context.source === "design-review" ? round1Verdicts(report.records?.necessityJson) : undefined;
   const records: AspectRecord[] = [];
   // What earlier heads left open (design §9.3): each aspect's sweep re-judges its own earlier findings and drops a new comment over one.
   const registry = registryFromEvidence(view.evidence);
@@ -1197,9 +953,10 @@ function review(ctx: Context, view: RunView): GraphDecision {
     }
     const earlier = findingsOf(records);
     const ap = aspectPrior(registry, aspect, analysis.snapshot.files, files);
-    const f = aspectFlow(view.evidence.slice(from + 1), { aspect, scope: files, principles: principleIds, earlier, firstId: registry.nextF, prior: ap.given, suppress: ap.suppress, base, retryable: (r) => isStaleFailure(r.record, view), repro: reproEnv(view.evidence, profile, reproRunsIn(view.evidence.slice(0, from + 1))) });
+    const mine = aspect === "maintainability" ? leads : [];
+    const f = aspectFlow(view.evidence.slice(from + 1), { aspect, scope: files, principles: principleIds, earlier, firstId: registry.nextF, prior: ap.given, suppress: ap.suppress, base, retryable: (r) => isStaleFailure(r.record, view), repro: reproEnv(view.evidence, profile, reproRunsIn(view.evidence.slice(0, from + 1))), leads: mine });
     const reviewDir = reviewDirOf(view);
-    const baseDir = baseTreeDir(view, { baseTree: true });
+    const baseDir = baseTreeDir(view, g.groundwork);
     switch (f.state) {
       case "supervise":
         return supervise({ reason: f.reason, evidenceRefs: f.refs }, "hand the unresolved review to the supervisor");
@@ -1219,13 +976,17 @@ function review(ctx: Context, view: RunView): GraphDecision {
           snapshot: analysis.snapshot,
           aspect,
           pass: f.n,
-          files: readingOrder(view.evidence, s.files),
+          files: readingOrder(report.json, s.files),
           scopeLine: scopeLine(s),
           groups: rules.groups,
           known: f.known,
           prior: f.prior,
           feedback: f.feedback,
           repro: profile.review.repro,
+          source: context.source,
+          designHead: context.head,
+          ...(f.leads.length > 0 ? { leads: f.leads, leadTotal: mine.length } : {}),
+          ...(aspect === "correctness" ? { testGaps: correctnessContext(leads) } : {}),
           ...(reviewPrinciples !== undefined ? { principles: reviewPrinciples, round1 } : {}),
           ...(baseDir !== undefined ? { baseDir } : {}),
           ...(reviewDir !== undefined ? { reviewDir } : {}),
@@ -1233,9 +994,11 @@ function review(ctx: Context, view: RunView): GraphDecision {
         const written = writeSpills(view, REVIEW_STAGE, planned.spills);
         if (written !== undefined) return written;
         const known = ["", ...f.known.map((k) => k.id)];
-        const job = agentJob(ctx, view, { jobId: role, stageId: REVIEW_STAGE, purpose: "review", instruction: `Review the ${aspect} aspect (pass ${f.n})`, schema: REVIEW_SCHEMA_NAME, harness: profile.roles[role], role, assignment: planned.text, readOnlyBinds: mounted, references: idRefs({ [REVIEW_REFERENCES[0]!]: idSet(known), [REVIEW_REFERENCES[2]!]: idSet(f.prior.map((x) => x.id)), [REVIEW_REFERENCES[1]!]: idSet(["", ...principleIds], (id) => oneLineText(reviewPrinciples?.applicable.find((p) => p.id === id)?.statement ?? "").slice(0, 300)) }) }, analysis.snapshot.files);
+        // A correction (a missing lead status, an unknown principle id, a file left out) goes back to the same session (design-pr-review-split §4.3).
+        const continued = f.feedback.length > 0 ? jobSession(view, REVIEW_STAGE, role) : undefined;
+        const job = agentJob(ctx, view, { jobId: role, stageId: REVIEW_STAGE, purpose: "review", instruction: `Review the ${aspect} aspect (pass ${f.n})`, schema: REVIEW_SCHEMA_NAME, harness: profile.roles[role], role, assignment: planned.text, readOnlyBinds: mounted, ...(continued !== undefined ? { continueFrom: continued } : {}), references: idRefs({ [REVIEW_REFERENCES[0]!]: idSet(known), [REVIEW_REFERENCES[2]!]: idSet(f.prior.map((x) => x.id)), [REVIEW_REFERENCES[1]!]: idSet(["", ...principleIds], (id) => oneLineText(reviewPrinciples?.applicable.find((p) => p.id === id)?.statement ?? "").slice(0, 300)), [REVIEW_REFERENCES[3]!]: idSet(f.leads.map((l) => l.id), (id) => oneLineText(f.leads.find((l) => l.id === id)?.facts[0] ?? "").slice(0, 300)) }) }, analysis.snapshot.files);
         if ("problem" in job) return refused(job);
-        return dispatchAgent(view, job, `review the ${aspect} aspect (pass ${f.n}) in a fresh read-only ${harnessName(profile.roles[role])} session (${s.context.reason})`);
+        return dispatchAgent(view, job, `${continued !== undefined ? "correct" : "review"} the ${aspect} aspect (pass ${f.n}) in ${continued !== undefined ? "the same" : "a fresh"} read-only ${harnessName(profile.roles[role])} session (${s.context.reason})${f.leads.length > 0 ? `, with ${f.leads.length} lead(s) to judge` : ""}`);
       }
       case "verify": {
         const role = verifierRole(aspect);
@@ -1258,6 +1021,7 @@ function review(ctx: Context, view: RunView): GraphDecision {
           findings: f.findings,
           unsaturated: f.unsaturated,
           ...(ap.given.length + ap.settled.length > 0 ? { prior: [...f.prior, ...ap.settled].sort((a, b) => Number(a.id.slice(1)) - Number(b.id.slice(1))) } : {}),
+          leads: f.leads,
         };
         const id = aspectRecordId(aspect);
         return recordStep(view, REVIEW_STAGE, id, recordCommands(id, "review", aspectRecordJson(record)), `the ${aspect} review`);
@@ -1268,7 +1032,7 @@ function review(ctx: Context, view: RunView): GraphDecision {
 }
 
 /** Decides the scope and writes the rule files and the scope record, in that order (the record last: it marks the start complete). */
-function startReview(ctx: Context, view: RunView, analysis: Analysis, check: Parameters<typeof chooseScope>[0]["check"]): GraphDecision {
+function startReview(ctx: Context, view: RunView, analysis: Analysis, check: Parameters<typeof chooseScope>[0]["check"], context: ContextRecord): GraphDecision {
   const { profile } = ctx;
   const choice = chooseScope({ mode: analysis.snapshot.mode, files: analysis.snapshot.files, partition: analysis.snapshot.partition, check });
   if (choice.files.length === 0) return supervise({ reason: "the review's scope holds no file to review" }, "escalate an empty review scope");
@@ -1283,6 +1047,7 @@ function startReview(ctx: Context, view: RunView, analysis: Analysis, check: Par
     areas: choice.areas,
     files: choice.files,
     context: { kind: "seeded", reason: FRESH_START_REASON },
+    contextSource: context.source,
     harnesses: Object.fromEntries(ASPECTS.map((a) => [a, { reviewer: profile.roles[reviewerRole(a)], verifier: profile.roles[verifierRole(a)] }])),
   };
   const commands = [...ASPECTS.flatMap((a) => ruleCommands(a, profile.review.rules[a])), ...recordCommands(SCOPE_RECORD_ID, "review", scopeRecordJson(record))];
@@ -1292,93 +1057,103 @@ function startReview(ctx: Context, view: RunView, analysis: Analysis, check: Par
   return withPrivate(dispatch(commandJob(REVIEW_STAGE, writeInstruction(next.command, "Record the review's scope as evidence"), { commands: [next.command] }), "write the aspects' rule files and record the review's scope"));
 }
 
-/** The Draft stage: the draft and the report files with the Review section, written whole, then validated. */
+/** The Draft stage: the draft and the report files with the Review section, written whole, then the ledger's review section, then validated. */
 function draftStage(ctx: Context, view: RunView): GraphDecision {
   const { profile, pr } = ctx;
-  const a = analyze(view.evidence, profile, pr);
-  if (a.state !== "ready") return supervise({ reason: a.state === "pending" ? `the draft stage lost the pull request snapshot: ${a.reason}` : a.problem }, "escalate a missing snapshot");
-  const w = draftWrites(view.evidence, a.analysis, pr, pinnedBase(view.evidence));
+  const inputs = reviewInputs(ctx, view, "draft");
+  if ("decision" in inputs) return inputs.decision;
+  const w = draftWrites(view.evidence, inputs.analysis, pr, pinnedBase(view.evidence), inputs.context, inputs.m, profile);
   if (w.state === "pending") return supervise({ reason: `the draft cannot be composed: ${w.reason}` }, "escalate a missing review record");
   if (w.state === "failed") return supervise({ reason: w.reason, evidenceRefs: w.refs }, "escalate an unreadable review record");
   const t = w.writes.texts;
-  const secrets = Object.values(t).flatMap((x) => secretFindings(x));
+  const secrets = Object.values(t).flatMap((x) => (x === undefined ? [] : secretFindings(x)));
   if (secrets.length > 0) return stop({ reason: "report refused", blocker: `the draft would hold what looks like a credential (${[...new Set(secrets)].slice(0, 3).join("; ")}); it was not written`, retryable: false }, "refuse to write a draft that holds a secret");
-  const inert = [...writtenHtmlProblems(t.html, pr, pinnedBase(view.evidence)), ...writtenHtmlProblems(t.appendix, pr, pinnedBase(view.evidence))];
+  const also = inputs.context.head !== undefined ? [inputs.context.head, ...(inputs.context.base !== undefined ? [inputs.context.base] : [])] : [];
+  const inert = [...(t.html !== undefined ? writtenHtmlProblems(t.html, pr, pinnedBase(view.evidence), also) : []), ...(t.appendix !== undefined ? writtenHtmlProblems(t.appendix, pr, pinnedBase(view.evidence), also) : [])];
   if (inert.length > 0) return supervise({ reason: `review.html or review-appendix.html would not be self-contained and inert: ${inert.slice(0, 3).join("; ")}` }, "escalate a report file that fails its own inertness check");
   const next = nextWrite(view, w.writes.commands, { failed: "writing the draft failed", settle: "the written draft keeps differing from the one the evidence recomputes" });
-  if (next === undefined) return validateStage(ctx, view, DRAFT_STAGE);
-  if ("decision" in next) return next.decision;
-  return withPrivate(dispatch(commandJob(DRAFT_STAGE, writeInstruction(next.command, "Write the draft review"), { commands: [next.command] }), "write draft.json, draft.md and the report files with the Review section"));
+  if (next !== undefined) {
+    if ("decision" in next) return next.decision;
+    return withPrivate(dispatch(commandJob(DRAFT_STAGE, writeInstruction(next.command, "Write the draft review"), { commands: [next.command] }), `write draft.json, draft.md and the report files with the Review section`));
+  }
+  return recordReviewLedger(ctx, view, w.writes.draft);
 }
 
-// ---- round 1 and publishing (design §9.4, §8.5) ----
-
-/** The Round 1 stage: the issues of the report and the Q&A, computed by plugin code and recorded once, then validated. */
-function round1Stage(ctx: Context, view: RunView): GraphDecision {
-  const { profile, pr } = ctx;
-  const a = analyze(view.evidence, profile, pr);
-  if (a.state !== "ready") return supervise({ reason: a.state === "pending" ? `the round-1 stage lost the pull request snapshot: ${a.reason}` : a.problem }, "escalate a missing snapshot");
-  const computed = round1Computed(view.evidence, a.analysis, pr, profile);
-  if (computed.state === "pending") return supervise({ reason: `round 1 cannot be decided: ${computed.reason}` }, "escalate a missing Q&A artifact");
-  const rec = recordedRound1(view.evidence);
-  if (rec.state === "failed") return supervise({ reason: `the round-1 record does not read back: ${rec.reason}`, evidenceRefs: rec.refs }, "escalate an unreadable round-1 record");
-  if (rec.state === "read" && round1Json(rec.value) === round1Json(computed.record)) return validateStage(ctx, view, ROUND1_STAGE);
-  const n = computed.record.issues.length;
-  return recordStep(view, ROUND1_STAGE, ROUND1_RECORD_ID, recordCommands(ROUND1_RECORD_ID, ROUND1_DIR, round1Json(computed.record)), `round 1 (${n} issue${n === 1 ? "" : "s"})`);
+/** The ledger's review section after the draft (design-pr-review-split §4.1 `ledger-recorded`), by compare-and-swap from the value Fetch read. */
+function recordReviewLedger(ctx: Context, view: RunView, draft: Parameters<typeof reviewLedgerWrite>[2]): GraphDecision {
+  const { pr } = ctx;
+  const read = ledgerRead(view.evidence);
+  const lw = commandState(view, COMMAND.reviewLedgerWrite);
+  if (read === undefined) return supervise({ reason: "the ledger value Fetch read is not in the evidence" }, "escalate a missing ledger read");
+  if (lw.run !== undefined && lw.failed) {
+    if (!lw.retry) {
+      if (lw.run.command.exitCode === LEDGER_MOVED) {
+        return stop({ reason: "ledger moved", blocker: `another run advanced the ledger's review section after Fetch read it; resume to read it again and record this head after it`, evidenceRefs: [lw.run.record.ref], retryable: true }, "stop: lost the compare-and-swap on the ledger");
+      }
+      return supervise({ reason: `advancing the ledger failed: ${describeCommand(lw.run.command)}: ${outputTail(lw.run.command)}`, evidenceRefs: [lw.run.record.ref] }, "escalate a failed ledger write");
+    }
+    // After the operator's resume: read the ledger again first, since the value the write swapped from was stale.
+    const at = (r: string): number => view.evidence.findIndex((e) => e.ref === r);
+    if (at(read.run.record.ref) < at(lw.run.record.ref)) {
+      return withPrivate(dispatch(commandJob(DRAFT_STAGE, "Read the pull request's ledger ref again", { commands: [ledgerReadCommand(pr.owner, pr.repo, pr.number)], env: { ...GIT_ENV } }), "read the ledger ref again: it moved since Fetch read it"));
+    }
+  }
+  const lr = commandState(view, COMMAND.ledger, ledgerReadCommand(pr.owner, pr.repo, pr.number));
+  if (lr.failed && lr.run !== undefined) return supervise({ reason: `the ledger read failed: ${describeCommand(lr.run.command)}`, evidenceRefs: [lr.run.record.ref] }, "escalate a failed ledger read");
+  const plan = reviewLedgerWrite(view.evidence, pr, draft);
+  if (plan.state === "read") return withPrivate(dispatch(commandJob(DRAFT_STAGE, "Read the prior ledger's sections", { commands: plan.commands, continueOnFailure: true, env: { ...GIT_ENV } }), "read the prior ledger's sections, so the new review section keeps its heads and findings"));
+  if (plan.state === "problem") return supervise({ reason: plan.reason, evidenceRefs: plan.refs }, "escalate a prior ledger that cannot be read: it is never overwritten");
+  if (plan.state === "stale") return stop({ reason: "ledger moved", blocker: plan.reason, evidenceRefs: plan.refs, retryable: false }, "stop: another PR review recorded findings after this run's Fetch; this run's draft is stale");
+  if (lw.run !== undefined && !lw.failed && sameArgv(lw.run.command.argv, plan.write.argv)) return validateStage(ctx, view, DRAFT_STAGE);
+  if (commandRuns(view.evidence, COMMAND.reviewLedgerWrite).length >= 6) return supervise({ reason: "the ledger write keeps differing from the one the evidence recomputes" }, "escalate a ledger write that does not settle");
+  // The files the write reads are written first as part sets (design §6.6): the design section a migration of a v1 ledger builds, and a review ledger.json or ledger.md too large for the write's one command.
+  const parts = nextWrite(view, plan.parts, { failed: "writing the ledger files failed", settle: "the written ledger files keep differing from the ones the evidence recomputes" });
+  if (parts !== undefined) {
+    if ("decision" in parts) return parts.decision;
+    return withPrivate(dispatch(commandJob(DRAFT_STAGE, writeInstruction(parts.command, "Write the ledger files"), { commands: [parts.command] }), "write the ledger files the section write reads, as parts: a migrated design section, or a review section too large for its one command"));
+  }
+  return withPrivate(dispatch(commandJob(DRAFT_STAGE, "Advance the ledger's review section by compare-and-swap (no repository code runs)", { commands: [plan.write], env: { ...GIT_ENV } }), "record this head, its context source and the round-1 head it counts in the ledger's review section, from the value Fetch read"));
 }
+
+// ---- publishing (design §8.5; design-pr-review-split §4.5) ----
 
 /** The verdict and link of the review the evidence shows posted, once the Publish stage is done. */
-function postedReview(view: RunView, ctx: Context, analysis: Analysis): { url: string | null; verdict: "passed" | "changes-requested"; open: number } | undefined {
-  const p = publishPlan(view.evidence, analysis, ctx.pr, pinnedBase(view.evidence));
+function postedReview(view: RunView, ctx: Context): { url: string | null; verdict: "passed" | "changes-requested"; open: number } | undefined {
+  const inputs = reviewInputs(ctx, view, "publish");
+  if ("decision" in inputs) return undefined;
+  const p = publishPlan(view.evidence, inputs.analysis, ctx.pr, pinnedBase(view.evidence), inputs.context, inputs.m, ctx.profile);
   if (p.state !== "ready") return undefined;
-  const flow = publishFlow(view.evidence, p.plan, ctx.pr);
+  const flow = publishFlow(view.evidence, p.plan, p.draft, ctx.pr);
   return flow.state === "done" ? { url: flow.posted.url, verdict: p.plan.verdict, open: p.plan.open } : undefined;
 }
 
 /** The stop reason of a draft the run is not allowed to post. */
 export const POSTING_NOT_ENABLED = "posting not enabled";
 
-/**
- * What the stop says, naming only what exists. When round 1 found issues the run ends after Answers' files: the report (`review.html`)
- * and the round-1 record, and Review and Draft never ran, so there is no draft. Otherwise the draft and the report are written.
- */
-function postingNotEnabled(round1Issues: number): string {
-  const enable = "set the runner config's github.writeTokenEnv and resume to post";
-  if (round1Issues > 0) {
-    return `round 1 found ${round1Issues} issue${round1Issues === 1 ? "" : "s"}; posting is not enabled (${enable}). The report is ${REVIEW_HTML} and the round-1 record ${REVIEW_DIR}/${ROUND1_DIR}/${ROUND1_RECORD_ID}.json, in the run's worktree`;
-  }
-  return `draft ready; posting is not enabled (${enable}). The draft is ${DRAFT_MD} and the report ${REVIEW_HTML}, in the run's worktree`;
-}
-
-/**
- * Whether the review's write is withheld. The runner's grants are declared data on the run view (`executors[].effectGranted`);
- * a runner that reports none leaves the write to the controller's own refusal and recovery.
- */
-function writeWithheld(view: RunView): boolean {
-  return view.executors?.find((e) => e.id === CREATE_PULL_REVIEW.id)?.effectGranted === false;
+/** What the stop says, naming only what exists: the draft, and the report (`review.html`, or `review.md` when there is no report). */
+function postingNotEnabled(context: ContextRecord): string {
+  return `draft ready; posting is not enabled (set the runner config's github.writeTokenEnv and resume to post). The draft is ${DRAFT_MD} and the report ${context.source === "none" ? REVIEW_MD : REVIEW_HTML}, in the run's worktree`;
 }
 
 /**
  * The Publish stage: read the pull request's reviews, post the one review unless this head already has it, read its comments back,
- * and record the ids in the ledger. The reads are the executors' own (reads of the review and its comments); the one write is
- * `create-pull-review`, whose credential binding is the runner's, never the plugin's.
+ * and record the ids in the ledger's review section. The reads are the executors' own; the one write is `create-pull-review`, whose
+ * credential binding is the runner's, never the plugin's.
  */
 function publishStage(ctx: Context, view: RunView): GraphDecision {
   const { profile, pr } = ctx;
-  const a = analyze(view.evidence, profile, pr);
-  if (a.state !== "ready") return supervise({ reason: a.state === "pending" ? `the publish stage lost the pull request snapshot: ${a.reason}` : a.problem }, "escalate a missing snapshot");
-  const p = publishPlan(view.evidence, a.analysis, pr, pinnedBase(view.evidence));
+  const inputs = reviewInputs(ctx, view, "publish");
+  if ("decision" in inputs) return inputs.decision;
+  const p = publishPlan(view.evidence, inputs.analysis, pr, pinnedBase(view.evidence), inputs.context, inputs.m, profile);
   if (p.state === "pending") return supervise({ reason: `the review cannot be composed: ${p.reason}` }, "escalate a missing record");
   if (p.state === "failed") return supervise({ reason: p.reason, evidenceRefs: p.refs }, "escalate an unreadable record");
   if (p.plan.problem !== undefined) return supervise({ reason: p.plan.problem }, "escalate a review whose items cannot all be made readable");
   const secrets = secretFindings(JSON.stringify(createInput(pr, p.plan)));
   if (secrets.length > 0) return stop({ reason: "report refused", blocker: `the review would hold what looks like a credential (${[...new Set(secrets)].slice(0, 3).join("; ")}); it was not posted`, retryable: false }, "refuse to post a review that holds a secret");
-  const flow = publishFlow(view.evidence, p.plan, pr);
+  const flow = publishFlow(view.evidence, p.plan, p.draft, pr);
   // Posting is the operator's to enable: without the grant the draft is the result, and the run ends here instead of failing the write into the supervisor.
   if ((flow.state === "viewer" || flow.state === "reviews" || flow.state === "create") && writeWithheld(view)) {
-    const round1 = recordedRound1(view.evidence);
-    const issues = round1.state === "read" ? round1.value.issues.length : 0;
-    return stop({ reason: POSTING_NOT_ENABLED, blocker: postingNotEnabled(issues), retryable: false }, "stop: the review is ready and the runner does not grant its write");
+    return stop({ reason: POSTING_NOT_ENABLED, blocker: postingNotEnabled(inputs.context), retryable: false }, "stop: the review is ready and the runner does not grant its write");
   }
   const base = { owner: pr.owner, repo: pr.repo, number: pr.number };
   switch (flow.state) {
@@ -1410,9 +1185,22 @@ function publishStage(ctx: Context, view: RunView): GraphDecision {
         if ("decision" in parts) return parts.decision;
         return withPrivate(dispatch(commandJob(PUBLISH_STAGE, writeInstruction(parts.command, "Write the published review's ledger patch"), { commands: [parts.command] }), "write the patch that records the published review in the ledger, in parts with a digest"));
       }
-      return withPrivate(dispatch(commandJob(PUBLISH_STAGE, "Record the published review in the pull request's ledger by compare-and-swap (no repository code runs)", { commands: [flow.command], env: { ...GIT_ENV } }), `record review ${flow.posted.reviewId} and its comments' ids in the ledger`));
+      return withPrivate(dispatch(commandJob(PUBLISH_STAGE, "Record the published review in the ledger's review section by compare-and-swap (no repository code runs)", { commands: [flow.command], env: { ...GIT_ENV } }), `record review ${flow.posted.reviewId} and its comments' ids in the ledger`));
     }
     case "done":
       return validateStage(ctx, view, PUBLISH_STAGE);
   }
+}
+
+/** The leads of the review's scope (design-pr-review-split §4.3), from the measurements, the groundwork and the context's report. */
+function leadsOf(analysis: Analysis, profile: Profile, scopeFiles: readonly string[], report: Parameters<typeof leadInputOf>[3], m: MeasurementState, groundwork: Parameters<typeof leadInputOf>[5]): ReturnType<typeof computeLeads> {
+  return computeLeads(leadInputOf(analysis, profile, scopeFiles, report, m, groundwork));
+}
+
+/**
+ * Whether the review's write is withheld. The runner's grants are declared data on the run view (`executors[].effectGranted`);
+ * a runner that reports none leaves the write to the controller's own refusal and recovery.
+ */
+function writeWithheld(view: RunView): boolean {
+  return view.executors?.find((e) => e.id === CREATE_PULL_REVIEW.id)?.effectGranted === false;
 }

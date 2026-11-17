@@ -63,7 +63,10 @@ and `pr-review` 1.x (round 2 only, runnable alone), with one ledger per pull req
 and a section per graph, is designed in [the PR-review split](docs/design-pr-review-split.md);
 `pr-design-review` 0.1.0 (`examples/plugins/pr-design-review`, round 1 as its own
 graph: no Docker, a clean round 1 posts nothing and its result names the
-`graphloom task new pr-review …` command) is implemented, `pr-review` 1.x is not yet.
+`graphloom task new pr-review …` command) and `pr-review` 1.0.0 (round 2 only: Fetch, Report,
+Review, Draft, Publish; the context is the design review's report, a report-only prelude, or,
+with `task new pr-review … --no-report`, none; deterministic leads for the maintainability
+reviewer; it writes only the ledger's `review` section) are implemented.
 Both plugins vendor the third-party diagram-design agent skill
 (`examples/plugins/<plugin>/vendor/diagram-design`, MIT, unmodified, with its
 `LICENSE` and a `VENDORED.md` naming source and commit; design
