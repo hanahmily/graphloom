@@ -289,17 +289,21 @@ describe("the ledger compare-and-swap (design 9.1)", () => {
     write(dir, { ".graphloom/review/qa.json": '{"qa":1}', ".graphloom/review/report.json": '{"report":1}', ".graphloom/review/necessity.json": '{"necessity":1}' });
     return dir;
   };
-  const write1 = (dir: string, old: string, tag: string) => run(dir, ledgerWriteCommand(pr, old, JSON.stringify({ schema: "graphloom-pr-ledger-v1", tag }), `# ledger ${tag}\n`)!);
+  /** The design section is advanced from the subtree `old` holds (absent before the first write), as a run swaps from what it read. */
+  const baselineAt = (dir: string, old: string): string => (old === "absent" ? "absent" : git(dir, ["rev-parse", `${old}:design`]));
+  const write1 = (dir: string, old: string, tag: string) => run(dir, ledgerWriteCommand(pr, old, baselineAt(dir, old), JSON.stringify({ schema: "pr-design-review-ledger-v1", tag }), `# ledger ${tag}\n`)!);
 
-  it("creates the ref from absent with a commit holding ledger.json, ledger.md, necessity.json, qa.json and report.json", () => {
+  it("creates the ref from absent with a v2 ledger.json and a design section holding ledger.json, ledger.md, necessity.json, qa.json and report.json", () => {
     const dir = setup();
     const r = write1(dir, "absent", "one");
     expect(r.code, r.stderr).toBe(0);
     const sha = git(dir, ["rev-parse", ref]);
-    expect(r.stdout.trim()).toBe(`advanced ${sha}`);
-    expect(git(dir, ["ls-tree", "--name-only", sha]).split("\n")).toEqual(["ledger.json", "ledger.md", "necessity.json", "qa.json", "report.json"]);
-    expect(git(dir, ["show", `${sha}:ledger.json`])).toContain('"tag":"one"');
-    expect(git(dir, ["show", `${sha}:qa.json`])).toBe('{"qa":1}');
+    expect(r.stdout.trim().split("\n")).toEqual([`advanced ${sha}`, "cur absent", `design ${git(dir, ["rev-parse", `${sha}:design`])}`, "review absent"]);
+    expect(git(dir, ["ls-tree", "--name-only", sha]).split("\n")).toEqual(["design", "ledger.json"]);
+    expect(JSON.parse(git(dir, ["show", `${sha}:ledger.json`]))).toEqual({ schema: "graphloom-pr-ledger-v2", pull: { owner: "apache", repo: "skywalking-banyandb", number: 7 }, sections: ["design", "review"] });
+    expect(git(dir, ["ls-tree", "--name-only", `${sha}:design`]).split("\n")).toEqual(["ledger.json", "ledger.md", "necessity.json", "qa.json", "report.json"]);
+    expect(git(dir, ["show", `${sha}:design/ledger.json`])).toContain('"tag":"one"');
+    expect(git(dir, ["show", `${sha}:design/qa.json`])).toBe('{"qa":1}');
     expect(git(dir, ["rev-list", "--count", sha])).toBe("1");
     // The worktree and the index are untouched: only objects and one ref were written.
     expect(git(dir, ["status", "--porcelain", "--untracked-files=no"])).toBe("");
@@ -315,35 +319,40 @@ describe("the ledger compare-and-swap (design 9.1)", () => {
     expect(git(dir, ["rev-parse", `${second}^`])).toBe(first);
     expect(git(dir, ["log", "--format=%an", "-1", ref])).toBe("graphloom");
     // The prior read keeps the schema, the heads, the questions' ids and keys and the posted items.
-    const one = run(dir, priorShowCommand(first, process.execPath)).report;
+    const top = run(dir, priorShowCommand(first, process.execPath)).report;
+    expect(JSON.parse(top.slice(top.indexOf("\n") + 1))).toEqual({ schema: "graphloom-pr-ledger-v2", qa: [], findings: [] });
+    const one = run(dir, priorShowCommand(first, process.execPath, 0, "design")).report;
     expect(one).toMatch(/^graphloom-prior 0 1 [0-9a-f]{64}\n/);
-    expect(JSON.parse(one.slice(one.indexOf("\n") + 1))).toEqual({ schema: "graphloom-pr-ledger-v1", qa: [], findings: [] });
+    expect(JSON.parse(one.slice(one.indexOf("\n") + 1))).toEqual({ schema: "pr-design-review-ledger-v1", qa: [], findings: [] });
+    // A section the commit does not have reads as absent.
+    expect(run(dir, priorShowCommand(first, process.execPath, 0, "review")).report.trim()).toBe("graphloom-prior-absent");
   });
 
   it("reads the heads of a prior ledger far larger than a command report holds, and fails when git cannot read it", () => {
     const dir = setup();
     const heads = [{ sha: "a".repeat(40), base: "b".repeat(40), files: 207, commits: 5, facts: 300, reported: true, reviewed: false }];
-    const big = JSON.stringify({ schema: "graphloom-pr-ledger-v1", pull: { owner: "o", repo: "r", number: 1 }, heads, purposes: [], qa: Array.from({ length: 400 }, (_, i) => ({ id: `Q${i}`, answer: "x".repeat(600) })), findings: [] });
+    const big = JSON.stringify({ schema: "pr-design-review-ledger-v1", heads, purposes: [], qa: Array.from({ length: 400 }, (_, i) => ({ id: `Q${i}`, answer: "x".repeat(600) })), findings: [] });
     expect(big.length).toBeGreaterThan(200_000);
-    const writes = ledgerWriteCommands(pr, "absent", big, "# big\n");
+    const writes = ledgerWriteCommands(pr, "absent", "absent", big, "# big\n");
     for (const c of [...writes.parts, writes.write]) expect(run(dir, c).code).toBe(0);
     const sha = git(dir, ["rev-parse", ref]);
-    const read = run(dir, priorShowCommand(sha, process.execPath));
+    const read = run(dir, priorShowCommand(sha, process.execPath, 0, "design"));
     expect(read.code, read.stderr).toBe(0);
     expect(read.report.length).toBeLessThan(65_536);
     const registry = JSON.parse(read.report.slice(read.report.indexOf("\n") + 1)) as unknown;
-    expect(registry).toMatchObject({ schema: "graphloom-pr-ledger-v1", heads, findings: [] });
+    expect(registry).toMatchObject({ schema: "pr-design-review-ledger-v1", heads, findings: [] });
     expect(run(dir, priorShowCommand("f".repeat(40), process.execPath)).code).not.toBe(0);
+    expect(run(dir, priorShowCommand("f".repeat(40), process.execPath, 0, "design")).code).not.toBe(0);
   });
 
-  it("reads a prior ledger with about 200 KB of findings in parts that each fit a command report, and joins them against their digest", () => {
+  it("reads a design section with about 200 KB of posted items in parts that each fit a command report, and joins them against their digest", () => {
     const dir = setup();
     // CJK (3 bytes each) and emoji (a surrogate pair, 4 bytes) in every finding: pipes, argv chunks and report parts all cut this text at many places.
     const mixed = (i: number): string => `finding ${i} ${"漢字かな한글".repeat(40)} ${"😀🎉".repeat(30)} ${"x".repeat(300)}`;
-    const findings = Array.from({ length: 200 }, (_, i) => ({ head: "a".repeat(40), id: `F${i + 1}`, origin: "round2", key: `k${i}`, state: "open", path: "pkg/a.go", line: i + 1, text: mixed(i), history: [{ head: "a".repeat(40), status: "open" }], github: { head: "a".repeat(40), reviewId: 1, commentId: i, inline: true } }));
-    const big = JSON.stringify({ schema: "graphloom-pr-ledger-v1", pull: { owner: "o", repo: "r", number: 1 }, heads: [{ sha: "a".repeat(40) }], purposes: [], qa: [], findings });
+    const findings = Array.from({ length: 200 }, (_, i) => ({ head: "a".repeat(40), id: `Q${i + 1}`, origin: "round1", key: `k${i}`, state: "open", path: "pkg/a.go", line: i + 1, text: mixed(i), history: [{ head: "a".repeat(40), status: "open" }], github: { head: "a".repeat(40), reviewId: 1, commentId: i, inline: true } }));
+    const big = JSON.stringify({ schema: "pr-design-review-ledger-v1", heads: [{ sha: "a".repeat(40) }], purposes: [], qa: [], items: findings });
     expect(big.length).toBeGreaterThan(200_000);
-    const writes = ledgerWriteCommands(pr, "absent", big, "# big\n");
+    const writes = ledgerWriteCommands(pr, "absent", "absent", big, "# big\n");
     for (const c of [...writes.parts, writes.write]) expect(run(dir, c).code).toBe(0);
     const sha = git(dir, ["rev-parse", ref]);
     let evidence: EvidenceRecord[] = [];
@@ -361,13 +370,14 @@ describe("the ledger compare-and-swap (design 9.1)", () => {
     expect(reads.length).toBeGreaterThan(5);
     expect(Math.max(...reads)).toBeLessThan(65_536);
     expect(state.state).toBe("read");
-    const value = (state as { value: { findings: Array<{ id: string; text: string }> } }).value;
-    expect(value.findings).toHaveLength(200);
+    const value = (state as unknown as { value: { design: { items: Array<{ id: string; text: string }> } } }).value.design;
+    expect(value.items).toHaveLength(200);
     // Every finding comes back character for character: no replacement character, nothing cut mid-character.
-    expect(value.findings.map((f) => f.text)).toEqual(findings.map((f) => f.text));
+    expect(value.items.map((f) => f.text)).toEqual(findings.map((f) => f.text));
     expect(JSON.stringify(value)).not.toContain("\ufffd");
     // A part from another read, or one missing its digest, is never joined.
-    const tampered = evidence.map((e, i) => (i === 2 ? { ...e, payload: { command: { ...(e.payload as { command: object }).command, stdoutTail: "graphloom-prior 2 99 " + "0".repeat(64) + "\nx" } } } : e)) as EvidenceRecord[];
+    // The top-level ledger.json and each section are read first (records 0 to 2); record 3 is the design section's second part.
+    const tampered = evidence.map((e, i) => (i === 3 ? { ...e, payload: { command: { ...(e.payload as { command: object }).command, stdoutTail: "graphloom-prior 2 99 " + "0".repeat(64) + "\nx" } } } : e)) as EvidenceRecord[];
     expect(priorState(tampered, sha)).toMatchObject({ state: "unreadable", reason: expect.stringContaining("not of the same read") });
   });
 
@@ -387,7 +397,7 @@ describe("the ledger compare-and-swap (design 9.1)", () => {
 
   it("lets exactly one of several simultaneous writers win", async () => {
     const dir = setup();
-    const c = (tag: string) => ledgerWriteCommand(pr, "absent", JSON.stringify({ tag }), `# ${tag}\n`)!;
+    const c = (tag: string) => ledgerWriteCommand(pr, "absent", "absent", JSON.stringify({ tag }), `# ${tag}\n`)!;
     const codes = await Promise.all(
       ["a", "b", "c", "d", "e", "f"].map(
         (tag) =>

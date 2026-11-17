@@ -10,7 +10,7 @@ export const GRAPH_ID = "pr-review";
  * and Draft; 0.21 adds the round-1 gate (Round 1) and Publish, and removes
  * every human touchpoint. Checks arrive with a later version.
  */
-export const GRAPH_VERSION = "0.26.5";
+export const GRAPH_VERSION = "0.27.0";
 
 export const FETCH_STAGE = "fetch";
 export const REPORT_STAGE = "report";
@@ -89,6 +89,9 @@ export const COMMAND = {
   names: "names",
   qaWrite: "qa-write",
   ledgerPrior: "ledger-prior",
+  /** The reads of a v2 ledger's sections (design-pr-review-split §5.2): `design/ledger.json` and `review/ledger.json`, parts `-<k>`. */
+  ledgerPriorDesign: "ledger-prior-design",
+  ledgerPriorReview: "ledger-prior-review",
   /** The reads of the ledger commit's `qa.json` and `necessity.json` (parts `-<k>`), the head delta and the base delta of incremental round 1 (design §9.2). */
   ledgerPriorQa: "ledger-prior-qa",
   ledgerPriorNecessity: "ledger-prior-nec",
@@ -128,6 +131,9 @@ export const PART_BASE = {
   necessityJson: "necessity-json",
   ledgerJson: "ledger-json",
   ledgerMd: "ledger-md",
+  /** The review section a migration of a v1 ledger builds (design-pr-review-split §5.4), written before the first v2 write reads it. */
+  ledgerReviewJson: "ledger-review-json",
+  ledgerReviewMd: "ledger-review-md",
   /** The patch the Publish stage records in the ledger, as a part set (design §6.6): it can be far past one argument. */
   publishPatch: "publish-patch",
   /** The rule file of an aspect: `review-rules-<aspect>` (design §8.1). */
@@ -145,7 +151,7 @@ export const QUESTIONER_JOB = "questioner";
 /** The review layer's job keys: `reviewer-<aspect>` and `verifier-<aspect>`. */
 export const ANSWERER_JOB = "answerer";
 
-/** The exit status of the ledger write when its compare-and-swap lost the race (design §9.1). */
+/** The exit status of a ledger write when its section is not the baseline, or its compare-and-swap lost the race four times (design-pr-review-split §5.2). */
 export const LEDGER_MOVED = 4;
 
 /** Most questions one answerer job answers in large mode (design §7.6); the answerer continues its own session from batch to batch. */
@@ -173,6 +179,9 @@ export const NECESSITY_JSON = `${REVIEW_DIR}/necessity.json`;
 export const LEDGER_JSON_FILE = `${REVIEW_DIR}/ledger/ledger.json`;
 export const PUBLISH_PATCH_FILE = `${REVIEW_DIR}/ledger/publish-patch.json`;
 export const LEDGER_MD_FILE = `${REVIEW_DIR}/ledger/ledger.md`;
+/** The migrated review section's files (design-pr-review-split §5.4), which the first v2 write reads. */
+export const LEDGER_REVIEW_JSON_FILE = `${REVIEW_DIR}/ledger/review/ledger.json`;
+export const LEDGER_REVIEW_MD_FILE = `${REVIEW_DIR}/ledger/review/ledger.md`;
 
 /** `refs/graphloom/pr-review/<owner>/<repo>/<N>/ledger`: the per-PR ledger (design §9.1). */
 export const ledgerRef = (owner: string, repo: string, n: number): string => `refs/graphloom/pr-review/${owner}/${repo}/${n}/ledger`;

@@ -17,14 +17,16 @@
  * outdated; it counts toward the verdict, so `Review passed` means no round-1 issue and no round-2 finding is open, earlier ones included.
  */
 import { MAX_EXECUTOR_INPUT_BYTES, type EnvironmentCommand, type EvidenceRecord } from "@graphloom/sdk";
-import { COMMAND, CREATE_PULL_REVIEW, GET_VIEWER, PART_BASE, PUBLISH_PATCH_FILE, PUBLISH_STAGE, ledgerRef } from "./constants.js";
+import { COMMAND, CREATE_PULL_REVIEW, GET_VIEWER, LEDGER_MOVED, PART_BASE, PUBLISH_PATCH_FILE, PUBLISH_STAGE, ledgerRef } from "./constants.js";
 import { fitParts, type ItemParts } from "./answertext.js";
 import { clip, clipKeep, withoutFences } from "./escape.js";
 import { partCommands, readParts } from "./parts.js";
 import { anchored, severityLabel, type Draft, type DraftEntry } from "./draft.js";
-import { commandRuns, isObject, producer, succeeded, type CommandRun } from "./evidence.js";
+import { commandRuns, isObject, producer, reportText, succeeded, type CommandRun } from "./evidence.js";
 import type { Analysis } from "./analysis.js";
-import { GIT_IDENTITY } from "./ledger.js";
+import { ledgerRead, oldValue, parseSectionRecord, priorState, readBaselines, SECTION_PRELUDE, SECTION_RECORD } from "./ledger.js";
+import { LEDGER_V2, REVIEW_SCHEMA, reviewMarkdown, SKIPPED_NOTE, type Section } from "./ledgerv2.js";
+import { pinnedBase } from "./commands.js";
 import { draftWrites, recordedRound1 } from "./reviewdraft.js";
 import { anchorInfo, findingKey, registryFromEvidence, type PriorItem, type PriorRegistry } from "./prior.js";
 import { ASPECTS } from "./aspects.js";
@@ -65,6 +67,10 @@ export function unmarkedText(id: string, body: string): string {
 }
 /** The marker of this run's review of `head`: the head and a nonce of the run (its viewer read's operation), which a stranger cannot know. */
 export const reviewMarker = (head: string, nonce: string): string => `<!-- graphloom-review: ${head} ${nonce} -->`;
+/** The same for a post of round 1's items, the design review's (design-pr-review-split §5.3): a post of either round is told apart by its marker before its nonce. */
+export const designReviewMarker = (head: string, nonce: string): string => `<!-- graphloom-design-review: ${head} ${nonce} -->`;
+/** The head marker of a post of round `round`, the body's second line: round 1 posts as the design review, round 2 as the PR review. */
+export const headMarker = (round: 1 | 2, head: string, nonce: string): string => (round === 1 ? designReviewMarker(head, nonce) : reviewMarker(head, nonce));
 /** The marker publication appends: the last thing in a body. Marker-looking text in an item's content is neutralized and never matches. */
 const MARKER = /<!-- graphloom-finding: ([A-Z][0-9]+) -->$/;
 /** The same marker as the first thing in a body: a read cuts a body at 4,000 characters, so a longer body also leads with it. */
@@ -259,7 +265,7 @@ export function planReview(i: {
   const round1Line = i.round1.skipped !== undefined ? `Round 1 (design and architecture, from the change report and its questions) was skipped by the operator's choice (${i.round1.skipped}): no question was asked, and earlier round-1 items, if any, were not re-checked and are not counted here.` : issues.length > 0 ? `Round 1 (design and architecture, from the change report and its questions): ${issues.length} issue${issues.length === 1 ? "" : "s"} to resolve. The detailed review (round 2) runs after they are fixed.` : "Round 1 (design and architecture, from the change report and its questions): no open issue.";
   const round2Line = round === 2 ? `Round 2 (details, functionality, algorithms): ${i.draft !== undefined && open > 0 ? `${open} open finding${open === 1 ? "" : "s"}.` : "no open finding."}${i.draft !== undefined && i.draft.summary !== "" ? ` ${oneLine(i.draft.summary)}` : ""}` : undefined;
   const sections = [
-    `${firstLine}\n${reviewMarker(i.head, i.nonce)}`,
+    `${firstLine}\n${headMarker(round, i.head, i.nonce)}`,
     [round1Line, ...(round2Line !== undefined ? [round2Line] : [])].join("\n\n"),
     ...(priors.length > 0 ? [priorSection(priors, i.pull, i.head)] : []),
     ...(inline > 0 ? [`${inline} item${inline === 1 ? " is" : "s are"} commented on the diff.`] : []),
@@ -366,7 +372,7 @@ export function findingMeta(f: { id: string; raisedBy: string; severity: string;
 
 /** The input of the create-pull-review call: one `COMMENT` review at the pinned head. */
 export function createInput(pr: Pick<PullRequest, "owner" | "repo" | "number" | "head">, plan: ReviewPlan): Record<string, unknown> {
-  return { owner: pr.owner, repo: pr.repo, number: pr.number, event: "COMMENT", body: plan.body, comments: plan.comments, commitId: pr.head, idempotencyKey: `publish-${pr.head.slice(0, 12)}-r${plan.round}` };
+  return { owner: pr.owner, repo: pr.repo, number: pr.number, event: "COMMENT", body: plan.body, comments: plan.comments, commitId: pr.head, idempotencyKey: idempotencyKey(plan.round, pr.head) };
 }
 
 /** The reads the stage makes of the pull request's reviews and their comments. */
@@ -376,15 +382,20 @@ export const COMMENTS_READ = spec("reviewComments");
 
 /**
  * A review of this head that this run posted: authored by the login the credential authenticates as, in state COMMENTED, and carrying
- * this run's marker. The marker alone proves nothing (the head sha is public), so a review by anyone else is ignored.
+ * this run's head marker for the round it posts (the body's second line). The marker alone proves nothing (the head sha is public),
+ * so a review by anyone else is ignored, and a review with the other round's marker is not this post (design-pr-review-split §5.3).
  */
-export function findPosted(items: readonly unknown[], head: string, nonce: string, login: string): { id: number; url: string | null } | undefined {
+export function findPosted(items: readonly unknown[], head: string, nonce: string, login: string, round: 1 | 2): { id: number; url: string | null } | undefined {
+  const marker = headMarker(round, head, nonce);
   for (const r of items) {
     if (!isObject(r) || typeof r.id !== "number" || r.commitId !== head || r.user !== login || r.state !== "COMMENTED") continue;
-    if (typeof r.body === "string" && r.body.includes(reviewMarker(head, nonce))) return { id: r.id, url: typeof r.url === "string" ? r.url : null };
+    if (typeof r.body === "string" && r.body.split("\n")[1]?.trim() === marker) return { id: r.id, url: typeof r.url === "string" ? r.url : null };
   }
   return undefined;
 }
+
+/** The key the executor reconciles a post by (design-pr-review-split §5.3): `design-<head12>` for round 1's, `review-<head12>` for round 2's. */
+export const idempotencyKey = (round: 1 | 2, head: string): string => `${round === 1 ? "design" : "review"}-${head.slice(0, 12)}`;
 
 /** The ids of the comments of review `reviewId`, by the finding marker each ends with. */
 export function commentIds(items: readonly unknown[], reviewId: number): Map<string, number> {
@@ -410,8 +421,12 @@ export interface LedgerPatch {
   head: string;
   round: 1 | 2;
   round1Skipped?: true;
+  /** This head's pinned base, which the review section's head records. */
+  base?: string;
   verdict: ReviewPlan["verdict"];
   open: number;
+  /** Round 1's items still open after this head, which the design section's head records: the ones posted now and the earlier ones still open. */
+  round1Open: number;
   reviewId: number;
   url: string | null;
   items: Array<{ id: string; origin: PublishItem["origin"]; path: string | null; line: number | null; endLine?: number; inline: boolean; commentId: number | null; /** The whole text of an item whose posted text was compacted. */ body?: string; /** The item's text as posted (whole), without its marker. */ text: string; repost?: boolean; covers?: string[]; meta?: ItemMeta }>;
@@ -421,14 +436,17 @@ export interface LedgerPatch {
   closed: Array<{ id: string; path: string; line: number; endLine: number; side: "RIGHT" | "LEFT"; text: string; meta: ItemMeta }>;
 }
 
-export function ledgerPatch(pr: Pick<PullRequest, "head">, plan: ReviewPlan, posted: Posted, ids: ReadonlyMap<string, number>): LedgerPatch {
+export function ledgerPatch(pr: Pick<PullRequest, "head"> & { base?: string | undefined }, plan: ReviewPlan, posted: Posted, ids: ReadonlyMap<string, number>): LedgerPatch {
+  const round1Open = new Set([...plan.items.filter((x) => x.origin === "round1").map((x) => x.id), ...plan.priors.filter((l) => l.origin === "round1" && l.status === "open").map((l) => l.id)]).size;
   return {
     schema: PUBLISH_SCHEMA,
     head: pr.head,
     round: plan.round,
     ...(plan.round1Skipped === true ? { round1Skipped: true as const } : {}),
+    ...(pr.base !== undefined ? { base: pr.base } : {}),
     verdict: plan.verdict,
     open: plan.open,
+    round1Open,
     reviewId: posted.reviewId,
     url: posted.url,
     items: plan.items.map((x) => ({ id: x.id, origin: x.origin, path: x.path ?? null, /** The item's first line (a range's last is `endLine`; GitHub's own convention is the end, kept for the posted comment only). */ line: x.startLine ?? x.line ?? null, ...(x.line !== undefined ? { endLine: x.line } : {}), inline: x.inline, commentId: x.inline ? ids.get(x.id) ?? null : null, ...(x.full !== undefined ? { body: x.full } : {}), text: x.full ?? unmarkedText(x.id, x.body), ...(x.repost === true ? { repost: true } : {}), ...(x.covers !== undefined ? { covers: x.covers } : {}), ...(x.meta !== undefined ? { meta: x.meta } : {}) })),
@@ -459,7 +477,7 @@ export type PublishFlow =
   | { state: "reviews"; cursor?: string; why: string }
   | { state: "create"; why: string }
   | { state: "comments"; reviewId: number; cursor?: string; why: string }
-  | { state: "ledger"; posted: Posted; patch: LedgerPatch; /** The commands that write the patch file, a part set, before the ledger command reads it. */ parts: EnvironmentCommand[]; run?: CommandRun }
+  | { state: "ledger"; posted: Posted; patch: LedgerPatch; /** The section write that records it. */ command: EnvironmentCommand; /** The commands that write the patch file, a part set, before the ledger command reads it. */ parts: EnvironmentCommand[]; run?: CommandRun }
   | { state: "done"; posted: Posted; patch: LedgerPatch }
   | { state: "supervise"; reason: string; refs: string[] };
 
@@ -470,7 +488,7 @@ const at = (evidence: readonly EvidenceRecord[], ref: string): number => evidenc
  * the reviews decides whether a review of this head exists; a create after it (an attempt that failed or whose outcome is not
  * known) means the reviews are read again before anything is posted, so an ambiguous attempt is reconciled, never repeated blind.
  */
-export function publishFlow(evidence: readonly EvidenceRecord[], plan: ReviewPlan, pr: Pick<PullRequest, "head">): PublishFlow {
+export function publishFlow(evidence: readonly EvidenceRecord[], plan: ReviewPlan, pr: Pick<PullRequest, "owner" | "repo" | "number" | "head">): PublishFlow {
   const mine = evidence.filter((e) => producer(e)?.stageId === PUBLISH_STAGE);
   const viewer = viewerOf(evidence);
   if (viewer === undefined) return { state: "viewer", why: "read who the credential authenticates as, so only a review this graph authored is taken for its own" };
@@ -494,7 +512,7 @@ export function publishFlow(evidence: readonly EvidenceRecord[], plan: ReviewPla
       return { state: "reviews", why: "the attempt to post the review did not complete: read the reviews again, so a review that reached GitHub is found and not posted twice" };
     }
   } else {
-    const found = findPosted(reviews.items, pr.head, viewer.nonce, viewer.login);
+    const found = findPosted(reviews.items, pr.head, viewer.nonce, viewer.login, plan.round);
     if (found !== undefined) posted = { reviewId: found.id, url: found.url, how: "found" };
   }
   if (posted === undefined) {
@@ -515,67 +533,139 @@ export function publishFlow(evidence: readonly EvidenceRecord[], plan: ReviewPla
     if (reads >= MAX_COMMENT_READS) return { state: "supervise", reason: `${reads} reads of the review's comments did not show the inline comment${missing.length === 1 ? "" : "s"} of ${missing.join(", ")}, so their ids cannot be recorded`, refs: comments.refs };
     return { state: "comments", reviewId: posted.reviewId, why: `the read of the review's comments lacks ${missing.join(", ")}: read them again` };
   }
-  const patch = ledgerPatch(pr, plan, posted, ids);
+  const patch = ledgerPatch({ head: pr.head, base: pinnedBase(evidence) }, plan, posted, ids);
+  const baselines = publishBaselines(evidence, pr);
+  if ("problem" in baselines) return { state: "supervise", reason: `the published review cannot be recorded in the ledger: ${baselines.problem}`, refs: [] };
+  const command = ledgerPublishedCommand(pr, patch, baselines, process.execPath);
   const run = commandRuns(evidence, COMMAND.ledgerPublished).at(-1);
   const json = JSON.stringify(patch);
   const written = readParts(evidence, PART_BASE.publishPatch, PUBLISH_PATCH_FILE);
   const wroteAt = written.state === "read" ? written.at : -1;
   const readsAt = Math.max(...comments.refs.map((r) => at(evidence, r)));
   const current = written.state === "read" && written.value === json && wroteAt > readsAt;
-  if (current && run !== undefined && succeeded(run.command) && at(evidence, run.record.ref) > wroteAt && run.command.argv[6] === PUBLISH_PATCH_FILE) return { state: "done", posted, patch };
-  return { state: "ledger", posted, patch, parts: partCommands(PART_BASE.publishPatch, PUBLISH_PATCH_FILE, json), ...(run !== undefined && current && at(evidence, run.record.ref) > wroteAt ? { run } : {}) };
+  // The write recorded is the one recomputed: the same patch file, sections and baselines (`ledger-cas`, design-pr-review-split §5.2).
+  const same = run !== undefined && run.command.argv.length === command.argv.length && run.command.argv.every((a, k) => a === command.argv[k]);
+  if (current && run !== undefined && succeeded(run.command) && at(evidence, run.record.ref) > wroteAt && same) return { state: "done", posted, patch };
+  return { state: "ledger", posted, patch, command, parts: partCommands(PART_BASE.publishPatch, PUBLISH_PATCH_FILE, json), ...(run !== undefined && current && same && at(evidence, run.record.ref) > wroteAt ? { run } : {}) };
 }
 
 // ---- the ledger ----
 
-/** The code `ledger-published` runs over the ledger's `ledger.json` and the patch: `SAME` when the ledger already holds this review. */
-const MERGE = String.raw`let s="";process.stdin.setEncoding("utf8");process.stdin.on("data",(d)=>{s+=d}).on("end",()=>{
-const v=JSON.parse(s);const p=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
+/** The head a design section records of a post: round 1's outcome on it, and the review id when round 1 posted it. Prints `SAME` when nothing changes. */
+const MERGE_DESIGN = String.raw`let s="";process.stdin.setEncoding("utf8");process.stdin.on("data",(d)=>{s+=d}).on("end",()=>{
+const v=JSON.parse(s);const before=JSON.stringify(v);const p=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
 const heads=Array.isArray(v.heads)?v.heads:[];const h=heads.find((x)=>x.sha===p.head);
-if(h&&h.reviewId===p.reviewId){process.stdout.write("SAME");return}
-if(h){h.reviewId=p.reviewId;h.reviewed=p.round===2;h.round1=p.round===1?"issues":p.round1Skipped?"skipped":"clean";h.verdict=p.verdict;h.open=p.open;if(p.url)h.reviewUrl=p.url}
+if(h){h.round1=p.round===1?"items":"clean";h.open=p.round1Open;if(p.round1Skipped)h.note="${SKIPPED_NOTE}";if(p.round===1){h.reviewId=p.reviewId;if(p.url)h.reviewUrl=p.url}}
+const gh=(it)=>({head:p.head,reviewId:p.reviewId,commentId:it.commentId,inline:it.inline});
+const items=Array.isArray(v.items)?v.items:[];const qa=Array.isArray(v.qa)?v.qa:[];
+const note=(f,status,extra)=>{const keep=(Array.isArray(f.history)?f.history:[]).filter((x)=>x.head!==p.head);f.history=keep.concat([Object.assign({head:p.head,status:status},extra||{})])};
+const mine=p.items.filter((it)=>it.origin==="round1");
+for(const it of mine){
+const fields=Object.assign({origin:it.origin,path:it.path,line:it.line,text:it.text},it.covers?{covers:it.covers}:{},it.endLine?{endLine:it.endLine}:{},it.body?{body:it.body}:{},it.meta||{});
+let f=items.find((x)=>x.id===it.id);
+if(f)Object.assign(f,fields);else{f=Object.assign({head:p.head,id:it.id},fields);items.push(f)}
+f.state="open";delete f.reason;f.github=gh(it);note(f,"open",it.repost?{reposted:true}:{});
+const q=qa.find((x)=>x.id===it.id);if(q){q.state="open";q.github=gh(it)}
+}
+for(const pr of (p.priors||[]).filter((x)=>x.origin==="round1")){
+const f=items.find((x)=>x.id===pr.id);if(!f)continue;
+if(pr.status==="fixed"){f.state="fixed";f.fixedIn=p.head;note(f,"fixed",{reason:pr.reason})}
+else if(!mine.some((it)=>it.id===pr.id)){note(f,"open",{reason:pr.reason,carried:pr.carried});if(pr.covers)f.covers=pr.covers;else delete f.covers}
+const q=qa.find((x)=>x.id===pr.id);if(q&&pr.status==="fixed")q.state="fixed";
+}
+v.heads=heads;v.items=items;v.qa=qa;const out=JSON.stringify(v);process.stdout.write(out===before?"SAME":out)})`;
+
+/** The review section's record of a round-2 post: this head, its findings and what became of the earlier ones. Prints `SAME` when nothing changes. */
+const MERGE_REVIEW = String.raw`let s="";process.stdin.setEncoding("utf8");process.stdin.on("data",(d)=>{s+=d}).on("end",()=>{
+const v=JSON.parse(s);const before=JSON.stringify(v);const p=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
+if(!v.schema)v.schema="${REVIEW_SCHEMA}";
+const heads=Array.isArray(v.heads)?v.heads:[];
+const e=Object.assign({sha:p.head,base:p.base,context:p.round1Skipped?{source:"prelude"}:{source:"design-review",head:p.head},round1:p.round1Skipped?null:{head:p.head,open:p.round1Open},reviewId:p.reviewId},p.url?{reviewUrl:p.url}:{},{verdict:p.verdict,open:p.open,leads:{given:0,raised:0}});
+const i=heads.findIndex((x)=>x.sha===p.head);if(i>=0)heads[i]=e;else heads.push(e);
 const gh=(it)=>({head:p.head,reviewId:p.reviewId,commentId:it.commentId,inline:it.inline});
 const findings=Array.isArray(v.findings)?v.findings:[];
-const qa=Array.isArray(v.qa)?v.qa:[];
 const note=(f,status,extra)=>{const keep=(Array.isArray(f.history)?f.history:[]).filter((x)=>x.head!==p.head);f.history=keep.concat([Object.assign({head:p.head,status:status},extra||{})])};
-for(const it of p.items){
-const fields=Object.assign({origin:it.origin,path:it.path,line:it.line,text:it.text},it.covers?{covers:it.covers}:{},it.endLine?{endLine:it.endLine}:{},it.body?{body:it.body}:{},it.meta||{});
+const mine=p.items.filter((it)=>it.origin==="round2");
+for(const it of mine){
+const fields=Object.assign({origin:it.origin,path:it.path,line:it.line,text:it.text},it.endLine?{endLine:it.endLine}:{},it.body?{body:it.body}:{},it.meta||{});
 let f=findings.find((x)=>x.id===it.id);
 if(f){if(it.meta){delete f.anchorText;delete f.patchId;delete f.hunk;delete f.outdated}Object.assign(f,fields)}else{f=Object.assign({head:p.head,id:it.id},fields);findings.push(f)}
 f.state="open";f.github=gh(it);note(f,"open",it.repost?{reposted:true}:{});
-const q=qa.find((x)=>x.id===it.id);if(q){q.state="open";q.github=gh(it)}
 }
-for(const pr of p.priors||[]){
+for(const pr of (p.priors||[]).filter((x)=>x.origin==="round2")){
 const f=findings.find((x)=>x.id===pr.id);if(!f)continue;
 if(pr.status==="fixed"){f.state="fixed";f.fixedIn=p.head;note(f,"fixed",{reason:pr.reason})}
-else if(!p.items.some((it)=>it.id===pr.id)){note(f,"open",{reason:pr.reason,carried:pr.carried});if(pr.covers)f.covers=pr.covers;else delete f.covers;if(pr.moved){delete f.anchorText;delete f.patchId;delete f.hunk;Object.assign(f,{path:pr.moved.path,line:pr.moved.line,endLine:pr.moved.endLine},pr.moved.meta)}if(pr.outdated===true)f.outdated=true;else if(pr.outdated===false)delete f.outdated}
-const q=qa.find((x)=>x.id===pr.id);if(q&&pr.status==="fixed")q.state="fixed";
+else if(!mine.some((it)=>it.id===pr.id)){note(f,"open",{reason:pr.reason,carried:pr.carried});if(pr.moved){delete f.anchorText;delete f.patchId;delete f.hunk;Object.assign(f,{path:pr.moved.path,line:pr.moved.line,endLine:pr.moved.endLine},pr.moved.meta)}if(pr.outdated===true)f.outdated=true;else if(pr.outdated===false)delete f.outdated}
 }
 for(const c of p.closed||[]){if(findings.some((x)=>x.id===c.id))continue;findings.push(Object.assign({head:p.head,id:c.id,origin:"round2",path:c.path,line:c.line,endLine:c.endLine,side:c.side,text:c.text,state:"withdrawn",history:[{head:p.head,status:"withdrawn"}]},c.meta||{}))}
-v.heads=heads;v.findings=findings;v.qa=qa;process.stdout.write(JSON.stringify(v))})`;
-
-const PUBLISHED_WRITE =
-  String.raw`set -eu; ref="$1"; msg="$2"; patch="$3"; node="$4"; merge="$5"
-` +
-  GIT_IDENTITY +
-  String.raw`
-tab=$(printf '\t')
-old=$(git -c core.hooksPath=/dev/null rev-parse --verify "$ref")
-out=$(git -c core.hooksPath=/dev/null show "$old:ledger.json" | "$node" -e "$merge" "$patch")
-if [ "$out" = SAME ]; then echo "already recorded"; exit 0; fi
-a=$(printf '%s' "$out" | git -c core.hooksPath=/dev/null hash-object -w --stdin)
-rest=$(git -c core.hooksPath=/dev/null ls-tree "$old" | grep -v "$tab"'ledger.json$' || true)
-tree=$({ printf '%s\n' "$rest"; printf '100644 blob %s\tledger.json\n' "$a"; } | git -c core.hooksPath=/dev/null mktree)
-new=$(git -c core.hooksPath=/dev/null -c commit.gpgsign=false commit-tree "$tree" -p "$old" -m "$msg")
-if git -c core.hooksPath=/dev/null update-ref "$ref" "$new" "$old"; then echo "advanced $new"; else echo "ledger moved" >&2; exit 4; fi`;
+v.heads=heads;v.findings=findings;const out=JSON.stringify(v);process.stdout.write(out===before?"SAME":out)})`;
 
 /**
- * Records the published review in the ledger: the head's `reviewId`, and a `github` entry (review and comment ids) on each
- * item posted, from the ledger the Answers stage advanced. It reads the ref itself and swaps from what it read, so a ledger
- * another run advanced since is built upon, and a review the ledger already holds is a no-op. `node` is the Node binary to run.
+ * The write of the published review (design-pr-review-split §5.2): each section the post records (`$secs`) is merged from the ref's
+ * current value; a section the merge leaves unchanged already holds this review and is skipped, any other must be exactly its
+ * baseline (`$bd`, `$br`), and the sections it does not write are carried from the current value. A section the ledger does not
+ * have yet starts empty, with the section's `ledger.md` (`$rmd`). A lost `update-ref` race starts again, at most three times.
  */
-export function ledgerPublishedCommand(pr: Pick<PullRequest, "owner" | "repo" | "number" | "head">, patch: LedgerPatch, node = "node"): EnvironmentCommand {
-  return { id: COMMAND.ledgerPublished, argv: ["sh", "-c", PUBLISHED_WRITE, COMMAND.ledgerPublished, ledgerRef(pr.owner, pr.repo, pr.number), `pr-review ${pr.owner}/${pr.repo}#${pr.number} at ${pr.head.slice(0, 12)}: published review ${patch.reviewId}`, PUBLISH_PATCH_FILE, node, MERGE] };
+const PUBLISHED_WRITE =
+  String.raw`set -eu; ref="$1"; msg="$2"; patch="$3"; node="$4"; secs="$5"; bd="$6"; br="$7"; md="$8"; mr="$9"; shift 9; rmd="$1"
+` +
+  SECTION_PRELUDE +
+  String.raw`while :; do
+cur=$(g rev-parse --verify "$ref^{commit}")
+if ! v2 "$cur"; then echo "ledger moved: $cur is not a ${LEDGER_V2} ledger" >&2; exit ${LEDGER_MOVED}; fi
+root=$(g ls-tree "$cur"); changed=""
+for s in $secs; do
+if [ "$s" = design ]; then want="$bd"; code="$md"; else want="$br"; code="$mr"; fi
+have=$(g rev-parse --verify --quiet "$cur:$s" || echo absent)
+out=$({ if [ "$have" = absent ]; then printf '{}'; else g cat-file blob "$cur:$s/ledger.json"; fi; } | "$node" -e "$code" "$patch")
+if [ "$out" = SAME ]; then continue; fi
+if [ "$have" != "$want" ]; then echo "ledger moved: its $s section is $have, not the baseline $want" >&2; exit ${LEDGER_MOVED}; fi
+a=$(printf '%s' "$out" | g hash-object -w --stdin)
+if [ "$have" = absent ]; then b=$(printf '%s' "$rmd" | g hash-object -w --stdin); sub=$(printf '100644 blob %s\tledger.json\n100644 blob %s\tledger.md\n' "$a" "$b" | g mktree)
+else sub=$({ g ls-tree "$have" | grep -v "$tab"'ledger.json$' || true; printf '100644 blob %s\tledger.json\n' "$a"; } | g mktree); fi
+root=$({ printf '%s\n' "$root" | grep -v -e "$tab$s\$" -e '^$' || true; printf '040000 tree %s\t%s\n' "$sub" "$s"; })
+changed="$changed $s"
+done
+if [ -z "$changed" ]; then echo "already recorded"; exit 0; fi
+tree=$(printf '%s\n' "$root" | g mktree)
+new=$(g commit-tree "$tree" -p "$cur" -m "$msg")
+if g update-ref "$ref" "$new" "$cur" 2>/dev/null; then ` +
+  SECTION_RECORD +
+  String.raw`; exit 0; fi
+try=$((try + 1)); if [ "$try" -gt 3 ]; then echo "ledger moved: the compare-and-swap lost $try races" >&2; exit ${LEDGER_MOVED}; fi
+done`;
+
+/** The sections a post records: round 1's is the design review's; round 2's records round 1's outcome on the head too. */
+export const publishedSections = (round: 1 | 2): Section[] => (round === 1 ? ["design"] : ["design", "review"]);
+
+/**
+ * Records the published review in the ledger: on the design section, round 1's outcome on the head (and a round-1 post's review id)
+ * and the `github` entry (review and comment ids) of each round-1 item posted; on the review section, for a round-2 post, the head
+ * with its review id, verdict and context, and its findings. Each section is advanced from its baseline: the design section from this
+ * run's Answers write, the review section from what the ledger read saw (design-pr-review-split §5.2). A review the ledger already
+ * holds is a no-op. `node` is the Node binary to run.
+ */
+export function ledgerPublishedCommand(pr: Pick<PullRequest, "owner" | "repo" | "number" | "head">, patch: LedgerPatch, baselines: Record<Section, string>, node = "node"): EnvironmentCommand {
+  return {
+    id: COMMAND.ledgerPublished,
+    argv: ["sh", "-c", PUBLISHED_WRITE, COMMAND.ledgerPublished, ledgerRef(pr.owner, pr.repo, pr.number), `pr-review ${pr.owner}/${pr.repo}#${pr.number} at ${pr.head.slice(0, 12)}: published review ${patch.reviewId}`, PUBLISH_PATCH_FILE, node, publishedSections(patch.round).join(" "), baselines.design, baselines.review, MERGE_DESIGN, MERGE_REVIEW, reviewMarkdown(pr)],
+  };
+}
+
+/**
+ * The baselines the published review's write swaps from (design-pr-review-split §5.2): the design section this run's latest accepted
+ * Answers write produced, as its record names it, and the review section as the latest ledger read saw it (a v1 ledger's migrated one).
+ */
+export function publishBaselines(evidence: readonly EvidenceRecord[], pr: Pick<PullRequest, "owner" | "repo" | "number" | "head">): Record<Section, string> | { problem: string } {
+  const lw = commandRuns(evidence, COMMAND.ledgerWrite).filter((r) => succeeded(r.command)).at(-1);
+  if (lw === undefined) return { problem: "the ledger has not been advanced with this head's report and Q&A" };
+  const design = parseSectionRecord(reportText(lw).text)?.sections.design;
+  if (design === undefined) return { problem: "the ledger write's record does not name the design section it wrote" };
+  const read = ledgerRead(evidence);
+  if (read === undefined) return { problem: "the ledger value Fetch read is not in the evidence" };
+  const review = readBaselines(read.ledger, priorState(evidence, oldValue(read.ledger)), pr)?.review;
+  if (review === undefined) return { problem: "the prior ledger's sections have not been read" };
+  return { design, review };
 }
 
 // ---- what the stage posts, from the records ----

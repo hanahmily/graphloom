@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -10,7 +10,7 @@ import type { EvidenceRecord } from "@graphloom/sdk";
 import { afterAll, describe, expect, it } from "vitest";
 import type { Draft, DraftEntry } from "../src/draft.js";
 import { readParts, partCommands } from "../src/parts.js";
-import { commentIds, createInput, findPosted, findingMarker, ledgerPatch, ledgerPublishedCommand, planReview, publishFlow, publishPlan, reviewMarker, viewerOf, verdictLine, MAX_INLINE_COMMENTS, MAX_REVIEW_BODY } from "../src/publish.js";
+import { commentIds, createInput, findPosted, findingMarker, ledgerPatch, ledgerPublishedCommand, planReview, publishFlow, publishPlan, designReviewMarker, reviewMarker, viewerOf, verdictLine, MAX_INLINE_COMMENTS, MAX_REVIEW_BODY } from "../src/publish.js";
 import { analyze, evidencePull } from "../src/analysis.js";
 import { REHEARSAL_HEAD } from "../src/rehearsal.js";
 import { pinnedBase } from "../src/commands.js";
@@ -34,9 +34,9 @@ describe("the review the Publish stage posts", () => {
     const plan = planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([issue("N1"), issue("Q3")]) });
     expect(plan).toMatchObject({ round: 1, verdict: "changes-requested", open: 2, firstLine: "Changes requested: 2 open" });
     expect(plan.body.split("\n")[0]).toBe("Changes requested: 2 open");
-    expect(plan.body.split("\n")[1]).toBe(reviewMarker(HEAD, NONCE));
+    expect(plan.body.split("\n")[1]).toBe(designReviewMarker(HEAD, NONCE));
     const input = createInput(PULL, plan);
-    expect(input).toMatchObject({ owner: "apache", repo: "skywalking-banyandb", number: 7, event: "COMMENT", commitId: HEAD, idempotencyKey: `publish-${HEAD.slice(0, 12)}-r1` });
+    expect(input).toMatchObject({ owner: "apache", repo: "skywalking-banyandb", number: 7, event: "COMMENT", commitId: HEAD, idempotencyKey: `design-${HEAD.slice(0, 12)}` });
     expect(JSON.stringify(input)).not.toMatch(/APPROVE|REQUEST_CHANGES/);
   });
 
@@ -135,12 +135,12 @@ describe("the review the Publish stage posts", () => {
     const comments = [{ id: 1, reviewId: 5, body: plan.comments[0]!.body }, { id: 2, reviewId: 5, body: `${findingMarker("Q7")} quoted at the start\n\n${findingMarker("Q3")}\n` }, { id: 3, reviewId: 5, body: `${findingMarker("Q6")} and then nothing at the end` }];
     expect([...commentIds(comments, 5)]).toEqual([["Q1", 1], ["Q3", 2]]);
     // A review's head marker typed into content is inert too.
-    expect(planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([issue("Q1", { body: reviewMarker(HEAD, "x") })]) }).items[0]!.body).not.toContain("<!-- graphloom-review");
+    expect(planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([issue("Q1", { body: `${reviewMarker(HEAD, "x")} ${designReviewMarker(HEAD, "x")}` })]) }).items[0]!.body).not.toMatch(/<!-- graphloom-(design-)?review/);
   });
 
   it("finds a review of this head only when this credential's login authored it, as COMMENTED, with this run's marker", () => {
     const marked = { id: 41, commitId: HEAD, user: "graphloom-bot", state: "COMMENTED", body: `Review passed\n${reviewMarker(HEAD, NONCE)}\n\nx`, url: "https://github.com/o/r/pull/7#pullrequestreview-41" };
-    const find = (r: object, nonce = NONCE) => findPosted([{ ...marked, ...r }], HEAD, nonce, "graphloom-bot");
+    const find = (r: object, nonce = NONCE) => findPosted([{ ...marked, ...r }], HEAD, nonce, "graphloom-bot", 2);
     expect(find({})).toEqual({ id: 41, url: marked.url });
     expect(find({ commitId: "b".repeat(40) })).toBeUndefined();
     expect(find({ body: "Review passed" })).toBeUndefined();
@@ -151,6 +151,12 @@ describe("the review the Publish stage posts", () => {
     expect(find({ state: "PENDING" })).toBeUndefined();
     // Another run's review of the same head is not this run's.
     expect(find({}, "op7")).toBeUndefined();
+    // Each round has its own head marker (design-pr-review-split §5.3): a post with the other marker is not this round's post, even with this run's nonce.
+    expect(find({ body: `Review passed\n${designReviewMarker(HEAD, NONCE)}\n\nx` })).toBeUndefined();
+    expect(findPosted([{ ...marked, body: `Changes requested: 1 open\n${designReviewMarker(HEAD, NONCE)}\n\nx` }], HEAD, NONCE, "graphloom-bot", 1)).toEqual({ id: 41, url: marked.url });
+    expect(findPosted([marked], HEAD, NONCE, "graphloom-bot", 1)).toBeUndefined();
+    // The marker counts only as the body's second line, where the post puts it.
+    expect(find({ body: `Review passed\n\n${reviewMarker(HEAD, NONCE)}` })).toBeUndefined();
     const comments = [{ id: 5, reviewId: 41, body: `a ${findingMarker("N1")}` }, { id: 6, reviewId: 42, body: `a ${findingMarker("Q3")}` }, { id: 7, reviewId: 41, body: `b ${findingMarker("Q4")}` }, { id: 8, reviewId: 41, body: "no marker" }];
     expect([...commentIds(comments, 41)]).toEqual([["N1", 5], ["Q4", 7]]);
   });
@@ -185,7 +191,7 @@ describe("the gate after Answers: issues publish round 1 and end the run, none c
     const n = (recordedRound1(sim.evidence) as { value: Round1Record }).value.issues.length;
     expect(sim.github.creates).toHaveLength(1);
     const c = sim.github.creates[0]!;
-    expect(c).toMatchObject({ event: "COMMENT", commitId: HEAD, idempotencyKey: `publish-${HEAD.slice(0, 12)}-r1` });
+    expect(c).toMatchObject({ event: "COMMENT", commitId: HEAD, idempotencyKey: `design-${HEAD.slice(0, 12)}` });
     expect(String(c.body).split("\n")[0]).toBe(`Changes requested: ${n} open`);
     expect(sim.github.reviews).toHaveLength(1);
   });
@@ -216,7 +222,7 @@ describe("the gate after Answers: issues publish round 1 and end the run, none c
     expect(recordedRound1(run.evidence)).toMatchObject({ state: "read", value: { issues: [] } });
     expect(run.jobs.some((j) => j.stageId === "review" && j.kind === "agent")).toBe(true);
     expect(run.github.creates).toHaveLength(1);
-    expect(run.github.creates[0]).toMatchObject({ event: "COMMENT", idempotencyKey: `publish-${HEAD.slice(0, 12)}-r2` });
+    expect(run.github.creates[0]).toMatchObject({ event: "COMMENT", idempotencyKey: `review-${HEAD.slice(0, 12)}` });
     const body = String(run.github.creates[0]!.body);
     expect(body.split("\n")[0]).toBe("Changes requested: 1 open");
     expect(body).toContain("Round 1 (design and architecture, from the change report and its questions): no open issue.");
@@ -226,7 +232,7 @@ describe("the gate after Answers: issues publish round 1 and end the run, none c
 });
 
 describe("publishing is idempotent across retries and runs: the reviews are read before anything is posted", () => {
-  const marked = (nonce: string, over: Partial<FakeReview> = {}): FakeReview => ({ id: 99, body: `Changes requested: 1 open\n${reviewMarker(HEAD, nonce)}\n\nearlier`, commitId: HEAD, state: "COMMENTED", url: "https://github.com/apache/skywalking-banyandb/pull/7#pullrequestreview-99", comments: issues().github.reviews[0]!.comments.map((c, k) => ({ ...c, id: 990 + k })), ...over });
+  const marked = (nonce: string, over: Partial<FakeReview> = {}): FakeReview => ({ id: 99, body: `Changes requested: 1 open\n${designReviewMarker(HEAD, nonce)}\n\nearlier`, commitId: HEAD, state: "COMMENTED", url: "https://github.com/apache/skywalking-banyandb/pull/7#pullrequestreview-99", comments: issues().github.reviews[0]!.comments.map((c, k) => ({ ...c, id: 990 + k })), ...over });
 
   it("posts nothing when a review of this head already carries the marker, and records that review", () => {
     const sim = issues({ reviews: [marked(nonceOf(issues()))] });
@@ -249,6 +255,21 @@ describe("publishing is idempotent across retries and runs: the reviews are read
     expect(sim.github.creates).toHaveLength(1);
     expect(sim.github.reviews).toHaveLength(4);
     expect([90, 91, 92]).not.toContain(ledgerPatchOf(sim).reviewId);
+  });
+
+  it("ignores a review of this head with this run's nonce under the other round's head marker, and posts its own (design-pr-review-split §5.3)", () => {
+    const n = nonceOf(issues());
+    // Round 1's issues are posted under the design review's marker; a review with the PR review's marker is not that post.
+    const r1 = issues({ reviews: [marked(n, { id: 93, body: `Review passed\n${reviewMarker(HEAD, n)}\n\nround 2` })] });
+    expect(r1.github.creates).toHaveLength(1);
+    expect(r1.github.creates[0]).toMatchObject({ idempotencyKey: `design-${HEAD.slice(0, 12)}` });
+    expect(ledgerPatchOf(r1).reviewId).not.toBe(93);
+    // Round 2's findings are posted under the PR review's marker; a design-review post of this head is not that post.
+    const r2 = clean({ reviews: [marked(nonceOf(clean()), { id: 94, comments: [] })] });
+    expect(r2.github.creates).toHaveLength(1);
+    expect(r2.github.creates[0]).toMatchObject({ idempotencyKey: `review-${HEAD.slice(0, 12)}` });
+    expect(String(r2.github.creates[0]!.body).split("\n")[1]).toBe(reviewMarker(HEAD, nonceOf(clean())));
+    expect(ledgerPatchOf(r2).reviewId).not.toBe(94);
   });
 
   it("reconciles an attempt whose outcome is unknown: the reviews are read again, the review that reached GitHub is found, and nothing is posted twice", () => {
@@ -356,91 +377,136 @@ describe("the ledger advance that records the published review, against a real r
   const REF = "refs/graphloom/pr-review/apache/skywalking-banyandb/7/ledger";
   const env = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
   const git = async (cwd: string, ...args: string[]): Promise<string> => (await sh("git", args, { cwd, env })).stdout.trim();
+  const TOP = JSON.stringify({ schema: "graphloom-pr-ledger-v2", pull: { owner: "apache", repo: "skywalking-banyandb", number: 7 }, sections: ["design", "review"] });
 
-  /** A repository whose ledger ref holds the Answers stage's commit: ledger.json (this head, one Q&A item), ledger.md, qa.json and report.json. */
-  async function ledgerRepo(): Promise<{ dir: string; first: string }> {
+  /** A repository whose ledger ref holds the Answers stage's commit: the v2 ledger.json and the design section (this head, one Q&A item). */
+  async function ledgerRepo(): Promise<{ dir: string; first: string; baselines: { design: string; review: string } }> {
     const dir = await mkdtemp(path.join(os.tmpdir(), "pr-review-ledger-"));
     dirs.push(dir);
     await sh("git", ["init", "-q", "-b", "main", dir], { env });
-    const ledger = { schema: "graphloom-pr-ledger-v1", pull: { owner: "apache", repo: "skywalking-banyandb", number: 7 }, heads: [{ sha: "a".repeat(40), reviewed: false }, { sha: HEAD, base: "b".repeat(40), reported: true, reviewed: false }], purposes: [], qa: [{ id: "Q1", type: "purpose", state: "open", history: [] }, { id: "Q2", type: "purpose", state: "open", history: [] }], findings: [] };
-    for (const [name, text] of Object.entries({ "ledger.json": JSON.stringify(ledger), "ledger.md": "# apache/skywalking-banyandb#7\n", "qa.json": "{\"q\":1}", "report.json": "{\"r\":1}" })) await writeFile(path.join(dir, name), text);
+    const design = { schema: "pr-design-review-ledger-v1", heads: [{ sha: "a".repeat(40), round1: "clean", open: 0 }, { sha: HEAD, base: "b".repeat(40), files: 1, commits: 1, facts: 0 }], purposes: [], qa: [{ id: "Q1", type: "purpose", state: "open", history: [] }, { id: "Q2", type: "purpose", state: "open", history: [] }], items: [] };
+    await mkdir(path.join(dir, "design"));
+    for (const [name, text] of Object.entries({ "ledger.json": TOP, "design/ledger.json": JSON.stringify(design), "design/ledger.md": "# apache/skywalking-banyandb#7\n", "design/qa.json": "{\"q\":1}", "design/report.json": "{\"r\":1}" })) await writeFile(path.join(dir, name), text);
     await git(dir, "add", "-A");
     await git(dir, "commit", "-q", "-m", "answers");
     const first = await git(dir, "rev-parse", "HEAD");
     await git(dir, "update-ref", REF, first);
-    return { dir, first };
+    return { dir, first, baselines: { design: await git(dir, "rev-parse", `${first}:design`), review: "absent" } };
   }
-  const patchOf = (over: Partial<ReturnType<typeof ledgerPatch>> = {}) => ({ ...ledgerPatch({ head: HEAD }, planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([issue("Q1", { path: "pkg/a.go", line: 4, anchored: true }), issue("N1")]) }), { reviewId: 4242, url: "https://github.com/o/r/pull/7#pullrequestreview-4242", how: "created" }, new Map([["Q1", 777]])), ...over });
+  /** Another run's commit on the ref: `files` replace the paths they name in the ref's current tree. */
+  async function advance(dir: string, files: Record<string, string>): Promise<string> {
+    await git(dir, "checkout", "-q", "--detach", REF);
+    for (const [name, text] of Object.entries(files)) {
+      await mkdir(path.dirname(path.join(dir, name)), { recursive: true });
+      await writeFile(path.join(dir, name), text);
+    }
+    await git(dir, "add", "-A");
+    await git(dir, "commit", "-q", "-m", "another run");
+    const sha = await git(dir, "rev-parse", "HEAD");
+    await git(dir, "update-ref", REF, sha);
+    return sha;
+  }
+  const patchOf = (over: Partial<ReturnType<typeof ledgerPatch>> = {}) => ({ ...ledgerPatch({ head: HEAD, base: "b".repeat(40) }, planReview({ pull: PULL, head: HEAD, nonce: NONCE, round1: round1([issue("Q1", { path: "pkg/a.go", line: 4, anchored: true }), issue("N1")]) }), { reviewId: 4242, url: "https://github.com/o/r/pull/7#pullrequestreview-4242", how: "created" }, new Map([["Q1", 777]])), ...over });
   /** As the stage does: the patch is written as a part set with a digest, then the ledger command reads the file. */
-  const run = async (dir: string, patch: ReturnType<typeof ledgerPatch>) => {
+  const run = async (dir: string, patch: ReturnType<typeof ledgerPatch>, baselines: { design: string; review: string }) => {
     for (const part of partCommands("publish-patch", ".graphloom/review/ledger/publish-patch.json", JSON.stringify(patch))) await sh(part.argv[0]!, part.argv.slice(1), { cwd: dir, env });
-    const c = ledgerPublishedCommand(PULL, patch, process.execPath);
+    const c = ledgerPublishedCommand(PULL, patch, baselines, process.execPath);
     return sh(c.argv[0]!, c.argv.slice(1), { cwd: dir, env });
   };
+  type DesignDoc = { heads: Array<Record<string, unknown>>; qa: Array<Record<string, unknown>>; items: Array<Record<string, unknown>> };
 
-  it("adds one commit that records reviewId on the head and github ids on the items, keeping the other heads and the other files", async () => {
-    const { dir, first } = await ledgerRepo();
-    const out = await run(dir, patchOf());
+  it("adds one commit that records round 1's post on the design section's head and items, keeping the other heads and files and the top-level ledger.json", async () => {
+    const { dir, first, baselines } = await ledgerRepo();
+    const out = await run(dir, patchOf(), baselines);
     expect(out.stdout).toMatch(/^advanced [0-9a-f]{40}/);
     const now = await git(dir, "rev-parse", REF);
     expect(now).not.toBe(first);
     expect(await git(dir, "rev-parse", `${now}^`)).toBe(first);
-    const ledger = JSON.parse(await git(dir, "show", `${now}:ledger.json`)) as { heads: Array<Record<string, unknown>>; qa: Array<Record<string, unknown>>; findings: Array<Record<string, unknown>> };
-    expect(ledger.heads[0]).toEqual({ sha: "a".repeat(40), reviewed: false });
-    expect(ledger.heads[1]).toMatchObject({ sha: HEAD, reviewId: 4242, reviewed: false, round1: "issues", verdict: "changes-requested", open: 2, reviewUrl: "https://github.com/o/r/pull/7#pullrequestreview-4242" });
-    expect(ledger.qa[0]).toMatchObject({ id: "Q1", state: "open", github: { head: HEAD, reviewId: 4242, commentId: 777, inline: true } });
-    expect(ledger.qa[1]).not.toHaveProperty("github");
-    expect(ledger.findings.map((f) => [f.id, f.origin, f.state, (f.github as { commentId: number | null }).commentId])).toEqual([["Q1", "round1", "open", 777], ["N1", "round1", "open", null]]);
-    expect(await git(dir, "show", `${now}:qa.json`)).toBe("{\"q\":1}");
-    expect(await git(dir, "show", `${now}:report.json`)).toBe("{\"r\":1}");
-    expect(await git(dir, "show", `${now}:ledger.md`)).toContain("apache/skywalking-banyandb#7");
+    const design = JSON.parse(await git(dir, "show", `${now}:design/ledger.json`)) as DesignDoc;
+    expect(design.heads[0]).toEqual({ sha: "a".repeat(40), round1: "clean", open: 0 });
+    expect(design.heads[1]).toEqual({ sha: HEAD, base: "b".repeat(40), files: 1, commits: 1, facts: 0, round1: "items", open: 2, reviewId: 4242, reviewUrl: "https://github.com/o/r/pull/7#pullrequestreview-4242" });
+    expect(design.qa[0]).toMatchObject({ id: "Q1", state: "open", github: { head: HEAD, reviewId: 4242, commentId: 777, inline: true } });
+    expect(design.qa[1]).not.toHaveProperty("github");
+    expect(design.items.map((f) => [f.id, f.origin, f.state, (f.github as { commentId: number | null }).commentId])).toEqual([["Q1", "round1", "open", 777], ["N1", "round1", "open", null]]);
+    expect(await git(dir, "show", `${now}:design/qa.json`)).toBe("{\"q\":1}");
+    expect(await git(dir, "show", `${now}:design/report.json`)).toBe("{\"r\":1}");
+    expect(await git(dir, "show", `${now}:design/ledger.md`)).toContain("apache/skywalking-banyandb#7");
+    // A round-1 post writes the design section only, and the top-level ledger.json never changes.
+    expect(await git(dir, "ls-tree", "--name-only", now)).toBe("design\nledger.json");
+    expect(await git(dir, "show", `${now}:ledger.json`)).toBe(TOP);
     expect(await git(dir, "log", "-1", "--format=%s", REF)).toBe(`pr-review apache/skywalking-banyandb#7 at ${HEAD.slice(0, 12)}: published review 4242`);
   });
 
   it("records a patch of about 200 KiB, written as a part set that fits the executor input and read from its file, not an argument", async () => {
-    const { dir } = await ledgerRepo();
+    const { dir, baselines } = await ledgerRepo();
     const big = patchOf({ items: Array.from({ length: 140 }, (_, i) => ({ id: `Q${i + 1}`, origin: "round1" as const, path: null, line: null, inline: false, commentId: null, body: `${i}:${"b".repeat(2_000)}`, text: `${i}:${"b".repeat(2_000)}` })) });
     const json = JSON.stringify(big);
     expect(json.length).toBeGreaterThan(200_000);
     const parts = partCommands("publish-patch", ".graphloom/review/ledger/publish-patch.json", json);
     expect(parts.length).toBeGreaterThan(1);
     for (const part of parts) expect(Buffer.byteLength(JSON.stringify({ commands: [part] }), "utf8")).toBeLessThan(256_000);
-    const command = ledgerPublishedCommand(PULL, big, process.execPath);
-    expect(JSON.stringify(command.argv).length).toBeLessThan(10_000);
+    const command = ledgerPublishedCommand(PULL, big, baselines, process.execPath);
+    expect(JSON.stringify(command.argv).length).toBeLessThan(16_000);
+    // Every argument fits the command executor's 4,096 characters.
+    for (const a of command.argv) expect(a.length).toBeLessThanOrEqual(4_096);
     expect(command.argv[6]).toBe(".graphloom/review/ledger/publish-patch.json");
-    const out = await run(dir, big);
+    const out = await run(dir, big, baselines);
     expect(out.stdout).toMatch(/^advanced /);
-    const ledger = JSON.parse(await git(dir, "show", `${REF}:ledger.json`)) as { findings: Array<{ id: string; body: string }> };
-    expect(ledger.findings).toHaveLength(140);
-    expect(ledger.findings[139]!.body).toBe(`139:${"b".repeat(2_000)}`);
+    const design = JSON.parse(await git(dir, "show", `${REF}:design/ledger.json`)) as { items: Array<{ id: string; body: string }> };
+    expect(design.items).toHaveLength(140);
+    expect(design.items[139]!.body).toBe(`139:${"b".repeat(2_000)}`);
   });
 
   it("is a no-op when the ledger already holds that review, so a retry or a resume changes nothing", async () => {
-    const { dir } = await ledgerRepo();
-    await run(dir, patchOf());
+    const { dir, baselines } = await ledgerRepo();
+    await run(dir, patchOf(), baselines);
     const once = await git(dir, "rev-parse", REF);
-    const again = await run(dir, patchOf());
+    const again = await run(dir, patchOf(), baselines);
     expect(again.stdout).toContain("already recorded");
     expect(await git(dir, "rev-parse", REF)).toBe(once);
   });
 
-  it("builds on a ledger another run advanced since, keeping what it added, and a round-2 review marks the head reviewed", async () => {
-    const { dir } = await ledgerRepo();
-    const other = { schema: "graphloom-pr-ledger-v1", heads: [{ sha: "c".repeat(40), reviewed: true, reviewId: 5 }, { sha: HEAD, reviewed: false }], qa: [], findings: [] };
-    await writeFile(path.join(dir, "ledger.json"), JSON.stringify(other));
-    await git(dir, "add", "-A");
-    await git(dir, "commit", "-q", "-m", "another run");
-    await git(dir, "update-ref", REF, await git(dir, "rev-parse", "HEAD"));
-    await run(dir, patchOf({ round: 2, verdict: "passed", open: 0, items: [] }));
-    const ledger = JSON.parse(await git(dir, "show", `${REF}:ledger.json`)) as { heads: Array<Record<string, unknown>> };
-    expect(ledger.heads[0]).toEqual({ sha: "c".repeat(40), reviewed: true, reviewId: 5 });
-    expect(ledger.heads[1]).toMatchObject({ sha: HEAD, reviewed: true, round1: "clean", verdict: "passed", reviewId: 4242 });
+  it("builds on its own first write when the other section moved in between, carrying that section unchanged", async () => {
+    const { dir, baselines } = await ledgerRepo();
+    const review = JSON.stringify({ schema: "pr-review-ledger-v1", heads: [{ sha: "c".repeat(40), reviewId: 5 }], findings: [] });
+    const other = await advance(dir, { "review/ledger.json": review, "review/ledger.md": "# r\n" });
+    const out = await run(dir, patchOf(), baselines);
+    expect(out.stdout).toMatch(/^advanced /);
+    const now = await git(dir, "rev-parse", REF);
+    expect(await git(dir, "rev-parse", `${now}^`)).toBe(other);
+    expect(await git(dir, "rev-parse", `${now}:review`)).toBe(await git(dir, "rev-parse", `${other}:review`));
+    expect((JSON.parse(await git(dir, "show", `${now}:design/ledger.json`)) as DesignDoc).heads[1]).toMatchObject({ round1: "items", reviewId: 4242 });
+    expect(await git(dir, "show", `${now}:ledger.json`)).toBe(TOP);
+  });
+
+  it("records a round-2 post on both sections: round 1 clean on the design head, and the review section's head and findings", async () => {
+    const { dir, baselines } = await ledgerRepo();
+    await run(dir, patchOf({ round: 2, verdict: "passed", open: 0, round1Open: 0, items: [], priors: [] }), baselines);
+    const design = JSON.parse(await git(dir, "show", `${REF}:design/ledger.json`)) as DesignDoc;
+    expect(design.heads[1]).toEqual({ sha: HEAD, base: "b".repeat(40), files: 1, commits: 1, facts: 0, round1: "clean", open: 0 });
+    const review = JSON.parse(await git(dir, "show", `${REF}:review/ledger.json`)) as { schema: string; heads: unknown[]; findings: unknown[] };
+    expect(review).toEqual({ schema: "pr-review-ledger-v1", heads: [{ sha: HEAD, base: "b".repeat(40), context: { source: "design-review", head: HEAD }, round1: { head: HEAD, open: 0 }, reviewId: 4242, reviewUrl: "https://github.com/o/r/pull/7#pullrequestreview-4242", verdict: "passed", open: 0, leads: { given: 0, raised: 0 } }], findings: [] });
+    expect(await git(dir, "show", `${REF}:review/ledger.md`)).toContain("the PR review");
+    expect(await git(dir, "show", `${REF}:ledger.json`)).toBe(TOP);
+  });
+
+  it("stops \"ledger moved\" when a section it writes is not its baseline, leaving the ref where the other run put it", async () => {
+    const { dir, baselines } = await ledgerRepo();
+    // Another run advanced the review section, which a round-2 post writes.
+    const reviewed = await advance(dir, { "review/ledger.json": JSON.stringify({ schema: "pr-review-ledger-v1", heads: [], findings: [{ id: "F1" }] }), "review/ledger.md": "# r\n" });
+    const r2 = run(dir, patchOf({ round: 2, verdict: "passed", open: 0, round1Open: 0, items: [], priors: [] }), baselines);
+    await expect(r2).rejects.toMatchObject({ code: 4, stderr: expect.stringContaining("ledger moved: its review section") });
+    expect(await git(dir, "rev-parse", REF)).toBe(reviewed);
+    // Another run of round 1 advanced the design section.
+    const designed = await advance(dir, { "design/ledger.json": "{\"schema\":\"pr-design-review-ledger-v1\",\"heads\":[]}" });
+    await expect(run(dir, patchOf(), baselines)).rejects.toMatchObject({ code: 4, stderr: expect.stringContaining("ledger moved: its design section") });
+    expect(await git(dir, "rev-parse", REF)).toBe(designed);
   });
 
   it("fails, leaving the ref where it is, when the ledger ref does not exist", async () => {
-    const { dir } = await ledgerRepo();
+    const { dir, baselines } = await ledgerRepo();
     await git(dir, "update-ref", "-d", REF);
-    await expect(run(dir, patchOf())).rejects.toBeTruthy();
+    await expect(run(dir, patchOf(), baselines)).rejects.toBeTruthy();
     await expect(git(dir, "rev-parse", "--verify", REF)).rejects.toBeTruthy();
   });
 });

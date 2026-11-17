@@ -248,7 +248,8 @@ describe("the ledger read", () => {
     for (const r of ["head", "base", `heads/${sha}`]) out(dir, ["update-ref", `${R}/${r}`, sha]);
     expect(parseLedger(read().stdout)).toEqual({ present: false });
     out(dir, ["update-ref", `${R}/ledger`, sha]);
-    expect(parseLedger(read().stdout)).toEqual({ present: true, sha });
+    // The read lists the commit's paths and their ids before its value, so a section write's baselines come from this one read.
+    expect(parseLedger(read().stdout)).toEqual({ present: true, sha, entries: new Map([["a.txt", out(dir, ["rev-parse", `${sha}:a.txt`])]]) });
     expect(read().status).toBe(0);
   });
 

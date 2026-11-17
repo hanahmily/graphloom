@@ -101,7 +101,7 @@ import { incrementalReads } from "./incremental.js";
 import { registryFromEvidence } from "./prior.js";
 import { authorReplies } from "./replies.js";
 import { aspectPrior } from "./priorreview.js";
-import { COMMENTS_READ, createInput, ledgerPublishedCommand, publishFlow, publishPlan, REVIEWS_READ } from "./publish.js";
+import { COMMENTS_READ, createInput, publishFlow, publishPlan, REVIEWS_READ } from "./publish.js";
 import { scopeLine, DRAFT_SCHEMA } from "./draft.js";
 import { prepareTask } from "./prepare.js";
 import { requestedPull, type PullRequest } from "./request.js";
@@ -244,7 +244,7 @@ export function definitionFor(profile: Profile): GraphDefinition {
     },
     {
       id: REQUIREMENT_PUBLISHED,
-      statement: `The review was posted to the pull request as exactly one GitHub review of event COMMENT (never APPROVE or REQUEST_CHANGES), pinned to head <sha>, by the graphloom.github/create-pull-review executor, whose credential the plugin never sees, or a review of this head carrying the graph's head marker was already there and was found by reading the pull request's reviews before any post (an attempt whose outcome is unknown is reconciled the same way, and never repeated blind). Its body's first line is the verdict: "Review passed" when round 1 has no open issue and round 2 no open postable finding, else "Changes requested: <n> open". It carries round 1's issues when round 1 found any, else round 2's postable findings (the draft's comments that are findings); an item with a diff anchor is an inline comment (at most 50), the rest are in the body; each item ends with its marker (<!-- graphloom-finding: F3 --> or Q3, N1) and the body carries <!-- graphloom-review: <head> -->. The review's comments were read back and the ledger records the review id (reviewId on the head) and, for each item, the review and comment ids (github), by a compare-and-swap from the ledger value it read. On a later head the body also lists what became of the items an earlier review posted (fixed in a commit, or still open with a link to the earlier comment), a still-open item is not posted again unless its old thread is outdated, and the verdict counts the earlier items still open. The review's items and verdict recompute from the recorded round 1, the aspects' records, the draft and the ledger's earlier items.`,
+      statement: `The review was posted to the pull request as exactly one GitHub review of event COMMENT (never APPROVE or REQUEST_CHANGES), pinned to head <sha>, by the graphloom.github/create-pull-review executor, whose credential the plugin never sees, or a review of this head carrying the graph's head marker was already there and was found by reading the pull request's reviews before any post (an attempt whose outcome is unknown is reconciled the same way, and never repeated blind). Its body's first line is the verdict: "Review passed" when round 1 has no open issue and round 2 no open postable finding, else "Changes requested: <n> open". It carries round 1's issues when round 1 found any, else round 2's postable findings (the draft's comments that are findings); an item with a diff anchor is an inline comment (at most 50), the rest are in the body; each item ends with its marker (<!-- graphloom-finding: F3 --> or Q3, N1) and the body's second line is the head marker of the round it posts, <!-- graphloom-design-review: <head> <nonce> --> for round 1's issues and <!-- graphloom-review: <head> <nonce> --> for round 2's findings. The review's comments were read back and the ledger records the review id and, for each item, the review and comment ids (github): round 1's outcome and items in its design section, round 2's head and findings in its review section, each advanced by compare-and-swap from its baseline. On a later head the body also lists what became of the items an earlier review posted (fixed in a commit, or still open with a link to the earlier comment), a still-open item is not posted again unless its old thread is outdated, and the verdict counts the earlier items still open. The review's items and verdict recompute from the recorded round 1, the aspects' records, the draft and the ledger's earlier items.`,
       evidenceSchema: "publish-v1",
     },
   ];
@@ -1146,11 +1146,11 @@ function recordLedger(ctx: Context, view: RunView, w: AnswerWrites): GraphDecisi
   if (w.ledger === undefined) return stop({ reason: "incompatible task", blocker: w.problem ?? "the ledger files cannot be written", retryable: false }, "stop: the ledger files do not fit one command");
   if (lw.run !== undefined && !lw.failed && sameArgv(lw.run.command.argv, w.ledger.argv)) return validateStage(ctx, view, ANSWERS_STAGE);
   if (commandRuns(view.evidence, COMMAND.ledgerWrite).length >= 6) return supervise({ reason: "the ledger write keeps differing from the one the evidence recomputes" }, "escalate a ledger write that does not settle");
-  // A ledger.json or ledger.md too large for the ledger write's one command is written first as a part set (design §6.6); the write reads those files.
+  // The files the write reads are written first as part sets (design §6.6): the review section a migration of a v1 ledger builds (design-pr-review-split §5.4), and a design ledger.json or ledger.md too large for the write's one command.
   const parts = nextWrite(view, w.ledgerParts ?? [], { failed: "writing the ledger files failed", settle: "the written ledger files keep differing from the ones the evidence recomputes" });
   if (parts !== undefined) {
     if ("decision" in parts) return parts.decision;
-    return withPrivate(dispatch(commandJob(ANSWERS_STAGE, writeInstruction(parts.command, "Write the ledger files"), { commands: [parts.command] }), "write the ledger's ledger.json and ledger.md as parts: they do not fit the ledger write's one command"));
+    return withPrivate(dispatch(commandJob(ANSWERS_STAGE, writeInstruction(parts.command, "Write the ledger files"), { commands: [parts.command] }), "write the ledger files the section write reads, as parts: a migrated review section, or a design section too large for its one command"));
   }
   return withPrivate(dispatch(commandJob(ANSWERS_STAGE, "Advance the pull request's ledger ref by compare-and-swap (no repository code runs)", { commands: [w.ledger], env: { ...GIT_ENV } }), "record this head's report and Q&A in the ledger, from the value Fetch read"));
 }
@@ -1411,7 +1411,7 @@ function publishStage(ctx: Context, view: RunView): GraphDecision {
         if ("decision" in parts) return parts.decision;
         return withPrivate(dispatch(commandJob(PUBLISH_STAGE, writeInstruction(parts.command, "Write the published review's ledger patch"), { commands: [parts.command] }), "write the patch that records the published review in the ledger, in parts with a digest"));
       }
-      return withPrivate(dispatch(commandJob(PUBLISH_STAGE, "Record the published review in the pull request's ledger by compare-and-swap (no repository code runs)", { commands: [ledgerPublishedCommand(pr, flow.patch, process.execPath)], env: { ...GIT_ENV } }), `record review ${flow.posted.reviewId} and its comments' ids in the ledger`));
+      return withPrivate(dispatch(commandJob(PUBLISH_STAGE, "Record the published review in the pull request's ledger by compare-and-swap (no repository code runs)", { commands: [flow.command], env: { ...GIT_ENV } }), `record review ${flow.posted.reviewId} and its comments' ids in the ledger`));
     }
     case "done":
       return validateStage(ctx, view, PUBLISH_STAGE);

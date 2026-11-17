@@ -11,12 +11,17 @@ import { createHash } from "node:crypto";
 import { COMMAND } from "./constants.js";
 import { ledgerRead, oldValue, priorState } from "./ledger.js";
 import { isObject } from "./evidence.js";
+import { FEATURE_TYPE, LEDGER_V1, LEDGER_V2, migrateV1 } from "./ledgerv2.js";
+import { REUSE_TYPE } from "./questions.js";
 import { lineText, parsePatch } from "./patch.js";
 import type { PullFile } from "./snapshot.js";
 import type { EvidenceRecord } from "@graphloom/sdk";
 
-/** The status an item carries in the ledger: open until a later head fixes it or a verifier withdraws it. */
-export type ItemStatus = "open" | "fixed" | "withdrawn";
+/**
+ * The status an item carries in the ledger: open until a later head fixes it or a verifier withdraws it; `moved` and `superseded`
+ * close a v1 round-1 item whose question round 1 no longer asks (design-pr-review-split §5.4). Only an open item is re-checked or counted.
+ */
+export type ItemStatus = "open" | "fixed" | "withdrawn" | "moved" | "superseded";
 
 /** One posted item of an earlier head, as the registry holds it (the latest state of its id). */
 export interface PriorItem {
@@ -58,8 +63,10 @@ export interface PriorRegistry {
   /** The numbers the next new question and finding take. */
   nextQ: number;
   nextF: number;
-  /** The heads the ledger has seen, oldest first. */
+  /** The heads the ledger's design section has seen, oldest first (the last one's qa.json is the ledger's). */
   heads: string[];
+  /** Where the ledger commit keeps the latest qa.json and necessity.json: `design/` in a v2 ledger, the top level in a v1 one. */
+  designDir?: string;
 }
 
 export const EMPTY_REGISTRY: PriorRegistry = { items: [], qa: [], nextQ: 1, nextF: 1, heads: [] };
@@ -68,20 +75,27 @@ const num = (v: unknown): number | undefined => (typeof v === "number" && Number
 const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
 const idNumber = (id: string, letter: string): number => (id.startsWith(letter) && /^\d+$/.test(id.slice(1)) ? Number(id.slice(1)) : 0);
 
-/** The registry a prior `ledger.json` holds (its heads, its questions and its posted items). */
+/**
+ * The registry a prior ledger holds (its heads, its questions and its posted items): its two sections (design-pr-review-split §5),
+ * the design section's heads, questions and round-1 items and the review section's findings, or a v1 `ledger.json`, migrated first.
+ */
 export function registryOf(ledger: unknown): PriorRegistry {
   if (!isObject(ledger)) return EMPTY_REGISTRY;
-  const heads = (Array.isArray(ledger.heads) ? ledger.heads : []).filter(isObject).map((h) => str(h.sha)).filter((s): s is string => s !== undefined);
-  const qa = (Array.isArray(ledger.qa) ? ledger.qa : []).filter(isObject).map((q) => ({ id: str(q.id) ?? "", key: str(q.key) ?? "" })).filter((q) => q.id !== "");
+  const sections = ledger.schema === LEDGER_V1 ? migrateV1(ledger) : ledger.schema === LEDGER_V2 ? { design: ledger.design, review: ledger.review } : undefined;
+  if (sections === undefined) return EMPTY_REGISTRY;
+  const design = isObject(sections.design) ? sections.design : {};
+  const review = isObject(sections.review) ? sections.review : {};
+  const heads = (Array.isArray(design.heads) ? design.heads : []).filter(isObject).map((h) => str(h.sha)).filter((s): s is string => s !== undefined);
+  const qa = (Array.isArray(design.qa) ? design.qa : []).filter(isObject).map((q) => ({ id: str(q.id) ?? "", key: str(q.key) ?? "" })).filter((q) => q.id !== "");
   const items = new Map<string, PriorItem>();
-  for (const raw of Array.isArray(ledger.findings) ? ledger.findings : []) {
+  for (const raw of [...(Array.isArray(design.items) ? design.items : []), ...(Array.isArray(review.findings) ? review.findings : [])]) {
     if (!isObject(raw)) continue;
     const id = str(raw.id);
     const origin = raw.origin === "round1" || raw.origin === "round2" ? raw.origin : undefined;
     if (id === undefined || origin === undefined) continue;
     const gh = isObject(raw.github) ? raw.github : {};
     const hunk = Array.isArray(raw.hunk) && raw.hunk.length === 3 && raw.hunk.every((n) => typeof n === "number") ? ([raw.hunk[0], raw.hunk[1], raw.hunk[2]] as [number, number, number]) : undefined;
-    const status: ItemStatus = raw.state === "fixed" || raw.state === "withdrawn" ? raw.state : "open";
+    const status: ItemStatus = raw.state === "fixed" || raw.state === "withdrawn" || raw.state === "moved" || raw.state === "superseded" ? raw.state : "open";
     const history = (Array.isArray(raw.history) ? raw.history : []).filter(isObject).map((h) => ({ head: str(h.head) ?? "", status: str(h.status) ?? "" }));
     const item: PriorItem = {
       id,
@@ -123,7 +137,7 @@ export function registryFromEvidence(evidence: readonly EvidenceRecord[]): Prior
   const read = ledgerRead(evidence);
   if (read === undefined || !read.ledger.present) return EMPTY_REGISTRY;
   const prior = priorState(evidence, oldValue(read.ledger));
-  return prior.state === "read" ? registryOf(prior.value) : EMPTY_REGISTRY;
+  return prior.state === "read" ? { ...registryOf(prior.value), designDir: prior.layout === "v2" ? "design/" : "" } : EMPTY_REGISTRY;
 }
 
 // ---- stable keys and ids ----
@@ -161,7 +175,8 @@ export function questionKeys(questions: readonly KeyQuestion[], symbols: readonl
           ? `${q.type}|sym|${sym.path}|${sym.qualified}`
           : q.fn !== undefined
             ? `${q.type}|fn|${q.fnPath ?? ""}|${q.fn}`
-            : `${q.type}|item|${itemPath(q.item) ?? q.item}`;
+            : // A high-level existing-reuse-common question is keyed as the v2 ledger keys it (design-pr-review-split §5.4), so a migrated ledger's id carries on.
+              `${q.type === REUSE_TYPE ? FEATURE_TYPE : q.type}|item|${itemPath(q.item) ?? q.item}`;
     const n = (seen.get(base) ?? 0) + 1;
     seen.set(base, n);
     out.set(q.id, n === 1 ? base : `${base}#${n}`);
