@@ -176,6 +176,16 @@ export async function assertLiveWorkspaceMatchesEvidence(
  * Controller-owned Validate → optional Accept (receipt).
  * Never called from plugin/supervisor decisions directly as Accept.
  */
+/**
+ * The run's pinned task request for a `ValidationInput`: what intake pinned,
+ * read from the run's state (never the task file, which may have changed since).
+ * Opaque here; empty only for a state with no request at all.
+ */
+export function pinnedRequest(state: DurableRunState): { request?: string } {
+  const request = (state.intake as { task?: { request?: unknown } } | undefined)?.task?.request;
+  return typeof request === "string" ? { request } : {};
+}
+
 export async function admitValidation(
   state: DurableRunState,
   spec: ValidateSpec,
@@ -313,6 +323,7 @@ export async function admitValidation(
         history,
         candidateFingerprint: fingerprint,
         ...(liveDigest !== undefined ? { candidateDigest: liveDigest } : {}),
+        ...pinnedRequest(state),
       }),
     );
     const resolved = await Promise.resolve(result);

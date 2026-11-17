@@ -755,6 +755,14 @@ export interface ValidationInput {
   candidateDigest?: Fingerprint;
   /** The task's pinned config, as in `RunView.config`; absent when the task names none. */
   config?: unknown;
+  /**
+   * The task's request as intake pinned it, as in `RunView.task.request`: the
+   * same text on every call of the run, also after a resume, whatever the task
+   * file says now. Opaque to the controller. Optional: a validator that
+   * ignores it behaves as before, and a caller with no run (a scenario check)
+   * may leave it out.
+   */
+  request?: string;
 }
 
 export interface ValidationResult {

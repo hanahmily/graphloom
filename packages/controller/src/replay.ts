@@ -21,6 +21,7 @@ import type { CallContext, PluginHost } from "@graphloom/plugin-host";
 import type { DurableRunState } from "./state.js";
 import { toRunView } from "./loop.js";
 import { hydrateEvidence } from "./evidence.js";
+import { pinnedRequest } from "./admit.js";
 
 export interface ReclassifiedRecord {
   ref: string;
@@ -201,6 +202,7 @@ export async function replayRun(recorded: DurableRunState, host: PluginHost): Pr
         statement: requirement.statement,
         evidence: reclassifiedEvidence,
         ...(recorded.candidateDigest !== undefined ? { candidateDigest: recorded.candidateDigest } : {}),
+        ...pinnedRequest(recorded),
       });
       requirements.push({
         requirementId: requirement.id,
