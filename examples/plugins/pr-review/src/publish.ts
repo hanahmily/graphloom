@@ -17,15 +17,16 @@
  * outdated; it counts toward the verdict, so `Review passed` means no round-1 issue and no round-2 finding is open, earlier ones included.
  */
 import { MAX_EXECUTOR_INPUT_BYTES, type EnvironmentCommand, type EvidenceRecord } from "@graphloom/sdk";
-import { COMMAND, CREATE_PULL_REVIEW, GET_VIEWER, LEDGER_MOVED, PART_BASE, PUBLISH_PATCH_FILE, PUBLISH_STAGE, ledgerRef } from "./kit/constants.js";
-import { fitParts, type ItemParts } from "./answertext.js";
+import { COMMAND, PART_BASE, PUBLISH_PATCH_FILE, ledgerRef } from "./kit/constants.js";
+import { designReviewMarker, findingMarker, findPostedBy, markedBody, MAX_INLINE_COMMENTS, MAX_REVIEW_BODY, neutralize, postFlow, reviewMarker, unmarkedText, verdictLine, viewerOf, type Posted, type PostFlow } from "./kit/post.js";
+import { fitParts, type ItemParts } from "./kit/answertext.js";
 import { clip, clipKeep, withoutFences } from "./kit/escape.js";
 import { partCommands, readParts } from "./kit/parts.js";
 import { anchored, severityLabel, type Draft, type DraftEntry } from "./draft.js";
-import { commandRuns, isObject, producer, reportText, succeeded, type CommandRun } from "./kit/evidence.js";
+import { commandRuns, isObject, succeeded, type CommandRun } from "./kit/evidence.js";
 import type { Analysis } from "./kit/analysis.js";
-import { ledgerRead, oldValue, parseSectionRecord, priorState, readBaselines, SECTION_PRELUDE, SECTION_RECORD } from "./kit/ledger.js";
-import { LEDGER_V2, REVIEW_SCHEMA, reviewMarkdown, SKIPPED_NOTE, type Section } from "./kit/ledgerv2.js";
+import { publishBaselines, PUBLISHED_WRITE } from "./kit/ledger.js";
+import { REVIEW_SCHEMA, reviewMarkdown, SKIPPED_NOTE, type Section } from "./kit/ledgerv2.js";
 import { pinnedBase } from "./kit/commands.js";
 import { draftWrites, recordedRound1 } from "./reviewdraft.js";
 import { anchorInfo, findingKey, registryFromEvidence, type PriorItem, type PriorRegistry } from "./prior.js";
@@ -35,16 +36,10 @@ import { recordedAspect } from "./reviewdraft.js";
 import type { PullFile } from "./kit/snapshot.js";
 import { MAX_ITEM_TEXT, type Round1Covered, type Round1Record } from "./round1.js";
 import type { PullRequest } from "./kit/request.js";
-import { READS, readResult, type ReadSpec } from "./kit/snapshot.js";
 
 export const PUBLISH_SCHEMA = "pr-review-publish-v1";
-/**
- * GitHub caps a review body at 65,536 characters, the executor takes at most 50 inline comments and one executor input at
- * most 256,000 bytes, and the reads of the review and its comments cut a body at 4,000 characters, so an item's marker, at the
- * end of its body, must lie within that to be found again.
- */
-export const MAX_REVIEW_BODY = 40_000;
-export const MAX_INLINE_COMMENTS = 50;
+export { publishBaselines } from "./kit/ledger.js";
+export { commentIds, designReviewMarker, findingMarker, markedBody, MAX_COMMENT_READS, MAX_CREATE_ATTEMPTS, MAX_INLINE_COMMENTS, MAX_REVIEW_BODY, neutralize, reviewMarker, unmarkedText, verdictLine, viewerOf, COMMENTS_READ, REVIEWS_READ, type Posted } from "./kit/post.js";
 /** What one item may take before it is shortened: its text (`MAX_ITEM_TEXT`) and, for a finding, its suggestion block. Far below the 65,536 characters GitHub accepts in a comment. */
 const MAX_ITEM_BODY = MAX_ITEM_TEXT + 2_000;
 /** The least text a compacted item keeps: a one-liner shorter than this says too little to act on. */
@@ -52,33 +47,8 @@ const MIN_ONE_LINER = 80;
 /** Room kept in the executor input for what the plan does not measure (the idempotency key and the like). */
 const INPUT_MARGIN = 1_000;
 
-export const findingMarker = (id: string): string => `<!-- graphloom-finding: ${id} -->`;
-/** An item's posted body: its text, then its marker; a body past what a read keeps leads with the marker too, so the id is still found. */
-export function markedBody(id: string, text: string): string {
-  const m = findingMarker(id);
-  const body = `${text}\n\n${m}`;
-  return body.length > READ_WINDOW ? `${m}\n${body}` : body;
-}
-/** An item's text without its marker or markers. */
-export function unmarkedText(id: string, body: string): string {
-  const m = findingMarker(id);
-  const lead = body.startsWith(`${m}\n`) ? body.slice(m.length + 1) : body;
-  return (lead.endsWith(m) ? lead.slice(0, lead.length - m.length) : lead).trim();
-}
-/** The marker of this run's review of `head`: the head and a nonce of the run (its viewer read's operation), which a stranger cannot know. */
-export const reviewMarker = (head: string, nonce: string): string => `<!-- graphloom-review: ${head} ${nonce} -->`;
-/** The same for a post of round 1's items, the design review's (design-pr-review-split §5.3): a post of either round is told apart by its marker before its nonce. */
-export const designReviewMarker = (head: string, nonce: string): string => `<!-- graphloom-design-review: ${head} ${nonce} -->`;
 /** The head marker of a post of round `round`, the body's second line: round 1 posts as the design review, round 2 as the PR review. */
 export const headMarker = (round: 1 | 2, head: string, nonce: string): string => (round === 1 ? designReviewMarker(head, nonce) : reviewMarker(head, nonce));
-/** The marker publication appends: the last thing in a body. Marker-looking text in an item's content is neutralized and never matches. */
-const MARKER = /<!-- graphloom-finding: ([A-Z][0-9]+) -->$/;
-/** The same marker as the first thing in a body: a read cuts a body at 4,000 characters, so a longer body also leads with it. */
-const LEADING_MARKER = /^<!-- graphloom-finding: ([A-Z][0-9]+) -->(?:\n|$)/;
-/** A body longer than this has lost its trailing marker when read back (the read keeps 4,000 characters). */
-const READ_WINDOW = 3_900;
-/** Content that looks like one of this graph's markers (or any HTML comment) is made inert, so it cannot be taken for a marker or hide text. */
-export const neutralize = (text: string): string => text.replace(/<!--/g, "&lt;!--");
 const SUGGESTION_OMITTED = "(suggested change omitted for size; see the report)";
 /** A posted text shortened to `n` characters: its fenced blocks (a suggestion) go whole, with a note, before its prose is cut at a sentence end or a word boundary; no fence is ever left open. */
 function shrinkPlain(text: string, n: number): string {
@@ -185,8 +155,6 @@ export interface ReviewPlan {
 
 const oneLine = (s: string): string => s.replace(/\s+/g, " ").trim();
 
-/** The first line of the review: the verdict, and what is open. */
-export const verdictLine = (open: number): string => (open === 0 ? "Review passed" : `Changes requested: ${open} open`);
 
 function findingBody(e: DraftEntry): { text: string; full?: string } {
   const aspects = e.aspects.length > 0 ? ` · ${e.aspects.join(", ")}` : "";
@@ -375,45 +343,13 @@ export function createInput(pr: Pick<PullRequest, "owner" | "repo" | "number" | 
   return { owner: pr.owner, repo: pr.repo, number: pr.number, event: "COMMENT", body: plan.body, comments: plan.comments, commitId: pr.head, idempotencyKey: idempotencyKey(plan.round, pr.head) };
 }
 
-/** The reads the stage makes of the pull request's reviews and their comments. */
-const spec = (key: ReadSpec["key"]): ReadSpec => READS.find((r) => r.key === key)!;
-export const REVIEWS_READ = spec("reviews");
-export const COMMENTS_READ = spec("reviewComments");
-
-/**
- * A review of this head that this run posted: authored by the login the credential authenticates as, in state COMMENTED, and carrying
- * this run's head marker for the round it posts (the body's second line). The marker alone proves nothing (the head sha is public),
- * so a review by anyone else is ignored, and a review with the other round's marker is not this post (design-pr-review-split §5.3).
- */
+/** A review of this head that this run posted for round `round`, carrying that round's head marker (design-pr-review-split §5.3). */
 export function findPosted(items: readonly unknown[], head: string, nonce: string, login: string, round: 1 | 2): { id: number; url: string | null } | undefined {
-  const marker = headMarker(round, head, nonce);
-  for (const r of items) {
-    if (!isObject(r) || typeof r.id !== "number" || r.commitId !== head || r.user !== login || r.state !== "COMMENTED") continue;
-    if (typeof r.body === "string" && r.body.split("\n")[1]?.trim() === marker) return { id: r.id, url: typeof r.url === "string" ? r.url : null };
-  }
-  return undefined;
+  return findPostedBy(items, head, login, headMarker(round, head, nonce));
 }
 
 /** The key the executor reconciles a post by (design-pr-review-split §5.3): `design-<head12>` for round 1's, `review-<head12>` for round 2's. */
 export const idempotencyKey = (round: 1 | 2, head: string): string => `${round === 1 ? "design" : "review"}-${head.slice(0, 12)}`;
-
-/** The ids of the comments of review `reviewId`, by the finding marker each ends with. */
-export function commentIds(items: readonly unknown[], reviewId: number): Map<string, number> {
-  const out = new Map<string, number>();
-  for (const c of items) {
-    if (!isObject(c) || c.reviewId !== reviewId || typeof c.id !== "number" || typeof c.body !== "string") continue;
-    const m = MARKER.exec(c.body.trimEnd()) ?? LEADING_MARKER.exec(c.body);
-    if (m !== null && !out.has(m[1]!)) out.set(m[1]!, c.id);
-  }
-  return out;
-}
-
-export interface Posted {
-  reviewId: number;
-  url: string | null;
-  /** How it was established: this attempt created it, the executor reconciled it, or the stage found it before posting. */
-  how: "created" | "reconciled" | "found";
-}
 
 /** What the ledger records of the published review: patched into `ledger.json` by `ledger-published`. */
 export interface LedgerPatch {
@@ -455,84 +391,21 @@ export function ledgerPatch(pr: Pick<PullRequest, "head"> & { base?: string | un
   };
 }
 
-export const MAX_CREATE_ATTEMPTS = 3;
-/** Whole reads of a posted review's comments before a missing inline id goes to the supervisor. */
-export const MAX_COMMENT_READS = 3;
-
-/** Who the credential is and this run's nonce, from the viewer read the stage made first (`get-viewer`; its operation id is the nonce). */
-export function viewerOf(evidence: readonly EvidenceRecord[]): { login: string; nonce: string } | undefined {
-  for (let i = evidence.length - 1; i >= 0; i -= 1) {
-    const e = evidence[i]!;
-    const p = producer(e);
-    if (p?.stageId !== PUBLISH_STAGE || p.executorId !== GET_VIEWER.id) continue;
-    const g = isObject(e.payload) && isObject(e.payload.github) ? e.payload.github : {};
-    const item = isObject(g.item) ? g.item : {};
-    if (typeof item.login === "string" && item.login !== "") return { login: item.login, nonce: p.operationId.replace(/[^A-Za-z0-9._:-]/g, "_") };
-  }
-  return undefined;
-}
-
 export type PublishFlow =
-  | { state: "viewer"; why: string }
-  | { state: "reviews"; cursor?: string; why: string }
-  | { state: "create"; why: string }
-  | { state: "comments"; reviewId: number; cursor?: string; why: string }
+  | Exclude<PostFlow, { state: "posted" }>
   | { state: "ledger"; posted: Posted; patch: LedgerPatch; /** The section write that records it. */ command: EnvironmentCommand; /** The commands that write the patch file, a part set, before the ledger command reads it. */ parts: EnvironmentCommand[]; run?: CommandRun }
-  | { state: "done"; posted: Posted; patch: LedgerPatch }
-  | { state: "supervise"; reason: string; refs: string[] };
+  | { state: "done"; posted: Posted; patch: LedgerPatch };
 
 const at = (evidence: readonly EvidenceRecord[], ref: string): number => evidence.findIndex((e) => e.ref === ref);
 
 /**
- * Where the stage stands, from the evidence alone. Reads and the write are the publish stage's own records. The latest read of
- * the reviews decides whether a review of this head exists; a create after it (an attempt that failed or whose outcome is not
- * known) means the reviews are read again before anything is posted, so an ambiguous attempt is reconciled, never repeated blind.
+ * Where the stage stands, from the evidence alone: the post (the kit's `postFlow`: the reviews read, the one create, the comments
+ * read back, each reconciled before anything is posted again), then the ledger write that records it.
  */
 export function publishFlow(evidence: readonly EvidenceRecord[], plan: ReviewPlan, pr: Pick<PullRequest, "owner" | "repo" | "number" | "head">): PublishFlow {
-  const mine = evidence.filter((e) => producer(e)?.stageId === PUBLISH_STAGE);
-  const viewer = viewerOf(evidence);
-  if (viewer === undefined) return { state: "viewer", why: "read who the credential authenticates as, so only a review this graph authored is taken for its own" };
-  const reviews = readResult(mine, REVIEWS_READ);
-  const creates = mine.filter((e) => producer(e)?.executorId === CREATE_PULL_REVIEW.id);
-  const lastCreate = creates.at(-1);
-  const readAt = reviews === undefined ? -1 : Math.max(...reviews.refs.map((r) => at(evidence, r)));
-  if (reviews === undefined || (reviews.complete === false && reviews.nextCursor !== null)) {
-    return { state: "reviews", ...(reviews?.nextCursor != null ? { cursor: reviews.nextCursor } : {}), why: reviews === undefined ? "read the pull request's reviews, to find one this graph already posted for this head" : "read the next page of the pull request's reviews" };
-  }
-  if (!reviews.complete) return { state: "supervise", reason: "the pull request's reviews could not be read whole, so a review already posted for this head cannot be ruled out", refs: reviews.refs };
-  let posted: Posted | undefined;
-  let postedAt = readAt;
-  if (lastCreate !== undefined && at(evidence, lastCreate.ref) > readAt) {
-    const g = isObject(lastCreate.payload) && isObject(lastCreate.payload.github) ? lastCreate.payload.github : {};
-    const review = isObject(g.review) ? g.review : undefined;
-    if ((g.outcome === "created" || g.outcome === "reconciled") && review !== undefined && typeof review.id === "number") {
-      posted = { reviewId: review.id, url: typeof review.url === "string" ? review.url : null, how: g.outcome };
-      postedAt = at(evidence, lastCreate.ref);
-    } else {
-      return { state: "reviews", why: "the attempt to post the review did not complete: read the reviews again, so a review that reached GitHub is found and not posted twice" };
-    }
-  } else {
-    const found = findPosted(reviews.items, pr.head, viewer.nonce, viewer.login, plan.round);
-    if (found !== undefined) posted = { reviewId: found.id, url: found.url, how: "found" };
-  }
-  if (posted === undefined) {
-    if (creates.length >= MAX_CREATE_ATTEMPTS) return { state: "supervise", reason: `${creates.length} attempts to post the review did not produce a review of this head`, refs: creates.map((e) => e.ref) };
-    return { state: "create", why: `post the review (${plan.firstLine}) as one COMMENT review at head ${pr.head.slice(0, 12)}` };
-  }
-  const later = mine.filter((e) => at(evidence, e.ref) > postedAt);
-  const comments = readResult(later, COMMENTS_READ);
-  if (comments === undefined || (comments.complete === false && comments.nextCursor !== null)) {
-    return { state: "comments", reviewId: posted.reviewId, ...(comments?.nextCursor != null ? { cursor: comments.nextCursor } : {}), why: comments === undefined ? "read the review's comments back, to record their ids" : "read the next page of the review's comments" };
-  }
-  if (!comments.complete) return { state: "supervise", reason: "the review's comments could not be read whole, so their ids cannot be recorded", refs: comments.refs };
-  const ids = commentIds(comments.items, posted.reviewId);
-  const missing = plan.items.filter((x) => x.inline && !ids.has(x.id)).map((x) => x.id);
-  if (missing.length > 0) {
-    // A read can lag the post: read again (a whole read each time), and escalate when the ids are still missing, never accept a null id.
-    const reads = later.filter((e) => producer(e)?.executorId === COMMENTS_READ.pin.id && isObject(e.payload) && isObject(e.payload.github) && (!isObject(e.payload.github.page) || [undefined, "1", "start"].includes(e.payload.github.page.startCursor as string | undefined))).length;
-    if (reads >= MAX_COMMENT_READS) return { state: "supervise", reason: `${reads} reads of the review's comments did not show the inline comment${missing.length === 1 ? "" : "s"} of ${missing.join(", ")}, so their ids cannot be recorded`, refs: comments.refs };
-    return { state: "comments", reviewId: posted.reviewId, why: `the read of the review's comments lacks ${missing.join(", ")}: read them again` };
-  }
+  const post = postFlow(evidence, { marker: (head, nonce) => headMarker(plan.round, head, nonce), firstLine: plan.firstLine, inline: plan.items.filter((x) => x.inline).map((x) => x.id) }, pr);
+  if (post.state !== "posted") return post;
+  const { posted, ids, readsAt } = post;
   const patch = ledgerPatch({ head: pr.head, base: pinnedBase(evidence) }, plan, posted, ids);
   const baselines = publishBaselines(evidence, pr);
   if ("problem" in baselines) return { state: "supervise", reason: `the published review cannot be recorded in the ledger: ${baselines.problem}`, refs: [] };
@@ -541,7 +414,6 @@ export function publishFlow(evidence: readonly EvidenceRecord[], plan: ReviewPla
   const json = JSON.stringify(patch);
   const written = readParts(evidence, PART_BASE.publishPatch, PUBLISH_PATCH_FILE);
   const wroteAt = written.state === "read" ? written.at : -1;
-  const readsAt = Math.max(...comments.refs.map((r) => at(evidence, r)));
   const current = written.state === "read" && written.value === json && wroteAt > readsAt;
   // The write recorded is the one recomputed: the same patch file, sections and baselines (`ledger-cas`, design-pr-review-split §5.2).
   const same = run !== undefined && run.command.argv.length === command.argv.length && run.command.argv.every((a, k) => a === command.argv[k]);
@@ -600,41 +472,6 @@ else if(!mine.some((it)=>it.id===pr.id)){note(f,"open",{reason:pr.reason,carried
 for(const c of p.closed||[]){if(findings.some((x)=>x.id===c.id))continue;findings.push(Object.assign({head:p.head,id:c.id,origin:"round2",path:c.path,line:c.line,endLine:c.endLine,side:c.side,text:c.text,state:"withdrawn",history:[{head:p.head,status:"withdrawn"}]},c.meta||{}))}
 v.heads=heads;v.findings=findings;const out=JSON.stringify(v);process.stdout.write(out===before?"SAME":out)})`;
 
-/**
- * The write of the published review (design-pr-review-split §5.2): each section the post records (`$secs`) is merged from the ref's
- * current value; a section the merge leaves unchanged already holds this review and is skipped, any other must be exactly its
- * baseline (`$bd`, `$br`), and the sections it does not write are carried from the current value. A section the ledger does not
- * have yet starts empty, with the section's `ledger.md` (`$rmd`). A lost `update-ref` race starts again, at most three times.
- */
-const PUBLISHED_WRITE =
-  String.raw`set -eu; ref="$1"; msg="$2"; patch="$3"; node="$4"; secs="$5"; bd="$6"; br="$7"; md="$8"; mr="$9"; shift 9; rmd="$1"
-` +
-  SECTION_PRELUDE +
-  String.raw`while :; do
-cur=$(g rev-parse --verify "$ref^{commit}")
-if ! v2 "$cur"; then echo "ledger moved: $cur is not a ${LEDGER_V2} ledger" >&2; exit ${LEDGER_MOVED}; fi
-root=$(g ls-tree "$cur"); changed=""
-for s in $secs; do
-if [ "$s" = design ]; then want="$bd"; code="$md"; else want="$br"; code="$mr"; fi
-have=$(g rev-parse --verify --quiet "$cur:$s" || echo absent)
-out=$({ if [ "$have" = absent ]; then printf '{}'; else g cat-file blob "$cur:$s/ledger.json"; fi; } | "$node" -e "$code" "$patch")
-if [ "$out" = SAME ]; then continue; fi
-if [ "$have" != "$want" ]; then echo "ledger moved: its $s section is $have, not the baseline $want" >&2; exit ${LEDGER_MOVED}; fi
-a=$(printf '%s' "$out" | g hash-object -w --stdin)
-if [ "$have" = absent ]; then b=$(printf '%s' "$rmd" | g hash-object -w --stdin); sub=$(printf '100644 blob %s\tledger.json\n100644 blob %s\tledger.md\n' "$a" "$b" | g mktree)
-else sub=$({ g ls-tree "$have" | grep -v "$tab"'ledger.json$' || true; printf '100644 blob %s\tledger.json\n' "$a"; } | g mktree); fi
-root=$({ printf '%s\n' "$root" | grep -v -e "$tab$s\$" -e '^$' || true; printf '040000 tree %s\t%s\n' "$sub" "$s"; })
-changed="$changed $s"
-done
-if [ -z "$changed" ]; then echo "already recorded"; exit 0; fi
-tree=$(printf '%s\n' "$root" | g mktree)
-new=$(g commit-tree "$tree" -p "$cur" -m "$msg")
-if g update-ref "$ref" "$new" "$cur" 2>/dev/null; then ` +
-  SECTION_RECORD +
-  String.raw`; exit 0; fi
-try=$((try + 1)); if [ "$try" -gt 3 ]; then echo "ledger moved: the compare-and-swap lost $try races" >&2; exit ${LEDGER_MOVED}; fi
-done`;
-
 /** The sections a post records: round 1's is the design review's; round 2's records round 1's outcome on the head too. */
 export const publishedSections = (round: 1 | 2): Section[] => (round === 1 ? ["design"] : ["design", "review"]);
 
@@ -650,22 +487,6 @@ export function ledgerPublishedCommand(pr: Pick<PullRequest, "owner" | "repo" | 
     id: COMMAND.ledgerPublished,
     argv: ["sh", "-c", PUBLISHED_WRITE, COMMAND.ledgerPublished, ledgerRef(pr.owner, pr.repo, pr.number), `pr-review ${pr.owner}/${pr.repo}#${pr.number} at ${pr.head.slice(0, 12)}: published review ${patch.reviewId}`, PUBLISH_PATCH_FILE, node, publishedSections(patch.round).join(" "), baselines.design, baselines.review, MERGE_DESIGN, MERGE_REVIEW, reviewMarkdown(pr)],
   };
-}
-
-/**
- * The baselines the published review's write swaps from (design-pr-review-split §5.2): the design section this run's latest accepted
- * Answers write produced, as its record names it, and the review section as the latest ledger read saw it (a v1 ledger's migrated one).
- */
-export function publishBaselines(evidence: readonly EvidenceRecord[], pr: Pick<PullRequest, "owner" | "repo" | "number" | "head">): Record<Section, string> | { problem: string } {
-  const lw = commandRuns(evidence, COMMAND.ledgerWrite).filter((r) => succeeded(r.command)).at(-1);
-  if (lw === undefined) return { problem: "the ledger has not been advanced with this head's report and Q&A" };
-  const design = parseSectionRecord(reportText(lw).text)?.sections.design;
-  if (design === undefined) return { problem: "the ledger write's record does not name the design section it wrote" };
-  const read = ledgerRead(evidence);
-  if (read === undefined) return { problem: "the ledger value Fetch read is not in the evidence" };
-  const review = readBaselines(read.ledger, priorState(evidence, oldValue(read.ledger)), pr)?.review;
-  if (review === undefined) return { problem: "the prior ledger's sections have not been read" };
-  return { design, review };
 }
 
 // ---- what the stage posts, from the records ----

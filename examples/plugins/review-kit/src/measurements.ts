@@ -492,6 +492,8 @@ export function measurementState(
   const measured = withBase.records;
   const measuredFiles = m.files.filter((f) => !overflowed.includes(f.path));
   const excluded = [...m.excluded, ...overflowed.map((p) => ({ path: p, reason: `the static tool's output for ${p} did not fit one command report` }))];
+  // A static-only graph (the design review, design-pr-review-split §3.4) records complexity and nesting alone: no coverage, CRAP or mutation, and no not-run reason for them.
+  if (profile.metrics.staticOnly === true) return { state: "ready", records: measured, refs, excluded, coverage: { enabled: false, runs: [] } };
   const cov = coverageState({ evidence, records: measured, index, files: measuredFiles, profile, afterRef: diff.record.ref });
   switch (cov.state) {
     case "probe":
@@ -571,6 +573,7 @@ export function coverageNotes(facts: CoverageFacts): string[] {
 
 /** The Measurements part of `review.md` (design §6.8): facts only, built from the records. */
 export function renderMeasurements(state: MeasurementState, profile: Pick<Profile, "metrics">): string {
+  if (profile.metrics.staticOnly === true) return renderStaticMeasurements(state);
   const reasons = notRunReasons(profile);
   const lines = ["# Measurements", ""];
   if (state.state === "none") {
@@ -622,6 +625,46 @@ export function renderMeasurements(state: MeasurementState, profile: Pick<Profil
       `| ${cell(`\`${r.function}\` ${r.path}:${r.startLine}`)} | ${r.change} | ${over("complexity", LIMITS.complexity)} | ${over("nesting", LIMITS.nesting)} | ${cell(coverage)} | ${cell(crap)} | ${cell(mutation)} |`,
     );
   }
+  for (const e of state.excluded) lines.push("", `Not measured: ${e.path} (${e.reason}).`);
+  lines.push("");
+  return lines.join("\n");
+}
+
+/** What a static-only report says of the metrics it does not take (design-pr-review-split §3.4). */
+export const STATIC_ONLY_NOTE = "Coverage, CRAP and mutation are measured by the PR review (`pr-review`).";
+
+/** A metric's cell: `base → head` for a modified function, and whether an over-the-limit value was already there (design §6.8). */
+function originCell(r: MetricsRecord, metric: Metric, limit: number): string {
+  const o = originOf(r, metric);
+  const head = r[metric];
+  if (r.change === "added") return exceeds(metric, head) ? `${head} (over the limit of ${limit})` : String(head);
+  if (o.origin === "unknown") return `${head}${exceeds(metric, head) ? ` (over the limit of ${limit})` : ""} (base not measured: ${r.base !== undefined && "unavailable" in r.base ? r.base.unavailable : "not recorded"})`;
+  const arrow = `${o.base} → ${head}`;
+  if (o.origin === "within") return arrow;
+  if (o.origin === "introduced") return `${arrow} (over the limit of ${limit}: introduced by the pull request)`;
+  return `${arrow} (over the limit of ${limit} at the base${o.origin === "worse" ? "; made worse" : "; not raised"})`;
+}
+
+/** The Measurements of a static-only report: Function, Change, Complexity and Nesting, and the line that names who measures the rest. */
+function renderStaticMeasurements(state: MeasurementState): string {
+  const lines = ["# Measurements", ""];
+  if (state.state === "none") {
+    lines.push(`No function is measured: ${state.reason}.`, "");
+    return lines.join("\n");
+  }
+  if (state.state !== "ready") {
+    lines.push("Not measured: the static metrics did not complete.", "");
+    return lines.join("\n");
+  }
+  lines.push(
+    STATIC_ONLY_NOTE,
+    "Static metrics (gometrics, tsmetrics): parsed over the head tree, read-only, no network; none of the pull request's code ran for them. A modified function also shows its value at the base (`base → head`), measured by the same tool over the base file, so a value the base already had is not read as the pull request's.",
+    "",
+    `| Function | Change | Complexity (limit < ${LIMITS.complexity}) | Nesting (limit ≤ ${LIMITS.nesting}) |`,
+    "|---|---|---|---|",
+  );
+  if (state.records.length === 0) lines.push("| (no function added or modified) | | | |");
+  for (const r of state.records) lines.push(`| ${cell(`\`${r.function}\` ${r.path}:${r.startLine}`)} | ${r.change} | ${originCell(r, "complexity", LIMITS.complexity)} | ${originCell(r, "nesting", LIMITS.nesting)} |`);
   for (const e of state.excluded) lines.push("", `Not measured: ${e.path} (${e.reason}).`);
   lines.push("");
   return lines.join("\n");

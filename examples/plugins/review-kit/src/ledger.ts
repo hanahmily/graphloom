@@ -93,7 +93,7 @@ try=$((try + 1)); if [ "$try" -gt 3 ]; then echo "ledger moved: the compare-and-
 done`;
 
 /** What the ledger commit is for, as its message says. */
-export const ledgerMessage = (pr: PullRequest): string => `pr-review ${pr.owner}/${pr.repo}#${pr.number} at ${pr.head.slice(0, 12)}: report and Q&A`;
+export const ledgerMessage = (pr: PullRequest, graph = "pr-review"): string => `${graph} ${pr.owner}/${pr.repo}#${pr.number} at ${pr.head.slice(0, 12)}: report and Q&A`;
 
 /** What a write migrates: nothing (the prior ledger is absent or v2), or a v1 commit, with the review section its migration builds. */
 export type Migration = { from: "none" } | { from: "v1"; review: { json: string; markdown: string } | undefined };
@@ -108,10 +108,10 @@ const AT = { id: 3, ref: 4, old: 5, msg: 6, section: 7, baseline: 8, top: 9, mig
  * Advances the design section by compare-and-swap with the ledger files in the argv, or undefined when they do not fit one command.
  * `old` is the value the latest ledger read saw (`absent` when it read none), `baseline` the section's baseline (§5.2).
  */
-export function ledgerWriteCommand(pr: PullRequest, old: string, baseline: string, json: string, markdown: string, migration: Migration = { from: "none" }): EnvironmentCommand | undefined {
+export function ledgerWriteCommand(pr: PullRequest, old: string, baseline: string, json: string, markdown: string, migration: Migration = { from: "none" }, graph = "pr-review"): EnvironmentCommand | undefined {
   const parts = writeChunks(json);
   const md = writeChunks(markdown);
-  const argv = ["sh", "-c", WRITE, COMMAND.ledgerWrite, ledgerRef(pr.owner, pr.repo, pr.number), old, ledgerMessage(pr), "design", baseline, topLedgerJson(pr), ...migArgs(migration), String(parts.length), ...parts, ...md];
+  const argv = ["sh", "-c", WRITE, COMMAND.ledgerWrite, ledgerRef(pr.owner, pr.repo, pr.number), old, ledgerMessage(pr, graph), "design", baseline, topLedgerJson(pr), ...migArgs(migration), String(parts.length), ...parts, ...md];
   if (argv.length > 64 || Buffer.byteLength(JSON.stringify(argv), "utf8") > MAX_COMMAND_BYTES) return undefined;
   return { id: COMMAND.ledgerWrite, argv };
 }
@@ -120,12 +120,12 @@ export function ledgerWriteCommand(pr: PullRequest, old: string, baseline: strin
  * What advancing the design section takes: the commands that first write the files the write reads (a migrated review section,
  * and the section's own files when they do not fit one command; a part set each, design §6.6), then the compare-and-swap itself.
  */
-export function ledgerWriteCommands(pr: PullRequest, old: string, baseline: string, json: string, markdown: string, migration: Migration = { from: "none" }): { parts: EnvironmentCommand[]; write: EnvironmentCommand } {
+export function ledgerWriteCommands(pr: PullRequest, old: string, baseline: string, json: string, markdown: string, migration: Migration = { from: "none" }, graph = "pr-review"): { parts: EnvironmentCommand[]; write: EnvironmentCommand } {
   const migrated = migration.from === "v1" && migration.review !== undefined ? [...partCommands(PART_BASE.ledgerReviewJson, LEDGER_REVIEW_JSON_FILE, migration.review.json), ...partCommands(PART_BASE.ledgerReviewMd, LEDGER_REVIEW_MD_FILE, migration.review.markdown)] : [];
-  const single = ledgerWriteCommand(pr, old, baseline, json, markdown, migration);
+  const single = ledgerWriteCommand(pr, old, baseline, json, markdown, migration, graph);
   if (single !== undefined) return { parts: migrated, write: single };
   const parts = [...migrated, ...partCommands(PART_BASE.ledgerJson, LEDGER_JSON_FILE, json), ...partCommands(PART_BASE.ledgerMd, LEDGER_MD_FILE, markdown)];
-  const argv = ["sh", "-c", WRITE, COMMAND.ledgerWrite, ledgerRef(pr.owner, pr.repo, pr.number), old, ledgerMessage(pr), "design", baseline, topLedgerJson(pr), ...migArgs(migration), "files", LEDGER_JSON_FILE, LEDGER_MD_FILE, sha256(json), sha256(markdown)];
+  const argv = ["sh", "-c", WRITE, COMMAND.ledgerWrite, ledgerRef(pr.owner, pr.repo, pr.number), old, ledgerMessage(pr, graph), "design", baseline, topLedgerJson(pr), ...migArgs(migration), "files", LEDGER_JSON_FILE, LEDGER_MD_FILE, sha256(json), sha256(markdown)];
   return { parts, write: { id: COMMAND.ledgerWrite, argv } };
 }
 
@@ -343,4 +343,57 @@ export function migrationOf(prior: PriorLedger, pull: Pull): Migration {
   if (prior.state !== "read" || prior.layout !== "v1") return { from: "none" };
   const review = prior.value.review;
   return { from: "v1", review: review === undefined ? undefined : { json: JSON.stringify(review), markdown: reviewMarkdown(pull) } };
+}
+
+// ---- the published review (design-pr-review-split §5.2) ----
+
+/**
+ * The write of the published review (design-pr-review-split §5.2): each section the post records (`$secs`) is merged from the ref's
+ * current value; a section the merge leaves unchanged already holds this review and is skipped, any other must be exactly its
+ * baseline (`$bd`, `$br`), and the sections it does not write are carried from the current value. A section the ledger does not
+ * have yet starts empty, with the section's `ledger.md` (`$rmd`). A lost `update-ref` race starts again, at most three times.
+ */
+export const PUBLISHED_WRITE =
+  String.raw`set -eu; ref="$1"; msg="$2"; patch="$3"; node="$4"; secs="$5"; bd="$6"; br="$7"; md="$8"; mr="$9"; shift 9; rmd="$1"
+` +
+  SECTION_PRELUDE +
+  String.raw`while :; do
+cur=$(g rev-parse --verify "$ref^{commit}")
+if ! v2 "$cur"; then echo "ledger moved: $cur is not a ${LEDGER_V2} ledger" >&2; exit ${LEDGER_MOVED}; fi
+root=$(g ls-tree "$cur"); changed=""
+for s in $secs; do
+if [ "$s" = design ]; then want="$bd"; code="$md"; else want="$br"; code="$mr"; fi
+have=$(g rev-parse --verify --quiet "$cur:$s" || echo absent)
+out=$({ if [ "$have" = absent ]; then printf '{}'; else g cat-file blob "$cur:$s/ledger.json"; fi; } | "$node" -e "$code" "$patch")
+if [ "$out" = SAME ]; then continue; fi
+if [ "$have" != "$want" ]; then echo "ledger moved: its $s section is $have, not the baseline $want" >&2; exit ${LEDGER_MOVED}; fi
+a=$(printf '%s' "$out" | g hash-object -w --stdin)
+if [ "$have" = absent ]; then b=$(printf '%s' "$rmd" | g hash-object -w --stdin); sub=$(printf '100644 blob %s\tledger.json\n100644 blob %s\tledger.md\n' "$a" "$b" | g mktree)
+else sub=$({ g ls-tree "$have" | grep -v "$tab"'ledger.json$' || true; printf '100644 blob %s\tledger.json\n' "$a"; } | g mktree); fi
+root=$({ printf '%s\n' "$root" | grep -v -e "$tab$s\$" -e '^$' || true; printf '040000 tree %s\t%s\n' "$sub" "$s"; })
+changed="$changed $s"
+done
+if [ -z "$changed" ]; then echo "already recorded"; exit 0; fi
+tree=$(printf '%s\n' "$root" | g mktree)
+new=$(g commit-tree "$tree" -p "$cur" -m "$msg")
+if g update-ref "$ref" "$new" "$cur" 2>/dev/null; then ` +
+  SECTION_RECORD +
+  String.raw`; exit 0; fi
+try=$((try + 1)); if [ "$try" -gt 3 ]; then echo "ledger moved: the compare-and-swap lost $try races" >&2; exit ${LEDGER_MOVED}; fi
+done`;
+
+/**
+ * The baselines the published review's write swaps from (design-pr-review-split §5.2): the design section this run's latest accepted
+ * Answers write produced, as its record names it, and the review section as the latest ledger read saw it (a v1 ledger's migrated one).
+ */
+export function publishBaselines(evidence: readonly EvidenceRecord[], pr: Pull): Record<Section, string> | { problem: string } {
+  const lw = commandRuns(evidence, COMMAND.ledgerWrite).filter((r) => succeeded(r.command)).at(-1);
+  if (lw === undefined) return { problem: "the ledger has not been advanced with this head's report and Q&A" };
+  const design = parseSectionRecord(reportText(lw).text)?.sections.design;
+  if (design === undefined) return { problem: "the ledger write's record does not name the design section it wrote" };
+  const read = ledgerRead(evidence);
+  if (read === undefined) return { problem: "the ledger value Fetch read is not in the evidence" };
+  const review = readBaselines(read.ledger, priorState(evidence, oldValue(read.ledger)), pr)?.review;
+  if (review === undefined) return { problem: "the prior ledger's sections have not been read" };
+  return { design, review };
 }

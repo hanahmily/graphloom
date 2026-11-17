@@ -68,6 +68,12 @@ export interface GroundworkOptions {
   files: readonly PullFile[];
   profile: Pick<Profile, "symbols" | "metrics" | "questions" | "limits">;
   base: string;
+  /**
+   * Whether the per-symbol groundwork runs (default true): the whole-repository searches, the candidate bodies, the similarity of
+   * new symbols and the test map. The design review asks nothing per symbol (design-pr-review-split §3.2), so it reads the symbols,
+   * the dependency inventory and the base export only.
+   */
+  perSymbol?: boolean;
   /** Whether a failed command may be run again (the operator resumed since). */
   retryable?: (run: CommandRun) => boolean;
 }
@@ -159,7 +165,8 @@ export function groundworkState(o: GroundworkOptions): GroundworkState {
   const deps = declaredDependencies(manifests.files);
   const population = tokenPopulation(symbols.filter((s) => s.change === "new").map((s) => s.body));
   const testSpecs = [...new Set(packs.flatMap((p) => p.testFiles))];
-  const searchCmds = symbols.flatMap((s) => {
+  const perSymbol = o.perSymbol !== false;
+  const searchCmds = !perSymbol ? [] : symbols.flatMap((s) => {
     const plan = planFor(s, population);
     if (s.change === "modified" && testSpecs.length === 0) return [];
     return [searchCommand(s.id, plan, o.base, o.profile.questions.maxCandidates, o.profile.questions.excludeRoots, packOf(packs, s.path)?.testFiles ?? testSpecs)];
@@ -169,14 +176,14 @@ export function groundworkState(o: GroundworkOptions): GroundworkState {
   if (s2 !== undefined) return s2;
   for (const c of phase2) refs.push(runOf(o.evidence, c.id)!.record.ref);
   const searches = new Map<string, SearchSection[]>();
-  for (const s of symbols) {
+  for (const s of perSymbol ? symbols : []) {
     const out = textOf(o.evidence, `${COMMAND.search}-${s.id}`);
     if (out.truncated) notes.push(`the searches for ${s.qualified} did not fit the report whole`);
     searches.set(s.id, parseSearch(out.text));
   }
 
   // Phase 3: the bodies of the candidate definitions the searches found.
-  const wanted = candidatePlan(symbols, searches, packs);
+  const wanted = perSymbol ? candidatePlan(symbols, searches, packs) : [];
   const phase3 = wanted.map((c, i) => candidateCommand(i + 1, o.base, c.path, c.line));
   const s3 = step(phase3, "read the candidate definitions the searches found");
   if (s3 !== undefined) return s3;
@@ -193,7 +200,7 @@ export function groundworkState(o: GroundworkOptions): GroundworkState {
       candidates.push({ symbol: owner.symbol, path: w.path, line: w.line, ...(body !== undefined ? { body } : {}), similarity: body !== undefined ? similarity(sym.body, body) : 0, via: owner.via });
     }
   }
-  const newOnes = symbols.filter((s) => s.change === "new");
+  const newOnes = perSymbol ? symbols.filter((s) => s.change === "new") : [];
   const sets = new Map(newOnes.map((s) => [s.id, shingles(tokensOf(s.body))] as const));
   const prSimilar: Groundwork["prSimilar"] = [];
   for (let i = 0; i < newOnes.length; i += 1) {
@@ -215,7 +222,7 @@ export function groundworkState(o: GroundworkOptions): GroundworkState {
     manifestCuts: manifests.cuts,
   });
   const testCtx = testMapContext(symbols, o.files, packs);
-  const testMap = new Map(symbols.map((s) => [s.id, mapTests(s, symbols, o.files, packs, testCtx)] as const));
+  const testMap = new Map(perSymbol ? symbols.map((s) => [s.id, mapTests(s, symbols, o.files, packs, testCtx)] as const) : []);
   const baseTree = parseBaseExport(textOf(o.evidence, COMMAND.baseExport).text);
   if (baseTree === undefined || baseTree.base !== o.base) notes.push("the base commit's files could not be exported to a directory, so base facts come from `git show` and `git grep` over the base commit only");
   return { state: "ready", groundwork: { base: o.base, symbols, searches, candidates, prSimilar, inventory, testMap, notes, ...(baseTree !== undefined && baseTree.base === o.base ? { baseTree } : {}) }, refs };

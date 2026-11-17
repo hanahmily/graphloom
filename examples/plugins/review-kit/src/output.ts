@@ -5,7 +5,7 @@ import { checkLines, featureLines, whatsNewLines } from "./briefing.js";
 import { buildCards } from "./cards.js";
 import type { Fact } from "./detectors.js";
 import type { DiagramsDoc } from "./diagrams.js";
-import { coverageNotes, renderMeasurements, notRunReasons, type MeasurementState } from "./measurements.js";
+import { coverageNotes, renderMeasurements, notRunReasons, STATIC_ONLY_NOTE, type MeasurementState } from "./measurements.js";
 import { DIVE_COLUMNS, DIVE_COMMAND, DIVE_HEADING, DIVE_LINE, DIVE_TEXT, diveRow } from "./dive.js";
 import type { LargeInfo } from "./large.js";
 import { describeReasons, type ReviewMode } from "./mode.js";
@@ -62,9 +62,12 @@ export function reportJson(i: OutputInput): string {
     removedParts: i.final.removedParts,
     ...(i.diagrams !== undefined && (Object.keys(i.diagrams.features).length > 0 || Object.keys(i.diagrams.states).length > 0) ? { diagrams: i.diagrams } : {}),
     measurements:
-      m.state === "ready"
-        ? { tools: m.coverage.runs.some((r) => r.ran) ? "static+coverage" : "static", coverage: coverageNotes(m.coverage), runs: m.coverage.runs, mutation: reasons.mutation, records: m.records }
-        : { tools: "static", coverage: [reasons.coverage], runs: [], mutation: reasons.mutation, records: [], none: m.state === "none" ? m.reason : "not measured" },
+      i.profile.metrics.staticOnly === true
+        ? // A static-only report (design-pr-review-split §3.4): complexity and nesting, and no coverage or mutation record.
+          { tools: "static", coverage: [STATIC_ONLY_NOTE], runs: [], mutation: STATIC_ONLY_NOTE, records: m.state === "ready" ? m.records : [], ...(m.state === "ready" ? {} : { none: m.state === "none" ? m.reason : "not measured" }) }
+        : m.state === "ready"
+          ? { tools: m.coverage.runs.some((r) => r.ran) ? "static+coverage" : "static", coverage: coverageNotes(m.coverage), runs: m.coverage.runs, mutation: reasons.mutation, records: m.records }
+          : { tools: "static", coverage: [reasons.coverage], runs: [], mutation: reasons.mutation, records: [], none: m.state === "none" ? m.reason : "not measured" },
   });
 }
 
@@ -98,10 +101,10 @@ function areasMarkdown(final: FinalReport, large: LargeInfo | undefined): string
 }
 
 /** The Hotspots part of the briefing: the top five functions by CRAP, then complexity. */
-function hotspotsMarkdown(m: MeasurementState): string[] {
+function hotspotsMarkdown(m: MeasurementState, staticOnly = false): string[] {
   if (m.state === "none") return ["## Hotspots", `- No function is measured: ${m.reason}.`, ""];
   if (m.state !== "ready") return ["## Hotspots", "- Not measured: the static metrics did not complete.", ""];
-  const top = hotspots(m.records);
+  const top = hotspots(m.records, undefined, staticOnly);
   return ["## Hotspots", ...(top.length === 0 ? ["- No production function added or modified."] : top.map((h, n) => `${n + 1}. ${hotspotText(h)} — ${h.path}:${h.startLine}`)), ""];
 }
 
@@ -147,7 +150,7 @@ export function reviewMarkdown(i: OutputInput): string {
     "",
     ...featureLines(b),
     ...checkLines(b),
-    ...hotspotsMarkdown(i.measurements),
+    ...hotspotsMarkdown(i.measurements, i.profile.metrics.staticOnly === true),
     ...areasMarkdown(i.final, i.large),
     "## Open questions",
     OPEN_PENDING,

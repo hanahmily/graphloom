@@ -1,0 +1,29 @@
+{
+  "source": "github.com/fzipp/gocyclo/cmd/gocyclo@latest, run once over testdata/corpus; values include the function literals nested in each function",
+  "files": {
+    "basic.go": {
+      "Empty": 1,
+      "Straight": 1,
+      "Branches": 4,
+      "Loops": 6,
+      "Switchy": 5,
+      "TypeSwitch": 4,
+      "Selecty": 4,
+      "Logic": 7,
+      "(*Store).Get": 4,
+      "Store.Limit": 1,
+      "(*Pair[...]).Swap": 2,
+      "Map[...]": 2,
+      "Deep": 6,
+      "Words": 4,
+      "initOnce": 3
+    },
+    "closures.go": {
+      "glob.func1": 2,
+      "Sorted": 2,
+      "Nested": 4,
+      "TwoLiterals": 3,
+      "WithDefer": 3
+    }
+  }
+}

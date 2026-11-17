@@ -20,6 +20,7 @@ const bundles = [
   "examples/plugins/release",
   "examples/plugins/issue-fix",
   "examples/plugins/pr-review",
+  "examples/plugins/pr-design-review",
   "executors/coding-agent",
   "executors/command",
   "executors/github",

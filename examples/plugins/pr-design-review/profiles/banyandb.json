@@ -1,0 +1,202 @@
+{
+  "name": "banyandb",
+  "description": "Design review (round 1) profile for incoming pull requests to apache/skywalking-banyandb; it carries pr-design-review's keys only (design-pr-review-split.md 7.2), and one profile holding pr-review's keys too is accepted. The report.sections routing globs follow the repository's layout as the design maps it (design-pr-review-graph.md 6.2) and are TO CONFIRM against the repository before a live run; a glob that matches nothing only means less routing, the generic detectors still run. questions.designDocs names the design and architecture pages (docs/concept and the 0.12.0 streaming and batch designs) that the necessity question N1 reads for what the system says about the behavior a change touches; it was checked against docs/ in apache/skywalking-banyandb at 450c73a3a, so refresh it when those pages move. The static metrics run under bwrap with no network; this graph never runs the Docker sandbox.",
+  "project": "apache/skywalking-banyandb",
+  "issues": {
+    "owner": "apache",
+    "repo": "skywalking"
+  },
+  "environment": {
+    "checks": [
+      {
+        "id": "go",
+        "argv": [
+          "sh",
+          "-c",
+          "want=$(sed -n \"s/^go //p\" go.mod); have=$(go env GOVERSION) || exit 127; [ \"$have\" = \"go$want\" ] || { echo \"$have found; go.mod needs go$want\" >&2; exit 1; }"
+        ]
+      },
+      {
+        "id": "git",
+        "argv": [
+          "sh",
+          "-c",
+          "v=$(git --version | sed -n \"s/^git version \\([0-9]*\\)\\.\\([0-9]*\\).*/\\1 \\2/p\"); set -- $v; [ \"${1:-0}\" -gt 2 ] || { [ \"${1:-0}\" -eq 2 ] && [ \"${2:-0}\" -ge 41 ]; } || { echo \"git >= 2.41 required; found $(git --version)\" >&2; exit 1; }"
+        ]
+      },
+      {
+        "id": "codex",
+        "argv": [
+          "sh",
+          "-c",
+          "c=\"${GRAPHLOOM_CODEX_BIN:-codex}\"; h=\"${GRAPHLOOM_CODEX_HOME:-${CODEX_HOME:-}}\"; [ -z \"$h\" ] || export CODEX_HOME=\"$h\"; \"$c\" --version >/dev/null 2>&1 || { echo \"Codex ($c) is not installed\" >&2; exit 127; }; \"$c\" login status >/dev/null 2>&1 || { echo \"Codex is not logged in${h:+ for $h}: run $c login\" >&2; exit 1; }"
+        ],
+        "timeoutMs": 120000
+      },
+      {
+        "id": "claude",
+        "argv": [
+          "sh",
+          "-c",
+          "c=\"${GRAPHLOOM_CLAUDE_BIN:-claude}\"; d=\"${GRAPHLOOM_CLAUDE_CONFIG_DIR:-${CLAUDE_CONFIG_DIR:-}}\"; [ -z \"$d\" ] || export CLAUDE_CONFIG_DIR=\"$d\"; \"$c\" --version >/dev/null 2>&1 || { echo \"Claude Code ($c) is not installed\" >&2; exit 127; }; \"$c\" auth status >/dev/null 2>&1 || { echo \"Claude Code is not logged in${d:+ for $d}: run $c auth login\" >&2; exit 1; }"
+        ],
+        "timeoutMs": 120000
+      }
+    ]
+  },
+  "report": {
+    "sections": [
+      {
+        "id": "schema",
+        "meaning": "Proto and API definitions, the schema catalog, storage and on-disk format.",
+        "routing": [
+          "api/proto/**",
+          "banyand/metadata/schema/**",
+          "pkg/encoding/**",
+          "banyand/internal/storage/**"
+        ]
+      },
+      {
+        "id": "background",
+        "meaning": "Schedulers, flushers, compaction and merge, retention.",
+        "routing": [
+          "**/*scheduler*.go",
+          "**/*flusher*.go",
+          "**/*merger*.go",
+          "**/*retention*.go",
+          "**/*compact*.go"
+        ]
+      },
+      {
+        "id": "config",
+        "meaning": "CLI flags (cobra/pflag), environment variables, config files.",
+        "detectors": [
+          {
+            "kind": "added-line",
+            "pattern": "Flags\\(\\)\\.\\w+(?:Var)?P?\\(\\s*(?:&[\\w.]+,\\s*)?\"([^\"]+)\"",
+            "files": [
+              "**/*.go"
+            ],
+            "label": "command-line flag (pflag)"
+          }
+        ]
+      },
+      {
+        "id": "interfaces",
+        "meaning": "gRPC services and messages, the HTTP gateway, BydbQL syntax.",
+        "routing": [
+          "api/proto/**/rpc.proto",
+          "pkg/bydbql/**"
+        ]
+      },
+      {
+        "id": "external",
+        "meaning": "Go modules, the UI's npm packages, Docker images.",
+        "routing": [
+          "go.mod",
+          "ui/package.json",
+          "**/Dockerfile",
+          "docker/**"
+        ]
+      }
+    ]
+  },
+  "symbols": {
+    "packs": [
+      {
+        "language": "go",
+        "globs": [
+          "**/*.go"
+        ],
+        "testFiles": [
+          "**/*_test.go"
+        ]
+      },
+      {
+        "language": "typescript",
+        "globs": [
+          "**/*.ts",
+          "**/*.tsx"
+        ],
+        "testFiles": [
+          "**/*.test.ts",
+          "**/*.spec.ts"
+        ]
+      }
+    ]
+  },
+  "questions": {
+    "excludeRoots": [
+      "**/*.pb.go",
+      "**/*.pb.validate.go"
+    ],
+    "designDocs": [
+      "docs/concept/tsdb.md",
+      "docs/concept/clustering.md",
+      "docs/concept/persistence-storage.md",
+      "docs/concept/storage-and-format.md",
+      "docs/concept/data-model.md",
+      "docs/concept/rotation.md",
+      "docs/design/README.md",
+      "docs/design/0.12.0/streaming-api/README.md",
+      "docs/design/0.12.0/measure-batch-v2/README.md"
+    ],
+    "principles": {
+      "path": "skills/design-principles/SKILL.md"
+    }
+  },
+  "metrics": {
+    "generated": [
+      "**/*.pb.go",
+      "**/*.pb.validate.go",
+      "**/*_mock.go",
+      "**/mock_*.go"
+    ]
+  },
+  "privateRepos": [],
+  "harnesses": {
+    "reporter": {
+      "harness": "claude-code",
+      "model": "opus",
+      "effort": "high"
+    },
+    "report-checker": {
+      "harness": "codex",
+      "effort": "medium"
+    },
+    "questioner": {
+      "harness": "codex",
+      "effort": "medium"
+    },
+    "answerer": {
+      "harness": "claude-code",
+      "model": "opus",
+      "effort": "high"
+    },
+    "batch-answerer": {
+      "harness": "claude-code",
+      "model": "sonnet",
+      "effort": "high"
+    },
+    "answer-checker": {
+      "harness": "codex",
+      "effort": "medium"
+    }
+  },
+  "supervisor": {
+    "harnesses": [
+      "pi",
+      "claude-code",
+      "codex"
+    ]
+  },
+  "limits": {
+    "maxFiles": 150,
+    "maxPatchBytes": 1048576,
+    "hardMaxFiles": 1000,
+    "hardMaxPatchBytes": 8388608,
+    "hardMaxNewSymbols": 2000,
+    "areaMaxBytes": 262144,
+    "areaMinBytes": 16384
+  }
+}

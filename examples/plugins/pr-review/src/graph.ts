@@ -27,7 +27,7 @@ import {
   type ValidationResult,
   type ValidatorBinding,
 } from "@graphloom/sdk";
-import { attemptEvidence, noteAttempt, readAttempts } from "./attempt.js";
+import { attemptEvidence, noteAttempt, readAttempts } from "./kit/attempt.js";
 import { analyze, reportFlowOf, type Analysis } from "./kit/analysis.js";
 import { checkoutCommand, GIT_ENV, GUARD_REFUSED, guardCommand, headTreeCommand, ledgerReadCommand, pinnedBase, reviewDirCommand } from "./kit/commands.js";
 import {
@@ -104,7 +104,7 @@ import { COMMENTS_READ, createInput, publishFlow, publishPlan, REVIEWS_READ } fr
 import { scopeLine, DRAFT_SCHEMA } from "./draft.js";
 import { prepareTask } from "./prepare.js";
 import { requestedPull, type PullRequest } from "./kit/request.js";
-import { secretFindings } from "./secrets.js";
+import { secretFindings } from "./kit/secrets.js";
 import { readInput, snapshotState, type PullFile, type ReadSpec } from "./kit/snapshot.js";
 import { CLAIM_CHECK_SCHEMA_NAME } from "./kit/claims.js";
 import { diagramsOf, outputsOf, validatorById, writtenHtmlProblems } from "./validators.js";

@@ -1,6 +1,8 @@
 # Splitting pr-review into `pr-design-review` and `pr-review`
 
-Status: proposed, 2026-11-17. Not implemented. It changes the
+Status: proposed, 2026-11-17; §5 (ledger v2) is implemented in pr-review 0.27.0, the kit
+in 0.27.1, and §3 in `pr-design-review` 0.1.0 ([§11](#11-implementation-plan) items 1 to 4);
+`pr-review` 1.0 (§4) is not. It changes the
 [PR-review graph](design-pr-review-graph.md) as of pr-review 0.26.5; that
 document keeps describing 0.26.x until the implementation pull requests of
 [§11](#11-implementation-plan) rewrite it. Each section below says what changes

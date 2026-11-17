@@ -8,7 +8,7 @@
  * from the ledger, at most 1,200 characters.
  */
 import { ASPECTS, DRAFT_ORDER, type Aspect } from "./kit/aspects.js";
-import { citationLinks, composeParts, proposalText, type GithubPin, type ProposalLike } from "./answertext.js";
+import { citationLinks, composeParts, proposalText, type GithubPin, type ProposalLike } from "./kit/answertext.js";
 import { clip } from "./kit/escape.js";
 import { proofOf, type Proof } from "./proof.js";
 import { findingsOf, keptSuggestion, MAX_SWEEP_PASSES, SEVERITIES, type AspectRecord, type Finding, type Severity } from "./review.js";

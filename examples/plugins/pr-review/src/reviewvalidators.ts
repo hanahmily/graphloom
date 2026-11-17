@@ -23,7 +23,7 @@ import { draftWrites, recordedAspect, recordedRound1, recordedRules, recordedSco
 import { round1Json } from "./round1.js";
 import { publishFlow, publishPlan } from "./publish.js";
 import { aspectOfItem, registryFromEvidence } from "./prior.js";
-import { secretFindings } from "./secrets.js";
+import { secretFindings } from "./kit/secrets.js";
 
 const passed = (reason: string): ValidationResult => ({ status: "passed", reason });
 const failed = (reason: string): ValidationResult => ({ status: "failed", reason });

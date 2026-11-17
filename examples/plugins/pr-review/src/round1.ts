@@ -11,7 +11,7 @@
  */
 import { isTestPath } from "./answers.js";
 import { clip } from "./kit/escape.js";
-import { citationLinks, composeParts, fitParts, proposalText, type GithubPin, type ItemParts, type ProposalLike } from "./answertext.js";
+import { citationLinks, composeParts, fitParts, proposalText, type GithubPin, type ItemParts, type ProposalLike } from "./kit/answertext.js";
 import { anchored, scrub, type ItemCites } from "./draft.js";
 import type { FullPack } from "./kit/packs.js";
 import { effectiveConclusion, brokenNote, parseNecessityRecord, NECESSITY_ID, ROUNDS_SKIP_REASON } from "./necessity.js";

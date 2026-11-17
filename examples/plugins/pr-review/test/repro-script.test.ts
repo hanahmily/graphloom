@@ -253,7 +253,7 @@ describe.skipIf(!hasGo)("repro.sh with Go and the profile's build tags: a packag
 });
 
 describe.skipIf(!hasVitest)("repro.sh with TypeScript: a scratch file with the repository's config and a resolveId hook", () => {
-  const dir = "examples/plugins/pr-review/src";
+  const dir = "examples/plugins/pr-review/src/kit";
   const ts = (name: string, expectation: string): Repro => ({ dir, name, expect: "assertion", oracle: "secrets.ts's documented contract", text: `import { it, expect } from "vitest";\nimport { secretFindings } from "./secrets.js";\n\nit("${name}", () => {\n  ${expectation}\n});\n` });
 
   it("resolves the scratch file's relative imports as if it lived next to the module, and reports a failing assertion twice", () => {
