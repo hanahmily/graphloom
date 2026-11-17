@@ -4,7 +4,7 @@
 import { checkAssignmentFidelity, type EvidenceRecord, type JobSpec } from "@graphloom/sdk";
 import { describe, expect, it } from "vitest";
 import { ledgerReadCommand } from "../src/commands.js";
-import { priorChunkText } from "../src/ledger.js";
+import { priorChunkText, writtenLedger } from "../src/ledger.js";
 import { GIT_ENV } from "../src/commands.js";
 import { advancePullRequest } from "../src/graph.js";
 import { REHEARSAL_MERGE_BASE, rehearsal } from "../src/rehearsal.js";
@@ -411,9 +411,13 @@ describe("the ledger (design 9.1)", () => {
     const argv = write();
     expect(argv[4]).toBe("refs/graphloom/pr-review/apache/skywalking-banyandb/7/ledger");
     expect(argv[5]).toBe("absent");
-    const json = JSON.parse(argv.slice(8, 8 + Number(argv[7])).join("")) as { schema: string; heads: Array<{ sha: string; reported: boolean; reviewed: boolean }>; qa: Array<{ id: string; status: string }> };
-    expect(json.schema).toBe("graphloom-pr-ledger-v1");
-    expect(json.heads).toEqual([expect.objectContaining({ sha: "0123456789abcdef0123456789abcdef01234567", reported: true, reviewed: false })]);
+    // The design section, from the absent baseline, creating the v2 ledger with no migration (design-pr-review-split §5.2).
+    const w = writtenLedger(argv)!;
+    expect(w).toMatchObject({ old: "absent", section: "design", baseline: "absent", migration: { mode: "-" } });
+    expect(JSON.parse(w.top)).toEqual({ schema: "graphloom-pr-ledger-v2", pull: { owner: "apache", repo: "skywalking-banyandb", number: 7 }, sections: ["design", "review"] });
+    const json = JSON.parse(w.json) as { schema: string; heads: Array<Record<string, unknown>>; qa: Array<{ id: string; status: string }> };
+    expect(json.schema).toBe("pr-design-review-ledger-v1");
+    expect(json.heads).toEqual([{ sha: "0123456789abcdef0123456789abcdef01234567", base: expect.any(String), files: expect.any(Number), commits: expect.any(Number), facts: expect.any(Number) }]);
     expect(json.qa.map((q) => q.id)).toEqual(qaOf(sim).questions.map((q) => q.id));
   });
 
@@ -429,7 +433,10 @@ describe("the ledger (design 9.1)", () => {
     const job = s2.jobs.find((j) => j.instruction.startsWith("Advance the pull"))!;
     const argv = (job.input as { commands: Array<{ argv: string[] }> }).commands[0]!.argv;
     expect(argv[5]).toBe(prior);
-    const json = JSON.parse(argv.slice(8, 8 + Number(argv[7])).join("")) as { heads: Array<{ sha: string }> };
+    // A v1 prior is migrated by this write: its heads go to the design section, and with no reviewed head and no F<n> there is no review section.
+    const w = writtenLedger(argv)!;
+    expect(w.migration).toEqual({ mode: "v1", json: "-", markdown: "-" });
+    const json = JSON.parse(w.json) as { heads: Array<{ sha: string }> };
     expect(json.heads.map((h) => h.sha)).toEqual(["e".repeat(40), "0123456789abcdef0123456789abcdef01234567"]);
   });
 
@@ -445,7 +452,7 @@ describe("the ledger (design 9.1)", () => {
     const cases: Array<[{ exitCode: number; stdout?: string; stderr?: string }, RegExp]> = [
       [{ exitCode: 128, stderr: "fatal: path is not in the commit" }, /exited 128/],
       [{ exitCode: 0, stdout: priorChunkText("not json", 0) }, /it is not JSON/],
-      [{ exitCode: 0, stdout: priorChunkText(JSON.stringify({ heads: [] }), 0) }, /not a graphloom-pr-ledger-v1 document/],
+      [{ exitCode: 0, stdout: priorChunkText(JSON.stringify({ heads: [] }), 0) }, /not a graphloom-pr-ledger-v1 or graphloom-pr-ledger-v2 document/],
     ];
     for (const [stub, reason] of cases) {
       const sim = withPrior(stub);

@@ -161,9 +161,9 @@ const FILE_NAME: Record<PriorFile, string> = { qa: "qa.json", necessity: "necess
 const FILE_ID: Record<PriorFile, string> = { qa: COMMAND.ledgerPriorQa, necessity: COMMAND.ledgerPriorNecessity };
 
 /** Part `k` of `qa.json` or `necessity.json` as the ledger commit `old` holds it; says `absent` when the commit has no such file. */
-export const priorFileCommand = (file: PriorFile, old: string, node: string, k: number): EnvironmentCommand => ({
+export const priorFileCommand = (file: PriorFile, old: string, node: string, k: number, dir = ""): EnvironmentCommand => ({
   id: k === 0 ? FILE_ID[file] : `${FILE_ID[file]}-${k}`,
-  argv: ["sh", "-c", FILE_SHOW, FILE_ID[file], old, node, FILE_EXTRACT, String(k), FILE_NAME[file]],
+  argv: ["sh", "-c", FILE_SHOW, FILE_ID[file], old, node, FILE_EXTRACT, String(k), `${dir}${FILE_NAME[file]}`],
 });
 
 /** What part `k` of `text` prints, as `priorFileCommand` does: for the stand-ins of a rehearsal and for tests. */
@@ -176,12 +176,12 @@ export function priorFileText(text: string, k: number): string {
 export type FileRead = { state: "missing"; next: EnvironmentCommand[] } | { state: "absent" } | { state: "read"; text: string } | { state: "unreadable"; reason: string };
 
 /** The file as the part commands read it from the ledger commit `old`: absent, still to read (the commands that read what is missing), whole, or not readable. */
-export function priorFile(evidence: readonly EvidenceRecord[], file: PriorFile, old: string, node: string): FileRead {
+export function priorFile(evidence: readonly EvidenceRecord[], file: PriorFile, old: string, node: string, dir = ""): FileRead {
   const id = FILE_ID[file];
   const runs = commandRuns(evidence).filter((r) => r.command.argv[3] === id && r.command.argv[4] === old);
   const part = (k: number): CommandRun | undefined => runs.filter((r) => r.command.argv[7] === String(k)).at(-1);
   const first = part(0);
-  if (first === undefined) return { state: "missing", next: [priorFileCommand(file, old, node, 0)] };
+  if (first === undefined) return { state: "missing", next: [priorFileCommand(file, old, node, 0, dir)] };
   const text = (run: CommandRun): { text: string } | { problem: string } => {
     if (!succeeded(run.command)) return { problem: `reading ${FILE_NAME[file]} ended: ${describeCommand(run.command)}` };
     const report = reportText(run);
@@ -202,7 +202,7 @@ export function priorFile(evidence: readonly EvidenceRecord[], file: PriorFile, 
   for (let k = 1; k < h.n; k += 1) {
     const run = part(k);
     if (run === undefined) {
-      missing.push(priorFileCommand(file, old, node, k));
+      missing.push(priorFileCommand(file, old, node, k, dir));
       continue;
     }
     const t = text(run);
@@ -333,7 +333,7 @@ export function incrementalReads(evidence: readonly EvidenceRecord[], i: Increme
   // A ledger commit always lists its head; one that lists none (or whose prior ledger.json is not loaded yet) is as good as no ledger.
   if (last === undefined) return { state: "none" };
   const fileOf = (file: PriorFile): { text: string } | { full: string } | { run: IncrementalReads & { state: "run" } } => {
-    const r = priorFile(evidence, file, i.ledger!, i.node);
+    const r = priorFile(evidence, file, i.ledger!, i.node, i.registry.designDir ?? "");
     if (r.state === "missing") return { run: { state: "run", commands: r.next, why: `read ${FILE_NAME[file]} of the ledger's latest commit, so a later head can carry what it answered` } };
     if (r.state === "absent") return { full: `the ledger's latest commit holds no ${FILE_NAME[file]}${file === "necessity" ? " (a ledger written before 0.26 has none)" : ""}` };
     if (r.state === "unreadable") return { full: `the ledger's ${FILE_NAME[file]} cannot be read (${r.reason})` };

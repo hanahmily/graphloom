@@ -2745,6 +2745,12 @@ dispute, and the threads' own resolution state as an input.
 
 ### 9.1 Where the ledger lives
 
+**Status (0.27.0):** the ledger is `graphloom-pr-ledger-v2`, with a `design` and a
+`review` section, each advanced by its own compare-and-swap; a v1 ledger is migrated
+by the first write
+([split §5](design-pr-review-split.md#5-the-ledger), [Version 0.27.0](#version-0270-ledger-v2-with-a-design-and-a-review-section)).
+This section still describes the v1 layout of 0.21 to 0.26.
+
 The ledger lives at **a Git ref in the operator's review clone**,
 `refs/graphloom/pr-review/<owner>/<repo>/<N>/ledger`. The ref points at a commit
 whose tree holds `ledger.json` (`graphloom-pr-ledger-v1`), `ledger.md`, and
@@ -4114,6 +4120,44 @@ BanyanDB does not commit its generated protobuf and mock code. Coverage ran the 
   or a mode change would be lost).
 
 The `findings-proven` requirement's statement names the new reason. No step, name, order or budget changes.
+
+### Version 0.27.0: ledger v2 with a design and a review section
+
+The first step of [the split](design-pr-review-split.md#11-implementation-plan): the graph
+is still two rounds, but its ledger is the one both future graphs share
+([split §5](design-pr-review-split.md#5-the-ledger)).
+
+- **Layout.** The ref's commit holds a top-level `ledger.json`
+  (`graphloom-pr-ledger-v2`, written once), `design/` (`ledger.json`
+  `pr-design-review-ledger-v1` with heads, `qa`, `purposes` and the `N1`/`Q<n>` items,
+  `ledger.md`, the latest `report.json`, `qa.json`, `necessity.json`) and `review/`
+  (`ledger.json` `pr-review-ledger-v1` with heads and the `F<n>` findings, `ledger.md`).
+- **Section writes.** Answers' `ledger-write` advances the `design` section; Publish's
+  `ledger-published` advances `design` for a round-1 post and `design` and `review` for a
+  round-2 post. Each written section must be exactly its baseline (this run's Answers
+  write for `design`, what the ledger read saw for `review`), the other section is
+  carried from the ref's current value, and a lost `update-ref` race starts again, at
+  most three times; otherwise the run stops retryably "ledger moved". The record names
+  the commit it swapped from, the new commit and each section's subtree.
+- **Reads.** Fetch's ledger read lists the commit's paths and ids; the registry is read
+  in parts per file (`ledger-prior`, `ledger-prior-design`, `ledger-prior-review`), and
+  the earlier `qa.json`/`necessity.json` from `design/`.
+- **Migration.** A v1 ledger is migrated by the first write (pure `migrateV1`,
+  recomputed by `answers-complete`): heads, Q&A and items to `design`, reviewed heads and
+  `F<n>` to `review`, a high-level `existing-reuse-common` key becomes `existing-feature`
+  (and 0.27 keys that question so), open items of moved types close as `moved` or
+  `superseded` with a reason. 0.26.x cannot read a ledger once migrated.
+- **Markers.** Round 1 posts with `<!-- graphloom-design-review: <head> <nonce> -->` and
+  the key `design-<head12>`, round 2 with `<!-- graphloom-review: <head> <nonce> -->` and
+  `review-<head12>`; the reconcile takes the marker on the body's second line, so a post
+  with the other marker is not this post.
+- **Not done here:** a round-1 post no longer records "carried, not re-checked" on the
+  open `F<n>` findings (round 2 did not run, and the review section is not written); the
+  `moved`/`superseded` items are not listed in a later review's Earlier items (that is
+  `pr-design-review`'s, PR 4).
+
+No step, requirement, name, order or budget changes; the `review-published`
+statement names both head markers and the two sections.
 
 ### Version 0.24: reproducing tests (part 2, first slice)
 

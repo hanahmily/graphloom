@@ -248,25 +248,26 @@ describe("a ledger too large for one command", () => {
   };
 
   it("is written as part sets that the one ledger command reads; a small ledger stays one command with no parts", () => {
-    const small = ledgerWriteCommands(pr, "absent", JSON.stringify({ tag: "s" }), "# s\n");
+    const small = ledgerWriteCommands(pr, "absent", "absent", JSON.stringify({ tag: "s" }), "# s\n");
     expect(small.parts).toEqual([]);
-    expect(small.write).toEqual(ledgerWriteCommand(pr, "absent", JSON.stringify({ tag: "s" }), "# s\n"));
+    expect(small.write).toEqual(ledgerWriteCommand(pr, "absent", "absent", JSON.stringify({ tag: "s" }), "# s\n"));
     const json = JSON.stringify({ schema: "graphloom-pr-ledger-v1", pad: awkward(450_000) });
     const markdown = `# ledger\n${awkward(300_000)}`;
-    expect(ledgerWriteCommand(pr, "absent", json, markdown)).toBeUndefined();
-    const big = ledgerWriteCommands(pr, "absent", json, markdown);
+    expect(ledgerWriteCommand(pr, "absent", "absent", json, markdown)).toBeUndefined();
+    const big = ledgerWriteCommands(pr, "absent", "absent", json, markdown);
     expect(big.parts.length).toBeGreaterThanOrEqual(4);
     const dir = setup();
     for (const c of big.parts) expect(run(dir, c).code).toBe(0);
     const r = run(dir, big.write);
     expect(r.code, r.stderr).toBe(0);
     const sha = git(dir, ["rev-parse", ref]);
-    expect(git(dir, ["ls-tree", "--name-only", sha]).split("\n")).toEqual(["ledger.json", "ledger.md", "necessity.json", "qa.json", "report.json"]);
-    expect(spawnSync("git", ["show", `${sha}:ledger.json`], { cwd: dir, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }).stdout).toBe(json);
-    expect(spawnSync("git", ["show", `${sha}:ledger.md`], { cwd: dir, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }).stdout).toBe(markdown);
+    expect(git(dir, ["ls-tree", "--name-only", sha]).split("\n")).toEqual(["design", "ledger.json"]);
+    expect(git(dir, ["ls-tree", "--name-only", `${sha}:design`]).split("\n")).toEqual(["ledger.json", "ledger.md", "necessity.json", "qa.json", "report.json"]);
+    expect(spawnSync("git", ["show", `${sha}:design/ledger.json`], { cwd: dir, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }).stdout).toBe(json);
+    expect(spawnSync("git", ["show", `${sha}:design/ledger.md`], { cwd: dir, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }).stdout).toBe(markdown);
     expect(writtenLedger(big.write.argv)).toMatchObject({ ref, old: "absent", files: { json: sha256(json), markdown: sha256(markdown) } });
     // The compare-and-swap still loses a race: the ref has moved.
-    const again = run(dir, ledgerWriteCommands(pr, "absent", json, markdown).write);
+    const again = run(dir, ledgerWriteCommands(pr, "absent", "absent", json, markdown).write);
     expect(again.code).toBe(LEDGER_MOVED);
   });
 });

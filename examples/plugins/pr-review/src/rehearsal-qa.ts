@@ -328,6 +328,7 @@ export function qaScenario(i: QaInput): QaScenario {
   commands["necessity-write"] = ok("written\n");
   if (nspec.principles !== undefined) commands["principles-read"] = ok(`commit ${i.mergeBase}\npresent\n${nspec.principles.text}`);
   commands["qa-write"] = ok("written\n");
-  commands["ledger-write"] = ok(`advanced ${"b".repeat(40)}\n`);
+  // The record of a section write (design-pr-review-split §5.2): the new commit, the value it swapped from, and the subtrees it holds.
+  commands["ledger-write"] = ok(`advanced ${"b".repeat(40)}\ncur absent\ndesign ${"d".repeat(40)}\nreview absent\n`);
   return { results, commands, questions, symbols, necessity: { first: n1First, final: n1Final, asked: n1Asked } };
 }

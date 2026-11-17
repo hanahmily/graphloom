@@ -462,6 +462,11 @@ and [§10.3](design-pr-review-graph.md#103-verdict) change as follows.
 
 ## 5. The ledger
 
+**Status:** implemented in pr-review 0.27.0, still the two-round graph
+([§11](#11-implementation-plan) item 1): it writes the `design` section after the
+Q&A and with a round-1 post, and both sections with a round-2 post; it posts round 1
+with the design-review marker and round 2 with the PR-review marker.
+
 [§9.1](design-pr-review-graph.md#91-where-the-ledger-lives) changes from one
 registry advanced by one graph to one ledger with a section per graph.
 

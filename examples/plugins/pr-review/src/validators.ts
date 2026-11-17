@@ -4,9 +4,9 @@
 import type { EvidenceRecord, ValidationInput, ValidationResult, Validator } from "@graphloom/sdk";
 import { analyze, evidencePull, reportFlowOf, type Analysis } from "./analysis.js";
 import { checkoutCommand, guardCommand, headTreeCommand, parseHeadTree, parseLedger, pinnedBase } from "./commands.js";
-import { COMMAND, ENV_PLUGIN_ROOT, LEDGER_JSON_FILE, LEDGER_MD_FILE, PART_BASE, QA_JSON, REPORT_JSON, REVIEW_MD } from "./constants.js";
+import { COMMAND, ENV_PLUGIN_ROOT, LEDGER_JSON_FILE, LEDGER_MD_FILE, LEDGER_REVIEW_JSON_FILE, LEDGER_REVIEW_MD_FILE, PART_BASE, QA_JSON, REPORT_JSON, REVIEW_MD } from "./constants.js";
 import { diagramFlow, diagramInputOf, type DiagramFlow } from "./diagrams.js";
-import { commandRuns, describeCommand, environmentOutput, outputTail, reportText, succeeded } from "./evidence.js";
+import { commandRuns, describeCommand, environmentOutput, outputTail, reportText, succeeded, type CommandRun } from "./evidence.js";
 import type { ReportFlow } from "./flow.js";
 import { measurementState, type MeasurementState } from "./measurements.js";
 import { reportJson, reviewMarkdown } from "./output.js";
@@ -19,7 +19,8 @@ import { describeReasons, isLarge } from "./mode.js";
 import { requiredQuestions, statedPurposes } from "./questions.js";
 import { principlesRecord } from "./principles.js";
 import { htmlPagesFrom, htmlProblems } from "./html.js";
-import { ledgerRead, writtenLedger } from "./ledger.js";
+import { ledgerRead, parseSectionRecord, writtenLedger } from "./ledger.js";
+import { blobId, treeId } from "./ledgerv2.js";
 import { incrementalReads } from "./incremental.js";
 import { registryFromEvidence } from "./prior.js";
 import { codeReview, draftComposed, findingsProven, reviewPublished, round1Gated } from "./reviewvalidators.js";
@@ -384,11 +385,31 @@ function writtenAnswerFiles(input: ValidationInput, w: AnswerWrites, pr: PullReq
   if (!succeeded(lw.command)) return failed(`${describeCommand(lw.command)}: ${outputTail(lw.command)}`);
   if (lw.command.argv.length !== w.ledger.argv.length || lw.command.argv.some((a, i) => a !== w.ledger!.argv[i])) return failed("the ledger write is not the compare-and-swap from the value Fetch read with this head's report and Q&A");
   // A ledger too large for one command was written as part sets first; they are read back and checked like the other artifacts.
-  if (w.ledgerParts !== undefined && w.ledgerParts.length > 0) {
+  if (writtenLedger(lw.command.argv)?.files !== undefined) {
     const lj = readParts(input.evidence, PART_BASE.ledgerJson, LEDGER_JSON_FILE);
     const lm = readParts(input.evidence, PART_BASE.ledgerMd, LEDGER_MD_FILE);
     if (lj.state !== "read" || lm.state !== "read") return failed(`the ledger files were not written whole: ${lj.state === "failed" ? lj.reason : lm.state === "failed" ? lm.reason : "no recorded parts"}`);
     if (sha256(lj.value) !== writtenLedger(lw.command.argv)?.files?.json || sha256(lm.value) !== writtenLedger(lw.command.argv)?.files?.markdown) return failed("the ledger write commits files other than the parts the evidence holds");
+  }
+  return migratedWrite(input, w, lw);
+}
+
+/**
+ * A write that migrated a v1 ledger (design-pr-review-split §5.4), recomputed: the review section's files it read are the parts the
+ * evidence holds, which are the migration of the v1 registry Fetch read; and when it swapped from that v1 commit, the review subtree
+ * its record names is the one those files make.
+ */
+function migratedWrite(input: ValidationInput, w: AnswerWrites, lw: CommandRun): ValidationResult | undefined {
+  const m = w.migration;
+  if (m === undefined || m.from !== "v1" || m.review === undefined) return undefined;
+  const rj = readParts(input.evidence, PART_BASE.ledgerReviewJson, LEDGER_REVIEW_JSON_FILE);
+  const rm = readParts(input.evidence, PART_BASE.ledgerReviewMd, LEDGER_REVIEW_MD_FILE);
+  if (rj.state !== "read" || rm.state !== "read") return failed(`the migrated review section was not written whole: ${rj.state === "failed" ? rj.reason : rm.state === "failed" ? rm.reason : "no recorded parts"}`);
+  if (rj.value !== m.review.json || rm.value !== m.review.markdown) return failed("the migrated review section is not the migration of the v1 ledger Fetch read");
+  const record = parseSectionRecord(reportText(lw).text);
+  if (record === undefined) return failed("the ledger write's record names no commit");
+  if (record.cur === w.old && record.sections.review !== treeId([{ name: "ledger.json", id: blobId(m.review.json) }, { name: "ledger.md", id: blobId(m.review.markdown) }])) {
+    return failed("the ledger write migrated the v1 ledger, but its review section is not the migrated one");
   }
   return undefined;
 }

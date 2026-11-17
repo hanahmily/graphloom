@@ -2,16 +2,16 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterAll, describe, expect, it } from "vitest";
 import { findingMeta, ledgerPublishedCommand, ledgerPatch, planReview, priorLines, type PriorLine } from "../src/publish.js";
-import { partCommands, readParts } from "../src/parts.js";
-import { priorChunkText, priorShowCommand, writtenLedger } from "../src/ledger.js";
+import { partCommands } from "../src/parts.js";
+import { priorChunkText } from "../src/ledger.js";
+import { baselinesNow, LedgerRepo, v2Ledger, withLedger, type LedgerState } from "./ledgerrepo.js";
 import { continueIds, patchId, questionKeys, reanchor, registryOf, REANCHOR_WINDOW, type PriorItem, type PriorRegistry } from "../src/prior.js";
-import { REHEARSAL_HEAD } from "../src/rehearsal.js";
 import { passReply, verifyReply } from "../src/rehearsal-review.js";
 import { planAnswerChecker } from "../src/qaprompts.js";
 import { authorReplies } from "../src/replies.js";
@@ -241,18 +241,14 @@ describe("a finding's place in the ledger across three heads", () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), "pr-review-place-"));
     dirs.push(dir);
     await sh("git", ["init", "-q", "-b", "main", dir], { env });
-    await writeFile(path.join(dir, "ledger.json"), JSON.stringify({ schema: "graphloom-pr-ledger-v1", heads: [{ sha: hexOf("a") }, { sha: hexOf("b") }, { sha: hexOf("c") }], qa: [], findings: [] }));
-    for (const name of ["ledger.md", "qa.json", "report.json"]) await writeFile(path.join(dir, name), "{}\n");
-    await sh("git", ["add", "-A"], { cwd: dir, env });
-    await sh("git", ["commit", "-q", "-m", "answers"], { cwd: dir, env });
-    await sh("git", ["update-ref", REF, (await sh("git", ["rev-parse", "HEAD"], { cwd: dir, env })).stdout.trim()], { cwd: dir, env });
+    await v2Ledger(dir, { design: { schema: "pr-design-review-ledger-v1", heads: [{ sha: hexOf("a") }, { sha: hexOf("b") }, { sha: hexOf("c") }], purposes: [], qa: [], items: [] } });
     const publish = async (head: string, p: ReturnType<typeof ledgerPatch>) => {
       const text = JSON.stringify({ ...p, head });
       for (const part of partCommands("publish-patch", ".graphloom/review/ledger/publish-patch.json", text)) await sh(part.argv[0]!, part.argv.slice(1), { cwd: dir, env });
-      const c = ledgerPublishedCommand({ ...PULL, head }, JSON.parse(text), process.execPath);
+      const c = ledgerPublishedCommand({ ...PULL, head }, JSON.parse(text), await baselinesNow(dir), process.execPath);
       await sh(c.argv[0]!, c.argv.slice(1), { cwd: dir, env });
-      const ledger = JSON.parse((await sh("git", ["show", `${REF}:ledger.json`], { cwd: dir, env })).stdout) as unknown;
-      return registryOf(ledger).items.find((i) => i.id === "F1")!;
+      const show = async (p: string): Promise<unknown> => JSON.parse((await sh("git", ["show", `${REF}:${p}`], { cwd: dir, env })).stdout);
+      return registryOf({ schema: "graphloom-pr-ledger-v2", design: await show("design/ledger.json"), review: await show("review/ledger.json") }).items.find((i) => i.id === "F1")!;
     };
 
     // Head 1: the finding covers lines 11 to 13 (the draft's `line` is the range's end). The ledger keeps 11 and 13, and the anchor is line 11's text.
@@ -295,19 +291,15 @@ describe("recording a published review keeps non-ASCII text whole in a ledger fa
     try {
       await sh("git", ["init", "-q", "-b", "main", dir], { env });
       const findings = Array.from({ length: 120 }, (_, i) => ({ head: hexOf("a"), id: `F${i + 1}`, origin: "round2", state: "open", path: "pkg/a.go", line: 1, text: `${"漢字かな한글".repeat(60)} ${"😀🎉".repeat(60)} ${i}`, history: [] }));
-      const text = JSON.stringify({ schema: "graphloom-pr-ledger-v1", heads: [{ sha: hexOf("a") }], qa: [], findings });
-      expect(Buffer.byteLength(text, "utf8")).toBeGreaterThan(150_000);
-      await writeFile(path.join(dir, "ledger.json"), text);
-      for (const name of ["ledger.md", "qa.json", "report.json"]) await writeFile(path.join(dir, name), "{}\n");
-      await sh("git", ["add", "-A"], { cwd: dir, env });
-      await sh("git", ["commit", "-q", "-m", "answers"], { cwd: dir, env });
-      await sh("git", ["update-ref", REF, (await sh("git", ["rev-parse", "HEAD"], { cwd: dir, env })).stdout.trim()], { cwd: dir, env });
+      const review = { schema: "pr-review-ledger-v1", heads: [], findings };
+      expect(Buffer.byteLength(JSON.stringify(review), "utf8")).toBeGreaterThan(150_000);
+      await v2Ledger(dir, { design: { schema: "pr-design-review-ledger-v1", heads: [{ sha: hexOf("a") }], purposes: [], qa: [], items: [] }, review });
       const plan = planReview({ pull: { ...PULL }, head: hexOf("b"), nonce: "n", round1: { schema: ROUND1_SCHEMA, head: hexOf("b"), necessity: "necessary", issues: [] }, draft: { comments: [], summary: "" } as never });
       const patch = JSON.stringify({ ...ledgerPatch({ ...PULL, head: hexOf("b") }, plan, { reviewId: 1, url: null, how: "created" }, new Map()), head: hexOf("a") });
       for (const part of partCommands("publish-patch", ".graphloom/review/ledger/publish-patch.json", patch)) await sh(part.argv[0]!, part.argv.slice(1), { cwd: dir, env });
-      const c = ledgerPublishedCommand({ ...PULL, head: hexOf("a") }, JSON.parse(patch), process.execPath);
+      const c = ledgerPublishedCommand({ ...PULL, head: hexOf("a") }, JSON.parse(patch), await baselinesNow(dir), process.execPath);
       await sh(c.argv[0]!, c.argv.slice(1), { cwd: dir, env });
-      const after = (await sh("git", ["show", `${REF}:ledger.json`], { cwd: dir, env, maxBuffer: 10_000_000 })).stdout;
+      const after = (await sh("git", ["show", `${REF}:review/ledger.json`], { cwd: dir, env, maxBuffer: 10_000_000 })).stdout;
       expect(after).not.toContain("�");
       expect((JSON.parse(after) as { findings: Array<{ text: string }> }).findings.map((f) => f.text)).toEqual(findings.map((f) => f.text));
     } finally {
@@ -323,56 +315,14 @@ describe("a pull request reviewed on three heads", () => {
     for (const d of dirs) await rm(d, { recursive: true, force: true });
   });
 
-  class LedgerRepo {
-    dir = "";
-    async init(): Promise<this> {
-      this.dir = await mkdtemp(path.join(os.tmpdir(), "pr-review-heads-"));
-      dirs.push(this.dir);
-      await sh("git", ["init", "-q", "-b", "main", this.dir], { env });
-      return this;
-    }
-    private git = async (...args: string[]): Promise<string> => (await sh("git", args, { cwd: this.dir, env })).stdout.trim();
-    private exec = async (argv: readonly string[], extra: Record<string, string> = {}) => sh(argv[0]!, argv.slice(1), { cwd: this.dir, env: { ...env, ...extra } });
-    /** What the run's Answers and Publish stages leave in the ledger once the run ends, with its head renamed to `label` (every run of a fixture shows the same head). */
-    async advance(sim: Simulation, label: string): Promise<{ sha: string; extract: Record<string, string>; ledger: { heads: Array<Record<string, unknown>>; qa: Array<Record<string, unknown>>; findings: Array<Record<string, unknown>> } }> {
-      const rename = (s: string): string => s.split(REHEARSAL_HEAD).join(label);
-      const job = sim.jobs.find((j) => j.instruction.startsWith("Advance the pull"))!;
-      const written = writtenLedger((job.input as { commands: Array<{ argv: string[] }> }).commands[0]!.argv)!;
-      await writeFile(path.join(this.dir, "ledger.json"), rename(written.json));
-      // The Answers stage's commit holds these beside it, which the published write keeps.
-      for (const name of ["ledger.md", "qa.json", "report.json"]) await writeFile(path.join(this.dir, name), "{}\n");
-      await this.git("add", "-A");
-      await this.git("commit", "-q", "-m", "answers");
-      await this.git("update-ref", REF, await this.git("rev-parse", "HEAD"));
-      const patch = readParts(sim.evidence, "publish-patch", ".graphloom/review/ledger/publish-patch.json");
-      if (patch.state !== "read") throw new Error(`the ledger patch was not written: ${patch.state}`);
-      const text = rename(patch.value);
-      for (const part of partCommands("publish-patch", ".graphloom/review/ledger/publish-patch.json", text)) await this.exec(part.argv);
-      const published = ledgerPublishedCommand({ ...PULL, head: label }, JSON.parse(text), process.execPath);
-      await this.exec(published.argv);
-      const sha = await this.git("rev-parse", REF);
-      const ledger = JSON.parse(await this.git("show", `${sha}:ledger.json`)) as { heads: []; qa: []; findings: [] };
-      const out = path.join(this.dir, ".report");
-      // The prior ledger is read in parts, as Fetch reads it: the first says how many there are.
-      const parts: Record<string, string> = {};
-      for (let k = 0, n = 1; k < n; k += 1) {
-        const prior = priorShowCommand(sha, process.execPath, k);
-        await this.exec(prior.argv, { GRAPHLOOM_REPORT_FILE: out });
-        const text = await readFile(out, "utf8");
-        parts[prior.id] = text;
-        if (k === 0) n = Number(/^graphloom-prior 0 (\d+) /.exec(text)![1]);
-      }
-      return { sha, extract: parts, ledger };
-    }
-  }
-
-  /** A scenario that runs on the ledger `at` holds: the ledger ref and its prior ledger.json, as Fetch reads them. */
-  const onLedger = (name: string, at: { sha: string; extract: Record<string, string> }, change: (s: ReturnType<typeof scenarioWith>) => void = () => undefined) =>
+  /** A scenario that runs on the ledger `at` holds: the ledger ref and its registry, as Fetch reads them. */
+  const onLedger = (name: string, at: Pick<LedgerState, "reads">, change: (s: ReturnType<typeof scenarioWith>) => void = () => undefined) =>
     scenarioWith(name, (s) => {
-      s.commands!["ledger-read"] = { exitCode: 0, stdout: `present ${at.sha}\n` };
-      for (const [id, stdout] of Object.entries(at.extract)) s.commands![id] = { exitCode: 0, stdout };
+      withLedger(s, at);
       change(s);
     });
+  /** What a v1 ledger (0.21 to 0.26) at commit `sha` reads as, when its registry is `v1`: the ref, and the registry in one part. */
+  const v1At = (sha: string, v1: unknown): Pick<LedgerState, "reads"> => ({ reads: { "ledger-read": `present ${sha}\n`, "ledger-prior": priorChunkText(JSON.stringify(v1), 0) } });
   /** The `review-layer` scenario with its first answer only partial: round 1 finds that one issue on the head, and the run ends after posting it. The same questions are asked on every head, so their ids match. */
   const partialQ1 = (s: ReturnType<typeof scenarioWith>): void => {
     const answers = (s.results["answers-v1"]![0]!.output as { answers: Array<{ status: string }> }).answers;
@@ -382,14 +332,14 @@ describe("a pull request reviewed on three heads", () => {
   const body = (s: Simulation): string => String(s.github.creates[0]!.body);
   const ids = (s: Simulation): string[] => (JSON.parse(s.qa!.json) as { questions: Array<{ id: string }> }).questions.map((q) => q.id);
 
-  type Ledgers = Awaited<ReturnType<LedgerRepo["advance"]>>;
+  type Ledgers = LedgerState;
   const state: { repo?: LedgerRepo; a?: Simulation; b?: Simulation; la?: Ledgers; lb?: Ledgers; lc?: Ledgers } = {};
   const HEAD1 = hexOf("1");
   const HEAD2 = hexOf("2");
   const HEAD3 = hexOf("3");
 
   it("head 1: round 1 finds issues, posts them, ends; the ledger holds each with its key and comment ids", async () => {
-    state.repo = await new LedgerRepo().init();
+    state.repo = await new LedgerRepo().init(dirs, "pr-review-heads-");
     state.a = end(scenarioWith("review-layer", partialQ1));
     const a = state.a;
     expect(stopOf(a)).toMatchObject({ reason: "complete" });
@@ -398,7 +348,7 @@ describe("a pull request reviewed on three heads", () => {
     expect(posted.state === "read" && posted.value.issues.length).toBeGreaterThan(0);
     expect(body(a).split("\n")[0]).toMatch(/^Changes requested: \d+ open$/);
     state.la = await state.repo.advance(a, HEAD1);
-    const round1Items = state.la.ledger.findings.filter((f) => f.origin === "round1");
+    const round1Items = state.la.design.items.filter((f) => f.origin === "round1");
     expect(round1Items.length).toBeGreaterThan(0);
     for (const f of round1Items) expect(f).toMatchObject({ state: "open", head: HEAD1, key: expect.stringContaining("|"), text: expect.any(String), history: [{ head: HEAD1, status: "open" }] });
   });
@@ -438,13 +388,15 @@ describe("a pull request reviewed on three heads", () => {
     expect(text).toContain("- Q1: fixed in 0123456 (its question is now answered, with no blocking category)");
     expect(b.github.creates[0]!.comments).toHaveLength(1);
     state.lb = await state.repo!.advance(b, HEAD2);
-    const q1 = state.lb.ledger.findings.find((f) => f.id === "Q1")!;
+    const q1 = state.lb.design.items.find((f) => f.id === "Q1")!;
     expect(q1).toMatchObject({ state: "fixed", fixedIn: HEAD2, history: [{ head: HEAD1, status: "open" }, { head: HEAD2, status: "fixed", reason: expect.stringContaining("answered") }] });
-    expect(state.lb.ledger.qa.find((q) => q.id === "Q1")).toMatchObject({ state: "fixed" });
+    expect(state.lb.design.qa.find((q) => q.id === "Q1")).toMatchObject({ state: "fixed" });
     // The posted finding records its aspect, its key and where it is, so the next head can find it; the dismissed one is kept closed.
-    expect(state.lb.ledger.findings.find((f) => f.id === "F3")).toMatchObject({ origin: "round2", state: "open", aspect: "maintainability", key: expect.stringMatching(/^maintainability\|pkg\/schema\/ttl\.go\|/), anchorText: expect.any(String), patchId: expect.any(String), hunk: expect.any(Array), github: { head: HEAD2, inline: true, commentId: b.github.reviews[0]!.comments[0]!.id } });
-    expect(state.lb.ledger.findings.find((f) => f.id === "F2")).toMatchObject({ state: "withdrawn", origin: "round2" });
-    expect(state.lb.ledger.heads.map((h) => [h.sha, h.verdict])).toEqual([[HEAD1, "changes-requested"], [HEAD2, "changes-requested"]]);
+    expect(state.lb.review!.findings.find((f) => f.id === "F3")).toMatchObject({ origin: "round2", state: "open", aspect: "maintainability", key: expect.stringMatching(/^maintainability\|pkg\/schema\/ttl\.go\|/), anchorText: expect.any(String), patchId: expect.any(String), hunk: expect.any(Array), github: { head: HEAD2, inline: true, commentId: b.github.reviews[0]!.comments[0]!.id } });
+    expect(state.lb.review!.findings.find((f) => f.id === "F2")).toMatchObject({ state: "withdrawn", origin: "round2" });
+    // Head 1 posted round 1's items, head 2 round 2's findings: each section records the heads of its round (design-pr-review-split §5.1).
+    expect(state.lb.design.heads.map((h) => [h.sha, h.round1, h.open])).toEqual([[HEAD1, "items", 1], [HEAD2, "clean", 0]]);
+    expect(state.lb.review!.heads.map((h) => [h.sha, h.verdict, h.context])).toEqual([[HEAD2, "changes-requested", { source: "design-review", head: HEAD2 }]]);
   });
 
   /** The reviewers' scripted replies for a later head: the aspects' passes in order, and the verifier's. */
@@ -471,8 +423,9 @@ describe("a pull request reviewed on three heads", () => {
     // No verifier job: a finding the reviewer calls fixed is not a claim to confirm.
     expect(c.jobs.filter((j) => j.instruction.startsWith("Verify")).length).toBe(0);
     const l = await state.repo!.advance(c, HEAD3);
-    expect(l.ledger.findings.find((f) => f.id === "F3")).toMatchObject({ state: "fixed", fixedIn: HEAD3, history: [{ head: HEAD2, status: "open" }, { head: HEAD3, status: "fixed" }] });
-    expect(l.ledger.heads.map((h) => [h.sha, h.verdict])).toEqual([[HEAD1, "changes-requested"], [HEAD2, "changes-requested"], [HEAD3, "passed"]]);
+    expect(l.review!.findings.find((f) => f.id === "F3")).toMatchObject({ state: "fixed", fixedIn: HEAD3, history: [{ head: HEAD2, status: "open" }, { head: HEAD3, status: "fixed" }] });
+    expect(l.review!.heads.map((h) => [h.sha, h.verdict])).toEqual([[HEAD2, "changes-requested"], [HEAD3, "passed"]]);
+    expect(l.design.heads.map((h) => [h.sha, h.round1])).toEqual([[HEAD1, "items"], [HEAD2, "clean"], [HEAD3, "clean"]]);
     state.lc = l;
   });
 
@@ -525,7 +478,7 @@ describe("a pull request reviewed on three heads", () => {
   it("head 3 of a 0.21 ledger: a finding recorded without its aspect goes to the maintainability sweep, with its legacy body as the claim, and is judged there", () => {
     // What a 0.21 run left: no aspect, no key, no anchor, a single line.
     const old21 = { schema: "graphloom-pr-ledger-v1", heads: [{ sha: hexOf("a"), reviewed: true }], qa: [], findings: [{ head: hexOf("a"), id: "F3", origin: "round2", path: "pkg/schema/ttl.go", line: 16, state: "open", body: "The loop that adds 0+1+2 to n has no purpose a reader can find.", github: { head: hexOf("a"), reviewId: 9, commentId: 55, inline: true } }] };
-    const at = { sha: hexOf("d"), extract: { "ledger-prior": priorChunkText(JSON.stringify(old21), 0) } };
+    const at = v1At(hexOf("d"), old21);
     const c = end(onLedger("review-layer", at, reviewers([[1, []], [1, [], [{ finding: "F3", status: "fixed", reason: "gone" }]], [1, []]])));
     expect(aspectOf(c, "maintainability").prior).toMatchObject([{ id: "F3", status: "fixed" }]);
     expect(aspectOf(c, "correctness").prior).toBeUndefined();
@@ -540,7 +493,7 @@ describe("a pull request reviewed on three heads", () => {
 
   it("head 3 of a 0.21 ledger: a finding with no recorded claim is not sent to a reviewer; it stays open, listed with its link and the reason", () => {
     const old21 = { schema: "graphloom-pr-ledger-v1", heads: [{ sha: hexOf("a"), reviewed: true }], qa: [], findings: [{ head: hexOf("a"), id: "F3", origin: "round2", path: "pkg/schema/ttl.go", line: 16, state: "open", github: { head: hexOf("a"), reviewId: 9, commentId: 55, inline: true } }] };
-    const at = { sha: hexOf("d"), extract: { "ledger-prior": priorChunkText(JSON.stringify(old21), 0) } };
+    const at = v1At(hexOf("d"), old21);
     // The reviewer is given nothing to judge (its `prior` list is empty), so it cannot close the finding unchecked.
     const c = end(onLedger("review-layer", at, reviewers([[1, []], [1, []], [1, []]])));
     expect(aspectOf(c, "maintainability").prior).toMatchObject([{ id: "F3", status: "open", how: "carried", reason: "not re-checked: no recorded claim" }]);
@@ -569,8 +522,15 @@ describe("a pull request reviewed on three heads", () => {
     expect(body(issueAgain).split("\n")[0]).toBe("Changes requested: 2 open");
     expect(body(issueAgain)).toContain("- F3: still open");
     expect(body(issueAgain)).toContain("not re-checked on this head: round 1 has open issues, so round 2 did not run");
-    const l = await state.repo!.advance(issueAgain, hexOf("4"));
-    expect(l.ledger.findings.find((f) => f.id === "F3")).toMatchObject({ state: "open", history: [{ head: HEAD2, status: "open" }, { head: hexOf("4"), status: "open", carried: true }] });
+    // The shared repository went on to head 3 since; this head is recorded on a replay of heads 1 and 2, so it swaps from the ledger it read.
+    const repo = await new LedgerRepo().init(dirs, "pr-review-heads-");
+    await repo.advance(state.a!, HEAD1);
+    expect((await repo.advance(state.b!, HEAD2)).sha).not.toBe("");
+    const l = await repo.advance(issueAgain, hexOf("4"));
+    expect(l.review!.findings.find((f) => f.id === "F3")).toMatchObject({ state: "open", history: [{ head: HEAD2, status: "open" }] });
+    // A round-1 post records the design section only (design-pr-review-split §5.2): round 2 did not run, so its section is left as it was.
+    expect(l.review).toEqual(state.lb!.review);
+    expect(l.design.heads.at(-1)).toMatchObject({ sha: hexOf("4"), round1: "items" });
   });
 
 });

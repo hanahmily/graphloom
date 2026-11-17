@@ -18,7 +18,7 @@ import { commandRuns, succeeded, type CommandRun } from "./evidence.js";
 import { necessityDecision, necessityJson, necessityQuestion, parseNecessityRecord, roundsSkipJson, type NecessityRecord } from "./necessity.js";
 import { principlesContext, principlesReading, principlesRecord, type PrinciplesContext } from "./principles.js";
 import { continueIds, questionKeys, registryFromEvidence, type PriorRegistry } from "./prior.js";
-import { ledgerJson, ledgerMarkdown, ledgerRead, ledgerWriteCommands, oldValue, priorState, type PriorLedger } from "./ledger.js";
+import { ledgerJson, ledgerMarkdown, ledgerRead, ledgerWriteCommands, migrationOf, oldValue, priorState, readBaselines, type Migration, type PriorLedger } from "./ledger.js";
 import { htmlPagesFrom } from "./html.js";
 import { appendixWriteCommands, htmlWriteCommands, necessityWriteCommands, qaWriteCommands, readParts, recordedNecessityJson, recordedReport } from "./parts.js";
 import { withQa } from "./output.js";
@@ -257,6 +257,8 @@ export interface AnswerWrites {
   old?: string;
   /** The prior ledger.json, read from the commit the ledger write swaps from. */
   prior?: PriorLedger;
+  /** What the ledger write migrates: a v1 ledger's review section (design-pr-review-split §5.4), written first as part sets. */
+  migration?: Migration;
   /** Why a write cannot be built. */
   problem?: string;
 }
@@ -294,8 +296,12 @@ function finishWrites(evidence: readonly EvidenceRecord[], at: { pr: PullRequest
   if (prior.state === "missing") return { qa: written, texts, old, prior, problem: "the prior ledger's ledger.json has not been read" };
   if (prior.state === "unreadable") return { qa: written, texts, old, prior, problem: `the prior ledger's ledger.json cannot be read (${prior.reason}); the ledger is not overwritten` };
   const input = { pr: at.pr, base: at.base, files: at.analysis.snapshot.files.length, commits: at.analysis.snapshot.commits.length, facts: at.analysis.facts.length, questions: qa.questions, answers: qa.answers, purposes: qa.purposes };
-  const ledger = ledgerWriteCommands(at.pr, old, ledgerJson(input, prior.state === "read" ? prior.value : undefined), ledgerMarkdown(input));
-  return { qa: written, texts, ledgerParts: ledger.parts, ledger: ledger.write, old, prior };
+  // The design section is advanced from what the read saw of it (design-pr-review-split §5.2); a v1 ledger is migrated by this write (§5.4).
+  const baselines = readBaselines(read.ledger, prior, at.pr);
+  if (baselines === undefined) return { qa: written, texts, old, prior, problem: "the prior ledger's sections have not been read" };
+  const migration = migrationOf(prior, at.pr);
+  const ledger = ledgerWriteCommands(at.pr, old, baselines.design, ledgerJson(input, prior.state === "read" ? prior.value.design : undefined), ledgerMarkdown(input), migration);
+  return { qa: written, texts, ledgerParts: ledger.parts, ledger: ledger.write, old, prior, migration };
 }
 
 // ---- large mode: the answers in batches (design §7.6) ----

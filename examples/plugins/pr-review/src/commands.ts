@@ -70,9 +70,12 @@ const REVIEW_DIR_SCRIPT = `set -eu; mkdir -p ${REVIEW_DIR}; printf '*\\n' > ${RE
 export const reviewDirCommand = (): EnvironmentCommand => ({ id: COMMAND.reviewDir, argv: ["sh", "-c", REVIEW_DIR_SCRIPT, COMMAND.reviewDir] });
 
 const LEDGER =
-  'if sha=$(git -c core.hooksPath=/dev/null rev-parse --verify --quiet "$1^{commit}"); then echo "present $sha"; else echo absent; fi';
+  'if sha=$(git -c core.hooksPath=/dev/null rev-parse --verify --quiet "$1^{commit}"); then git -c core.hooksPath=/dev/null -c core.quotePath=false ls-tree -r -t "$sha"; echo "present $sha"; else echo absent; fi';
 
-/** Reads the PR's ledger ref, or records it absent (design §9.1). */
+/**
+ * Reads the PR's ledger ref, or records it absent (design §9.1). A present ledger's commit is listed first (its files and the
+ * section subtrees, with their ids), so the baselines of a section write are named from this one read (design-pr-review-split §5.2).
+ */
 export const ledgerReadCommand = (owner: string, repo: string, n: number): EnvironmentCommand => ({
   id: COMMAND.ledger,
   argv: ["sh", "-c", LEDGER, COMMAND.ledger, ledgerRef(owner, repo, n)],
@@ -99,13 +102,21 @@ export function parseHeadTree(text: string): HeadTree | undefined {
   return { head, index, base, clean: worktree === "clean" };
 }
 
-export type Ledger = { present: false } | { present: true; sha: string };
+/** The ledger ref's value; a present one with the paths of its commit (files and subtrees) and their ids, as the read listed them. */
+export type Ledger = { present: false } | { present: true; sha: string; entries: ReadonlyMap<string, string> };
 
 export function parseLedger(text: string): Ledger | undefined {
-  const line = text.trim().split("\n").at(-1)?.trim() ?? "";
+  const lines = text.trim().split("\n");
+  const line = lines.at(-1)?.trim() ?? "";
   if (line === "absent") return { present: false };
   const m = /^present ([0-9a-f]{40})$/.exec(line);
-  return m === null ? undefined : { present: true, sha: m[1]! };
+  if (m === null) return undefined;
+  const entries = new Map<string, string>();
+  for (const raw of lines.slice(0, -1)) {
+    const e = /^\d{6} (?:blob|tree) ([0-9a-f]{40})\t(.+)$/.exec(raw);
+    if (e !== null) entries.set(e[2]!, e[1]!);
+  }
+  return { present: true, sha: m[1]!, entries };
 }
 
 /** The base the checkout recorded: the pinned commit the worktree is built on. */

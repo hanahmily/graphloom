@@ -150,15 +150,15 @@ describe("rounds: both (the default) is unchanged", () => {
 describe("re-review continuity with review-only (design 9): earlier round-1 items are left as they were", () => {
   it("carries the earlier heads' questions, ids and posted items into the ledger, and adds none", () => {
     const prior = {
-      schema: "graphloom-pr-ledger-v1",
-      heads: [{ sha: "a".repeat(40), reported: true, reviewed: false }],
+      schema: "pr-design-review-ledger-v1",
+      heads: [{ sha: "a".repeat(40), round1: "items", open: 1 }],
       qa: [{ id: "Q4", type: "purpose", key: "purpose|item|pkg/a.go", symbol: null, item: "C1", status: "needs author", answer: "", state: "open", history: [] }],
-      findings: [{ id: "Q4", origin: "round1", status: "open", comment: 77 }],
+      items: [{ id: "Q4", origin: "round1", state: "open", comment: 77 }],
     };
     const pr = { mode: "review" as const, owner: "apache", repo: "skywalking-banyandb", number: 7, head: "b".repeat(40) };
-    const out = JSON.parse(ledgerJson({ pr, base: undefined, files: 1, commits: 1, facts: 0, questions: [], answers: [], purposes: [] }, prior)) as { qa: Array<{ id: string; status: string }>; findings: unknown[]; heads: Array<{ sha: string }> };
+    const out = JSON.parse(ledgerJson({ pr, base: undefined, files: 1, commits: 1, facts: 0, questions: [], answers: [], purposes: [] }, prior)) as { qa: Array<{ id: string; status: string }>; items: unknown[]; heads: Array<{ sha: string }> };
     expect(out.qa).toEqual(prior.qa);
-    expect(out.findings).toEqual(prior.findings);
+    expect(out.items).toEqual(prior.items);
     expect(out.heads.map((h) => h.sha)).toEqual(["a".repeat(40), "b".repeat(40)]);
   });
 });

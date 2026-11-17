@@ -1,86 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
-import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
-import { promisify } from "node:util";
+import { rm } from "node:fs/promises";
 import type { JobSpec, RehearsalScenario } from "@graphloom/sdk";
 import { afterAll, describe, expect, it } from "vitest";
 import type { Answer } from "../src/answers.js";
 import { priorFileCommand, priorFileText } from "../src/incremental.js";
-import { priorShowCommand, writtenLedger } from "../src/ledger.js";
-import { partCommands, readParts, recordedNecessityJson } from "../src/parts.js";
-import { ledgerPublishedCommand } from "../src/publish.js";
 import { incrementalRehearsal, REHEARSAL_HEAD } from "../src/rehearsal.js";
 import { passReply } from "../src/rehearsal-review.js";
 import { REVIEW_SCHEMA_NAME, VERIFY_SCHEMA_NAME } from "../src/review.js";
 import type { Question } from "../src/questions.js";
 import { recordedRound1 } from "../src/reviewdraft.js";
 import { answersComplete, questionsComplete } from "../src/validators.js";
+import { LedgerRepo, withLedger, type LedgerState } from "./ledgerrepo.js";
 import { BANYANDB, candidateEvidence, simulate, type Simulation } from "./support.js";
-
-const sh = promisify(execFile);
-const REF = "refs/graphloom/pr-review/apache/skywalking-banyandb/7/ledger";
-const PULL = { owner: "apache", repo: "skywalking-banyandb", number: 7 };
-const env = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
 const HEAD1 = "1".repeat(40);
 const stopOf = (s: Simulation) => (s.final.action.type === "stop" ? s.final.action.stop : undefined);
 const partial = (id: string) => (q: Question, _s: unknown, _r: unknown, dflt: Answer): Answer => (q.id === id ? { ...dflt, status: "partially answered" } : dflt);
 
 /** The ledger a run leaves in the review clone, held in a real repository so the prior files are read as Fetch reads them. */
-class LedgerRepo {
-  dir = "";
-  async init(dirs: string[]): Promise<this> {
-    this.dir = await mkdtemp(path.join(os.tmpdir(), "pr-review-incremental-"));
-    dirs.push(this.dir);
-    await sh("git", ["init", "-q", "-b", "main", this.dir], { env });
-    return this;
-  }
-  private git = async (...args: string[]): Promise<string> => (await sh("git", args, { cwd: this.dir, env })).stdout.trim();
-  private exec = async (argv: readonly string[], extra: Record<string, string> = {}) => sh(argv[0]!, argv.slice(1), { cwd: this.dir, env: { ...env, ...extra } });
-
-  /** The ledger after a run: its Answers commit with the real `qa.json` and `necessity.json`, then Publish's patch; and every read Fetch makes of it on the next head. */
-  async advance(sim: Simulation, label: string): Promise<Ledgers> {
-    const rename = (s: string): string => s.split(REHEARSAL_HEAD).join(label);
-    const job = sim.jobs.find((j) => j.instruction.startsWith("Advance the pull"))!;
-    const written = writtenLedger((job.input as { commands: Array<{ argv: string[] }> }).commands[0]!.argv)!;
-    const necessity = recordedNecessityJson(sim.evidence);
-    if (necessity.state !== "read") throw new Error("necessity.json was not recorded");
-    await writeFile(path.join(this.dir, "ledger.json"), rename(written.json));
-    await writeFile(path.join(this.dir, "qa.json"), rename(sim.qa!.json));
-    await writeFile(path.join(this.dir, "necessity.json"), necessity.value);
-    for (const name of ["ledger.md", "report.json"]) await writeFile(path.join(this.dir, name), "{}\n");
-    await this.git("add", "-A");
-    await this.git("commit", "-q", "-m", "answers");
-    await this.git("update-ref", REF, await this.git("rev-parse", "HEAD"));
-    const patch = readParts(sim.evidence, "publish-patch", ".graphloom/review/ledger/publish-patch.json");
-    if (patch.state !== "read") throw new Error(`the ledger patch was not written: ${patch.state}`);
-    const text = rename(patch.value);
-    for (const part of partCommands("publish-patch", ".graphloom/review/ledger/publish-patch.json", text)) await this.exec(part.argv);
-    await this.exec(ledgerPublishedCommand({ ...PULL, head: label }, JSON.parse(text), process.execPath).argv);
-    const sha = await this.git("rev-parse", REF);
-    const out = path.join(this.dir, ".report");
-    const registry: Record<string, string> = {};
-    for (let k = 0, n = 1; k < n; k += 1) {
-      const c = priorShowCommand(sha, process.execPath, k);
-      await this.exec(c.argv, { GRAPHLOOM_REPORT_FILE: out });
-      registry[c.id] = await readFile(out, "utf8");
-      if (k === 0) n = Number(/^graphloom-prior 0 (\d+) /.exec(registry[c.id]!)![1]);
-    }
-    return { sha, registry, qa: await this.git("show", `${sha}:qa.json`), necessity: await this.git("show", `${sha}:necessity.json`) };
-  }
-}
-
-interface Ledgers {
-  sha: string;
-  /** The `ledger-prior` parts, as the command prints them. */
-  registry: Record<string, string>;
-  qa: string;
-  necessity: string;
-}
-
+type Ledgers = LedgerState;
 /** What a later head's Fetch reads: the ledger ref, its registry, the earlier Q&A and necessity record (changed by `edit`), and the delta. */
 interface LaterHead {
   delta?: string;
@@ -106,8 +45,7 @@ const without = (...ids: string[]) => (qa: Record<string, unknown>): void => {
 function onLedger(scenario: RehearsalScenario, at: Ledgers, later: LaterHead = {}): RehearsalScenario {
   const s = structuredClone(scenario);
   const c = s.commands!;
-  c["ledger-read"] = { exitCode: 0, stdout: `present ${at.sha}\n` };
-  for (const [id, stdout] of Object.entries(at.registry)) c[id] = { exitCode: 0, stdout };
+  withLedger(s, at);
   const qa = JSON.parse(at.qa) as Record<string, unknown>;
   later.qa?.(qa);
   const parts = (file: "qa" | "necessity", text: string): void => {
