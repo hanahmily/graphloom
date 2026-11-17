@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { describe, expect, it } from "vitest";
-import { fitParts, type ItemParts } from "../src/answertext.js";
+import { fitParts, type ItemParts } from "../src/kit/answertext.js";
 import { clip, clipKeep, cutAt } from "../src/kit/escape.js";
 import { effectivePacks } from "../src/kit/packs.js";
 import { parsePatch } from "../src/kit/patch.js";

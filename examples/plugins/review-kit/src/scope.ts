@@ -74,12 +74,17 @@ export interface Hotspot {
   bound: boolean;
   /** For a modified function that got worse: the metric, its base and head values. */
   worse: Array<{ metric: "complexity" | "nesting"; base: number; head: number }>;
+  /** From a static-only report: no CRAP, ranked by complexity then nesting. */
+  staticOnly?: true;
 }
 
-/** The records' top functions by CRAP, then complexity, then nesting; test files are not ranked (they have no CRAP). */
-export function hotspots(records: readonly MetricsRecord[], n = MAX_HOTSPOTS): Hotspot[] {
+/**
+ * The records' top functions by CRAP, then complexity, then nesting; test files are not ranked (they have no CRAP). A static-only
+ * report (the design review, design-pr-review-split §3.4) has no CRAP: its top functions are by complexity, then nesting.
+ */
+export function hotspots(records: readonly MetricsRecord[], n = MAX_HOTSPOTS, staticOnly = false): Hotspot[] {
   const own = records.filter((r) => !r.test && !isTestPath(r.path));
-  const ranked = [...own].sort((a, b) => (b.crap ?? -1) - (a.crap ?? -1) || b.complexity - a.complexity || b.nesting - a.nesting || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0) || (a.function < b.function ? -1 : a.function > b.function ? 1 : 0));
+  const ranked = [...own].sort((a, b) => (staticOnly ? 0 : (b.crap ?? -1) - (a.crap ?? -1)) || b.complexity - a.complexity || b.nesting - a.nesting || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0) || (a.function < b.function ? -1 : a.function > b.function ? 1 : 0));
   return ranked.slice(0, n).map((r) => {
     const base = r.base !== undefined && !("unavailable" in r.base) ? r.base : undefined;
     const worse: Hotspot["worse"] = [];
@@ -87,7 +92,7 @@ export function hotspots(records: readonly MetricsRecord[], n = MAX_HOTSPOTS): H
       if (r.complexity > base.complexity) worse.push({ metric: "complexity", base: base.complexity, head: r.complexity });
       if (r.nesting > base.nesting) worse.push({ metric: "nesting", base: base.nesting, head: r.nesting });
     }
-    return { function: r.function, path: r.path, startLine: r.startLine, change: r.change, complexity: r.complexity, nesting: r.nesting, crap: r.crap, bound: r.coverage?.source !== "measured", worse };
+    return { function: r.function, path: r.path, startLine: r.startLine, change: r.change, complexity: r.complexity, nesting: r.nesting, crap: staticOnly ? undefined : r.crap, bound: r.coverage?.source !== "measured", worse, ...(staticOnly ? { staticOnly: true as const } : {}) };
   });
 }
 
@@ -97,6 +102,7 @@ export function hotspotText(h: Hotspot): string {
     const w = h.worse.find((x) => x.metric === metric);
     return `${metric} ${w !== undefined ? `${w.base} → ${w.head}` : h[metric]}`;
   };
+  if (h.staticOnly === true) return `${h.function} — ${value("complexity")}, ${value("nesting")} (${h.change})`;
   const crap = h.crap === undefined ? "CRAP n/a" : `CRAP ${h.crap}${h.bound ? " (upper bound, coverage unknown)" : ""}`;
   return `${h.function} — ${crap}, ${value("complexity")}, ${value("nesting")} (${h.change})`;
 }

@@ -16,7 +16,7 @@ export { reportFlow, type ReportFlow } from "./kit/flow.js";
 export { measurementState, renderMeasurements, notRunReasons, baseTargets } from "./kit/measurements.js";
 export { reportJson, reviewMarkdown } from "./kit/output.js";
 export { reportWriteCommand, writtenReport } from "./kit/write.js";
-export { secretFindings } from "./secrets.js";
+export { secretFindings } from "./kit/secrets.js";
 export { DEFAULT_PACKS, effectivePacks, GO_PACK, TS_PACK, type FullPack } from "./kit/packs.js";
 export { changedSymbols, extractSymbols, maskCode, parseBaseDefinitions, type SymbolDef } from "./kit/symbols.js";
 export { nameVariants, planFor, searchCommand, signatureTypes } from "./kit/queries.js";

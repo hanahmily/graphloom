@@ -3,7 +3,7 @@
 
 import type { EvidenceRecord, GraphDecision, JobSpec } from "@graphloom/sdk";
 import { describe, expect, it } from "vitest";
-import { attemptEvidence, noteAttempt, readAttempts, type AttemptState } from "../src/attempt.js";
+import { attemptEvidence, noteAttempt, readAttempts, type AttemptState } from "../src/kit/attempt.js";
 import { advancePullRequest } from "../src/graph.js";
 import type { Necessity } from "../src/necessity.js";
 import { ANSWERED, assignmentOf, scenarioWith, simulate, viewOf, type Simulation } from "./support.js";

@@ -492,3 +492,30 @@ describe("pr-review: graphloom task new, end to end against a fixture remote", (
     expect((await refused(["acme/widgets#7", "--base", "a..b"])).errors.join("\n")).toMatch(/not a branch name/);
   }, 120_000);
 });
+
+describe("pr-design-review: graphloom task new, end to end against a fixture remote", () => {
+  const profile = { name: "widgets", project: "acme/widgets", environment: { checks: [] } };
+
+  it("writes refs only under refs/graphloom/pr-design-review/ and the task in its own -design directory; the task passes check", async () => {
+    const w = await worldWithMain();
+    await mkdir(path.join(w.out, "plugins"), { recursive: true });
+    await symlink(exampleBundle("pr-design-review"), path.join(w.out, "plugins", "pr-design-review"));
+    await mkdir(path.join(w.out, "profiles"), { recursive: true });
+    await writeFile(path.join(w.out, "profiles", "widgets.json"), JSON.stringify(profile));
+    const before = (await w.repo.git("for-each-ref", "--format=%(refname)")).split("\n").filter(Boolean);
+    const r = await run({ graph: "pr-design-review", args: ["acme/widgets#7", "--all-questions"], repo: w.repo.path, out: w.out, profile: "widgets" });
+    expect(r.errors).toEqual([]);
+    expect(r.code).toBe(0);
+    const R = "refs/graphloom/pr-design-review/acme/widgets/7";
+    const added = (await w.repo.git("for-each-ref", "--format=%(refname)")).split("\n").filter((ref) => ref !== "" && !before.includes(ref));
+    expect(added.sort()).toEqual([`${R}/base`, `${R}/head`, `${R}/heads/${w.head}`]);
+    const taskPath = path.join(w.out, "reviews", "widgets-7-design", "task.yaml");
+    const task = await readFile(taskPath, "utf8");
+    expect(task).toContain("graph: pr-design-review");
+    expect(task).toContain(`request: "Design review on acme/widgets#7 at ${w.head}, asking every question."`);
+    expect(r.lines[0]).toBe("plan: design review of acme/widgets#7 against main, asking every question even if the change is judged unnecessary");
+    expect((await check(taskPath)).problems).toEqual([]);
+    const refused = await run({ graph: "pr-design-review", args: ["acme/widgets#7", "--no-report"], repo: w.repo.path, out: w.out, profile: "widgets", force: true });
+    expect(refused.errors.join("\n")).toMatch(/--no-report is not an option of pr-design-review/);
+  }, 120_000);
+});

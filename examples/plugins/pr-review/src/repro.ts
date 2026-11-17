@@ -16,7 +16,7 @@ import type { EnvironmentCommand } from "@graphloom/sdk";
 import { MAX_EXECUTOR_INPUT_BYTES } from "@graphloom/sdk";
 import { reportText, type CommandRun } from "./kit/evidence.js";
 import { encodeArg } from "./kit/metrics/coverage.js";
-import { secretFindings } from "./secrets.js";
+import { secretFindings } from "./kit/secrets.js";
 import { toolchainMismatch, toolchainSentence } from "./kit/toolchain.js";
 import { writeChunks } from "./kit/write.js";
 

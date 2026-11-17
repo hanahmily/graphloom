@@ -7,7 +7,7 @@
  * shortened is shortened by what matters least first (the proposal's detail, then the answer's tail), at a sentence end or a
  * word boundary, with a note that says so and where the whole answer is; a citation link is never dropped without a count.
  */
-import { cutAt } from "./kit/escape.js";
+import { cutAt } from "./escape.js";
 
 const oneLine = (s: string): string => s.replace(/\s+/g, " ").trim();
 

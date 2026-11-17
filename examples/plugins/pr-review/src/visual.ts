@@ -19,7 +19,7 @@ import { effectiveConclusion, NECESSITY_ID } from "./necessity.js";
 import { proofOf } from "./proof.js";
 import { SEVERITIES, type Finding } from "./review.js";
 import { hotspots, hotspotText, SCOPE_KINDS, SCOPE_TITLES, type ScopeKind } from "./kit/scope.js";
-import { squarify } from "./treemap.js";
+import { squarify } from "./kit/treemap.js";
 
 /** The places the page links to: the pull request, its commits, and the other file of the report. */
 export interface VisualLinks {
