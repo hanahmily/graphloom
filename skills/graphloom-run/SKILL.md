@@ -1,6 +1,6 @@
 ---
 name: graphloom-run
-description: Start a GraphLoom run. Writes task.yaml (graph, repo, config profile, request), checks it with graphloom check, starts graphloom run fully detached (setsid nohup) with an --on-stop hook that writes a marker file, captures the run id from the start line, and hands the run to the graphloom-watch skill (or, inside a HAPI session, to a detached graphloom watch that messages the session). Never polls the process table. Use when the user wants to run a graph (for example issue-fix on an issue) on a repository.
+description: Start a GraphLoom run. Writes task.yaml (graph, repo, config profile, request), checks it with graphloom check, starts graphloom run fully detached (setsid nohup) with an --on-stop hook that writes a marker file, captures the run id from the start line, and hands the run to the graphloom-watch skill (or, inside a HAPI session, to a detached graphloom watch that messages the session). Never polls the process table. Use when the user wants to run a graph (for example issue-fix on an issue, or pr-design-review or pr-review on a pull request) on a repository.
 ---
 
 # Start a GraphLoom run
@@ -115,6 +115,38 @@ graphloom task new pr-review apache/skywalking-banyandb#1234 --repo ./skywalking
   under `refs/graphloom/<graph>/` in the repository. The last line names the
   next command, `graphloom check` on the new task. Skip the hand-written
   task above and continue with section 2.
+- Arguments after the graph name are the graph's own; `graphloom task new`
+  passes them to the plugin, which refuses one it does not take.
+
+### Reviewing a pull request: two graphs
+
+A pull request is reviewed by two graphs, each its own run and its own task
+directory. Ask the user which one they want; do not run both unasked.
+
+- **`pr-design-review`** (round 1, the design review): is the change necessary,
+  what is each high-level change for, does the codebase already have it. No
+  Docker. Its task goes to `reviews/<repo>-<N>-design/task.yaml`. The graph
+  argument `--all-questions` asks every question even when the change is
+  judged unnecessary.
+- **`pr-review`** (round 2, the detail review): correctness, maintainability
+  and security reviewers with verified findings; it runs whether or not a
+  design review ran. Its task goes to `reviews/<repo>-<N>/task.yaml`. The graph
+  argument `--no-report` reviews from the pull request's own text and diff
+  when no design review report is usable, instead of writing a report first;
+  pass it only when the user asks for it.
+
+```sh
+graphloom task new pr-design-review apache/skywalking-banyandb#1234 --repo ./skywalking-banyandb --profile banyandb
+graphloom task new pr-review apache/skywalking-banyandb#1234 --repo ./skywalking-banyandb --profile banyandb
+```
+
+Each then goes through sections 2 to 5 like any task. When a
+`pr-design-review` run completes, relay its result line from `graphloom
+inspect` as it is. A clean design review posts nothing and its result names
+the next command (`Next: graphloom task new pr-review …`); tell the user, and
+start that `pr-review` task only when the user asks for it. A clean design
+review is never a reason to start the PR review by yourself. A design review
+with open items names no next command: it posted them on the pull request.
 
 ## 2. Check before spending
 
@@ -204,8 +236,9 @@ Record the state directory in `.graphloom-watch/run`.
 ## 6. A run that stops for a decision
 
 A graph may declare decisions for you as data and stop, final, with a result for
-you to read before anything continues (`graphloom inspect` names them; pr-review
-declares none: it posts its review and ends without waiting). Read what the stop
+you to read before anything continues (`graphloom inspect` names them;
+pr-design-review and pr-review declare none: each posts its review, or nothing,
+and ends without waiting). Read what the stop
 names, then decide:
 
 ```sh

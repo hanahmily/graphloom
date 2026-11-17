@@ -169,3 +169,21 @@ with the banyandb profile, and
 [`issue-fix-graphloom-task.yaml`](issue-fix-graphloom-task.yaml) on GraphLoom
 itself. See the [plugin README](plugins/issue-fix/README.md) and the
 [design](../docs/design-issue-fix-graph.md).
+
+## Pull request review: pr-design-review and pr-review
+
+Two plugins review an incoming pull request, each its own graph and its own run.
+[`plugins/pr-design-review`](plugins/pr-design-review/)
+(`@graphloom/plugin-pr-design-review`) is round 1, the design review: a neutral
+change report and design-level questions with their answers, the first being
+whether the change is necessary; its stages are Fetch, Report, Questions,
+Answers, Round 1 and Publish. [`plugins/pr-review`](plugins/pr-review/)
+(`@graphloom/plugin-pr-review`) is round 2, the detail review: three aspect
+reviewers with verified findings; its stages are Fetch, Report, Review, Draft
+and Publish, and it runs whether or not a design review ran. Neither takes a
+hand-written task: `graphloom task new <graph> <owner/repo#N> --repo <clone>
+--profile banyandb` fetches and pins the pull request's head and writes the
+task. Both copy the shared review machinery from
+[`plugins/review-kit`](plugins/review-kit/README.md) into their `src/kit/`. See
+the [design review](../docs/design-pr-design-review.md) and the
+[PR-review design](../docs/design-pr-review-graph.md).

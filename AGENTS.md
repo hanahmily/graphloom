@@ -49,24 +49,21 @@ an approval a graph declared as data. Tests of these use stub `claude`/`codex`
 binaries and a temporary `HOME`, never the real login; the one live check of
 Claude Code's fork is opt-in (`GRAPHLOOM_LIVE_CLAUDE_FORK=1`).
 
-The `pr-review` graph (0.23.x, implemented) (no human in a run: one run reviews one head in two
-rounds. Round 1 is a neutral change report, questions and their answers on an
-incoming pull request, the first question being whether the change is necessary;
-issues in it are posted and end the run. Otherwise round 2, three aspect reviewers
-with verified findings, runs in the same run; either way the run posts one `COMMENT`
-review whose first line is the verdict) follows the
-[PR-review design](docs/design-pr-review-graph.md); its shared review machinery
-is vendored source, not a dependency. Its one write, the review, needs the runner
-config's `github.writeTokenEnv`; the plugin never sees the token.
-Splitting it into two graphs, `pr-design-review` (round 1, design-level questions)
-and `pr-review` 1.x (round 2 only, runnable alone), with one ledger per pull request
-and a section per graph, is designed in [the PR-review split](docs/design-pr-review-split.md);
-`pr-design-review` 0.1.0 (`examples/plugins/pr-design-review`, round 1 as its own
-graph: no Docker, a clean round 1 posts nothing and its result names the
-`graphloom task new pr-review …` command) and `pr-review` 1.0.0 (round 2 only: Fetch, Report,
-Review, Draft, Publish; the context is the design review's report, a report-only prelude, or,
-with `task new pr-review … --no-report`, none; deterministic leads for the maintainability
-reviewer; it writes only the ledger's `review` section) are implemented.
+A pull request is reviewed by two graphs, each its own plugin and its own run, with
+no human in a run and no run starting another. `pr-design-review`
+(`examples/plugins/pr-design-review`, round 1) writes a neutral change report and
+asks design-level questions with their answers, the first being whether the change
+is necessary; it needs no Docker, posts its open items as one `COMMENT` review, posts
+nothing when clean, and its clean result names the `graphloom task new pr-review …`
+command, which the `graphloom-run` skill starts only when the user asks
+([design review](docs/design-pr-design-review.md)). `pr-review` 1.x
+(`examples/plugins/pr-review`, round 2) runs alone or after a design review: three
+aspect reviewers with verified findings and deterministic leads, seeded with the
+design review's report, a report-only prelude, or, with `task new pr-review …
+--no-report`, the pull request alone; it always posts one `COMMENT` review whose
+first line is the verdict ([PR-review design](docs/design-pr-review-graph.md)). Both
+share one ledger per pull request, a section per graph. Their one write, the review,
+needs the runner config's `github.writeTokenEnv`; the plugins never see the token.
 Both plugins vendor the third-party diagram-design agent skill
 (`examples/plugins/<plugin>/vendor/diagram-design`, MIT, unmodified, with its
 `LICENSE` and a `VENDORED.md` naming source and commit; design
@@ -76,8 +73,8 @@ header check and listed in `THIRD_PARTY_NOTICES`.
 The review machinery the two graphs share (Fetch, the ledger, the change
 report, measurements, groundwork, the profile parser, posting a review, the
 `task new` plan) is the review kit, `examples/plugins/review-kit/src`, a plain
-source tree copied byte for byte into each plugin's `src/kit/` (split design
-[§2](docs/design-pr-review-split.md#2-two-graphs-two-plugins)): edit the kit, never
+source tree copied byte for byte into each plugin's `src/kit/` (design
+[§14](docs/design-pr-review-graph.md#14-the-review-kit)): edit the kit, never
 a copy, then `npm run vendor -w @graphloom/plugin-pr-review` and
 `npm run vendor -w @graphloom/plugin-pr-design-review` and regenerate both
 manifests; each plugin's `kit-drift.test.ts` fails, naming the file, when they differ.

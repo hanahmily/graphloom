@@ -14,7 +14,8 @@ Graphs differ only in what they do with a measurement:
 
 | Graph | Use |
 |---|---|
-| [pr-review](design-pr-review-graph.md) | Facts in the change report's Measurements section, and questions for the author. Never a rejection |
+| [pr-design-review](design-pr-design-review.md) | Complexity and nesting only, as facts in the change report's Measurements section. Never a question or a rejection |
+| [pr-review](design-pr-review-graph.md) | Facts in the change report's Measurements section, and deterministic leads for its maintainability reviewer ([§7.3](design-pr-review-graph.md#73-leads)). Never a rejection |
 | [issue-fix](design-issue-fix-graph.md) | Gates on the graph's own change, designed in the issue-fix document |
 
 The thresholds are the operator's ("ub-mode") rules. A profile may tighten
@@ -167,7 +168,7 @@ always *shown*. It *triggers* follow-up only when `comp >= 10`, where the
 complexity rule already applies. Below that, an upper bound of 30 or more
 reflects the missing measurement, not the function. With measured coverage,
 `CRAP >= 30` triggers follow-up as stated. A graph's follow-up is its own:
-pr-review asks a question, and issue-fix applies a gate.
+pr-review gives its maintainability reviewer a `crap` lead, and issue-fix applies a gate.
 
 ### 2.5 Mutation testing
 
@@ -334,7 +335,7 @@ Both languages use the plugin's own tools, for the same reasons:
   behind, and mutants run one after another in one checkout.
 - **Repairable plugin source.** The tools are plugin source, vendored with
   the review kit
-  ([pr-review §14](design-pr-review-graph.md#14-sharing-code-with-issue-fix)),
+  ([pr-review §14](design-pr-review-graph.md#14-the-review-kit)),
   so they are source-repairable and pinned with the plugin.
 - **Offline in the Docker sandbox.** The Go tools are stdlib-only, so `go
   run` builds them offline inside the confinement. The TypeScript tools need
