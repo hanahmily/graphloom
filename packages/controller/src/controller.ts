@@ -29,7 +29,7 @@ import {
   type RecreateHostFn,
   type RepairDeps,
 } from "./repair-lifecycle.js";
-import { admitValidation, assertLiveWorkspaceMatchesEvidence, deliveryDrift, invalidateStageAndAfter, liveCandidateDigest } from "./admit.js";
+import { admitValidation, assertLiveWorkspaceMatchesEvidence, deliveryDrift, invalidateStageAndAfter, liveCandidateDigest, pinnedRequest } from "./admit.js";
 import type { AdmissionValidator } from "./admit.js";
 import { resolveBundleEntry } from "./bundle.js";
 import { createHostValidators } from "./host-validators.js";
@@ -1155,6 +1155,7 @@ async function recheckReceipts(
               evidence: evidence.filter((e) => e !== undefined),
               candidateFingerprint: receipt.candidateFingerprint,
               ...(receipt.candidateDigest !== undefined ? { candidateDigest: receipt.candidateDigest } : {}),
+              ...pinnedRequest(state),
             }),
           ),
         ).catch((err: unknown) => ({ status: "failed" as const, reason: err instanceof Error ? err.message : String(err) }));

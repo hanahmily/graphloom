@@ -42,6 +42,8 @@ const helloBundle = path.join(repoRoot, "examples/plugins/hello");
 
 const GREETING = "Hello, GraphLoom!\n";
 const GREETING_PATH = "GREETING.txt";
+/** The request makeEnv's task file holds, as intake pins it. */
+const PINNED_REQUEST = 'Create GREETING.txt containing exactly "Hello, GraphLoom!" followed by\none newline. Do not modify other files.';
 
 const definition: GraphDefinition = {
   graphId: "hello",
@@ -673,6 +675,24 @@ describe("release scenarios (#60)", () => {
       expect(resumed.receipts.filter((r) => r.valid).map((r) => r.stageId)).toEqual(["write"]);
     });
 
+    it("rechecks a receipt with the request intake pinned, not the task file's current one", async () => {
+      const paused = await acceptedWrite("update-recheck-request");
+      const { taskPath } = (await loadRunState(paused.stateDir)).intake;
+      await writeFile(taskPath, (await readFile(taskPath, "utf8")).replace(/request: \|[\s\S]*$/, "request: Something else entirely.\n"), "utf8");
+      const seen: Array<string | undefined> = [];
+      const recording: Validator = { evaluate: (input) => (seen.push(input.request), exactGreeting.evaluate(input)) };
+      const resumed = await createController().resume({
+        runRef: paused.stateDir,
+        plugin: resumedStop(),
+        runner: createScriptedRunner({ jobs: [] }),
+        validators: { ...validators, "exact-greeting": recording },
+        updatePlugin: true,
+      });
+      expect(resumed.stopReason).toBe("resumed");
+      expect(seen).toEqual([PINNED_REQUEST]);
+      expect(resumed.receipts.filter((r) => r.valid).map((r) => r.stageId)).toEqual(["write"]);
+    });
+
     it("invalidates a receipt the updated validator no longer accepts and returns to its stage", async () => {
       const paused = await acceptedWrite("update-invalidates");
       const stricter = { evaluate: () => ({ status: "failed" as const, reason: "stricter now" }) };
@@ -719,6 +739,62 @@ describe("release scenarios (#60)", () => {
       expect(resumed).toMatchObject({ status: "stopped", stopReason: "environment check failed" });
       expect(resumed.blocker).toMatch(/^new-tool: /);
       expect((await loadRunState(paused.stateDir)).definition.environment).toEqual(environment);
+    });
+  });
+
+  describe("the pinned request reaches validators (ValidationInput.request)", () => {
+    const recordingValidators = (seen: Array<{ requirementId: string; request: string | undefined }>) => ({
+      "exact-greeting": { evaluate: (input) => (seen.push({ requirementId: input.requirementId, request: input.request }), exactGreeting.evaluate(input)) } satisfies Validator,
+      "independent-reviewer": { evaluate: (input) => (seen.push({ requirementId: input.requirementId, request: input.request }), independentReview.evaluate(input)) } satisfies Validator,
+    });
+    const approve = async () => ({ status: "ok" as const, summary: "approved", evidence: [{ kind: "review" as const, payload: { verdict: "approved", summary: "ok" } }] });
+
+    it("passes the task's request to every validator on run", async () => {
+      const env = await makeEnv();
+      const seen: Array<{ requirementId: string; request: string | undefined }> = [];
+      const report = await createController().run({
+        taskPath: env.taskPath,
+        plugin: scriptedHappyPath(),
+        runner: createScriptedRunner({ jobs: [writeGreeting, approve] }),
+        validators: recordingValidators(seen),
+        stateRoot: env.stateRoot,
+        runId: "request-on-run",
+      });
+      expect(report.status).toBe("succeeded");
+      expect(seen).toEqual([
+        { requirementId: "greeting-bytes", request: PINNED_REQUEST },
+        { requirementId: "independent-review", request: PINNED_REQUEST },
+      ]);
+    });
+
+    it("passes the request intake pinned on resume, after the task file changed", async () => {
+      const env = await makeEnv();
+      const paused = await pausedRun(env, "request-on-resume");
+      await writeFile(env.taskPath, (await readFile(env.taskPath, "utf8")).replace(/request: \|[\s\S]*$/, "request: Something else entirely.\n"), "utf8");
+      const seen: Array<{ requirementId: string; request: string | undefined }> = [];
+      const resumed = await createController().resume({
+        runRef: paused.stateDir,
+        plugin: scriptedHappyPath(),
+        runner: createScriptedRunner({ jobs: [writeGreeting, approve] }),
+        validators: recordingValidators(seen),
+      });
+      expect(resumed.status).toBe("succeeded");
+      expect(seen.map((s) => s.request)).toEqual([PINNED_REQUEST, PINNED_REQUEST]);
+      expect((await loadRunState(paused.stateDir)).intake.task.request).toBe(PINNED_REQUEST);
+    });
+
+    it("leaves a validator that ignores the request accepting exactly as before", async () => {
+      const env = await makeEnv();
+      const report = await createController().run({
+        taskPath: env.taskPath,
+        plugin: scriptedHappyPath(),
+        runner: createScriptedRunner({ jobs: [writeGreeting, approve] }),
+        validators,
+        stateRoot: env.stateRoot,
+        runId: "request-ignored",
+      });
+      expect(report.status).toBe("succeeded");
+      expect(report.receipts.filter((r) => r.valid).map((r) => r.requirementId)).toEqual(["greeting-bytes", "independent-review"]);
     });
   });
 

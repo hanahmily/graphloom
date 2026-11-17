@@ -245,6 +245,13 @@ describe("wire validation", () => {
     expect(() => assertValidationInput({ ...input, history: [{ ref: "e0", kind: "review" }] })).toThrow(/generation/);
   });
 
+  it("checks the validation input's request is a string when present", () => {
+    const input = { requirementId: "r", statement: "s", evidence: [] };
+    expect(assertValidationInput({ ...input, request: "Fix #7\n" }).request).toBe("Fix #7\n");
+    expect(assertValidationInput(input).request).toBeUndefined();
+    expect(() => assertValidationInput({ ...input, request: 7 })).toThrow(/request must be a string/);
+  });
+
   it("rejects oversized payloads", () => {
     const huge = `"${"x".repeat(1_000_001)}"`;
     expect(() => parseJsonBounded(huge, 1000)).toThrow(WireValidationError);
