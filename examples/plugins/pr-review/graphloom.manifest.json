@@ -16,7 +16,7 @@
     "vitest": "^4.1.12"
   },
   "digests": {
-    "sourceTree": "acc7a3925af5ed3163dc12e1f60561adaa1884eac9b87fc26596a1f84f0c613a",
+    "sourceTree": "91866bb728708b4c3f2348e6697bb43455e7d9b7d5577f722150aa024c93ef8f",
     "packageLock": "1123e4e7d6011e4d012ec8a7d176b90952dd9efc98c832e27e3c856aad263108",
     "files": {
       "package.json": "7df63cfd7c8551cda0949401f18303c2e351cde84eb3c25be343b6eb89d82151",
@@ -60,7 +60,7 @@
       "vendor/diagram-design/scripts/verify-geometry.py": "33fb89edbdc8b9cf625a388ba47147bf46ec9e8ae84b7110e240de165732001f",
       "src/context.ts": "dd2b9376de2890c1bc82fa936935032e7bdcc8941a14f31c8becf04dd951bb39",
       "src/draft.ts": "a808e773f373696fe1125a3d31b03af76274f0ab7aad7057d7f1831a4afe4cb7",
-      "src/graph.ts": "9899943896e7e35bcdcc0a48ba4dea574082a2d50dbd0270ed6e56b789cff564",
+      "src/graph.ts": "456e2a57f5c708053fa19affec44a6fe3382451973a08d48076aae5f8a0b41fb",
       "src/html.ts": "998fa90a2546eb510b4eb11d26c8a49aba8d7f6133f5be97d67f83e7e4729d20",
       "src/index.ts": "70879220b9d758df6ae508987dce0a944164b1cb4956d2c65f85aa08e68fe1d8",
       "src/kit/analysis.ts": "98e49401ab61e25e0663a6b8aeecf0903eca7e12b81f859654c08332fde597fa",
@@ -154,10 +154,10 @@
       "src/reproplan.ts": "a3cfea73d201b20af94f2009ccc683494f97d44401b59497e5256e4063796c30",
       "src/review.ts": "b3a63aec16ed6c1a2fa8380d65ed1307f6bd86bfbfd80aefd52f26a67bbc87b2",
       "src/reviewdraft.ts": "f98e2863b9f7591b2a186c77ed9831129f2f6b5ef600577213327ffec4c452bd",
-      "src/reviewledger.ts": "f8f7d7f9befa9323774987299c0315d356922389fcb863a0e77d8f76b7642039",
+      "src/reviewledger.ts": "d41eff44b793094a90a8d8a5288649ae5bca638a7680c30e3b10547ac6b1328d",
       "src/reviewprompts.ts": "c3903cfed15083796143b0598098b674dfa9fe824457dd3a942ade309b45b7c3",
       "src/reviewscope.ts": "01d80589036204f395d227e88b9bae75cd52d749f6fc32a9aa62b884e5ba9f9d",
-      "src/reviewvalidators.ts": "07e58dbb320d859f07a43c8722d761c1c235290254d34d1bc2c40247b4698528",
+      "src/reviewvalidators.ts": "86bf3cafcc123226e37f67d974ad35206c3826cbdba1549096dafd6fc4da2e2d",
       "src/runcontext.ts": "d7e831aa7fd3305360026b59d4e999d2caf46e34b6be83ff281570628da810f4",
       "src/validators.ts": "80a572bc3ce91736e8fff3ff28079c28bcd76ae761d250b5cf731f68f46b73f8",
       "src/version.ts": "c4ae94705b9b5240bddcb579732e329495d5b130e9aac2d315da02b34b5bb0ae",
@@ -206,6 +206,7 @@
       "test/review-units.test.ts": "be0bf98a4a6e29176cd21cceabadd80ba96fe9c062455913c7d456f4dcc08ce3",
       "test/review.test.ts": "f5d9c232d0d1a5465d37470b8e3fab5d2e1ba06df1dfb00c3dc00e0e3efc5f55",
       "test/scope.test.ts": "ff961ee170f6ce5c21b8ffd0d89a49ce3792ad4a6380bc9b217ddefda4390df7",
+      "test/stale-ledger.test.ts": "7414febe0aaff87af8f81990e6c4d6e3ed16d109b8aa0305563e54998b27c3c8",
       "test/static-batches.test.ts": "eaa4095a411abf32ac8d59482b8b57c375ed3ce7692f0effab5b22ccebd916ca",
       "test/static-tools.test.ts": "73cd104a1bf1d00e400c581df9ef0dea237290c3fd200dab4560a10a86077cf2",
       "test/support.ts": "34984a35c450977ca76703e718e1e32bb747abc7efe3a66ac4a0c81aaf72bebf",

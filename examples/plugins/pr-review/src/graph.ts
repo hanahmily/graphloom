@@ -1103,6 +1103,7 @@ function recordReviewLedger(ctx: Context, view: RunView, draft: Parameters<typeo
   const plan = reviewLedgerWrite(view.evidence, pr, draft);
   if (plan.state === "read") return withPrivate(dispatch(commandJob(DRAFT_STAGE, "Read the prior ledger's sections", { commands: plan.commands, continueOnFailure: true, env: { ...GIT_ENV } }), "read the prior ledger's sections, so the new review section keeps its heads and findings"));
   if (plan.state === "problem") return supervise({ reason: plan.reason, evidenceRefs: plan.refs }, "escalate a prior ledger that cannot be read: it is never overwritten");
+  if (plan.state === "stale") return stop({ reason: "ledger moved", blocker: plan.reason, evidenceRefs: plan.refs, retryable: false }, "stop: another PR review recorded findings after this run's Fetch; this run's draft is stale");
   if (lw.run !== undefined && !lw.failed && sameArgv(lw.run.command.argv, plan.write.argv)) return validateStage(ctx, view, DRAFT_STAGE);
   if (commandRuns(view.evidence, COMMAND.reviewLedgerWrite).length >= 6) return supervise({ reason: "the ledger write keeps differing from the one the evidence recomputes" }, "escalate a ledger write that does not settle");
   // The files the write reads are written first as part sets (design §6.6): the design section a migration of a v1 ledger builds, and a review ledger.json or ledger.md too large for the write's one command.

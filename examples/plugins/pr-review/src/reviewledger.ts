@@ -8,7 +8,9 @@
  * design section the migration builds is carried in, with the v1 commit's report, Q&A and necessity record.
  */
 import type { EnvironmentCommand, EvidenceRecord } from "@graphloom/sdk";
-import { isObject } from "./kit/evidence.js";
+import { commandRuns, isObject, reportText, succeeded } from "./kit/evidence.js";
+import { COMMAND } from "./kit/constants.js";
+import { parseLedger } from "./kit/commands.js";
 import { ledgerRead, oldValue, priorState, readBaselines, reviewLedgerWriteCommands, reviewMigrationOf, type ReviewMigration } from "./kit/ledger.js";
 import { REVIEW_SCHEMA, reviewMarkdown } from "./kit/ledgerv2.js";
 import type { PullRequest } from "./kit/request.js";
@@ -41,7 +43,9 @@ export const reviewHeadOf = (draft: Pick<Draft, "head" | "base" | "context" | "r
 export type ReviewLedgerWrite =
   | { state: "ready"; old: string; baseline: string; migration: ReviewMigration; json: string; parts: EnvironmentCommand[]; write: EnvironmentCommand }
   | { state: "read"; commands: EnvironmentCommand[] }
-  | { state: "problem"; reason: string; refs: string[] };
+  | { state: "problem"; reason: string; refs: string[] }
+  /** Another PR review advanced the review section after this run's Fetch: this run's finding ids and earlier findings are stale. */
+  | { state: "stale"; reason: string; refs: string[] };
 
 /** The write of the review section with this head, recomputed from the ledger Fetch read and the draft. */
 export function reviewLedgerWrite(evidence: readonly EvidenceRecord[], pr: PullRequest, draft: Draft): ReviewLedgerWrite {
@@ -53,6 +57,17 @@ export function reviewLedgerWrite(evidence: readonly EvidenceRecord[], pr: PullR
   if (prior.state === "unreadable") return { state: "problem", reason: `the prior ledger cannot be read (${prior.reason}); it is never overwritten`, refs: [prior.run.record.ref] };
   const baselines = readBaselines(read.ledger, prior, pr);
   if (baselines === undefined) return { state: "problem", reason: "the prior ledger's sections have not been read", refs: [] };
+  // The review section a re-read (after "ledger moved") finds must be the one Fetch read: the draft numbers its findings on from that
+  // section and judges its earlier findings, so a section another PR review advanced since makes the draft stale. Only the design
+  // section may have moved (it is carried over as the ref holds it).
+  const first = commandRuns(evidence, COMMAND.ledger).filter((r) => succeeded(r.command))[0];
+  const fetched = first === undefined ? undefined : parseLedger(reportText(first).text);
+  if (first !== undefined && fetched !== undefined && first.record.ref !== read.run.record.ref) {
+    const fetchedPrior = priorState(evidence, oldValue(fetched));
+    if (fetchedPrior.state === "missing") return { state: "read", commands: fetchedPrior.next };
+    const was = readBaselines(fetched, fetchedPrior, pr)?.review;
+    if (was !== baselines.review) return { state: "stale", reason: `another PR review advanced the pull request's review section (${was ?? "unread"} to ${baselines.review}) after this run's Fetch, so this run's finding ids and earlier findings are stale: start a new pr-review task for this head`, refs: [first.record.ref, read.run.record.ref] };
+  }
   const migration = reviewMigrationOf(prior, pr);
   const json = reviewLedgerJson(prior.state === "read" ? prior.value.review : undefined, reviewHeadOf(draft));
   const message = `pr-review ${pr.owner}/${pr.repo}#${pr.number} at ${pr.head.slice(0, 12)}: ${draft.context.source} context, ${draft.comments.length} finding comment(s) drafted`;

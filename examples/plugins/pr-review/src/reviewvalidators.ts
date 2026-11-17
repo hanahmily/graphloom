@@ -303,7 +303,7 @@ export const ledgerCas: Validator = profiled((input, profile) => {
   if (w.state === "failed") return failed(w.reason);
   const plan = reviewLedgerWrite(input.evidence, run.pr, w.writes.draft);
   if (plan.state === "read") return inconclusive("the prior ledger's sections are not read");
-  if (plan.state === "problem") return failed(plan.reason);
+  if (plan.state === "problem" || plan.state === "stale") return failed(plan.reason);
   const lw = commandRuns(input.evidence, COMMAND.reviewLedgerWrite).at(-1);
   if (lw === undefined) return inconclusive("the ledger's review section has not been advanced");
   if (!succeeded(lw.command)) return failed(`the review section's write did not succeed (exit ${lw.command.exitCode ?? "signal"})`);
