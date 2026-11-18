@@ -1334,7 +1334,7 @@ appendix.
    the counts. Pending (the Questions and Answers stages follow) at the Report
    stage.
 6. **Review**, when the review layer ran ([§8](#8-the-review-layer)): the findings as
-   a grid of tiles by aspect and severity with counts, coloured by state
+   a grid of tiles by aspect and final priority ([§8.4](#84-draft)) with counts, coloured by state
    (disputed when its verifier did not settle it, unproven when it is a
    behavioral finding no test proves, confirmed otherwise; a cell takes its most
    serious state, and dismissed findings are not shown), each linking to its
@@ -1477,7 +1477,9 @@ about it, or `not-an-issue`, with a reason. A missing, repeated or unknown lead 
 goes back to the same session as a correction. A raised finding is an ordinary
 finding: verified, and posted only when confirmed. Its kind sets its priority, not
 the reviewer: the last column is what plugin code drafts a confirmed finding of
-that kind at, whatever priority the reviewer proposed.
+that kind at, whatever priority the reviewer proposed. That drafted priority is the
+finding's only one: every report, the posted review and the ledger show it, and the
+proposed one stays in the aspect record ([§8.4](#84-draft)).
 
 | Lead kind | Computed from | Priority of its finding |
 |---|---|---|
@@ -1987,6 +1989,22 @@ behavioral and disputed findings are listed under "Needs your judgment". The
 recommendation is computed ([§10.3](#103-verdict)). The draft is what the Publish
 stage posts from ([§8.5](#85-publish)), as it is composed: nobody edits it.
 
+**One priority per finding (since 1.1.1).** A finding's priority is its final one,
+the priority of the draft entry it is in (as its primary or linked finding), wherever
+a person sees it or the ledger stores it: `draft.json` (its entries and its report
+part), `draft.md`, the Review section and appendix of `review.md`, the grid and
+appendix of the HTML report, the posted review, and the ledger's findings
+([§9.1](#91-where-the-ledger-lives)). An unproven behavioral finding the reviewer
+proposed at P0 is P2 everywhere; a `reuse` finding proposed at P3 is P0 everywhere.
+An entry under "Needs your judgment" has the priority the same rules give it (an
+unproven one at most P2; `draft.md` names none in its heading, as before). A
+dismissed finding is in no entry and shows and stores no priority; a P3 nit is only
+counted. The reviewer's proposed priority is kept only in its aspect record
+(`review-aspect-<aspect>`), which the validators recompute from, and is never shown
+or copied elsewhere. `draft-composed` recomputes every priority `draft.json` holds and
+fails one that differs, naming it; `review-published` does the same for the ledger
+patch it records.
+
 **No Q&A item is drafted.** The body has a section "Design review (round 1)",
 from the `design` section Fetch read (its latest head with a recorded outcome):
 
@@ -2151,6 +2169,15 @@ review/ledger.md
   reviewId, commentId, inline }, fixedIn?, history: [{ head, status, reason?,
   carried?, reposted? }] }`. A finding's `state` is `open`, `fixed`, or `withdrawn`
   (a finding a verifier dismissed, never posted, kept so it is not raised again).
+  A finding's `severity` is its final priority, the one it was posted at
+  ([§8.4](#84-draft)); a withdrawn one has none (since 1.1.1).
+- **Sections 1.0 and 1.1.0 wrote.** They stored the reviewer's proposed priority in
+  `severity`, but posted the final one, and a posted item's `text` starts with its
+  label (`**[P0] critical** · …`, after any `**Still open** (first raised on …).`
+  lead-in of a repost). A later run reads a posted finding's priority from that
+  label, and the stored `severity` only when the text has none (a withdrawn finding,
+  or a 0.21 item); the section is not rewritten for it, but a finding this run
+  records at a new place or posts again is written back at the priority read.
 - **Ids and keys.** Each graph numbers from its own section only. A new finding
   takes the number after the highest `F`; a question whose stable key the section
   holds keeps its id. The key of a design question is `necessity|N1`, or its type
@@ -2318,7 +2345,9 @@ sections it does not know.
 base, the verdict and the recommendation, the summary, the comments (`{ id,
 aspects, severity, proof, path, side, startLine?, line, body, suggestion? }`), the
 entries for the maintainer's judgment, the earlier findings, and the round-1 part
-of [§8.4](#84-draft). Every comment is a finding. `proof` is
+of [§8.4](#84-draft). Every comment is a finding, and every `severity` the file
+holds, an entry's or a finding's in its report part, is the final one
+([§8.4](#84-draft)). `proof` is
 `proven` (with the test, its virtual path and the failure summary),
 `non-behavioral`, or for an entry under "Needs your judgment" `unproven` with
 its reason. Findings are grouped by aspect, in the order correctness,
@@ -3008,6 +3037,12 @@ graph over time.
   verified and drafted, not counted as a nit), and makes the recommendation
   `request-changes`; `findings-proven` recomputes its lead. `missing-test` stays at
   most P2 and `untested-feature` at most P1 ([§7.3](#73-leads)).
+- **1.1.1:** one priority per finding: `review.md`, the HTML report, `draft.json`'s
+  report part and the ledger show and store the final (drafted, posted) priority, not
+  the reviewer's proposed one, which stays in the aspect record; a dismissed finding
+  has none; `draft-composed` and `review-published` check every stored priority
+  against the recomputation; a section 1.0 or 1.1.0 wrote is read at the priority
+  each finding's posted label carries ([§8.4](#84-draft), [§9.1](#91-where-the-ledger-lives)).
 
 **Where 1.0 differs from its design.** The split design (now
 [a pointer](design-pr-review-split.md)) planned a Checks stage when the profile has

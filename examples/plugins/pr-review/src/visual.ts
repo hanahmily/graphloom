@@ -11,7 +11,7 @@
 import { CHECK_LISTS, type CheckList, type FinalFeature } from "./kit/briefing.js";
 import type { ChangeCard, Excerpt } from "./kit/cards.js";
 import type { DrawnDiagram } from "./kit/diagrams.js";
-import type { Draft } from "./draft.js";
+import type { Draft, ReviewFinding } from "./draft.js";
 import { clip, esc } from "./kit/escape.js";
 import { featureSvg } from "./kit/flowlayout.js";
 import type { HtmlInput, ReportDoc } from "./html.js";
@@ -300,13 +300,13 @@ export const areaAnchor = (id: string): string => `area-${id.replace(/[^A-Za-z0-
 const MAX_CARD_CITES = 3;
 
 /** The card of a coloured area: id, label and colour badge; one line for each check entry; the findings located in its files as chips. */
-function areaCard(area: RiskArea, kind: RiskKind, reasons: readonly AreaReason[], findings: readonly Finding[], l: VisualLinks): string {
+function areaCard(area: RiskArea, kind: RiskKind, reasons: readonly AreaReason[], findings: readonly ReviewFinding[], l: VisualLinks): string {
   const lines = reasons.map((x) => {
     const shown = x.cites.slice(0, MAX_CARD_CITES).map((c) => l.cite(c)).join(" ");
     const more = x.cites.length > MAX_CARD_CITES ? ` <span class="muted" title="${esc(x.cites.slice(MAX_CARD_CITES).map((c) => c.path).join(", "))}">+${x.cites.length - MAX_CARD_CITES}</span>` : "";
     return `<div class="re"><span class="rk ${x.kind}">${esc(RISK_NAMES[x.kind])}</span> <span class="rt" title="${esc(x.text)}">${esc(clip(x.text, 200))}</span> <span class="cites">${shown}${more}</span></div>`;
   });
-  const chips = findings.map((f) => `<a class="fchip ${findingTone(f)}" href="${esc(appendixAt(l, `f-${f.id}`))}" title="${esc(`${f.id} ${f.severity} ${findingTone(f)}: ${clip(f.content, 140)} (${f.path}:${f.startLine})`)}">${esc(f.id)} ${esc(f.severity)}</a>`);
+  const chips = findings.map((f) => `<a class="fchip ${findingTone(f)}" href="${esc(appendixAt(l, `f-${f.id}`))}" title="${esc(`${f.id}${f.severity !== undefined ? ` ${f.severity}` : ""} ${findingTone(f)}: ${clip(f.content, 140)} (${f.path}:${f.startLine})`)}">${esc(f.id)}${f.severity !== undefined ? ` ${esc(f.severity)}` : ""}</a>`);
   return `<div class="rcard" id="${esc(areaAnchor(area.id))}"><div class="rh"><span class="aid">${esc(area.id)}</span> <span class="rl" title="${esc(area.label)}">${esc(clip(area.label, 60))}</span> <span class="rb ${kind}">${esc(RISK_NAMES[kind])}</span></div><div class="rlines">${lines.join("")}</div>${chips.length > 0 ? `<div class="fchips">${chips.join("")}</div>` : ""}</div>`;
 }
 

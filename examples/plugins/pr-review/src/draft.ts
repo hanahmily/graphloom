@@ -12,6 +12,9 @@
  * `untested-feature` lead, whose proof is the recorded test map and coverage, may be drafted at P1; and a confirmed finding raised
  * from a `weak-test`, `split-function`, `crap` or `reuse` lead, whose proof is its recomputed lead, is drafted at P0 whatever
  * priority the reviewer proposed (an unproven behavioral one still is not: it goes to "Needs your judgment").
+ *
+ * That drafted priority is a finding's only one (design §8.4): the draft's report part (`review.findings`), review.md, the HTML
+ * report, the posted review and the ledger show it; a dismissed finding has none. The proposed one stays in the aspect record.
  */
 import { ASPECTS, DRAFT_ORDER, type Aspect } from "./kit/aspects.js";
 import { clip } from "./kit/escape.js";
@@ -111,12 +114,20 @@ export interface AspectView {
   dismissed: number;
 }
 
+/**
+ * A finding as every surface outside its aspect record shows it (review.md, the HTML report, draft.json): its priority is the final
+ * one the draft rules give it, the priority of the draft entry it is in (as primary or linked), or none when it is in no entry (a
+ * dismissed finding). The reviewer's proposed priority stays in the aspect record only (design §8.4).
+ */
+export type ReviewFinding = Omit<Finding, "severity"> & { severity?: Severity };
+
 /** What the report sections render: the scope and base, the aspects and every finding with its verdict. */
 export interface ReviewDoc {
   scope: { mode: "standard" | "large"; source: string; areas: ScopeRecord["areas"]; files: number };
   context: ScopeRecord["context"];
   aspects: AspectView[];
-  findings: Finding[];
+  /** Every finding, at its final priority or with none: never the reviewer's proposed one. */
+  findings: ReviewFinding[];
   /** Every lead with its status (design-pr-review-split §4.3); the appendix lists them. */
   leads: LeadRecord[];
 }
@@ -218,6 +229,44 @@ function entryOf(members: readonly Finding[], files: readonly PullFile[], reason
   };
 }
 
+/** The final priority of every finding in a draft entry: the entry's own, for its primary and its linked findings (design §7.3, §8.4). */
+export function finalPriorities(entries: readonly DraftEntry[]): Map<string, Severity> {
+  const out = new Map<string, Severity>();
+  for (const e of entries) {
+    if (e.severity === undefined) continue;
+    for (const id of [e.id, ...(e.linked ?? [])]) if (!out.has(id)) out.set(id, e.severity);
+  }
+  return out;
+}
+
+/**
+ * Where a written draft's priorities differ from the recomputed draft's: an entry, or a finding of the report part, at a priority
+ * other than the one the draft rules give it (a reviewer's proposed one copied, say). Undefined when they agree.
+ */
+export function priorityMismatch(written: unknown, want: Draft): string | undefined {
+  if (!isObj(written)) return undefined;
+  const sev = (v: unknown): string => (isObj(v) && typeof v.severity === "string" ? v.severity : "none");
+  const wantEntries = new Map([...want.comments, ...want.judgment].map((e) => [e.id, e.severity ?? "none"] as const));
+  for (const e of [...(Array.isArray(written.comments) ? written.comments : []), ...(Array.isArray(written.judgment) ? written.judgment : [])]) {
+    if (!isObj(e) || typeof e.id !== "string" || !wantEntries.has(e.id)) continue;
+    if (sev(e) !== wantEntries.get(e.id)) return `${e.id} is drafted at ${sev(e)}, but the draft rules give ${wantEntries.get(e.id)}`;
+  }
+  const wantFindings = new Map(want.review.findings.map((f) => [f.id, f.severity ?? "none"] as const));
+  const review = isObj(written.review) && Array.isArray(written.review.findings) ? written.review.findings : [];
+  for (const f of review) {
+    if (!isObj(f) || typeof f.id !== "string" || !wantFindings.has(f.id)) continue;
+    if (sev(f) !== wantFindings.get(f.id)) return `the report shows ${f.id} at ${sev(f)}, but the draft rules give ${wantFindings.get(f.id)}`;
+  }
+  return undefined;
+}
+
+/** A finding as shown outside its aspect record: at its final priority, or with none. */
+export function shownFinding(f: Finding, final: ReadonlyMap<string, Severity>): ReviewFinding {
+  const { severity: _proposed, ...rest } = f;
+  const s = final.get(f.id);
+  return s !== undefined ? { ...rest, severity: s } : rest;
+}
+
 /** A confirmed non-behavioral finding raised from an `untested-feature` lead: the one that may be drafted at P1 (§4.3). */
 export const untestedFeature = (f: Pick<Finding, "leadKind" | "kind" | "state">): boolean => f.leadKind === "untested-feature" && f.kind === "non-behavioral" && f.state === "confirmed";
 
@@ -290,11 +339,13 @@ export function composeDraft(i: DraftInput): Draft {
     disputed: r.findings.filter((f) => f.state === "disputed").length,
     dismissed: r.findings.filter((f) => f.state === "dismissed").length,
   }));
+  // Every surface shows a finding's final priority (its entry's), or none; the proposed one stays in the aspect record (design §8.4).
+  const final = finalPriorities([...comments, ...judgment]);
   const review: ReviewDoc = {
     scope: { mode: i.scope.mode, source: i.scope.source, areas: i.scope.areas, files: i.scope.files.length },
     context: i.scope.context,
     aspects: views,
-    findings,
+    findings: findings.map((f) => shownFinding(f, final)),
     leads,
   };
   const summary = summaryText(i.scope, confirmed.filter((f) => f.principle !== undefined), views, comments, judgment, dismissed.length, recommended);
@@ -399,9 +450,9 @@ export function draftMarkdown(d: Draft): string {
 
 // ---- review.md: the Review section and its appendix part ----
 
-const countBy = (fs: readonly Finding[], state: Finding["state"]): number => fs.filter((f) => f.state === state).length;
+const countBy = (fs: readonly ReviewFinding[], state: Finding["state"]): number => fs.filter((f) => f.state === state).length;
 
-const findingLine = (f: Finding, reviewerOf: (a: Aspect) => string): string => {
+const findingLine = (f: ReviewFinding, reviewerOf: (a: Aspect) => string): string => {
   const proof = proofOf(f);
   return `${f.id} · ${f.aspect} · ${f.path}:${f.startLine}${f.endLine > f.startLine ? `-${f.endLine}` : ""}${f.side === "LEFT" ? " (base)" : ""} · ${f.state}${f.principle !== undefined ? ` · breaks principle ${f.principle}` : ""}${f.verdict !== undefined ? ` (verifier ${reviewerOf(f.raisedBy)}: ${f.verdict.verdict})` : ""} · ${proof.state === "unproven" ? `unproven: ${proof.reason}` : proof.state}: ${clip(oneLine(f.content), 160)}`;
 };
@@ -421,6 +472,8 @@ export function reviewBriefingMarkdown(d: Draft): string {
     if (at.length === 0) continue;
     out.push("", `### ${sev} (${at.length})`, ...at.map((x) => `- ${findingLine(x, verifier)}`));
   }
+  const unranked = f.filter((x) => x.severity === undefined);
+  if (unranked.length > 0) out.push("", `### Not drafted (${unranked.length})`, ...unranked.map((x) => `- ${findingLine(x, verifier)}`));
   if (f.length === 0) out.push("", "No finding survived verification.");
   out.push("");
   return out.join("\n");
@@ -430,7 +483,7 @@ export function reviewBriefingMarkdown(d: Draft): string {
 export function reviewAppendixMarkdown(d: Draft): string {
   const out = ["## Review: findings and draft", "", "### Findings"];
   for (const f of d.review.findings) {
-    out.push(`#### ${f.id} · ${f.aspect} · ${f.severity} · ${f.kind} · ${f.state}${f.principle !== undefined ? ` · breaks principle ${f.principle}` : ""}`, `${f.path}:${f.startLine}-${f.endLine} (${f.side === "RIGHT" ? "head" : "base"}), raised in pass ${f.pass} of the ${f.raisedBy} sweep.`, f.content);
+    out.push(`#### ${f.id} · ${f.aspect} · ${f.severity !== undefined ? `${f.severity} · ` : ""}${f.kind} · ${f.state}${f.principle !== undefined ? ` · breaks principle ${f.principle}` : ""}`, `${f.path}:${f.startLine}-${f.endLine} (${f.side === "RIGHT" ? "head" : "base"}), raised in pass ${f.pass} of the ${f.raisedBy} sweep.`, f.content);
     if (f.evidence !== "") out.push(`The reviewer read: ${f.evidence}`);
     if (f.verdict !== undefined) out.push(`Verifier: ${f.verdict.verdict}${f.verdict.witness !== "" ? ` at ${f.verdict.witness}` : ""}: ${f.verdict.reason}${f.verdict.quotes.length > 0 ? ` Quotes: ${f.verdict.quotes.map((q) => `${q.path}:${q.line} "${clip(oneLine(q.text), 80)}"`).join("; ")}.` : ""}`);
     if (f.notes.length > 0) out.push(`Notes: ${f.notes.join("; ")}.`);
