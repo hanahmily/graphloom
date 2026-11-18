@@ -340,6 +340,31 @@ describe("a finding raised from a reuse lead is drafted and posted at P0 (design
     expect(findingsProven.evaluate({ requirementId: "findings-proven", statement: "", evidence: candidate(), config: BANYANDB })).toMatchObject({ status: "passed", reason: expect.stringContaining("1 raised from a weak-test, split-function, crap or reuse lead (drafted at P0)") });
   });
 
+  it("keeps the reuse lead when an untested-feature lead's comment, raised first, and the reuse comment merge into one finding", () => {
+    const merged = simulate({
+      scenario: scenarioWith("reuse-lead", (x) => {
+        const pass = x.results[REVIEW_SCHEMA_NAME]![2]!.output as { comments: Array<Record<string, unknown>>; leads: Array<Record<string, unknown>> };
+        const own = pass.comments[0]!;
+        pass.comments.push({ ...own, start_line: 1, end_line: 2, severity: "P2", content: "ParseTTL has no test." }, { ...own, start_line: 2, end_line: 3, severity: "P3", content: "ParseTTL repeats timestamp.ParseDuration; call it instead." });
+        pass.leads = [
+          { lead: "L1", status: "raised", comment: 1, reason: "raised as a comment" },
+          { lead: "L2", status: "raised", comment: 2, reason: "raised as a comment" },
+        ];
+        const verify = x.results[VERIFY_SCHEMA_NAME]![1]!.output as { verdicts: Array<Record<string, unknown>> };
+        verify.verdicts.push({ ...verify.verdicts[0]!, finding: "F4", witness: "pkg/timestamp/duration.go:30", reason: "ParseDuration parses the same units", fixes: false });
+      }),
+    });
+    ended(merged);
+    const r = recordedAspect(merged.evidence, "maintainability");
+    if (r.state !== "read") throw new Error("not recorded");
+    expect(r.value.passes[0]).toMatchObject({ raised: ["F3", "F4"], nits: 0, merged: 1 });
+    expect(r.value.findings.find((f) => f.id === "F4")).toMatchObject({ lead: "L2", leadKind: "reuse", state: "confirmed" });
+    const draft = JSON.parse((writtenDraftFiles(merged.evidence).draftJson as { value: string }).value) as { recommended: string; comments: Array<{ id: string; severity: string; lead?: { id: string; kind: string } }> };
+    expect(draft.comments.find((c) => c.id === "F4")).toMatchObject({ severity: "P0", lead: { id: "L2", kind: "reuse" } });
+    expect(draft.recommended).toBe("request-changes");
+    expect(merged.receipts.some((x) => x.requirementId === "findings-proven" && x.valid)).toBe(true);
+  });
+
   it("fails findings-proven for a forged lead: an unknown id, another kind, or a lead the record does not show raised by the finding", () => {
     const forge = (from: string, to: string): EvidenceRecord[] =>
       candidate().map((e): EvidenceRecord => {

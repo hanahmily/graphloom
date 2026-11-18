@@ -1499,8 +1499,10 @@ that kind at, whatever priority the reviewer proposed.
   as for any finding. A finding the reviewer or the verifier classes as
   behavioral keeps the proof rule of [§8.2](#82-reproducing-tests): proven, it is
   drafted at P0; unproven, it is never P0 or P1 and goes to "Needs your judgment".
-  When such a finding is linked with another aspect's on overlapping lines, the one
-  entry is P0 and names the lead.
+  When several leads name one finding (one comment, or comments merged on
+  overlapping lines), the finding keeps the first, unless a later one is of these
+  four kinds and the first is not. When such a finding is linked with another
+  aspect's on overlapping lines, the one entry is P0 and names the lead.
 
 - **Scope.** Leads are computed for the functions and symbols in the review's scope
   only (in large mode, the files of the scoped areas). With coverage off or not run,

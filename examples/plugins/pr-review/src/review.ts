@@ -793,7 +793,9 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
           if (e.status !== "raised") continue;
           const target = findings.find((f) => f.id === commentOutcome.get(e.comment));
           const lead = givenLeads.find((l) => l.id === e.lead);
-          if (target !== undefined && lead !== undefined && target.lead === undefined) {
+          // Several leads may name one finding (one comment, or comments merged on overlapping lines): the first is kept, unless a
+          // later one is drafted at the fixed P0 and the kept one is not (design §7.3).
+          if (target !== undefined && lead !== undefined && (target.lead === undefined || (!fixedP0Lead(target.leadKind) && fixedP0Lead(lead.kind)))) {
             target.lead = lead.id;
             target.leadKind = lead.kind;
           }

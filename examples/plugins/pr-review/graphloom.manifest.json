@@ -16,7 +16,7 @@
     "vitest": "^4.1.12"
   },
   "digests": {
-    "sourceTree": "b6d79c03a569a3cb09df9e0e341930e4a5dd36d0b82b1f90c2c7c3ad8e7f4850",
+    "sourceTree": "72f573e18ee86a52525ecef2fc17ac3b458b7906346c1cfcb3506c002ee9fd5a",
     "packageLock": "1123e4e7d6011e4d012ec8a7d176b90952dd9efc98c832e27e3c856aad263108",
     "files": {
       "package.json": "5c3eab5860715c11889c953b68d2bcbb7d5a49eb55f6d6cef79a907f50f3765b",
@@ -152,7 +152,7 @@
       "src/rehearsal.ts": "949f143168799a13abf95774493da3859e2e6d847fa14007b6398077d6e0c651",
       "src/repro.ts": "75ee6fd47a0f6c863e47771316a54b6344f3849195119ebc2c434f50c9bcc54f",
       "src/reproplan.ts": "a3cfea73d201b20af94f2009ccc683494f97d44401b59497e5256e4063796c30",
-      "src/review.ts": "0b88fa8f097e67ede0b4c07e276ef145a9d91ab5153fd8d21330420635407da5",
+      "src/review.ts": "c6ece1a6959ce6d1e6156786793d8d59fdc68c1e7de1108cade488d01070b0d1",
       "src/reviewdraft.ts": "f98e2863b9f7591b2a186c77ed9831129f2f6b5ef600577213327ffec4c452bd",
       "src/reviewledger.ts": "d41eff44b793094a90a8d8a5288649ae5bca638a7680c30e3b10547ac6b1328d",
       "src/reviewprompts.ts": "726ced72f09feceb79b875e4cc62bcc880c4a0c74f4e48072d5adfdd75bf23f2",
@@ -169,7 +169,7 @@
       "test/briefing.test.ts": "967482a394f92849bb8ec159077aa9d6258e3901752493cf106532103cda6496",
       "test/cards.test.ts": "9574c83725988c8d62f1f8c31eca813b9ac5ab0a5cbfaee99c0cda3a6adccbba",
       "test/claims.test.ts": "8ddb31d8aef749f62e723fd10a17f9e4e7bcf0a01c5c56e51b43ff40d8934b2e",
-      "test/context-leads.test.ts": "e9a5b219845bb9951ce762739663f4d6ec7bbf1a6dbbf61bf37abab17555ee20",
+      "test/context-leads.test.ts": "c65f974b8cd3472dfe67d38f6214be5fe5b73b9b831395782acbcce9090a9f86",
       "test/coverage.test.ts": "f574bea323a455f070236531a45770795ff19215ed7beaa7e9bdb540d9a919ee",
       "test/crap.test.ts": "82db56db32013b6079b5001195ef025379b7e74b0b1ad4973d88de720a4b3c98",
       "test/detectors.test.ts": "83b8192ea9854cb9188ca55f4850bacc7aad1a27f030035f9d7aea0e75790b60",
