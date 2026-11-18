@@ -74,6 +74,17 @@ const num = (v: unknown): number | undefined => (typeof v === "number" && Number
 const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
 const idNumber = (id: string, letter: string): number => (id.startsWith(letter) && /^\d+$/.test(id.slice(1)) ? Number(id.slice(1)) : 0);
 
+/** A repost's lead-in, before the finding's text as it was first posted. */
+const STILL_OPEN = /^\*\*Still open\*\* \(first raised on [0-9a-f]+\)\.\s*/;
+
+/** The priority a posted finding's label gives (`**[P0] critical**`), after any repost lead-ins; undefined when the text has no label. */
+export function postedPriority(text: string | undefined): string | undefined {
+  if (text === undefined) return undefined;
+  let t = text;
+  while (STILL_OPEN.test(t)) t = t.replace(STILL_OPEN, "");
+  return /^\*\*\[(P[0-3])\] (?:critical|major|minor|nit)\*\*/.exec(t)?.[1];
+}
+
 /**
  * The registry a prior ledger holds (its heads, its questions and its posted items): its two sections (design-pr-review-split §5),
  * the design section's heads, questions and round-1 items and the review section's findings, or a v1 `ledger.json`, migrated first.
@@ -96,6 +107,9 @@ export function registryOf(ledger: unknown): PriorRegistry {
     const hunk = Array.isArray(raw.hunk) && raw.hunk.length === 3 && raw.hunk.every((n) => typeof n === "number") ? ([raw.hunk[0], raw.hunk[1], raw.hunk[2]] as [number, number, number]) : undefined;
     const status: ItemStatus = raw.state === "fixed" || raw.state === "withdrawn" || raw.state === "moved" || raw.state === "superseded" ? raw.state : "open";
     const history = (Array.isArray(raw.history) ? raw.history : []).filter(isObject).map((h) => ({ head: str(h.head) ?? "", status: str(h.status) ?? "" }));
+    // A posted finding's priority is the one its posted label carries: pr-review 1.0 and 1.1.0 stored the reviewer's proposed priority
+    // in `severity`, but always posted the final one (design §9.1). A finding never posted (withdrawn) keeps what is stored.
+    const severity = (origin === "round2" && status !== "withdrawn" ? postedPriority(str(raw.text) ?? str(raw.body)) : undefined) ?? str(raw.severity);
     const item: PriorItem = {
       id,
       origin,
@@ -109,7 +123,7 @@ export function registryOf(ledger: unknown): PriorRegistry {
       ...(raw.side === "RIGHT" || raw.side === "LEFT" ? { side: raw.side } : {}),
       ...(str(raw.anchorText) !== undefined ? { anchorText: str(raw.anchorText)! } : {}),
       ...(Array.isArray(raw.covers) && raw.covers.every((c) => typeof c === "string") ? { covers: raw.covers as string[] } : {}),
-      ...(str(raw.severity) !== undefined ? { severity: str(raw.severity)! } : {}),
+      ...(severity !== undefined ? { severity } : {}),
       ...(str(raw.kind) !== undefined ? { kind: str(raw.kind)! } : {}),
       ...(str(raw.patchId) !== undefined ? { patchId: str(raw.patchId)! } : {}),
       ...(hunk !== undefined ? { hunk } : {}),

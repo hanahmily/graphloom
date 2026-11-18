@@ -6,11 +6,11 @@ import { REHEARSAL_HEAD, REHEARSAL_MERGE_BASE, rehearsal } from "../src/rehearsa
 import { htmlProblems } from "../src/html.js";
 import { describe, expect, it } from "vitest";
 import { LARGE_LIMITS, REHEARSAL_REQUEST } from "../src/rehearsal.js";
-import { parseDraft } from "../src/draft.js";
+import { draftJson, parseDraft, type Draft } from "../src/draft.js";
 import { passReply, verifyReply } from "../src/rehearsal-review.js";
 import { recordedAspect, recordedScope } from "../src/reviewdraft.js";
 import { recordedContext } from "../src/runcontext.js";
-import { readParts } from "../src/kit/parts.js";
+import { partCommands, readParts } from "../src/kit/parts.js";
 import { quotePrefix, REVIEW_SCHEMA_NAME, VERIFY_SCHEMA_NAME } from "../src/review.js";
 import { codeReview, draftComposed } from "../src/reviewvalidators.js";
 import { BANYANDB, assignmentOf, candidateEvidence, scenarioWith, simulate, type Simulation } from "./support.js";
@@ -141,22 +141,26 @@ describe("the review layer of pr-review 1.x, from a report-only prelude", () => 
     expect([md.state, html.state, appendix.state]).toEqual(["read", "read", "read"]);
     if (md.state !== "read" || html.state !== "read" || appendix.state !== "read") return;
     expect(md.value).toContain("## Review\nRecommended verdict: comment.");
-    expect(md.value).toMatch(/### P1 \(1\)\n- F1 · correctness · pkg\/schema\/ttl\.go:26-30 · confirmed \(verifier codex: confirmed\) · unproven:/);
+    // F1 was proposed at P1 but is unproven: the draft rules give it P2, and that is the one priority it shows (design §8.4).
+    expect(md.value).toMatch(/### P2 \(2\)\n- F1 · correctness · pkg\/schema\/ttl\.go:26-30 · confirmed \(verifier codex: confirmed\) · unproven:/);
+    expect(md.value).not.toContain("### P1");
+    expect(md.value).toMatch(/#### F1 · correctness · P2 · behavioral · confirmed/);
     expect(md.value).toContain("## Review: findings and draft");
     expect(md.value.indexOf("## Review\n")).toBeLessThan(md.value.indexOf("## Review: findings and draft"));
     // review.html: the findings that stand as a grid of aspect by severity, coloured by state, each tile linking to its finding in the appendix.
     expect(html.value).toContain("<h2>Review</h2>");
     expect(html.value.indexOf("<h2>Review</h2>")).toBeGreaterThan(html.value.indexOf("<h2>Questions</h2>"));
-    expect(html.value).toMatch(/<a class="tile grey cell" href="review-appendix.html#f-F1" title="P1 correctness\nF1 unproven: [^"]*"><strong>1<\/strong><\/a>/);
+    expect(html.value).toMatch(/<a class="tile grey cell" href="review-appendix.html#f-F1" title="P2 correctness\nF1 unproven: [^"]*"><strong>1<\/strong><\/a>/);
+    expect(html.value).toContain('title="no P1 finding of correctness"');
     expect(html.value).toMatch(/<a class="tile bad cell" href="review-appendix.html#f-F3" title="P2 maintainability\nF3 confirmed: [^"]*"><strong>1<\/strong><\/a>/);
     expect(html.value).toContain("<span class=\"fh\">correctness</span>");
     expect(html.value).toMatch(/<span class="key"><span class="sw bad"><\/span>confirmed 1<\/span><span class="key"><span class="sw warn"><\/span>disputed 0<\/span><span class="key"><span class="sw grey"><\/span>unproven 1<\/span>/);
     expect(html.value).not.toContain("#f-F2");
     expect(html.value).not.toMatch(/<(ul|table)\b/);
     expect(htmlProblems(html.value, { owner: "apache", repo: "skywalking-banyandb", head: REHEARSAL_HEAD, base: REHEARSAL_MERGE_BASE })).toEqual([]);
-    // The appendix holds the findings in text, by severity with the P1 that stands open, and in full with the draft; each has the id a tile links to.
-    expect(appendix.value).toMatch(/<h3>P1 <span class="muted">\(1\)<\/span><\/h3><details open class="qa">/);
-    expect(appendix.value).toMatch(/<h3>P2 <span class="muted">\(1\)<\/span><\/h3><details class="qa">/);
+    // The appendix holds the findings in text, by their final priority (F1, proposed P1 and unproven, is P2), and in full with the draft; each has the id a tile links to.
+    expect(appendix.value).not.toMatch(/<h3>P1 /);
+    expect(appendix.value).toMatch(/<h3>P2 <span class="muted">\(2\)<\/span><\/h3><details class="qa">/);
     expect(appendix.value).toContain("Checker (codex): <strong>confirmed</strong>");
     expect(appendix.value).toContain('<span class="badge grey">correctness</span>');
     expect(appendix.value).toMatch(/<details id="f-F1"[^>]*class="qa">/);
@@ -196,6 +200,37 @@ describe("the review layer of pr-review 1.x, from a report-only prelude", () => 
       j.findings = [];
     });
     expect(draftComposed.evaluate({ requirementId: "draft-composed", statement: "", evidence: noFindings, candidateDigest: "d1", config: BANYANDB, request: REVIEW_REQUEST })).toMatchObject({ status: "failed", reason: expect.stringContaining("is not what the evidence recomputes") });
+  });
+
+  it("fails the draft when draft.json stores a priority other than the one the draft rules recompute (design §8.4)", () => {
+    const evidence = candidateEvidence(sim.evidence, "d1");
+    const written = readParts(evidence, "draft-json", ".graphloom/review/draft.json");
+    expect(written.state).toBe("read");
+    if (written.state !== "read") return;
+    // Rewrite draft.json's parts with one priority changed: F1 (proposed P1, unproven, drafted P2) shown at its proposed P1, or F3 at P3.
+    const rewritten = (change: (d: Draft) => void): EvidenceRecord[] => {
+      const d = JSON.parse(written.value) as Draft;
+      change(d);
+      const parts = partCommands("draft-json", ".graphloom/review/draft.json", draftJson(d));
+      return evidence.map((e) => {
+        const c = (e.payload as { command?: { id: string; argv: string[] } } | undefined)?.command;
+        const part = parts.find((p) => p.id === c?.id);
+        return part === undefined ? e : { ...e, payload: { ...(e.payload as object), command: { ...c, argv: part.argv } } };
+      });
+    };
+    const evaluate = (ev: EvidenceRecord[]) => draftComposed.evaluate({ requirementId: "draft-composed", statement: "", evidence: ev, candidateDigest: "d1", config: BANYANDB, request: REVIEW_REQUEST });
+    const proposedShown = rewritten((d) => {
+      d.review.findings.find((f) => f.id === "F1")!.severity = "P1";
+    });
+    expect(evaluate(proposedShown)).toMatchObject({ status: "failed", reason: "draft.json holds a priority the draft rules do not give: the report shows F1 at P1, but the draft rules give P2" });
+    const commentAtP3 = rewritten((d) => {
+      d.comments.find((c) => c.id === "F3")!.severity = "P3";
+    });
+    expect(evaluate(commentAtP3)).toMatchObject({ status: "failed", reason: "draft.json holds a priority the draft rules do not give: F3 is drafted at P3, but the draft rules give P2" });
+    const dismissedRanked = rewritten((d) => {
+      d.review.findings.find((f) => f.id === "F2")!.severity = "P1";
+    });
+    expect(evaluate(dismissedRanked)).toMatchObject({ status: "failed", reason: expect.stringContaining("the report shows F2 at P1, but the draft rules give none") });
   });
 });
 

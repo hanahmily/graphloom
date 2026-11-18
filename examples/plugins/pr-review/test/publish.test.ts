@@ -204,6 +204,30 @@ describe("a run posts round 2 once and records it in the review section", () => 
     expect(reviewPublished.evaluate({ requirementId: "review-published", statement: "", evidence: without, candidateDigest: "d1", config: BANYANDB })).toMatchObject({ status: "inconclusive" });
     expect(reviewPublished.evaluate({ requirementId: "review-published", statement: "", evidence, candidateDigest: "d1", config: BANYANDB })).toMatchObject({ status: "passed", reason: expect.stringMatching(/one COMMENT review \(\d+, created\) at head 0123456789ab: Changes requested: 1 open \(1 open finding\(s\); round 1 not run\)/) });
   });
+
+  it("records each finding's final priority in the ledger, none for a withdrawn one, and fails a ledger patch that records another (design §9.1)", () => {
+    const evidence = candidateEvidence(sim.evidence, "d1");
+    const written = readParts(evidence, "publish-patch", ".graphloom/review/ledger/publish-patch.json");
+    if (written.state !== "read") throw new Error(written.state);
+    const patch = JSON.parse(written.value) as { items: Array<{ id: string; meta?: { severity?: string } }>; closed: Array<{ id: string; meta: { severity?: string } }> };
+    expect(patch.items.map((x) => [x.id, x.meta?.severity])).toEqual([["F3", "P2"]]);
+    // F2 was refuted: it is in no draft entry, so the ledger records no priority for it.
+    expect(patch.closed.map((x) => x.id)).toEqual(["F2"]);
+    expect(patch.closed[0]!.meta).not.toHaveProperty("severity");
+    const tampered = (change: (p: typeof patch) => void): EvidenceRecord[] => {
+      const p = JSON.parse(written.value) as typeof patch;
+      change(p);
+      const parts = partCommands("publish-patch", ".graphloom/review/ledger/publish-patch.json", JSON.stringify(p));
+      return evidence.map((e) => {
+        const c = (e.payload as { command?: { id: string; argv: string[] } } | undefined)?.command;
+        const part = parts.find((x) => x.id === c?.id);
+        return part === undefined ? e : { ...e, payload: { ...(e.payload as object), command: { ...c, argv: part.argv } } };
+      });
+    };
+    const evaluate = (ev: EvidenceRecord[]) => reviewPublished.evaluate({ requirementId: "review-published", statement: "", evidence: ev, candidateDigest: "d1", config: BANYANDB });
+    expect(evaluate(tampered((p) => (p.items[0]!.meta!.severity = "P0")))).toMatchObject({ status: "failed", reason: "the published review was recorded with a priority the draft rules do not give: the ledger records item F3 at P0, but the draft rules give P2" });
+    expect(evaluate(tampered((p) => (p.closed[0]!.meta.severity = "P1")))).toMatchObject({ status: "failed", reason: expect.stringContaining("the ledger records withdrawn F2 at P1, but the draft rules give none") });
+  });
 });
 
 describe("publishing is idempotent across retries and runs: the reviews are read before anything is posted", () => {

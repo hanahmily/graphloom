@@ -31,7 +31,7 @@ import { pinnedBase } from "./kit/commands.js";
 import { draftWrites, recordedAspect } from "./reviewdraft.js";
 import { anchorInfo, findingKey, registryFromEvidence, type PriorItem, type PriorRegistry } from "./prior.js";
 import { ASPECTS } from "./kit/aspects.js";
-import { findingsOf, type AspectRecord } from "./review.js";
+import type { AspectRecord } from "./review.js";
 import type { PullFile } from "./kit/snapshot.js";
 import type { PullRequest } from "./kit/request.js";
 import type { MeasurementState } from "./kit/measurements.js";
@@ -308,9 +308,9 @@ function priorSection(priors: readonly PriorLine[], head: string): string {
 }
 
 /** The meta of a new finding the draft posts: the aspect that raised it, its place and what the file's patch shows there. */
-export function findingMeta(f: { id: string; raisedBy: string; severity: string; kind: string; path: string; side: "RIGHT" | "LEFT"; startLine: number; endLine: number }, files: readonly PullFile[]): ItemMeta {
+export function findingMeta(f: { id: string; raisedBy: string; severity?: string | undefined; kind: string; path: string; side: "RIGHT" | "LEFT"; startLine: number; endLine: number }, files: readonly PullFile[]): ItemMeta {
   const a = anchorInfo(files.find((x) => x.path === f.path), f.side, f.startLine);
-  return { key: findingKey(f.raisedBy, f.path, f.startLine, a.anchorText), aspect: f.raisedBy, severity: f.severity, kind: f.kind, side: f.side, endLine: f.endLine, ...a };
+  return { key: findingKey(f.raisedBy, f.path, f.startLine, a.anchorText), aspect: f.raisedBy, ...(f.severity !== undefined ? { severity: f.severity } : {}), kind: f.kind, side: f.side, endLine: f.endLine, ...a };
 }
 
 /** The key the executor reconciles a post by (design-pr-review-split §5.3). */
@@ -395,6 +395,36 @@ export function publishFlow(evidence: readonly EvidenceRecord[], plan: ReviewPla
   return { state: "ledger", posted, patch, command, parts: partCommands(PART_BASE.publishPatch, PUBLISH_PATCH_FILE, json), ...(run !== undefined && current && same && at(evidence, run.record.ref) > wroteAt ? { run } : {}) };
 }
 
+/**
+ * Where the ledger patch the evidence holds records a priority the recomputation does not give: a posted item, an earlier finding
+ * that moved, or a withdrawn one (design §9.1: the ledger keeps a finding's final priority, or none). Undefined when they agree or
+ * no patch is written yet.
+ */
+export function ledgerPriorityMismatch(evidence: readonly EvidenceRecord[], plan: ReviewPlan): string | undefined {
+  const written = readParts(evidence, PART_BASE.publishPatch, PUBLISH_PATCH_FILE);
+  if (written.state !== "read") return undefined;
+  let p: unknown;
+  try {
+    p = JSON.parse(written.value);
+  } catch {
+    return undefined;
+  }
+  if (!isObject(p)) return undefined;
+  const sev = (m: unknown): string => (isObject(m) && typeof m.severity === "string" ? m.severity : "none");
+  const want = new Map<string, string>([
+    ...plan.items.filter((x) => x.meta !== undefined).map((x) => [`item ${x.id}`, sev(x.meta)] as const),
+    ...plan.priors.filter((l) => l.moved !== undefined).map((l) => [`earlier ${l.id}`, sev(l.moved!.meta)] as const),
+    ...plan.closed.map((c) => [`withdrawn ${c.id}`, sev(c.meta)] as const),
+  ]);
+  const got: Array<[string, string]> = [
+    ...(Array.isArray(p.items) ? p.items : []).filter((x): x is Record<string, unknown> => isObject(x) && x.meta !== undefined).map((x) => [`item ${String(x.id)}`, sev(x.meta)] as [string, string]),
+    ...(Array.isArray(p.priors) ? p.priors : []).filter((x): x is Record<string, unknown> => isObject(x) && isObject(x.moved)).map((x) => [`earlier ${String(x.id)}`, sev((x.moved as Record<string, unknown>).meta)] as [string, string]),
+    ...(Array.isArray(p.closed) ? p.closed : []).filter(isObject).map((x) => [`withdrawn ${String(x.id)}`, sev(x.meta)] as [string, string]),
+  ];
+  for (const [k, s] of got) if (want.has(k) && want.get(k) !== s) return `the ledger records ${k} at ${s}, but the draft rules give ${want.get(k)}`;
+  return undefined;
+}
+
 // ---- the ledger ----
 
 /** The review section's record of a post: this head, its findings and what became of the earlier ones. Prints `SAME` when nothing changes. */
@@ -473,6 +503,27 @@ export function priorLines(registry: PriorRegistry, pull: Pick<PullRequest, "own
   return out.sort((a, b) => (Number(a.id.slice(1)) || 0) - (Number(b.id.slice(1)) || 0));
 }
 
+/**
+ * What the ledger keeps of this head's findings, from the draft: each finding's meta (for a posted one, its draft entry's range) and
+ * the dismissed ones, recorded withdrawn. A finding's priority is its final one, the draft's (design §8.4, §9.1), never the one its
+ * reviewer proposed; a dismissed finding is in no draft entry and records none.
+ */
+export function draftLedgerMeta(draft: Pick<Draft, "comments" | "review">, files: readonly PullFile[]): { meta: Map<string, ItemMeta>; closed: ClosedFinding[] } {
+  const all = draft.review.findings;
+  // A posted finding's place is its draft entry's range (which can cover several findings): the anchor is read at its first line and the range is recorded whole.
+  const entries = new Map(draft.comments.map((c) => [c.id, c] as const));
+  const meta = new Map(
+    all
+      .filter((f) => f.state === "confirmed" || f.state === "disputed")
+      .map((f) => {
+        const e = entries.get(f.id);
+        return [f.id, findingMeta(e === undefined ? f : { ...f, path: e.path, side: e.side, startLine: e.startLine ?? e.line, endLine: e.line }, files)] as const;
+      }),
+  );
+  const closed = all.filter((f) => f.state === "dismissed").map((f): ClosedFinding => ({ id: f.id, path: f.path, line: f.startLine, endLine: f.endLine, side: f.side, text: clipKeep(neutralize(f.content), MAX_ITEM_TEXT), meta: findingMeta(f, files) }));
+  return { meta, closed };
+}
+
 /** The review the run posts, recomputed from the draft the Draft stage composed, the aspects' records, the ledger and round 1's status. */
 export function publishPlan(evidence: readonly EvidenceRecord[], analysis: Analysis, pr: PullRequest, base: string | undefined, context: ContextRecord, m: MeasurementState, profile: Pick<Profile, "metrics" | "comments">): PublishPlan {
   const w = draftWrites(evidence, analysis, pr, base, context, m, profile);
@@ -486,19 +537,8 @@ export function publishPlan(evidence: readonly EvidenceRecord[], analysis: Analy
     const r = recordedAspect(evidence, a);
     if (r.state === "read") records.push(r.value);
   }
-  const all = findingsOf(records);
   const draft = w.writes.draft;
-  // A posted finding's place is its draft entry's range (which can cover several findings): the anchor is read at its first line and the range is recorded whole.
-  const entries = new Map(draft.comments.map((c) => [c.id, c] as const));
-  const meta = new Map(
-    all
-      .filter((f) => f.state === "confirmed" || f.state === "disputed")
-      .map((f) => {
-        const e = entries.get(f.id);
-        return [f.id, findingMeta(e === undefined ? f : { ...f, path: e.path, side: e.side, startLine: e.startLine ?? e.line, endLine: e.line }, files)] as const;
-      }),
-  );
-  const closed = all.filter((f) => f.state === "dismissed").map((f): ClosedFinding => ({ id: f.id, path: f.path, line: f.startLine, endLine: f.endLine, side: f.side, text: clipKeep(neutralize(f.content), MAX_ITEM_TEXT), meta: findingMeta(f, files) }));
+  const { meta, closed } = draftLedgerMeta(draft, files);
   const prior = priorLines(registry, pr, records, files, analysis.snapshot.threads);
   return { state: "ready", draft, plan: planReview({ pull: pr, head: pr.head, nonce, draft, round1: draft.round1, prior, meta, closed, comments: profile.comments }) };
 }

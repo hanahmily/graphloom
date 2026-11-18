@@ -27,7 +27,8 @@ import { hasTest, judgeRun, reproCommandId, reproSpec } from "./repro.js";
 import { reproPlanFor } from "./reproplan.js";
 import { FRESH_START_REASON } from "./reviewscope.js";
 import { draftWrites, recordedAspect, recordedRules, recordedScope, writtenDraftFiles } from "./reviewdraft.js";
-import { publishFlow, publishPlan } from "./publish.js";
+import { priorityMismatch } from "./draft.js";
+import { ledgerPriorityMismatch, publishFlow, publishPlan } from "./publish.js";
 import { aspectOfItem, registryFromEvidence } from "./prior.js";
 import { secretFindings } from "./kit/secrets.js";
 import { computeLeads, fixedP0Lead, NOT_GIVEN, type Lead, type LeadRecord } from "./leads.js";
@@ -278,6 +279,17 @@ export const draftComposed: Validator = profiled((input, profile) => {
   if (w.state === "failed") return failed(w.reason);
   const written = writtenDraftFiles(input.evidence);
   const names: Record<keyof typeof written, string> = { draftJson: "draft.json", draftMd: "draft.md", markdown: "review.md with the Review section", html: "review.html with the Review section", appendix: "review-appendix.html with the Review section" };
+  // A finding has one priority wherever it is shown: the final one the draft rules give it, recomputed here (design §8.4).
+  if (written.draftJson.state === "read") {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(written.draftJson.value);
+    } catch {
+      parsed = undefined;
+    }
+    const wrong = priorityMismatch(parsed, w.writes.draft);
+    if (wrong !== undefined) return failed(`draft.json holds a priority the draft rules do not give: ${wrong}`);
+  }
   for (const key of Object.keys(written) as Array<keyof typeof written>) {
     const f = written[key];
     const want = w.writes.texts[key];
@@ -358,6 +370,9 @@ export const reviewPublished: Validator = profiled((input, profile) => {
   if (!plan.body.startsWith(`${plan.firstLine}\n`)) return failed("the review body does not open with its verdict");
   if (plan.verdict === "passed" && plan.open > 0) return failed("a review with an open item is not a pass");
   if (plan.problem !== undefined) return failed(plan.problem);
+  // The ledger keeps one priority per finding, the final one, recomputed here (design §9.1).
+  const wrong = ledgerPriorityMismatch(input.evidence, plan);
+  if (wrong !== undefined && commandRuns(input.evidence, COMMAND.ledgerPublished).some((r) => succeeded(r.command))) return failed(`the published review was recorded with a priority the draft rules do not give: ${wrong}`);
   const flow = publishFlow(input.evidence, plan, p.draft, pr);
   if (flow.state !== "done") return inconclusive(flow.state === "supervise" ? flow.reason : "the review is not posted and recorded in the ledger yet");
   const noId = flow.patch.items.filter((x) => x.inline && x.commentId === null).map((x) => x.id);

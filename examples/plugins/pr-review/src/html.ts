@@ -23,10 +23,10 @@ import { DIVE_COLUMNS, DIVE_COMMAND, DIVE_HEADING, DIVE_LINE, DIVE_TEXT, diveRow
 import { hotspots, hotspotText, needAuthor, openQuestions, SCOPE_KINDS, SCOPE_TITLES, type Scope } from "./kit/scope.js";
 import { describeReasons, type ModeReason } from "./kit/mode.js";
 import { exceeds, LIMITS, originOf, type Metric } from "./kit/metrics/crap.js";
-import { draftMarkdown, parseDraft, scopeLine, type Draft } from "./draft.js";
+import { draftMarkdown, parseDraft, scopeLine, type Draft, type ReviewFinding } from "./draft.js";
 import { round1Lines } from "./context.js";
 import { proofOf } from "./proof.js";
-import { SEVERITIES, type Finding } from "./review.js";
+import { SEVERITIES } from "./review.js";
 import type { MetricsRecord } from "./kit/metrics/record.js";
 import { isTestPath } from "./kit/metrics/record.js";
 import { searchWhere, type MeasuredSearch } from "./kit/searches.js";
@@ -169,9 +169,9 @@ const para = (text: string): string => `<p>${esc(text)}</p>`;
 const STATE_CLASS: Record<string, string> = { confirmed: "bad", disputed: "warn", dismissed: "grey", pending: "grey" };
 
 /** A finding that could block a merge: P0 or P1 that stands (confirmed, or still disputed). These are open by default. */
-const isBlocking = (f: Finding): boolean => (f.state === "confirmed" || f.state === "disputed") && (f.severity === "P0" || f.severity === "P1");
+const isBlocking = (f: ReviewFinding): boolean => (f.state === "confirmed" || f.state === "disputed") && (f.severity === "P0" || f.severity === "P1");
 
-function findingHtml(f: Finding, d: Draft, g: Github, full: boolean): string {
+function findingHtml(f: ReviewFinding, d: Draft, g: Github, full: boolean): string {
   const proof = proofOf(f);
   const verifier = d.review.aspects.find((a) => a.aspect === f.raisedBy)?.verifier ?? "?";
   const cite = citeLink(g, { path: f.path, side: f.side === "RIGHT" ? "head" : "base", start: f.startLine, end: f.endLine });
