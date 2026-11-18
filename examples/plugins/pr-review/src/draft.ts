@@ -8,13 +8,15 @@
  * to read it. The Publish stage (`publish.ts`) posts the draft's comments; nothing here writes to GitHub. The summary is plain text,
  * at most 1,200 characters.
  *
- * Only a proven behavioral finding may be drafted as P0 or P1, with one exception (§4.3): a confirmed finding raised from an
- * `untested-feature` lead, whose proof is the recorded test map and coverage, may be drafted at P1.
+ * Only a proven behavioral finding may be drafted as P0 or P1, with two exceptions (design §7.3): a confirmed finding raised from an
+ * `untested-feature` lead, whose proof is the recorded test map and coverage, may be drafted at P1; and a confirmed finding raised
+ * from a `weak-test`, `split-function`, `crap` or `reuse` lead, whose proof is its recomputed lead, is drafted at P0 whatever
+ * priority the reviewer proposed (an unproven behavioral one still is not: it goes to "Needs your judgment").
  */
 import { ASPECTS, DRAFT_ORDER, type Aspect } from "./kit/aspects.js";
 import { clip } from "./kit/escape.js";
 import { contextLine, round1Lines, type ContextSource, type Round1Status } from "./context.js";
-import { leadLine, type LeadKind, type LeadRecord } from "./leads.js";
+import { fixedP0Lead, leadLine, type LeadKind, type LeadRecord } from "./leads.js";
 import { proofOf, type Proof } from "./proof.js";
 import { findingsOf, keptSuggestion, MAX_SWEEP_PASSES, SEVERITIES, type AspectRecord, type Finding, type Severity } from "./review.js";
 import type { ScopeRecord } from "./reviewscope.js";
@@ -181,10 +183,13 @@ function entryOf(members: readonly Finding[], files: readonly PullFile[], reason
   const primary = pool[0] ?? members[0]!;
   const proof = proofOf(primary);
   const best = pool.reduce((s, f) => (sevIndex(f.severity) < sevIndex(s) ? f.severity : s), primary.severity);
-  // Only a proven finding may be drafted as P0 or P1 (design §8.2); a non-behavioral one claims no wrong behavior, so it is at most P2,
-  // except a confirmed untested-feature finding, which may be P1 (design-pr-review-split §4.3).
+  // A confirmed finding raised from a weak-test, split-function, crap or reuse lead is P0, whatever was proposed (design §7.3).
+  const fixed = pool.find(fixedP0Finding);
+  // Otherwise only a proven finding may be drafted as P0 or P1 (design §8.2); a non-behavioral one claims no wrong behavior, so it is
+  // at most P2, except a confirmed untested-feature finding, which may be P1 (design §7.3).
   const ceiling: Severity = proof.state === "proven" ? "P0" : untestedFeature(primary) ? "P1" : "P2";
-  const severity: Severity = sevIndex(best) < sevIndex(ceiling) ? ceiling : best;
+  const severity: Severity = fixed !== undefined ? "P0" : sevIndex(best) < sevIndex(ceiling) ? ceiling : best;
+  const led = fixed ?? primary;
   const kept = draftable ? keptSuggestion(primary) : undefined;
   const aspects = [...new Set(members.map((f) => f.aspect))];
   const file = files.find((x) => x.path === primary.path);
@@ -209,12 +214,15 @@ function entryOf(members: readonly Finding[], files: readonly PullFile[], reason
     ...(kept !== undefined && "text" in kept ? { suggestion: kept.text } : {}),
     ...(test !== undefined ? { test } : {}),
     ...(members.length > 1 ? { linked: members.filter((f) => f !== primary).map((f) => f.id) } : {}),
-    ...(primary.lead !== undefined && primary.leadKind !== undefined ? { lead: { id: primary.lead, kind: primary.leadKind } } : {}),
+    ...(led.lead !== undefined && led.leadKind !== undefined ? { lead: { id: led.lead, kind: led.leadKind } } : {}),
   };
 }
 
 /** A confirmed non-behavioral finding raised from an `untested-feature` lead: the one that may be drafted at P1 (§4.3). */
 export const untestedFeature = (f: Pick<Finding, "leadKind" | "kind" | "state">): boolean => f.leadKind === "untested-feature" && f.kind === "non-behavioral" && f.state === "confirmed";
+
+/** A confirmed finding raised from a `weak-test`, `split-function`, `crap` or `reuse` lead that is not an unproven behavioral one: drafted at P0 (§7.3). */
+export const fixedP0Finding = (f: Pick<Finding, "leadKind" | "kind" | "state" | "proof">): boolean => fixedP0Lead(f.leadKind) && f.state === "confirmed" && proofOf(f).state !== "unproven";
 
 // ---- composing ----
 
@@ -265,9 +273,9 @@ export function composeDraft(i: DraftInput): Draft {
     ...i.records.filter((r) => r.findings.some((f) => f.notes.some((n) => n.startsWith("merged")))).map((r) => `The ${r.aspect} pass merged comments on overlapping lines into one finding.`),
     ...(i.scope.mode === "large" ? [`Large pull request: only the files of ${i.scope.areas.map((a) => a.id).join(", ")} were reviewed; the other areas were not.`] : []),
   ];
-  // The recommendation (design §10.3): request-changes needs a proven P0 or P1, or a confirmed untested-feature finding at P1
-  // (design-pr-review-split §4.5); approve only when nothing is open.
-  const blocking = comments.some((c) => (c.proof?.state === "proven" && (c.severity === "P0" || c.severity === "P1")) || (c.lead?.kind === "untested-feature" && c.severity === "P1"));
+  // The recommendation (design §10.3): request-changes needs a proven P0 or P1, a confirmed untested-feature finding at P1, or a
+  // confirmed weak-test, split-function, crap or reuse finding at P0 (design §7.3); approve only when nothing is open.
+  const blocking = comments.some((c) => (c.proof?.state === "proven" && (c.severity === "P0" || c.severity === "P1")) || (c.lead?.kind === "untested-feature" && c.severity === "P1") || (fixedP0Lead(c.lead?.kind) && c.severity === "P0"));
   const open = comments.length > 0 || judgment.length > 0;
   const recommended: Verdict = blocking ? "request-changes" : open ? "comment" : "approve";
   const views: AspectView[] = i.records.map((r) => ({

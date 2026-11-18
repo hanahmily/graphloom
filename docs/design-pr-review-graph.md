@@ -1,6 +1,6 @@
 # PR-review graph (`pr-review`) and the review kit
 
-Status: implemented, `pr-review` 1.0.0 (`examples/plugins/pr-review`). A pull
+Status: implemented, `pr-review` 1.1.0 (`examples/plugins/pr-review`). A pull
 request is reviewed by two graphs, each its own plugin and its own run:
 
 - **`pr-design-review`**, round 1, the design review: is the change necessary,
@@ -51,12 +51,12 @@ The product has three layers:
 | Two independent graphs | `pr-design-review`: Fetch → Report → Questions → Answers → Round 1 → Publish. `pr-review`: Fetch → Report → Review → Draft → Publish. No run starts another, and the controller learns nothing of rounds ([§2](#2-the-run-two-graphs-and-no-human)) |
 | Understanding comes before judgement | The reviewers are seeded with a report: the design review's, when the ledger holds a usable one, else a report-only prelude of this run; only `--no-report` seeds them with the pull request alone ([§7.1](#71-the-context-source)) |
 | `pr-review` runs alone | It does not gate on round 1. It lists and counts round 1's open items when a design review ran, and says round 1 was not run when none did ([§8.4](#84-draft)) |
-| The detail questions are leads | Computed by plugin code, given to the maintainability reviewer, each with a status from it; a raised lead is an ordinary finding, verified and prioritized ([§7.3](#73-leads)) |
+| The detail questions are leads | Computed by plugin code, given to the maintainability reviewer, each with a status from it; a raised lead is an ordinary finding, verified, and drafted at a priority its kind fixes or caps: P0 for `weak-test`, `split-function`, `crap` and `reuse` ([§7.3](#73-leads)) |
 | The report and the answers are grounded | Deterministic detectors, symbol extraction, whole-repository search, the dependency inventory and test mapping feed them; every item cites the diff or the base tree; independent checkers verify every claim ([§6](#6-the-change-report)) |
 | Judgement words are allowed | No word list is enforced. The report and the Q&A stay structurally neutral, and the checkers judge claims for support ([§6.5](#65-deterministic-validation)) |
 | Exactly one write per run: a `COMMENT` review | Posted through `graphloom.github/create-pull-review` with the credential the runner binds, which the plugin never sees; never `APPROVE` or `REQUEST_CHANGES`; found by its marker before any post, so a retry never posts twice ([§8.5](#85-publish), [§12.5](#125-never-auto-approve)). A clean design review posts nothing |
 | Three aspect reviewers, each on its own rules | A pass whose rule groups are not all `custom` fails, so no aspect is reviewed with a generic rule; each finding is verified in a fresh session on a different harness ([§8.1](#81-review), [§13.1](#131-roles)) |
-| Reviewers prove bugs with tests | A behavioral finding is `proven` only when its test, rerun by the graph in the Docker sandbox, fails on the head and the verifier judges that it shows the bug; an unproven one is never P0 or P1 ([§8.2](#82-reproducing-tests)) |
+| Reviewers prove bugs with tests | A behavioral finding is `proven` only when its test, rerun by the graph in the Docker sandbox, fails on the head and the verifier judges that it shows the bug; an unproven one is never P0 or P1, even when raised from a lead ([§8.2](#82-reproducing-tests)) |
 | One ledger per pull request, a section per graph | A Git ref in the operator's review clone; each graph advances only its own section by compare-and-swap ([§9.1](#91-where-the-ledger-lives)) |
 | One run reviews one head | A later head continues from the ledger: ids continue, each earlier open item is re-checked, and the posted review says what became of it ([§9](#9-incremental-re-review)) |
 
@@ -296,7 +296,7 @@ and Publish requirements are the kit's, as below, except where that table says.
 | Report | `claims-checked` | When the source is `prelude`: an independent report checker, on another harness, in a read-only review job, judged every item and briefing claim; otherwise passes on the recorded source | `claims-checked` (not bound as a separate reviewer: the validator itself requires a prelude's checks to be read-only review jobs) |
 | Review | `code-review` | For each aspect, a read-only reviewer swept the scope with the aspect's rule file, and every finding has a verdict from the aspect's verifier on another harness; the scope recorded once, naming the context source, which equals `context.json`'s; every reviewer starts a fresh session seeded with `review.md` only | `code-review` (`independence: separate-reviewer`) |
 | Review | `leads-judged` | The leads computed before the first pass; at most 60 given to the maintainability reviewer; each given one exactly one status ([§7.3](#73-leads)) | `leads-judged` |
-| Review | `findings-proven` | Every `proven` behavioral finding recomputes from the graph's own test run and the verifier's judgment; an `untested-feature` finding is proven by its recorded test map and coverage ([§8.2](#82-reproducing-tests), [§7.3](#73-leads)) | `findings-proven` |
+| Review | `findings-proven` | Every `proven` behavioral finding recomputes from the graph's own test run and the verifier's judgment; a finding raised from an `untested-feature`, `weak-test`, `split-function`, `crap` or `reuse` lead is proven by its lead, which recomputes and is recorded as raised by it ([§8.2](#82-reproducing-tests), [§7.3](#73-leads)) | `findings-proven` |
 | Draft | `draft-composed` | The draft composed by plugin code; no Q&A item; round 1's open items listed, or round 1 said to be clean or not run ([§8.4](#84-draft)) | `draft-composed` |
 | Draft | `ledger-recorded` | The ledger's `review` section advanced by compare-and-swap from the value Fetch read, with this head, its context source, the round-1 head and open count it counts, and its lead counts; the design section carried unchanged ([§9.4](#94-section-writes-markers-and-migration)) | `ledger-cas` |
 | Publish | `review-published` | One `COMMENT` review at the head with the idempotency key `review-<head12>` and the `graphloom-review` head marker, or one already there found before any post; the verdict as the first line; the comments read back and recorded in the `review` section ([§8.5](#85-publish)) | `review-published` |
@@ -1475,16 +1475,32 @@ run), its kind, its place and the measured facts behind it. The reviewer returns
 one entry for each lead it was given: `raised`, naming the comment the pass raised
 about it, or `not-an-issue`, with a reason. A missing, repeated or unknown lead id
 goes back to the same session as a correction. A raised finding is an ordinary
-finding: verified, prioritized P0 to P3, and posted only when confirmed.
+finding: verified, and posted only when confirmed. Its kind sets its priority, not
+the reviewer: the last column is what plugin code drafts a confirmed finding of
+that kind at, whatever priority the reviewer proposed.
 
-| Lead kind | Computed from | Highest priority of its finding |
+| Lead kind | Computed from | Priority of its finding |
 |---|---|---|
 | `untested-feature` | A high-level change of the context report whose every new or modified function, in the files its cites name, has no covering test: the test map finds none, and coverage, when measured, executed none of their statements. None without a report (`none`) | P1: the one non-behavioral finding that may be drafted at P1. Its proof is the recorded test map and coverage, which `findings-proven` recomputes; the verifier confirms that no test of the pull request or the base exercises the feature |
-| `missing-test` | A new or modified function with no covering test by the same rule, not inside an `untested-feature` lead | P2 |
-| `weak-test` | A surviving mutant at a covered site | P2 |
-| `split-function` | A changed function with complexity ≥ 10 or nesting > 3, with whether the excess is inherited, made worse or introduced ([§6.8](#68-measurements)) | P2 |
-| `crap` | A changed function with measured coverage and CRAP ≥ 30, or unknown coverage and complexity ≥ 10 | P2 |
-| `reuse` | A new symbol whose whole-repository search found a name or signature hit, or a body at least `questions.similarity` similar, outside the files the pull request changes; or another new symbol of the pull request above that similarity | P2 |
+| `missing-test` | A new or modified function with no covering test by the same rule, not inside an `untested-feature` lead | At most P2 |
+| `weak-test` | A surviving mutant at a covered site | P0 |
+| `split-function` | A changed function with complexity ≥ 10 or nesting > 3, with whether the excess is inherited, made worse or introduced ([§6.8](#68-measurements)) | P0 |
+| `crap` | A changed function with measured coverage and CRAP ≥ 30, or unknown coverage and complexity ≥ 10 | P0 |
+| `reuse` | A new symbol whose whole-repository search found a name or signature hit, or a body at least `questions.similarity` similar, outside the files the pull request changes; or another new symbol of the pull request above that similarity | P0 |
+
+- **The fixed P0 (since 1.1.0).** A confirmed finding raised from a `weak-test`,
+  `split-function`, `crap` or `reuse` lead is drafted at P0 whatever the reviewer
+  proposed, needs no reproducing test (its proof is its lead, which
+  `findings-proven` recomputes and finds recorded as raised by that finding), and
+  makes the recommendation `request-changes` ([§10.3](#103-verdict)). A P3 comment
+  raising one of these leads is a finding, verified and drafted, not a counted
+  nit; a P3 comment raising a `missing-test` or `untested-feature` lead is still a
+  nit. A refuted one is dismissed and a disputed one goes to "Needs your judgment",
+  as for any finding. A finding the reviewer or the verifier classes as
+  behavioral keeps the proof rule of [§8.2](#82-reproducing-tests): proven, it is
+  drafted at P0; unproven, it is never P0 or P1 and goes to "Needs your judgment".
+  When such a finding is linked with another aspect's on overlapping lines, the one
+  entry is P0 and names the lead.
 
 - **Scope.** Leads are computed for the functions and symbols in the review's scope
   only (in large mode, the files of the scoped areas). With coverage off or not run,
@@ -1562,7 +1578,8 @@ reproducing tests.
   implemented is listed under [§8.2](#82-reproducing-tests).
 - **Not in this version:** the deterministic rule checks (`rules`) and the Checks
   stage (the profile refuses both as a later version's), "already raised" human
-  threads, `comments.nits` (P3 comments are counted and not verified), and the
+  threads, `comments.nits` (P3 comments are counted and not verified, except one
+  raising a `weak-test`, `split-function`, `crap` or `reuse` lead, [§7.3](#73-leads)), and the
   reroute of off-aspect findings into another aspect's sweep.
 
 **Three aspect reviewers.** Three reviewer sessions review the same file
@@ -1681,7 +1698,8 @@ background.
   `pr-finding-verification-v1` job (`verificationInstruction`,
   `src/findings.ts:615`, extended for tests) runs for the aspect's pending
   findings, on that aspect's verifier. It verifies every finding that would
-  be posted (P0 to P2), and P3 nits only with `comments.nits`. A suggestion
+  be posted (P0 to P2, and a P3 comment raising a lead drafted at P0,
+  [§7.3](#73-leads)), and P3 nits only with `comments.nits`. A suggestion
   is kept only when the verifier says `fixes`, its fix run passes
   ([§8.2](#82-reproducing-tests)), it is within `suggestions.maxLines`, and
   it lies inside the comment's range.
@@ -1797,7 +1815,9 @@ code is not enough. Each comment declares its `kind`:
 The verifier reclassifies a `non-behavioral` comment that in fact claims
 wrong behavior. It then needs a test like any behavioral finding.
 Non-behavioral findings are drafted at most as P2: they claim no wrong
-behavior, so nothing makes them blocking.
+behavior. The exceptions are lead findings: a confirmed `untested-feature`
+finding may be P1, and a confirmed `weak-test`, `split-function`, `crap` or
+`reuse` finding is P0 ([§7.3](#73-leads)).
 
 **The test.** A behavioral comment's `repro` holds `{ dir, name, text,
 expect, oracle }`:
@@ -1959,7 +1979,8 @@ Plugin code composes the draft from the aspects' records (no model writes it)
 and writes it to `draft.json` (`pr-review-draft-v2`, canonical) and `draft.md`.
 The reporter writes only a prose summary (`review-summary-v1`, at most 1,200
 characters). Confirmed findings are the comments, grouped by aspect, at most P2
-unless proven or a confirmed `untested-feature` finding at P1; unproven
+unless proven, a confirmed `untested-feature` finding at P1, or a confirmed
+`weak-test`, `split-function`, `crap` or `reuse` finding, always at P0 ([§7.3](#73-leads)); unproven
 behavioral and disputed findings are listed under "Needs your judgment". The
 recommendation is computed ([§10.3](#103-verdict)). The draft is what the Publish
 stage posts from ([§8.5](#85-publish)), as it is composed: nobody edits it.
@@ -2386,10 +2407,11 @@ The design review's verdict line counts its own open items
 The draft's **recommended verdict**, which is internal and shown in the report,
 follows from the ledger:
 
-- `request-changes` when a confirmed and proven P0 or P1 finding, or a
-  confirmed `untested-feature` finding at P1, remains open. Otherwise only
-  behavioral findings reach P0 or P1, and only proven ones are drafted there
-  ([§8.2](#82-reproducing-tests));
+- `request-changes` when a confirmed and proven P0 or P1 finding, a confirmed
+  `untested-feature` finding at P1, or a confirmed `weak-test`,
+  `split-function`, `crap` or `reuse` finding (drafted at P0,
+  [§7.3](#73-leads)) remains open. Otherwise only behavioral findings reach P0
+  or P1, and only proven ones are drafted there ([§8.2](#82-reproducing-tests));
 - `comment` when only P2 or P3 findings remain;
 - `approve` only when nothing is open.
 
@@ -2897,8 +2919,10 @@ The design review's scenarios are in
 
 The plugin's tests also cover each context source recomputed by its validator, each
 lead kind with coverage off and in large mode, a missing lead status corrected in the
-same session, the verdict with and without a round-1 record, nothing of round 1
-posted again, reproducing tests, the publish reconcile (already posted, an ambiguous
+same session, each lead kind's drafted priority (the fixed P0, a `reuse` finding
+raised at P3 and posted at P0, forged leads refused by `findings-proven`), the
+verdict with and without a round-1 record, nothing of round 1 posted again,
+reproducing tests, the publish reconcile (already posted, an ambiguous
 post, lost posts) and a stale ledger.
 
 ## 17. Discussing a run: `graphloom session open`
@@ -2977,6 +3001,11 @@ graph over time.
   defaulting to Claude Code with no `sameAs`; the round-1 lines and the verdict
   count; `rounds` and `Report on …` refused; the record of the report's claim checks
   ([§5.1](#51-convergence-after-a-reentry)).
+- **1.1.0:** a confirmed finding raised from a `weak-test`, `split-function`, `crap`
+  or `reuse` lead is drafted at P0, whatever the reviewer proposed (a P3 one is
+  verified and drafted, not counted as a nit), and makes the recommendation
+  `request-changes`; `findings-proven` recomputes its lead. `missing-test` stays at
+  most P2 and `untested-feature` at most P1 ([§7.3](#73-leads)).
 
 **Where 1.0 differs from its design.** The split design (now
 [a pointer](design-pr-review-split.md)) planned a Checks stage when the profile has

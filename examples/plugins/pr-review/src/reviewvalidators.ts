@@ -30,7 +30,7 @@ import { draftWrites, recordedAspect, recordedRules, recordedScope, writtenDraft
 import { publishFlow, publishPlan } from "./publish.js";
 import { aspectOfItem, registryFromEvidence } from "./prior.js";
 import { secretFindings } from "./kit/secrets.js";
-import { computeLeads, NOT_GIVEN, type Lead } from "./leads.js";
+import { computeLeads, fixedP0Lead, NOT_GIVEN, type Lead, type LeadRecord } from "./leads.js";
 import { contextLine, type ContextRecord } from "./context.js";
 import { contextReport, groundworkOptions, leadInputOf, priorRead, recordedContext } from "./runcontext.js";
 import { reviewLedgerWrite } from "./reviewledger.js";
@@ -196,7 +196,9 @@ export const leadsJudged: Validator = profiled((input, profile) => {
 /**
  * `findings-proven` (design §8.2; design-pr-review-split §4.3): every behavioral finding that the record calls proven is recomputed from
  * the evidence: the recorded test text, the command the graph ran for it in the sandbox and the verifier's judgment. A finding raised
- * from an `untested-feature` lead is proven by its lead, which must recompute from the test map and the coverage records.
+ * from an `untested-feature` lead (drafted at P1) or a `weak-test`, `split-function`, `crap` or `reuse` lead (drafted at P0) is proven
+ * by its lead: a given lead of that kind that recomputes from the measurement records, the test map and the searches, recorded as
+ * raised by this finding.
  */
 export const findingsProven: Validator = profiled((input, profile) => {
   const run = runOf(input, profile);
@@ -206,20 +208,29 @@ export const findingsProven: Validator = profiled((input, profile) => {
   let unproven = 0;
   let nonBehavioral = 0;
   let untested = 0;
+  let fixedP0 = 0;
   let leads: Lead[] | undefined;
+  const records: AspectRecord[] = [];
   for (const a of ASPECTS) {
     const r = recordedAspect(input.evidence, a);
     if (r.state === "none") return inconclusive(`the ${a} review is not finished`);
     if (r.state === "failed") return failed(r.reason);
-    for (const f of r.value.findings) {
-      if (f.leadKind === "untested-feature") {
+    records.push(r.value);
+  }
+  const statuses: LeadRecord[] = records.flatMap((r) => r.leads);
+  for (const r of records) {
+    for (const f of r.findings) {
+      if (f.leadKind === "untested-feature" || fixedP0Lead(f.leadKind)) {
         leads ??= (() => {
           const l = recomputedLeads(input, profile, run);
           return Array.isArray(l) ? l : [];
         })();
-        const lead = leads.find((l) => l.id === f.lead && l.kind === "untested-feature" && l.given);
-        if (lead === undefined) problems.push(`${f.id} is raised from the untested-feature lead ${f.lead ?? "?"}, which does not recompute from the test map and the coverage records`);
-        else untested += 1;
+        const lead = leads.find((l) => l.id === f.lead && l.kind === f.leadKind && l.given);
+        const status = statuses.find((l) => l.id === f.lead);
+        if (lead === undefined) problems.push(`${f.id} is raised from the ${f.leadKind} lead ${f.lead ?? "?"}, which does not recompute from the measurement records, the test map and the searches`);
+        else if (status?.status !== "raised" || status.finding !== f.id) problems.push(`${f.id} names the ${f.leadKind} lead ${f.lead}, which the record does not show raised by it`);
+        else if (f.leadKind === "untested-feature") untested += 1;
+        else fixedP0 += 1;
       }
       if (f.kind !== "behavioral") {
         nonBehavioral += 1;
@@ -255,7 +266,7 @@ export const findingsProven: Validator = profiled((input, profile) => {
     }
   }
   if (problems.length > 0) return failed(problems.slice(0, 4).join("; "));
-  return passed(`${proven} behavioral finding${proven === 1 ? "" : "s"} proven by a failing test the graph ran (recomputed from the evidence), ${unproven} unproven with a reason, ${nonBehavioral} non-behavioral (no test needed)${untested > 0 ? `; ${untested} raised from an untested-feature lead, whose test map and coverage recompute` : ""}`);
+  return passed(`${proven} behavioral finding${proven === 1 ? "" : "s"} proven by a failing test the graph ran (recomputed from the evidence), ${unproven} unproven with a reason, ${nonBehavioral} non-behavioral (no test needed)${untested > 0 ? `; ${untested} raised from an untested-feature lead, whose test map and coverage recompute` : ""}${fixedP0 > 0 ? `; ${fixedP0} raised from a weak-test, split-function, crap or reuse lead (drafted at P0), whose lead recomputes` : ""}`);
 });
 
 export const draftComposed: Validator = profiled((input, profile) => {
