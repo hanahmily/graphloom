@@ -20,8 +20,21 @@ export type LeadKind = (typeof LEAD_KINDS)[number];
 /** The most leads one reviewer is given (design-pr-review-split §4.3, §1.1); the rest are recorded as not given. */
 export const MAX_LEADS = 60;
 export const NOT_GIVEN = `not given: over the lead bound of ${MAX_LEADS}`;
-/** The highest priority a finding raised from a lead may be drafted at: P1 for `untested-feature`, P2 for every other kind. */
-export const LEAD_CEILING: Readonly<Record<LeadKind, "P1" | "P2">> = { "untested-feature": "P1", "missing-test": "P2", "weak-test": "P2", "split-function": "P2", crap: "P2", reuse: "P2" };
+/**
+ * The priority a confirmed finding raised from a lead is drafted at (design §7.3): `fixed` whatever the reviewer proposed (P3
+ * included, which is then verified and drafted, not counted as a nit), or at most `cap`.
+ */
+export const LEAD_PRIORITY: Readonly<Record<LeadKind, { fixed: "P0" } | { cap: "P1" | "P2" }>> = {
+  "untested-feature": { cap: "P1" },
+  "missing-test": { cap: "P2" },
+  "weak-test": { fixed: "P0" },
+  "split-function": { fixed: "P0" },
+  crap: { fixed: "P0" },
+  reuse: { fixed: "P0" },
+};
+
+/** Whether a finding of this lead kind is drafted at the fixed P0 (`weak-test`, `split-function`, `crap`, `reuse`). */
+export const fixedP0Lead = (kind: LeadKind | undefined): boolean => kind !== undefined && "fixed" in LEAD_PRIORITY[kind];
 
 export interface Lead {
   /** `L1`… in the order of `orderLeads`, per run. */

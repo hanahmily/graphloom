@@ -7,6 +7,7 @@ import { anchored, clusters, composeDraft, draftMarkdown, scrub, type DraftInput
 import { chooseScope } from "../src/reviewscope.js";
 import { keptSuggestion, parsePass, parseVerification, type AspectRecord, type Finding } from "../src/review.js";
 import { proofOf } from "../src/proof.js";
+import type { LeadKind } from "../src/leads.js";
 import type { Partition } from "../src/kit/areas.js";
 import type { PullFile } from "../src/kit/snapshot.js";
 import { parsePatch } from "../src/kit/patch.js";
@@ -184,6 +185,62 @@ describe("the draft", () => {
     expect(p0.comments[0]!.severity).toBe("P1");
     const plain = composeDraft(input([record("maintainability", [other])]));
     expect(plain.recommended).toBe("comment");
+  });
+
+  describe("a finding raised from a weak-test, split-function, crap or reuse lead (design §7.3)", () => {
+    const lead = (kind: LeadKind, over: Partial<Finding> = {}): Finding => finding({ id: "F1", kind: "non-behavioral", aspect: "maintainability", raisedBy: "maintainability", lead: "L1", leadKind: kind, ...over });
+    const drafted = (fs: Finding[]) => composeDraft(input([record("maintainability", fs)]));
+
+    for (const kind of ["weak-test", "split-function", "crap", "reuse"] as const) {
+      for (const proposed of ["P1", "P2", "P3"] as const) {
+        it(`is drafted at P0 from a reviewer's ${proposed} (${kind}), and asks for changes`, () => {
+          const d = drafted([lead(kind, { severity: proposed })]);
+          expect(d.comments.map((e) => [e.id, e.severity, e.proof?.state, e.lead])).toEqual([["F1", "P0", "non-behavioral", { id: "L1", kind }]]);
+          expect(d.recommended).toBe("request-changes");
+          expect(draftMarkdown(d)).toContain(`#### F1 · P0 · maintainability · non-behavioral · from lead L1 (${kind})`);
+        });
+      }
+    }
+
+    it("leaves missing-test capped at P2 and untested-feature at P1", () => {
+      const d = drafted([lead("missing-test", { severity: "P0" }), lead("untested-feature", { id: "F2", lead: "L2", severity: "P0", startLine: 40, endLine: 40 })]);
+      expect(d.comments.map((e) => [e.id, e.severity, e.lead?.kind])).toEqual([["F1", "P2", "missing-test"], ["F2", "P1", "untested-feature"]]);
+      expect(drafted([lead("missing-test", { severity: "P1" })]).recommended).toBe("comment");
+    });
+
+    it("drops a refuted one and leaves a disputed one to judgment, neither asking for changes", () => {
+      const dismissed = lead("reuse", { state: "dismissed", verdict: { verdict: "refuted", kind: "non-behavioral", witness: "", quotes: [{ path: "pkg/a.go", line: 2, text: "b" }], reason: "no duplicate", fixes: false } });
+      const d = drafted([dismissed]);
+      expect([d.comments, d.judgment, d.recommended]).toEqual([[], [], "approve"]);
+      const disputed = drafted([lead("crap", { state: "disputed", notes: ["the verifier could not decide"] })]);
+      expect(disputed.judgment.map((e) => [e.id, e.severity])).toEqual([["F1", "P2"]]);
+      expect(disputed.recommended).toBe("comment");
+    });
+
+    it("keeps an unproven behavioral one off P0, under judgment; a proven one is P0", () => {
+      const unproven = drafted([lead("split-function", { kind: "behavioral", proof: { state: "unproven", reason: "no test" } })]);
+      expect(unproven.comments).toEqual([]);
+      expect(unproven.judgment.map((e) => [e.id, e.severity, e.reason])).toEqual([["F1", "P2", "unproven: no test"]]);
+      expect(unproven.recommended).toBe("comment");
+      const record = { language: "go" as const, dir: "pkg", name: "TestX", expect: "assertion" as const, sha256: "0".repeat(64), runs: ["failed" as const, "failed" as const] };
+      const proven = drafted([lead("split-function", { kind: "behavioral", severity: "P2", proof: { state: "proven", record } })]);
+      expect(proven.comments.map((e) => [e.id, e.severity])).toEqual([["F1", "P0"]]);
+      expect(proven.recommended).toBe("request-changes");
+    });
+
+    it("leaves a finding not raised from a lead as it was", () => {
+      const d = drafted([finding({ id: "F1", severity: "P0", kind: "non-behavioral", aspect: "maintainability", raisedBy: "maintainability" })]);
+      expect(d.comments.map((e) => [e.id, e.severity, e.lead])).toEqual([["F1", "P2", undefined]]);
+      expect(d.recommended).toBe("comment");
+    });
+
+    it("drafts a linked entry at P0 when one of its findings is such a lead's, naming that lead", () => {
+      const c = finding({ id: "F1", aspect: "correctness", raisedBy: "correctness", severity: "P2", kind: "non-behavioral" });
+      const m = lead("reuse", { id: "F2", severity: "P3" });
+      const d = composeDraft(input([record("correctness", [c]), record("maintainability", [m])]));
+      expect(d.comments.map((e) => [e.id, e.severity, e.linked, e.lead])).toEqual([["F1", "P0", ["F2"], { id: "L1", kind: "reuse" }]]);
+      expect(d.recommended).toBe("request-changes");
+    });
   });
 
   it("anchors a comment only inside a hunk on its side, and keeps the review's own bookkeeping out of a body", () => {

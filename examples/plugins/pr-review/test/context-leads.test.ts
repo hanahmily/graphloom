@@ -18,7 +18,7 @@ import { recordedContext, recordedSeed } from "../src/runcontext.js";
 import { recordedAspect, writtenDraftFiles } from "../src/reviewdraft.js";
 import { reviewContext } from "../src/validators.js";
 import { findingsProven, leadsJudged } from "../src/reviewvalidators.js";
-import { REVIEW_SCHEMA_NAME } from "../src/review.js";
+import { REVIEW_SCHEMA_NAME, VERIFY_SCHEMA_NAME } from "../src/review.js";
 import { priorChunkText, writtenReviewLedger } from "../src/kit/ledger.js";
 import { findingMarker } from "../src/publish.js";
 import { BANYANDB, candidateEvidence, scenarioWith, simulate, type Simulation } from "./support.js";
@@ -296,5 +296,85 @@ describe("the maintainability reviewer judges each lead it is given", () => {
       return { ...e, payload: { ...(e.payload as object), command: { ...c, argv: c.argv.map((a) => a.split(`"lead":"${lead.id}"`).join('"lead":"L99"')) } } };
     });
     expect(findingsProven.evaluate({ requirementId: "findings-proven", statement: "", evidence: forged, config: BANYANDB })).toMatchObject({ status: "failed", reason: expect.stringContaining("does not recompute") });
+  });
+});
+
+describe("a finding raised from a reuse lead is drafted and posted at P0 (design §7.3)", () => {
+  // The reuse-lead scenario's maintainability reviewer raises its reuse lead (L2) at P3, and its untested-feature lead (L1) at P3 too;
+  // the verifier confirms the reuse finding (F4).
+  const scenario = scenarioWith("reuse-lead", (x) => {
+    const pass = x.results[REVIEW_SCHEMA_NAME]![2]!.output as { comments: Array<Record<string, unknown>>; leads: Array<Record<string, unknown>> };
+    const own = pass.comments[0]!;
+    pass.comments.push(
+      { ...own, start_line: 6, end_line: 18, severity: "P3", distinct: true, content: "ParseTTL repeats timestamp.ParseDuration (pkg/timestamp/duration.go:30); call it instead." },
+      { ...own, start_line: 1, end_line: 1, severity: "P3", distinct: true, content: "ParseTTL has no test." },
+    );
+    pass.leads = [
+      { lead: "L1", status: "raised", comment: 2, reason: "raised as a comment" },
+      { lead: "L2", status: "raised", comment: 1, reason: "raised as a comment" },
+    ];
+    const verify = x.results[VERIFY_SCHEMA_NAME]![1]!.output as { verdicts: Array<Record<string, unknown>> };
+    verify.verdicts.push({ ...verify.verdicts[0]!, finding: "F4", witness: "pkg/timestamp/duration.go:30", reason: "ParseDuration parses the same units", fixes: false });
+  });
+  const s = simulate({ scenario });
+  const candidate = (): EvidenceRecord[] => candidateEvidence(s.evidence, s.evidence.flatMap((e) => (e.candidateDigest !== undefined ? [e.candidateDigest] : [])).at(-1)!);
+
+  it("verifies the P3 reuse comment as a finding, and still counts the P3 untested-feature comment as a nit", () => {
+    ended(s);
+    const r = recordedAspect(s.evidence, "maintainability");
+    if (r.state !== "read") throw new Error("not recorded");
+    expect(r.value.passes[0]).toMatchObject({ raised: ["F3", "F4"], nits: 1 });
+    expect(r.value.findings.find((f) => f.id === "F4")).toMatchObject({ lead: "L2", leadKind: "reuse", severity: "P3", state: "confirmed" });
+    expect(r.value.leads.map((l) => [l.id, l.status, l.finding])).toEqual([["L1", "raised", "a nit (P3): not verified or posted"], ["L2", "raised", "F4"]]);
+    const verify = s.jobs.filter((j) => j.resultSchema === VERIFY_SCHEMA_NAME).at(-1)!;
+    expect((verify.input as { assignment: string }).assignment).toContain("F4 [maintainability, non-behavioral, P3]");
+  });
+
+  it("drafts it at P0, recommends request-changes, and posts it labelled P0, with every receipt of Review, Draft and Publish valid", () => {
+    const draft = JSON.parse((writtenDraftFiles(s.evidence).draftJson as { value: string }).value) as { recommended: string; comments: Array<{ id: string; severity: string; lead?: { id: string; kind: string } }> };
+    expect(draft.comments.find((c) => c.id === "F4")).toMatchObject({ severity: "P0", lead: { id: "L2", kind: "reuse" } });
+    expect(draft.recommended).toBe("request-changes");
+    const posted = [body(s), ...(s.github.creates[0]!.comments as Array<{ body: string }>).map((c) => c.body)].find((t) => t.includes(findingMarker("F4")))!;
+    expect(posted).toContain("**[P0] critical**");
+    expect(s.receipts.filter((x) => x.valid).map((x) => x.requirementId)).toEqual(expect.arrayContaining(["leads-judged", "findings-proven", "draft-composed", "ledger-recorded", "review-published"]));
+    expect(findingsProven.evaluate({ requirementId: "findings-proven", statement: "", evidence: candidate(), config: BANYANDB })).toMatchObject({ status: "passed", reason: expect.stringContaining("1 raised from a weak-test, split-function, crap or reuse lead (drafted at P0)") });
+  });
+
+  it("keeps the reuse lead when an untested-feature lead's comment, raised first, and the reuse comment merge into one finding", () => {
+    const merged = simulate({
+      scenario: scenarioWith("reuse-lead", (x) => {
+        const pass = x.results[REVIEW_SCHEMA_NAME]![2]!.output as { comments: Array<Record<string, unknown>>; leads: Array<Record<string, unknown>> };
+        const own = pass.comments[0]!;
+        pass.comments.push({ ...own, start_line: 1, end_line: 2, severity: "P2", content: "ParseTTL has no test." }, { ...own, start_line: 2, end_line: 3, severity: "P3", content: "ParseTTL repeats timestamp.ParseDuration; call it instead." });
+        pass.leads = [
+          { lead: "L1", status: "raised", comment: 1, reason: "raised as a comment" },
+          { lead: "L2", status: "raised", comment: 2, reason: "raised as a comment" },
+        ];
+        const verify = x.results[VERIFY_SCHEMA_NAME]![1]!.output as { verdicts: Array<Record<string, unknown>> };
+        verify.verdicts.push({ ...verify.verdicts[0]!, finding: "F4", witness: "pkg/timestamp/duration.go:30", reason: "ParseDuration parses the same units", fixes: false });
+      }),
+    });
+    ended(merged);
+    const r = recordedAspect(merged.evidence, "maintainability");
+    if (r.state !== "read") throw new Error("not recorded");
+    expect(r.value.passes[0]).toMatchObject({ raised: ["F3", "F4"], nits: 0, merged: 1 });
+    expect(r.value.findings.find((f) => f.id === "F4")).toMatchObject({ lead: "L2", leadKind: "reuse", state: "confirmed" });
+    const draft = JSON.parse((writtenDraftFiles(merged.evidence).draftJson as { value: string }).value) as { recommended: string; comments: Array<{ id: string; severity: string; lead?: { id: string; kind: string } }> };
+    expect(draft.comments.find((c) => c.id === "F4")).toMatchObject({ severity: "P0", lead: { id: "L2", kind: "reuse" } });
+    expect(draft.recommended).toBe("request-changes");
+    expect(merged.receipts.some((x) => x.requirementId === "findings-proven" && x.valid)).toBe(true);
+  });
+
+  it("fails findings-proven for a forged lead: an unknown id, another kind, or a lead the record does not show raised by the finding", () => {
+    const forge = (from: string, to: string): EvidenceRecord[] =>
+      candidate().map((e): EvidenceRecord => {
+        const c = (e.payload as { command?: { id: string; argv: string[] } }).command;
+        if (c?.id !== "review-aspect-maintainability") return e;
+        return { ...e, payload: { ...(e.payload as object), command: { ...c, argv: c.argv.map((a) => a.split(from).join(to)) } } };
+      });
+    const judge = (evidence: EvidenceRecord[]) => findingsProven.evaluate({ requirementId: "findings-proven", statement: "", evidence, config: BANYANDB });
+    expect(judge(forge('"lead":"L2"', '"lead":"L99"'))).toMatchObject({ status: "failed", reason: expect.stringContaining("F4 is raised from the reuse lead L99, which does not recompute") });
+    expect(judge(forge('"leadKind":"reuse"', '"leadKind":"crap"'))).toMatchObject({ status: "failed", reason: expect.stringContaining("F4 is raised from the crap lead L2, which does not recompute") });
+    expect(judge(forge('"finding":"F4"', '"finding":"F3"'))).toMatchObject({ status: "failed", reason: expect.stringContaining("F4 names the reuse lead L2, which the record does not show raised by it") });
   });
 });

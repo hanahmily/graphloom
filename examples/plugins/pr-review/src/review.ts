@@ -19,7 +19,8 @@
  *
  * The maintainability aspect's first pass is also given its leads (design-pr-review-split §4.3) and must give each one exactly one
  * status: a missing, repeated or unknown lead is a problem that goes back to the same session as a correction. A lead raised by a
- * comment marks the finding the comment became, which is then verified and prioritized like any other.
+ * comment marks the finding the comment became, which is then verified like any other; a comment raising a `weak-test`,
+ * `split-function`, `crap` or `reuse` lead is a finding even at P3 (it is drafted at P0 when confirmed), never a counted nit.
  */
 import type { EnvironmentCommand, EvidenceRecord } from "@graphloom/sdk";
 import { isAspect, type Aspect } from "./kit/aspects.js";
@@ -27,7 +28,7 @@ import { agentRuns, commandRuns, succeeded, reportText, type AgentRun, type Comm
 import { overlaps as priorOverlaps } from "./prior.js";
 import { hasTest, judgeRun, reproCommandId, reproProblems, REPRO_SCHEMA, reproSpec, type FindingProof, type Repro, type ReproLanguage, type ReproRunSpec } from "./repro.js";
 import { treeQuotePlan, readTreeQuotes, type TreeQuotePlan } from "./kit/treequotes.js";
-import { LEADS_SCHEMA, NOT_GIVEN, parseLeadStatuses, type Lead, type LeadEntry, type LeadKind, type LeadRecord } from "./leads.js";
+import { fixedP0Lead, LEADS_SCHEMA, NOT_GIVEN, parseLeadStatuses, type Lead, type LeadEntry, type LeadKind, type LeadRecord } from "./leads.js";
 
 export const REVIEW_SCHEMA_NAME = "pr-code-review-v2";
 export const VERIFY_SCHEMA_NAME = "pr-finding-verification-v1";
@@ -436,7 +437,7 @@ export interface PassRecord {
   reviewed: number;
   raised: string[];
   reaffirmed: string[];
-  /** Comments of severity P3, which are not verified (the profile has no `comments.nits`). */
+  /** Comments of severity P3, which are not verified (the profile has no `comments.nits`); a P3 comment raising a weak-test, split-function, crap or reuse lead is not one. */
   nits: number;
   /** Comments folded into another of the same pass on overlapping lines. */
   merged: number;
@@ -730,6 +731,8 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
       let suppressed = 0;
       for (const j of parsed.prior) said.set(j.finding, { status: j.status, reason: j.reason });
       if (n === 1) leadEntries = parsed.leads;
+      // A comment that raises a weak-test, split-function, crap or reuse lead is drafted at P0 when confirmed (design §7.3), so it is verified even at P3.
+      const raisesP0Lead = new Set(n === 1 ? leadEntries.filter((e) => e.status === "raised" && fixedP0Lead(givenLeads.find((l) => l.id === e.lead)?.kind)).map((e) => e.comment) : []);
       for (const [k, c] of parsed.comments.entries()) {
         if (c.finding === "" && (spec.suppress ?? []).some((x) => overlaps({ path: c.path, side: c.side, start: c.start_line, end: c.end_line }, { path: x.path, side: x.side, start: x.start, end: x.end }))) {
           suppressed += 1;
@@ -742,7 +745,7 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
           reaffirmed.push(c.finding);
           continue;
         }
-        if (c.severity === "P3") {
+        if (c.severity === "P3" && !raisesP0Lead.has(k)) {
           nits += 1;
           if (n === 1) commentOutcome.set(k, "a nit (P3): not verified or posted");
           continue;
@@ -790,7 +793,9 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
           if (e.status !== "raised") continue;
           const target = findings.find((f) => f.id === commentOutcome.get(e.comment));
           const lead = givenLeads.find((l) => l.id === e.lead);
-          if (target !== undefined && lead !== undefined && target.lead === undefined) {
+          // Several leads may name one finding (one comment, or comments merged on overlapping lines): the first is kept, unless a
+          // later one is drafted at the fixed P0 and the kept one is not (design §7.3).
+          if (target !== undefined && lead !== undefined && (target.lead === undefined || (!fixedP0Lead(target.leadKind) && fixedP0Lead(lead.kind)))) {
             target.lead = lead.id;
             target.leadKind = lead.kind;
           }
