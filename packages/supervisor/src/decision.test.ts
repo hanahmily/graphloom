@@ -42,6 +42,24 @@ describe("parseSupervisorDecision", () => {
       .toEqual({ type: "reenter", reenter: { stageId: "fix", reason: "fresh" } });
   });
 
+  it("reads an enter into a supervisor-only node, nested or with its fields beside its type, and a leave as reenter", () => {
+    const nested = { reason: "a ruling is needed", action: { type: "enter", enter: { stageId: "arb", reason: "arbitrate", evidenceRefs: ["ev-1"] } }, evidence: ["ev-1"] };
+    expect(parseSupervisorDecision(`Deciding.\n\`\`\`json\n${JSON.stringify(nested)}\n\`\`\``)).toEqual(nested);
+    expect(parseSupervisorDecision(JSON.stringify({ reason: "r", action: { type: "enter", stageId: "arb", reason: "arbitrate" } })).action).toEqual({
+      type: "enter",
+      enter: { stageId: "arb", reason: "arbitrate" },
+    });
+    expect(parseSupervisorDecision(JSON.stringify({ reason: "ruled", action: { type: "reenter", stageId: "review", reason: "the ruling holds" } })).action).toEqual({
+      type: "reenter",
+      reenter: { stageId: "review", reason: "the ruling holds" },
+    });
+  });
+
+  it("rejects an enter that names no node or gives no reason", () => {
+    expect(() => parseSupervisorDecision(JSON.stringify({ reason: "r", action: { type: "enter", enter: { reason: "x" } } }))).toThrow(/enter.stageId must be a non-empty string/);
+    expect(() => parseSupervisorDecision(JSON.stringify({ reason: "r", action: { type: "enter", stageId: "arb" } }))).toThrow(/enter.reason must be a non-empty string/);
+  });
+
   it("rejects Accept even if wrapped as a decision", () => {
     expect(() =>
       parseSupervisorDecision(

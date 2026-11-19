@@ -91,6 +91,8 @@ export function stageOfAction(action: GraphAction): string | undefined {
       return action.validate.stageId;
     case "reenter":
       return action.reenter.stageId;
+    case "enter":
+      return action.enter.stageId;
     default:
       return undefined;
   }
@@ -139,6 +141,13 @@ export function replayRefusal(episode: SupervisorEpisodeRecord, decision: GraphD
     case "observe": {
       const escaping = escapingObservePath(action.observe.paths);
       return escaping === undefined ? undefined : `observe paths are relative to the run worktree; ${escaping} is not`;
+    }
+    case "enter":
+      return facts === undefined || facts.canEnter?.includes(action.enter.stageId) === true ? undefined : `enter ${action.enter.stageId}: the recorded state admits enter of ${facts.canEnter !== undefined && facts.canEnter.length > 0 ? facts.canEnter.join(", ") : "no node"}`;
+    case "reenter": {
+      // While a side visit is open, only its out-edges leave it.
+      const exits = facts?.exits;
+      return exits === undefined || exits.includes(action.reenter.stageId) ? undefined : `reenter ${action.reenter.stageId}: the recorded side visit is left only along its out-edges, to ${exits.join(", ")}`;
     }
     default:
       return undefined;
@@ -268,6 +277,7 @@ async function replayOne(
     episodeId: episode.episodeId,
     trigger: structuredClone(recorded.trigger),
     view: structuredClone(recorded.view),
+    ...(recorded.nodes !== undefined ? { nodes: structuredClone(recorded.nodes) } : {}),
     ...(recorded.caseFile !== undefined ? { caseFile: structuredClone(recorded.caseFile) } : {}),
     ...(recorded.lastSettlement !== undefined ? { lastSettlement: structuredClone(recorded.lastSettlement) } : {}),
     ...(recorded.rejection !== undefined ? { rejection: structuredClone(recorded.rejection) } : {}),

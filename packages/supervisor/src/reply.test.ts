@@ -19,6 +19,12 @@ describe("parseSupervisorReply", () => {
     expect(() => parseSupervisorReply(JSON.stringify({ reason: "r", action: { type: "accept", accept: {} } }))).toThrow(/unsupported action type: accept|Accept/);
   });
 
+  it("reads an enter decision with its findings, the JSON reply form for a supervisor-only node", () => {
+    const decision = { reason: "a ruling is needed", action: { type: "enter", enter: { stageId: "arb", reason: "arbitrate" } }, evidence: ["ev-1"] };
+    const finding = { kind: "open", text: "which reading of the issue holds" };
+    expect(parseSupervisorReply(JSON.stringify({ ...decision, findings: [finding] }))).toEqual({ kind: "decision", decision, findings: [finding] });
+  });
+
   it("recognizes inspect requests and model switches", () => {
     expect(parseSupervisorReply('{"inspect": [{"tool": "check_validate", "args": {"stageId": "fix"}}, {"tool": "list_receipts"}]}')).toEqual({
       kind: "inspect",

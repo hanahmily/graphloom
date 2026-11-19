@@ -90,7 +90,7 @@ import { agentSessionViews, continuationRefusal, recordAgentSession, sessionForD
 import { citedEvidence, loadRunState, nextStageAttempt, type ProbeRecord, NO_PROGRESS_STOP_REASON, MAX_HOST_CHANGE_RECORDS, recordRemedy, type DurableRunState, saveRunState } from "./state.js";
 import { stopMarkOf } from "./stop-class.js";
 import { carryToTerminal, completionProblem, forwardRefusal, latestAttempt, moveTo, pathIndex, reenterPath, reentryRefusal, sideVisitOf, startPath, topologyView } from "./traversal.js";
-import { closeSideVisit, enterNode, enterRefusal, recordSettlement, settledSideVisit, settledTrigger, sideVisitRefusal, SUPERVISOR_NODE_SETTLED } from "./supervisor-node.js";
+import { closeSideVisit, enterNode, enterRefusal, recordSettlement, settledSideVisit, settledTrigger, sideVisitRefusal, supervisorNodes, SUPERVISOR_NODE_SETTLED } from "./supervisor-node.js";
 import { bumpGeneration } from "./generation.js";
 import { noteGraphDecision, noteSupervisorProposal, progressMark, settleCorrectionTrial, settleSupervisorCorrection } from "./escalation.js";
 import {
@@ -532,6 +532,8 @@ async function runNormalLoopSteps(
         // becomes an attempt, written by the controller, not the model.
         const executors = executorViews(state);
         const view = { ...toRunView(state), ...(executors !== undefined ? { executors } : {}) };
+        // The graph's nodes, for a graph that declares edges: the prompt's topology section reads them with view.topology.
+        const nodes = supervisorNodes(state);
         const lastSettlement = settleProposal(state);
         state = recordAttempt(refreshCaseFile(state), lastSettlement);
         const caseFile = liveCaseFile(state);
@@ -847,6 +849,7 @@ async function runNormalLoopSteps(
                 ...(trigger.evidenceRefs !== undefined ? { evidenceRefs: [...trigger.evidenceRefs] } : {}),
               },
               view,
+              ...(nodes !== undefined ? { nodes } : {}),
               signal: abort.signal,
               admission,
               ...(rejection !== undefined ? { rejection } : {}),
@@ -882,6 +885,7 @@ async function runNormalLoopSteps(
                 runId: state.runId,
                 trigger: { code: trigger.code as RecoveryTrigger["code"], message: trigger.message, ...(trigger.evidenceRefs !== undefined ? { evidenceRefs: [...trigger.evidenceRefs] } : {}) },
                 view,
+                ...(nodes !== undefined ? { nodes } : {}),
                 ...(caseFile !== undefined ? { caseFile } : {}),
                 ...(lastSettlement !== undefined ? { lastSettlement } : {}),
                 ...(rejection !== undefined ? { rejection } : {}),
@@ -997,11 +1001,14 @@ async function runNormalLoopSteps(
             applied: outcome,
           });
           if (outcome === "stop") {
+            // A settled side visit the supervisor did not leave: the stop names its node (docs/design-graph-topology.md §10).
+            const unleft = trigger.code === SUPERVISOR_NODE_SETTLED ? settledSideVisit(state) : undefined;
+            const node = unleft !== undefined ? `supervisor-only node ${unleft.stageId} settled and was not left; ` : "";
             state = {
               ...state,
               status: "stopped",
               stopReason: "supervisor_inadmissible",
-              blocker: boundText(`${rejections.length} inadmissible proposals this turn; last: ${last.action}: ${last.reason}`),
+              blocker: boundText(`${node}${rejections.length} inadmissible proposals this turn; last: ${last.action}: ${last.reason}`),
             };
             await saveRunState(state);
             syncRevision(deps, state);

@@ -7,6 +7,7 @@ import { supervisorProposalKey, progressMark } from "./escalation.js";
 import { manifestRepairContract } from "./intake.js";
 import { noteOutcome } from "./settlement.js";
 import type { DurableRunState, SupervisorOutcomeRecord } from "./state.js";
+import { topologyFacts } from "./supervisor-node.js";
 
 /**
  * Inadmissible supervisor proposals one decide() turn may make before the
@@ -73,6 +74,7 @@ export function admissionFacts(state: DurableRunState, hasRepairHooks: boolean):
       state.mode === "recovery" &&
       ((hasRepairHooks && state.budgets.corrections > 0 && repairGranted(state)) || environmentRepinnable(state)),
     qualifiedArtifactIds: (state.repairCandidates ?? []).filter((c) => c.status === "qualified").map((c) => c.artifactId),
+    ...topologyFacts(state),
   };
 }
 

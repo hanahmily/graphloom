@@ -8,6 +8,7 @@ import type {
   AdmissionFacts,
   RecoveryTrigger,
   SupervisorInspection,
+  SupervisorNodeView,
   SupervisorProposal,
   SupervisorRejection,
   SupervisorSettlement,
@@ -66,6 +67,8 @@ export interface SupervisorEpisodeRecord {
     trigger: RecoveryTrigger;
     /** The run view, shrunk only when the record would exceed its bound (see `shrinkJson`). */
     view: RunView;
+    /** The graph's nodes the call was given (`SupervisorInput.nodes`), for a graph that declares edges. */
+    nodes?: SupervisorNodeView[];
     caseFile?: CaseFile;
     lastSettlement?: SupervisorSettlement;
     /** The controller's rejection of the previous proposal, passed to a retried decide() call. */
@@ -331,6 +334,7 @@ export interface EpisodeRecordArgs {
   at?: string;
   trigger: RecoveryTrigger;
   view: RunView;
+  nodes?: SupervisorNodeView[];
   caseFile?: CaseFile;
   lastSettlement?: SupervisorSettlement;
   rejection?: SupervisorRejection;
@@ -430,6 +434,7 @@ export function buildEpisodeRecord(args: EpisodeRecordArgs): SupervisorEpisodeRe
     input: {
       trigger: args.trigger,
       view: args.view,
+      ...(args.nodes !== undefined ? { nodes: args.nodes } : {}),
       ...(args.caseFile !== undefined ? { caseFile: args.caseFile } : {}),
       ...(args.lastSettlement !== undefined ? { lastSettlement: args.lastSettlement } : {}),
       ...(args.rejection !== undefined ? { rejection: args.rejection } : {}),

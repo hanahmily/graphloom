@@ -14,7 +14,23 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { dispatch, observe, returnToNormal, stop, supervise, validate, type GraphDefinition, type RunView, type SupervisorPreference, type Validator } from "@graphloom/sdk";
+import {
+  createScriptedGraph,
+  dispatch,
+  enter,
+  observe,
+  reenter,
+  returnToNormal,
+  stop,
+  supervise,
+  validate,
+  type GraphDefinition,
+  type JobSpec,
+  type RunView,
+  type SupervisorPreference,
+  type ValidationInput,
+  type Validator,
+} from "@graphloom/sdk";
 import { createScriptedRunner } from "@graphloom/runner";
 import {
   createPiHarness,
@@ -26,6 +42,7 @@ import {
   type SupervisorHarness,
 } from "@graphloom/supervisor";
 import { createController, loadRunState, saveRunState, type SupervisorFactoryContext } from "./index.js";
+import { classifyStop } from "./stop-class.js";
 import { HELLO_VERSION } from "./testing/hello-version.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -494,5 +511,207 @@ describe("supervisor pin on resume", () => {
     const state = await loadRunState(resumed.stateDir);
     expect(state.supervisorSelection).toMatchObject({ harness: "claude-code", source: "plugin", preference: PREFERENCE, generation: before.generation });
     expect(state.supervisorBinding?.harness).toBe("claude-code");
+  });
+});
+
+/** Fix ⇄ Review with a supervisor-only Arbitrate that leaves to either (docs/design-graph-topology.md §5). */
+const topologyDefinition: GraphDefinition = {
+  graphId: "topo",
+  version: "1.0.0",
+  stages: [
+    { id: "fix", name: "Fix", requirementIds: ["req-fix"] },
+    { id: "review", name: "Review", requirementIds: ["req-review"] },
+    { id: "arb", name: "Arbitrate", requirementIds: ["req-arb"], entry: "supervisor", maxVisits: 2 },
+  ],
+  edges: [
+    { from: "fix", to: "review" },
+    { from: "review", to: "fix" },
+    { from: "arb", to: "fix" },
+    { from: "arb", to: "review" },
+  ],
+  start: "fix",
+  terminal: ["review"],
+  requirements: ["fix", "review", "arb"].map((id) => ({ id: `req-${id}`, statement: `${id} is done`, evidenceSchema: "node-v1" })),
+  defaultValidators: ["fix", "review", "arb"].map((id) => ({ requirementId: `req-${id}`, validatorId: "node", version: "1" })),
+};
+
+/** A repository and an installed level-2 bundle for the topology graph (its code is the in-process plugin). */
+async function makeTopologyEnv(): Promise<{ taskPath: string; stateRoot: string }> {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const run = promisify(execFile);
+  const dir = await mkdtemp(path.join(os.tmpdir(), "gl-supervisor-topology-"));
+  temps.push(dir);
+  const repo = path.join(dir, "repo");
+  await mkdir(repo, { recursive: true });
+  for (const args of [["init", "-q"], ["config", "user.email", "t@example.com"], ["config", "user.name", "T"], ["config", "commit.gpgsign", "false"]]) {
+    await run("git", args, { cwd: repo });
+  }
+  await writeFile(path.join(repo, "README.md"), "repo\n", "utf8");
+  await run("git", ["add", "README.md"], { cwd: repo });
+  await run("git", ["commit", "-q", "-m", "init"], { cwd: repo });
+  const bundle = path.join(dir, "plugins", "topo");
+  await mkdir(path.join(bundle, "dist"), { recursive: true });
+  const manifest = { graphId: "topo", version: "1.0.0", sdkProtocol: 2, entryPoints: { createGraph: "./dist/index.js" } };
+  await writeFile(path.join(bundle, "graphloom.manifest.json"), JSON.stringify(manifest), "utf8");
+  await writeFile(path.join(bundle, "dist", "index.js"), "export {};\n", "utf8");
+  const taskPath = path.join(dir, "task.yaml");
+  await writeFile(taskPath, "graph: topo\nrepo: ./repo\nrequest: walk the graph\n", "utf8");
+  return { taskPath, stateRoot: path.join(dir, "state") };
+}
+
+describe("a supervisor-only node through a supervisor host (docs/design-graph-topology.md §10)", () => {
+  /** A CLI-shaped harness: the JSON reply protocol, as Claude Code and Codex decide. */
+  const cli: SupervisorHarness = {
+    name: "claude-code",
+    capabilities: { toolCalling: false, inSessionModelSwitch: false, compaction: false, exactResend: false, exactProviderCalls: false, rawStreamCapture: false },
+    probe: async () => ({ ok: true }),
+    restore: async () => {
+      throw new Error("restored, not started");
+    },
+  };
+  const work = (stageId: string) =>
+    dispatch({ stageId, kind: "command", purpose: "diagnostic", readOnly: true, instruction: `work ${stageId}` }, `work ${stageId}`);
+  const check = (stageId: string) => validate({ stageId }, `validate ${stageId}`);
+  /** Each node's job records its node; the node validator passes on a record of its node. */
+  const nodeValidator: Validator = {
+    evaluate(input: ValidationInput) {
+      const node = input.requirementId.replace(/^req-/, "");
+      return input.evidence.some((e) => (e.payload as { node?: string } | undefined)?.node === node)
+        ? { status: "passed" as const, reason: `${node} ok: the record holds` }
+        : { status: "inconclusive" as const, reason: `no record of ${node}` };
+    },
+  };
+
+  it("shows the topology, admits the host's enter, opens supervisor_node_settled with its guidance, returns a refused leave's reason, and admits the leave", async () => {
+    const env = await makeTopologyEnv();
+    // Fix, then Review hands over; the node's work once the supervisor entered it; then Fix again and Review.
+    const advances = [
+      work("fix"),
+      check("fix"),
+      work("review"),
+      supervise({ reason: "a point the graph cannot settle" }, "hand over"),
+      work("arb"),
+      check("arb"),
+      check("fix"),
+      work("review"),
+      check("review"),
+      stop({ reason: "complete", blocker: "none" }, "done"),
+    ];
+    const prompts: string[] = [];
+    const replies = [
+      JSON.stringify(enter({ stageId: "arb", reason: "the reviewers disagree on the design" }, "arbitrate")),
+      JSON.stringify(returnToNormal({ summary: "let the graph run Arbitrate" }, "return")),
+      // A leave that is no out-edge of arb: refused in-turn with the controller's reason.
+      JSON.stringify(reenter({ stageId: "arb", reason: "again" }, "stay")),
+      JSON.stringify(reenter({ stageId: "fix", reason: "the ruling sends it back to Fix" }, "leave along arb → fix")),
+      JSON.stringify(returnToNormal({ summary: "fix again" }, "return")),
+    ];
+    let next = 0;
+    const replying = {
+      ...session([], "sess-topo"),
+      async prompt(text: string) {
+        prompts.push(text);
+        const reply = replies[next++];
+        if (reply === undefined) throw new Error("exhausted");
+        return reply;
+      },
+    };
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition: topologyDefinition, advances }),
+      validators: { node: nodeValidator },
+      runner: createScriptedRunner({
+        jobs: Array.from({ length: 16 }, () => async (job: JobSpec) => ({
+          status: "ok" as const,
+          summary: job.instruction,
+          evidence: [{ kind: "other" as const, payload: { node: job.stageId } }],
+        })),
+      }),
+      stateRoot: env.stateRoot,
+      runId: "topo-host",
+      selectSupervisor: async () => ({
+        selection: { harness: "claude-code", source: "fallback", reason: "test" },
+        supervisorFactory: async () => createSupervisorHost({ harness: cli, session: replying as unknown as HarnessSession, requireCitedEvidence: false }),
+      }),
+    });
+    expect(report.status, `${report.stopReason}: ${report.blocker}`).toBe("succeeded");
+    // The supervise episode: the topology, and enter offered for arb.
+    expect(prompts[0]).toContain("- live path: fix#1 → review#1; tail review#1");
+    expect(prompts[0]).toContain("- supervisor-only node arb: out-edges arb → fix, arb → review; 2 of 2 visits left");
+    expect(prompts[0]).toContain("- no side visit is open; enter admits now: arb");
+    expect(prompts[0]).toContain("reenter, enter, return, or stop");
+    // The settled episode: its trigger and guidance, the open side visit, and no enter offered.
+    const settled = prompts.find((p) => p.includes('"code": "supervisor_node_settled"'));
+    expect(settled).toBeDefined();
+    expect(settled).toContain("This episode's trigger is supervisor_node_settled");
+    expect(settled).toContain("- open side visit: arb#1, entered from the tail. Only you leave it, with reenter along one of its out-edges: arb → fix, arb → review.");
+    expect(settled).toContain("1 of 2 visits left");
+    expect(settled).not.toContain("reenter, enter");
+    // The refused leave came back to the same turn with the controller's reason.
+    const refused = prompts.find((p) => p.includes("Rejected: the controller would not admit this reenter: undeclared edge: leave arb to arb"));
+    expect(refused).toContain("out-edges of arb: arb → fix, arb → review");
+    const state = await loadRunState(report.stateDir);
+    expect(state.visits!.find((v) => v.stageId === "arb")).toMatchObject({ entered: "enter", ended: "routed to fix" });
+    const episodes = state.supervisorEpisodes ?? [];
+    expect(episodes[0]).toMatchObject({
+      input: { trigger: { code: "supervise" }, nodes: [{ id: "fix", entry: "graph" }, { id: "review", entry: "graph" }, { id: "arb", entry: "supervisor", maxVisits: 2, visitsLeft: 2 }] },
+      admission: { facts: { canEnter: ["arb"] } },
+    });
+    expect(episodes[0]!.admission.facts?.exits).toBeUndefined();
+    const settledRecord = episodes.find((e) => e.input.trigger.code === "supervisor_node_settled");
+    expect(settledRecord?.admission.facts).toMatchObject({ canEnter: [], exits: ["fix", "review"] });
+  });
+
+  it("stops, retryable and naming the node, when the settled episode's turn ends on inadmissible proposals", async () => {
+    const env = await makeTopologyEnv();
+    const advances = [work("fix"), check("fix"), supervise({ reason: "a point the graph cannot settle" }, "hand over"), work("arb"), check("arb")];
+    const stay = JSON.stringify(reenter({ stageId: "arb", reason: "again" }, "stay"));
+    const replies = [JSON.stringify(enter({ stageId: "arb", reason: "rule on it" }, "arbitrate")), JSON.stringify(returnToNormal({ summary: "run it" }, "return")), stay, stay, stay];
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition: topologyDefinition, advances }),
+      validators: { node: nodeValidator },
+      runner: createScriptedRunner({
+        jobs: Array.from({ length: 4 }, () => async (job: JobSpec) => ({ status: "ok" as const, summary: job.instruction, evidence: [{ kind: "other" as const, payload: { node: job.stageId } }] })),
+      }),
+      stateRoot: env.stateRoot,
+      runId: "topo-unleft",
+      selectSupervisor: async () => ({
+        selection: { harness: "claude-code", source: "fallback", reason: "test" },
+        supervisorFactory: async () => createSupervisorHost({ harness: cli, session: session(replies, "sess-unleft") as unknown as HarnessSession, requireCitedEvidence: false }),
+      }),
+    });
+    expect(report).toMatchObject({ status: "stopped", stopReason: "supervisor_inadmissible" });
+    expect(report.blocker).toMatch(/^supervisor-only node arb settled and was not left; 3 inadmissible proposals this turn; last: reenter: undeclared edge/);
+    expect(classifyStop(await loadRunState(report.stateDir))).toMatchObject({ retryable: true });
+  });
+
+  it("gives a chain run no topology facts or nodes", async () => {
+    const env = await makeEnv();
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin,
+      validators,
+      selectSupervisor: async () => ({
+        selection: { harness: "claude-code", source: "plugin", reason: "test" },
+        supervisorFactory: async () => hostOn("claude-code", [WRITE, ...FINISH], "sess-chain"),
+      }),
+      runner: createScriptedRunner({
+        jobs: [
+          async (_job, ctx) => {
+            await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
+            return { status: "ok", summary: "wrote" };
+          },
+          async () => ({ status: "ok" as const, summary: "approved", evidence: [{ kind: "review" as const, payload: { verdict: "approved", summary: "ok" } }] }),
+        ],
+      }),
+      stateRoot: env.stateRoot,
+      runId: "chain-facts",
+    });
+    expect(report.status).toBe("succeeded");
+    const episode = (await loadRunState(report.stateDir)).supervisorEpisodes![0]!;
+    expect(episode.input.nodes).toBeUndefined();
+    expect(episode.admission.facts).toEqual({ inRecovery: true, canQualify: false, qualifiedArtifactIds: [] });
   });
 });
