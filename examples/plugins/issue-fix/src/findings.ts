@@ -193,8 +193,8 @@ export interface FindingLedger {
   rulings: Ruling[];
   /** The design points the operator declined to rule on. */
   deferred: DeferredPoint[];
-  /** Accepted rulings on findings this evidence has not raised yet (a validator's partial view), by finding id. */
-  unapplied?: Map<string, { ruling: Ruling; ctx: EventContext }>;
+  /** Accepted rulings and deferrals on findings this evidence has not raised yet (a validator's partial view), by finding id. */
+  unapplied?: Map<string, { ruling: Ruling; ctx: EventContext } | { defer: string; ctx: EventContext }>;
 }
 
 const OPEN: ReadonlySet<FindingState> = new Set(["pending", "confirmed", "disputed"]);
@@ -315,11 +315,19 @@ function applyRuling(ledger: FindingLedger, evidence: EvidenceRecord[], at: numb
       // The point the visit pinned with its design-point record; the first open conflict when none was pinned.
       const pinned = designPointBefore(evidence, at);
       const point = pinned !== undefined ? findingById(ledger, pinned) : designConflicts(ledger)[0];
-      if (point === undefined) return;
+      const note = `the operator left the design point open${approval.reason !== undefined ? `: ${approval.reason}` : ""}`;
+      const reason = approval.reason !== undefined ? { reason: approval.reason } : {};
+      if (point === undefined) {
+        // A validator's partial view: the deferral waits, like a ruling, for the first comment naming the point.
+        if (pinned === undefined) return;
+        const cases = undecidedCases(evidence, at, pinned) ?? { question: `Does ${issueIdOf(pinned)} hold against the project's design?`, implementation: "", review: "" };
+        ledger.deferred.push({ finding: pinned, ...cases, ...reason, source: record.ref, receipt });
+        (ledger.unapplied ??= new Map()).set(pinned, { defer: note, ctx });
+        return;
+      }
       const cases = undecidedCases(evidence, at, point.id) ?? pointCases(ledger, point);
-      settle(point, "deferred", ctx.digest);
-      ledger.deferred.push({ finding: point.id, ...cases, ...(approval.reason !== undefined ? { reason: approval.reason } : {}), source: record.ref, receipt });
-      moveOrCreate(ledger, point, "deferred", "operator", `the operator left the design point open${approval.reason !== undefined ? `: ${approval.reason}` : ""}`, ctx);
+      ledger.deferred.push({ finding: point.id, ...cases, ...reason, source: record.ref, receipt });
+      defer(ledger, point, note, ctx);
       return;
     }
     if (approval.finding === undefined || approval.ruling === undefined) return;
@@ -351,6 +359,12 @@ function applyRuling(ledger: FindingLedger, evidence: EvidenceRecord[], at: numb
   // missing: the ruling waits for the first comment that names the finding, and applies to it then.
   if (f === undefined) (ledger.unapplied ??= new Map()).set(ruling.finding, { ruling: r, ctx });
   else rule(ledger, f, r, ctx);
+}
+
+/** The operator's decline: the point no longer blocks. */
+function defer(ledger: FindingLedger, f: Finding, note: string, ctx: EventContext): void {
+  settle(f, "deferred", ctx.digest);
+  moveOrCreate(ledger, f, "deferred", "operator", note, ctx);
 }
 
 /** A ruling's effect on its finding and the finding's issue. */
@@ -593,6 +607,9 @@ function applyPass(ledger: FindingLedger, run: AgentRun, digest: string, files: 
     const s = status.get(f.id);
     if (s === undefined) pass.missingStatus.push(f.id);
     else applyStatus(f, s, digest);
+    // Rule 6: a review-stands ruling holds while the lines it cites match; once they are observed changed it lapses.
+    const r = holdingRuling(ledger, f);
+    if (r?.decision === "review-stands" && r.code.length > 0 && r.digest !== digest && checkQuotes(r.code.map(asQuote), digest, files) === "mismatch") delete f.ruling;
   }
   for (const c of report.comments.filter(isBlocking)) {
     const known = c.finding !== undefined ? findingById(ledger, c.finding) : undefined;
@@ -604,6 +621,10 @@ function applyPass(ledger: FindingLedger, run: AgentRun, digest: string, files: 
       const f: Finding = { id: c.finding!, comment: c, state: "pending", on: digest, raisedOn: digest, round };
       ledger.findings.push(f);
       ledger.unapplied!.delete(f.id);
+      if ("defer" in waiting) {
+        defer(ledger, f, waiting.defer, waiting.ctx);
+        continue;
+      }
       rule(ledger, f, waiting.ruling, waiting.ctx);
       if (f.state === "dismissed") {
         recheckDismissal(f, digest, files);

@@ -16,7 +16,7 @@
     "vitest": "^4.1.12"
   },
   "digests": {
-    "sourceTree": "041eeaeca198c0a08f4b0a749adb47e0fea5787255cfef456f81271ee7f09839",
+    "sourceTree": "70b73b2e62367278632320f33647f42f7e32e608a92f6127bf34796f1a91f21b",
     "packageLock": "4276c46f75801cb721ab671035665f488c0073300c016b893ec89f4fceff3965",
     "files": {
       "package.json": "85011d048872acd4bfca6408858df50d0352bcdd20521d969d86c5ca70b6289b",
@@ -36,7 +36,7 @@
       "src/decision-record.ts": "376ef8443a09cc48a0a86da3e7b18963b218cee37f702e801a777fe693709848",
       "src/evidence.ts": "f7bede44580cfb444c649311513ef71dc23b68b01de71a08df2f421e49799633",
       "src/final.ts": "4bc011007a06be8ec0547bfa3beb6a886bf859e685741e28c2ed7463be5a8612",
-      "src/findings.ts": "92b561d88ff15012ef96e066a0db6cd7d06ee96c9ad145958f812af5117d3f68",
+      "src/findings.ts": "37e09fb64dee88b9c146aeb2f2dd9d2fc6c274db00ee522cdad9133ed1c7f14a",
       "src/graph.ts": "e62f04c130f459dbaff2242e1cc449f2d180a37b3f53cab4b0f4a96a394c0914",
       "src/index.ts": "c512b43af7c1b350abf39c060fb305d23a8c041a665e65f978e9207569d729ba",
       "src/issues.ts": "a8dff29d827691edd05f2a23da331e0ff1c31bb53c75473d55707c8571c9403c",
@@ -52,7 +52,7 @@
       "src/runners/types.ts": "c8993c827f54f377075eefd8630e144190759ac9ac5c9a8bd23efd9b580f3823",
       "src/runners/vitest.ts": "693c5722d62719505d21dee949d39a75f14e9368a11f5084f4bc36c95381171b",
       "src/validators.ts": "f35b31b682cdce730ae33de6ccf774ed7165b0a90fe8a3332044b45186844715",
-      "test/arbitrate.test.ts": "13ea808a56a992a47802a68c7fb0316d473d97e05e508a44c3259509e2fb97e3",
+      "test/arbitrate.test.ts": "855e559328a532d1d638a7eeda390a15155068b19a912e92c131c32cd7c8ac7e",
       "test/issue-fix.test.ts": "ec9a85e96f53b4a253b1c8cdb1d49b62aacf17429e876ecd0b5bb3cb7037577e",
       "test/issues.test.ts": "2002cb4156c8ee5902a90667735a5c506c9d1bb73733023e2b33f5b9ac06c82f",
       "test/profiles.test.ts": "d88baceb76b7eeec5b208b49bb08741d350b3e87875d1f9e4d0588354c6548c2",

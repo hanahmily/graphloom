@@ -738,6 +738,35 @@ describe("rulings in the findings ledger", () => {
     expect(more.findings.map((f) => f.id)).toEqual(["F1", "F2"]);
   });
 
+  it("keeps a declined point deferred in a validator's view that lacks the pass that raised it", () => {
+    const decline = rec("other", { type: "operator-approval", approvalId: "design-ruling", decision: "decline", files: [], operator: "op", at: "t", generation: 2 });
+    const evidence = [agent("review", "review", pass([FINDING]), D1), agent("review", "diagnostic", { verdicts: [DESIGN_LEVEL()] }, D1), point("F1", D1), decline];
+    const receipts = [receiptFor(evidence)];
+    expect(findingLedger(evidence, { receipts }).findings[0]).toMatchObject({ id: "F1", state: "deferred" });
+    const partial = [...evidence.slice(1), agent("review", "review", pass([{ ...FINDING, finding: "I1" }]), D1)];
+    const ledger = findingLedger(partial, { receipts });
+    expect(ledger.findings.map((f) => [f.id, f.state])).toEqual([["F1", "deferred"]]);
+    expect(ledger.deferred.map((d) => d.finding)).toEqual(["F1"]);
+  });
+
+  it("lapses a review-stands ruling once a pass sees the lines it cites changed", () => {
+    const evidence = [
+      agent("review", "review", pass([FINDING]), D1),
+      agent("review", "diagnostic", { verdicts: [DESIGN_LEVEL()] }, D1),
+      file(FIXED, D1),
+      point("F1", D1),
+      agent("arbitrate", "review", ruling({ ruling: "review-stands" }), D1),
+    ];
+    const receipts = [receiptFor(evidence)];
+    expect(findingLedger(evidence, { receipts }).findings[0]).toMatchObject({ state: "confirmed", ruling: "R1" });
+    const same = [...evidence, file(FIXED, D2), agent("review", "review", pass([], [["I1", "still_present"]]), D2)];
+    expect(findingLedger(same, { receipts }).findings[0]!.ruling).toBe("R1");
+    const changed = [...evidence, file(FIXED.replace("if running {", "if busy {"), D2), agent("review", "review", pass([], [["I1", "still_present"]]), D2)];
+    const lapsed = findingLedger(changed, { receipts }).findings[0]!;
+    expect(lapsed).toMatchObject({ state: "confirmed" });
+    expect(lapsed.ruling).toBeUndefined();
+  });
+
   it("orders a validator's history and evidence by the run's record sequence, so an older approval is not taken for the newest decision", () => {
     const seqRef = (e: EvidenceRecord, seq: number): EvidenceRecord => ({ ...e, ref: `ev-g1-${seq}-abcd` });
     const old = seqRef({ ...rec("other", { type: "operator-approval", approvalId: "design-ruling", decision: "approve", files: [], inputs: { finding: "F1", ruling: "review-stands", note: "n" }, operator: "op", at: "t", generation: 1 }) }, 5);

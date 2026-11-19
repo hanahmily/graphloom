@@ -2084,8 +2084,13 @@ ruling. Each issue gains `ruling` (`R<n>`) when one holds; like `severity`,
 only the graph sets it. `deferred` never blocks, and a later pass that names a
 deferred finding leaves it deferred. A ruling lapses (the finding and its
 issue lose `ruling`) when a pass raises a finding a ruling dismissed and the
-cited lines no longer match, or when a finding a ruling confirmed regresses
-after a fix.
+cited lines no longer match, when a pass on a later candidate sees a
+`review-stands` ruling's cited lines (as observed there) no longer match, or
+when a finding a ruling confirmed regresses after a fix. A validator sees only
+a candidate's latest review pass; a ruling or deferral on a finding that view
+never saw raised waits for the first comment naming the finding and applies
+to it then, and a validator orders its `history` and `evidence` by the run's
+record sequence, so the graph and the validators read the same rulings.
 
 **The pull request body** gains "Design rulings": each ruling with its finding,
 decision, decider, the quoted design statements with their sources, the code
