@@ -8,12 +8,15 @@
  * path and refuses a supervisor-only node; `resume --rehearsal` walks the
  * forward move, the back-edge reentry, the supervisor's enter, the settle and
  * the leave to completion; `inspect`, `stats` and `wait --until progress`
- * show the topology; a full `rehearse` is ready with `expect.path` met.
+ * show the topology; a full `rehearse` is ready with `expect.path` met; a
+ * rehearsal that waits inside Arbitrate for the operator's approval is ready,
+ * and its `resume --rehearsal --approve` continues the scripted supervisor at
+ * its next decision.
  */
-import { writeFile } from "node:fs/promises";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { createScope, createTopologyFixture, type TestScope } from "@graphloom/testkit";
+import { createScope, createTopologyFixture, TOPOLOGY_APPROVAL, TOPOLOGY_APPROVAL_STOP, type TestScope } from "@graphloom/testkit";
 import { execFileAsync, repoRoot } from "./cli-env.js";
 import { fakeRunnerConfig, writeFakeCodingAgents } from "./fixtures/fake-coding-agents.js";
 
@@ -30,7 +33,8 @@ async function setUp() {
   const runnerConfig = path.join(fixture.dir, "runner.json");
   await writeFile(runnerConfig, JSON.stringify(fakeRunnerConfig(agents)));
   const inherited = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("GRAPHLOOM_") && !name.startsWith("CLAUDE_")));
-  const env: NodeJS.ProcessEnv = { ...inherited, HOME: fixture.dir, GRAPHLOOM_RUNNER_CONFIG: runnerConfig };
+  // A rehearsal's scratch directory is made under TMPDIR, so a kept one is found under the fixture.
+  const env: NodeJS.ProcessEnv = { ...inherited, HOME: fixture.dir, TMPDIR: fixture.dir, GRAPHLOOM_RUNNER_CONFIG: runnerConfig };
   const graphloom = (...args: string[]) =>
     execFileAsync(process.execPath, [cli, ...args], { cwd: fixture.dir, env, maxBuffer: 16 * 1024 * 1024 }).then(
       ({ stdout, stderr }) => ({ stdout, stderr, code: 0 }),
@@ -138,5 +142,50 @@ describe("a graph with a cycle and a supervisor-only node, through the CLI", () 
     expect(report.verdict, JSON.stringify(report.blocker ?? report.convergence)).toBe("ready");
     expect(report.convergence).toMatchObject({ met: true, actual: { path: ["build", "check"] } });
     expect([...report.convergence.actual.receipts].sort()).toEqual(["arbitrate", "build", "check"]);
+  });
+
+  it("waits inside Arbitrate for the operator's approval as a ready rehearsal, and resumes with the script's next decision", { timeout: 180_000 }, async () => {
+    const { fixture, graphloom } = await setUp();
+    const rehearsed = await graphloom("rehearse", fixture.taskPath, "--scenario", "operator", "--keep");
+    const report = JSON.parse(rehearsed.stdout) as {
+      verdict: string;
+      blocker?: unknown;
+      boundaries: Record<string, { status: string; notes: string[] }>;
+      convergence: { met: boolean; actual: { status: string; stopReason?: string; path: string[]; receipts: string[] } };
+    };
+    // A final stop that waits for a declared approval is a legitimate outcome: the results it holds back are pending, not stuck (B5).
+    expect(report.verdict, JSON.stringify(report.blocker ?? report.convergence)).toBe("ready");
+    expect(report.convergence).toMatchObject({ met: true, actual: { status: "stopped", stopReason: TOPOLOGY_APPROVAL_STOP, path: ["build", "check"], receipts: ["build"] } });
+    expect(report.boundaries.B5).toEqual({
+      status: "passed",
+      notes: [
+        `stage check: a contract-valid result awaits the operator's approval ${TOPOLOGY_APPROVAL} (the run waits in arbitrate)`,
+        `stage arbitrate: a contract-valid result awaits the operator's approval ${TOPOLOGY_APPROVAL} (the run waits in arbitrate)`,
+      ],
+    });
+
+    const scratch = (await readdir(fixture.dir)).filter((name) => name.startsWith("graphloom-rehearsal-"));
+    expect(scratch).toHaveLength(1);
+    const stateRoot = path.join(fixture.dir, scratch[0]!, "state");
+    const runs = (await readdir(stateRoot)).filter((name) => name.startsWith("rehearsal-"));
+    expect(runs).toHaveLength(1);
+    const stateDir = path.join(stateRoot, runs[0]!);
+    type Episodes = { supervisorEpisodes?: Array<{ proposal?: { action: { type: string } }; admission: { outcome: string } }>; supervisorOutcomes?: unknown[] };
+    const episodes = async () => (JSON.parse(await readFile(path.join(stateDir, "state.json"), "utf8")) as Episodes);
+    const before = (await episodes()).supervisorEpisodes ?? [];
+    expect(before.map((r) => r.proposal?.action.type)).toEqual(["enter", "return"]);
+
+    const resumed = await graphloom("resume", stateDir, "--rehearsal", "--approve", TOPOLOGY_APPROVAL, "--input", "ruling=the build stands");
+    expect(JSON.parse(resumed.stdout), resumed.stderr).toMatchObject({ status: "succeeded" });
+    // The script continued at its third decision, the leave, not from its first: no replayed enter, nothing rejected.
+    const after = await episodes();
+    const resumedEpisodes = (after.supervisorEpisodes ?? []).slice(before.length);
+    expect(resumedEpisodes.map((r) => r.proposal?.action.type)).toEqual(["reenter", "return"]);
+    expect((after.supervisorEpisodes ?? []).map((r) => r.admission.outcome)).not.toContain("inadmissible");
+    expect(after.supervisorOutcomes ?? []).toEqual([]);
+
+    const inspect = JSON.parse((await graphloom("inspect", stateDir)).stdout) as Inspect;
+    expect(inspect.path).toEqual(["build#2", "check#3"]);
+    expect(inspect.visits.map((v) => [v.stageId, v.attempt, v.entered, v.ended ?? ""])).toContainEqual(["arbitrate", 1, "enter", "routed to check"]);
   });
 });

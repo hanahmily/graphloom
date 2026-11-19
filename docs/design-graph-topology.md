@@ -675,7 +675,18 @@ its columns, the JSON has the count either way. Totals are unchanged.
   engine; on an implicit chain the two agree). The report adds the live path
   (`path`). A supervisor-only node is refused as a stop point.
 - The rehearsal's scripted supervisor answers `supervisor_node_settled` from the
-  scenario's `supervisor` decisions like any other trigger.
+  scenario's `supervisor` decisions like any other trigger. `resume --rehearsal`
+  continues those decisions at the next one the run has not consumed, counted
+  from its recorded supervisor episodes, so a rehearsal stopped inside a node
+  resumes with the script's leave rather than its `enter` again.
+- A rehearsal that stops inside a node to wait for an approval the graph
+  declares for that node (§5.2) is a legitimate outcome: B5 lists the results
+  the wait holds back (the node's, and those of the node a side visit was
+  entered from) as pending on the operator, not as results that never minted
+  a receipt ([rehearsal §4.7](design-graph-rehearsal.md#47-evaluation-and-verdict)).
+  The testkit topology fixture's `operator` scenario waits in Arbitrate for
+  its `ruling` approval and is `ready`; `resume --rehearsal --approve ruling`
+  completes it.
 
 ## 10. Supervisor
 
