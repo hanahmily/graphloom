@@ -44,16 +44,63 @@ export interface ValidatorBinding {
   independence?: "none" | "separate-reviewer";
 }
 
+/** A node of the graph (docs/design-graph-topology.md §3.1); the SDK keeps the name stage. */
 export interface StageDefinition {
   id: StageId;
   name: string;
   requirementIds: RequirementId[];
+  /**
+   * Who may enter this node: the graph along declared edges (`graph`, the
+   * default), or only the supervisor (`supervisor`, a supervisor-only node,
+   * docs/design-graph-topology.md §5). `supervisor` needs declared `edges`.
+   */
+  entry?: "graph" | "supervisor";
+  /** Most visits of this node in a run, 1 to 64. Required for a supervisor-only node; needs declared `edges`. */
+  maxVisits?: number;
+}
+
+/** A directed edge between two nodes (docs/design-graph-topology.md §3.1). */
+export interface EdgeDefinition {
+  from: StageId;
+  to: StageId;
+}
+
+/**
+ * A graph's topology with its defaults applied (`normalizeTopology`): the
+ * declared edges, or, for a definition without `edges`, the implicit chain of
+ * docs/design-graph-topology.md §3.3.
+ */
+export interface GraphTopology {
+  start: StageId;
+  terminal: StageId[];
+  edges: EdgeDefinition[];
+  /** True for a definition without `edges`, normalized to the implicit chain. */
+  implicit: boolean;
+}
+
+/** The run's topology and where the run is on it (`RunView.topology`, docs/design-graph-topology.md §4.1). */
+export interface TopologyView extends GraphTopology {
+  /** The live path: visits of graph-entered nodes from `start`, no node twice; the last is the tail. */
+  path: StageAttempt[];
+  /** The open side visit of a supervisor-only node, when there is one. */
+  sideVisit?: StageAttempt;
 }
 
 export interface GraphDefinition {
   graphId: string;
   version: string;
+  /** The node set. */
   stages: StageDefinition[];
+  /**
+   * Directed edges between `stages` (docs/design-graph-topology.md §3).
+   * Absent: the implicit chain (`normalizeTopology`), forward to the next
+   * stage and back to every earlier one.
+   */
+  edges?: EdgeDefinition[];
+  /** The node a run starts at; needs `edges`. Default: the first graph-entered node in `stages`. */
+  start?: StageId;
+  /** Nodes a run may complete at; needs `edges`. Default: every graph-entered node with no out-edge. */
+  terminal?: StageId[];
   requirements: Requirement[];
   defaultValidators: ValidatorBinding[];
   privateStateSchema?: string;
@@ -416,6 +463,12 @@ export interface RunView {
    * not by itself a reason to stop again (see `isStaleFailure`).
    */
   resume?: ResumeView;
+  /**
+   * The run's topology (declared, or the implicit chain), its live path and
+   * an open side visit (docs/design-graph-topology.md §4.1). Routing reads
+   * the path's tail; `current` keeps its meaning.
+   */
+  topology?: TopologyView;
 }
 
 /** What the controller tells a graph about the operator's latest resume (docs/design-typescript-core.md §8). */
@@ -661,6 +714,13 @@ export interface ReenterSpec {
   evidenceRefs?: EvidenceRef[];
 }
 
+/** Opens a side visit of a supervisor-only node; a supervisor action only (docs/design-graph-topology.md §5.2). */
+export interface EnterSpec {
+  stageId: StageId;
+  reason: string;
+  evidenceRefs?: EvidenceRef[];
+}
+
 export interface SuperviseSpec {
   reason: string;
   evidenceRefs?: EvidenceRef[];
@@ -723,6 +783,7 @@ export type GraphAction =
   | { type: "observe"; observe: ObserveSpec }
   | { type: "validate"; validate: ValidateSpec }
   | { type: "reenter"; reenter: ReenterSpec }
+  | { type: "enter"; enter: EnterSpec }
   | { type: "supervise"; supervise: SuperviseSpec }
   | { type: "qualify_repair"; qualify: QualifyRepairSpec }
   | { type: "activate_repair"; activate: ActivateRepairSpec }
@@ -763,6 +824,19 @@ export interface ValidationInput {
    * may leave it out.
    */
   request?: string;
+  /**
+   * Every receipt of the run, valid and replaced, as `RunView.receipts` shows
+   * them, from the run's state at the call (docs/design-graph-topology.md
+   * §5.4): whether a receipt accepted a record is a lookup of its
+   * `evidenceRefs`. Optional: a validator that ignores it behaves as before.
+   */
+  receipts?: Receipt[];
+  /**
+   * The currently admitted validator bindings, as `RunView.validatorBindings`
+   * shows them. A validator honours another requirement's receipt only when
+   * the receipt's `validatorBinding` equals that requirement's binding here.
+   */
+  validatorBindings?: ValidatorBinding[];
 }
 
 export interface ValidationResult {

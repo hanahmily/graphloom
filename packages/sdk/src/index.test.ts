@@ -3,6 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  ACTION_SPEC_KEYS,
   PROTOCOL_VERSION,
   assertGraphAction,
   assertGraphDecision,
@@ -10,15 +11,19 @@ import {
   assertRunView,
   assertValidationInput,
   assertWireRequest,
+  assertWireResponse,
   createScriptedGraph,
   dispatch,
+  enter,
   parseJsonBounded,
   stop,
   supervise,
   validate,
   WireValidationError,
   type GraphDefinition,
+  type Receipt,
   type RunView,
+  type TopologyView,
 } from "./index.js";
 
 const helloDefinition: GraphDefinition = {
@@ -347,5 +352,108 @@ describe("GraphDecision.evidence (#119)", () => {
     expect(assertGraphDecision(base).evidence).toBeUndefined();
     expect(() => assertGraphDecision({ ...base, evidence: "ev-1" })).toThrow(/evidence must be an array of strings/);
     expect(() => assertGraphDecision({ ...base, evidence: [1] })).toThrow(/evidence must be an array of strings/);
+  });
+});
+
+describe("graph topology on the wire (docs/design-graph-topology.md §3, §5)", () => {
+  it("accepts an enter action and its builder, and refuses a malformed EnterSpec", () => {
+    const spec = { stageId: "arbitrate", reason: "the review and the fix disagree", evidenceRefs: ["ev-1"] };
+    const decision = enter(spec, "arbitrate");
+    expect(decision.action).toEqual({ type: "enter", enter: spec });
+    expect(assertGraphDecision(decision).action.type).toBe("enter");
+    expect(assertGraphAction({ type: "enter", enter: { stageId: "s", reason: "r" } }).type).toBe("enter");
+    expect(ACTION_SPEC_KEYS["enter"]).toBe("enter");
+    const bad = (enterSpec: unknown) => () => assertGraphAction({ type: "enter", enter: enterSpec });
+    expect(bad(undefined)).toThrow("enter action needs a enter object");
+    expect(bad({ reason: "r" })).toThrow("enter.stageId must be a non-empty string");
+    expect(bad({ stageId: "s", reason: " " })).toThrow("enter.reason must be a non-empty string");
+    expect(bad({ stageId: "s", reason: "r", evidenceRefs: "ev-1" })).toThrow("enter.evidenceRefs must be an array of non-empty strings");
+    expect(bad({ stageId: "s", reason: "r", evidenceRefs: [""] })).toThrow("enter.evidenceRefs must be an array of non-empty strings");
+  });
+
+  it("accepts a definition with edges in a describe_ok response and refuses a broken one", () => {
+    const envelope = { protocolVersion: PROTOCOL_VERSION, runId: "r1", operationId: "op1", generation: 1, expectedStateRevision: 0, activeVersion: "v1", kind: "describe_ok" };
+    const topology: GraphDefinition = {
+      ...helloDefinition,
+      edges: [
+        { from: "write", to: "review" },
+        { from: "review", to: "write" },
+      ],
+      start: "write",
+      terminal: ["review"],
+    };
+    expect(assertWireResponse({ ...envelope, definition: topology }).kind).toBe("describe_ok");
+    expect(() => assertWireResponse({ ...envelope, definition: { ...topology, edges: [{ from: "write", to: "write" }] } })).toThrow(/self-loop on write/);
+    expect(() => assertWireResponse({ ...envelope, definition: { ...helloDefinition, start: "write" } })).toThrow("definition.start needs declared edges");
+  });
+
+  const receipt: Receipt = {
+    id: "rcpt-1",
+    stageId: "arbitrate",
+    requirementId: "design-ruling",
+    validatorBinding: { requirementId: "design-ruling", validatorId: "ruling", version: "1" },
+    candidateFingerprint: "fp",
+    evidenceRefs: ["ev-1"],
+    valid: false,
+  };
+  const binding = { requirementId: "design-ruling", validatorId: "ruling", version: "2" };
+
+  it("accepts ValidationInput.receipts and validatorBindings, or neither", () => {
+    const input = { requirementId: "r", statement: "s", evidence: [] };
+    const full = assertValidationInput({ ...input, receipts: [receipt], validatorBindings: [binding] });
+    expect(full.receipts).toEqual([receipt]);
+    expect(full.validatorBindings).toEqual([binding]);
+    const none = assertValidationInput(input);
+    expect(none.receipts).toBeUndefined();
+    expect(none.validatorBindings).toBeUndefined();
+    const request = { protocolVersion: PROTOCOL_VERSION, runId: "r1", operationId: "op1", generation: 1, expectedStateRevision: 0, activeVersion: "v1" };
+    expect(assertWireRequest({ ...request, kind: "evaluate", validatorId: "v", input: { ...input, receipts: [receipt] } }).kind).toBe("evaluate");
+  });
+
+  it("refuses malformed receipts and validator bindings in a ValidationInput", () => {
+    const bad = (extra: Record<string, unknown>) => () => assertValidationInput({ requirementId: "r", statement: "s", evidence: [], ...extra });
+    expect(bad({ receipts: {} })).toThrow("receipts must be an array");
+    expect(bad({ receipts: ["rcpt-1"] })).toThrow("receipts[0] must be an object");
+    expect(bad({ receipts: [{ ...receipt, stageId: 3 }] })).toThrow("receipts[0].stageId must be a string");
+    expect(bad({ receipts: [{ ...receipt, valid: "yes" }] })).toThrow("receipts[0].valid must be boolean");
+    expect(bad({ receipts: [{ ...receipt, evidenceRefs: "ev-1" }] })).toThrow("receipts[0].evidenceRefs must be an array of strings");
+    expect(bad({ receipts: [{ ...receipt, validatorBinding: { ...receipt.validatorBinding, version: "" } }] })).toThrow(
+      "receipts[0].validatorBinding.version must be a non-empty string",
+    );
+    expect(bad({ validatorBindings: [binding, { requirementId: "r" }] })).toThrow("validatorBindings[1].validatorId must be a non-empty string");
+    expect(bad({ validatorBindings: "v" })).toThrow("validatorBindings must be an array");
+  });
+
+  const view: TopologyView = {
+    start: "write",
+    terminal: ["review"],
+    edges: [
+      { from: "write", to: "review" },
+      { from: "review", to: "write" },
+    ],
+    implicit: true,
+    path: [
+      { stageId: "write", attempt: 2 },
+      { stageId: "review", attempt: 1 },
+    ],
+  };
+
+  it("accepts RunView.topology, or none", () => {
+    expect(assertRunView(emptyView({ topology: view })).topology).toEqual(view);
+    const side = { ...view, implicit: false, sideVisit: { stageId: "arbitrate", attempt: 1 } };
+    expect(assertRunView(emptyView({ topology: side })).topology?.sideVisit).toEqual({ stageId: "arbitrate", attempt: 1 });
+    expect(assertRunView(emptyView()).topology).toBeUndefined();
+  });
+
+  it("refuses a malformed RunView.topology", () => {
+    const bad = (topology: unknown) => () => assertRunView({ ...emptyView(), topology });
+    expect(bad([])).toThrow("topology must be an object");
+    expect(bad({ ...view, start: "" })).toThrow("topology.start must be a non-empty string");
+    expect(bad({ ...view, terminal: [1] })).toThrow("topology.terminal must be an array of non-empty strings");
+    expect(bad({ ...view, edges: [{ from: "write" }] })).toThrow("topology.edges[0].to must be a non-empty string");
+    expect(bad({ ...view, implicit: "yes" })).toThrow("topology.implicit must be boolean");
+    expect(bad({ ...view, path: undefined })).toThrow("topology.path must be an array");
+    expect(bad({ ...view, path: [{ stageId: "write", attempt: 0 }] })).toThrow("topology.path[0].attempt must be a positive integer");
+    expect(bad({ ...view, sideVisit: { attempt: 1 } })).toThrow("topology.sideVisit.stageId must be a non-empty string");
   });
 });

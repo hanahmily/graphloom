@@ -3,6 +3,7 @@
 
 import type {
   ActivateRepairSpec,
+  EnterSpec,
   GraphAction,
   GraphDecision,
   JobSpec,
@@ -44,6 +45,11 @@ export function reenter(
   privateState?: string,
 ): GraphDecision {
   return decide({ type: "reenter", reenter: reenterSpec }, reason, privateState);
+}
+
+/** Enter a supervisor-only node: a supervisor action only; the controller refuses it from a graph. */
+export function enter(enterSpec: EnterSpec, reason: string, privateState?: string): GraphDecision {
+  return decide({ type: "enter", enter: enterSpec }, reason, privateState);
 }
 
 export function supervise(
