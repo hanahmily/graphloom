@@ -18,10 +18,10 @@
  */
 import { ASPECTS, DRAFT_ORDER, type Aspect } from "./kit/aspects.js";
 import { clip } from "./kit/escape.js";
-import { contextLine, round1Lines, type ContextSource, type Round1Status } from "./context.js";
+import { contextLine, round1Entry, round1Lines, type ContextSource, type Round1Status } from "./context.js";
 import { fixedP0Lead, leadLine, type LeadKind, type LeadRecord } from "./leads.js";
 import { proofOf, type Proof } from "./proof.js";
-import { findingsOf, keptSuggestion, MAX_SWEEP_PASSES, SEVERITIES, type AspectRecord, type Finding, type Severity } from "./review.js";
+import { correctedContent, findingsOf, keptSuggestion, MAX_SWEEP_PASSES, SEVERITIES, spanMatches, type AspectRecord, type Correction, type Finding, type FindingVerdict, type Severity } from "./review.js";
 import type { ScopeRecord } from "./reviewscope.js";
 import { sideLines, parsePatch } from "./kit/patch.js";
 import type { PullFile } from "./kit/snapshot.js";
@@ -208,6 +208,8 @@ function entryOf(members: readonly Finding[], files: readonly PullFile[], reason
   const notes = [...new Set(members.flatMap((f) => f.notes))];
   const principle = members.find((f) => f.principle !== undefined)?.principle;
   const test = draftTestOf(primary);
+  // The verifier's factual corrections reach the posted text (design §8.4): applied in place, or stated when one cannot be.
+  const corrected = correctedContent(primary);
   return {
     id: primary.id,
     kind: "finding",
@@ -221,7 +223,7 @@ function entryOf(members: readonly Finding[], files: readonly PullFile[], reason
     line: primary.endLine,
     anchored: isAnchored,
     ...(principle !== undefined ? { principle } : {}),
-    body: scrub([primary.content, ...(principle !== undefined ? [`Breaks the project's design principle \`${principle}\`.`] : []), ...(primary.verdict !== undefined && primary.verdict.verdict === "confirmed" && primary.verdict.witness !== "" ? [`Verified independently: ${oneLine(primary.verdict.reason)} (${primary.verdict.witness}).`] : []), ...(proof.state === "proven" && test !== undefined ? [provenLine(test)] : []), ...(reason !== undefined && notes.length > 0 ? [`Note: ${notes.join("; ")}.`] : [])].join("\n\n")),
+    body: scrub([corrected.text, ...(corrected.unapplied.length > 0 ? [correctedLine(corrected.unapplied)] : []), ...(principle !== undefined ? [`Breaks the project's design principle \`${principle}\`.`] : []), ...(primary.verdict !== undefined && primary.verdict.verdict === "confirmed" && primary.verdict.witness !== "" ? [`Verified independently: ${oneLine(primary.verdict.reason)} (${primary.verdict.witness}).`] : []), ...(proof.state === "proven" && test !== undefined ? [provenLine(test)] : []), ...(reason !== undefined && notes.length > 0 ? [`Note: ${notes.join("; ")}.`] : [])].join("\n\n")),
     ...(kept !== undefined && "text" in kept ? { suggestion: kept.text } : {}),
     ...(test !== undefined ? { test } : {}),
     ...(members.length > 1 ? { linked: members.filter((f) => f !== primary).map((f) => f.id) } : {}),
@@ -260,11 +262,43 @@ export function priorityMismatch(written: unknown, want: Draft): string | undefi
   return undefined;
 }
 
-/** A finding as shown outside its aspect record: at its final priority, or with none. */
+/** A finding as shown outside its aspect record: at its final priority, or with none, and with its verifier's corrections applied. */
 export function shownFinding(f: Finding, final: ReadonlyMap<string, Severity>): ReviewFinding {
   const { severity: _proposed, ...rest } = f;
   const s = final.get(f.id);
-  return s !== undefined ? { ...rest, severity: s } : rest;
+  const shown = { ...rest, content: correctedContent(f).text };
+  return s !== undefined ? { ...shown, severity: s } : shown;
+}
+
+/** The corrections as one sentence: `"9 drop sites" should read "6 drop sites"`. */
+const correctionsText = (cs: readonly Correction[]): string => cs.map((c) => `"${oneLine(c.original)}" should read "${oneLine(c.corrected)}"`).join("; ");
+
+/** The line a finding's text carries for a verifier's correction that could not be applied in place. */
+export const correctedLine = (cs: readonly Correction[]): string => `Corrected by the verifier: ${correctionsText(cs)}.`;
+
+/** What the report appendices say of a verdict's corrections (the shown text already has them applied); "" for none. */
+export const correctionsNote = (v: Pick<FindingVerdict, "verdict" | "corrections"> | undefined): string => (v?.verdict === "confirmed" && (v.corrections ?? []).length > 0 ? ` The verifier corrected the reviewer's text (applied above): ${correctionsText(v.corrections!)}.` : "");
+
+/**
+ * Where a written draft ignores a verifier's correction the recomputed draft applies (design §8.4): an entry whose body still holds a
+ * corrected span's original text where the recomputed body does not, or lacks its corrected text. Undefined when they agree.
+ */
+export function correctionMismatch(written: unknown, want: Draft): string | undefined {
+  if (!isObj(written)) return undefined;
+  const byId = new Map(want.review.findings.map((f) => [f.id, f] as const));
+  const wantBody = new Map([...want.comments, ...want.judgment].map((e) => [e.id, e.body] as const));
+  for (const e of [...(Array.isArray(written.comments) ? written.comments : []), ...(Array.isArray(written.judgment) ? written.judgment : [])]) {
+    if (!isObj(e) || typeof e.id !== "string" || typeof e.body !== "string") continue;
+    const f = byId.get(e.id);
+    const body = wantBody.get(e.id);
+    if (f === undefined || body === undefined || f.verdict?.verdict !== "confirmed") continue;
+    for (const c of f.verdict.corrections ?? []) {
+      const kept = spanMatches(e.body, c.original).length > spanMatches(body, c.original).length;
+      const lost = body.includes(c.corrected) && !e.body.includes(c.corrected);
+      if (kept || lost) return `${e.id} ignores its verifier's correction of "${clip(oneLine(c.original), 60)}" to "${clip(oneLine(c.corrected), 60)}"`;
+    }
+  }
+  return undefined;
 }
 
 /** A confirmed non-behavioral finding raised from an `untested-feature` lead: the one that may be drafted at P1 (§4.3). */
@@ -313,7 +347,7 @@ export function composeDraft(i: DraftInput): Draft {
   const raisedLeads = given.filter((l) => l.status === "raised").length;
   const maintainer = [
     `Context: ${contextLine(i.context, i.head)}.`,
-    ...round1Lines(i.round1, i.head),
+    round1Entry(i.round1, i.head),
     `Review scope: ${scopeLine(i.scope)}. ${i.scope.context.reason[0]!.toUpperCase()}${i.scope.context.reason.slice(1)}.`,
     ...(leads.length > 0 ? [`Leads: ${given.length} given to the maintainability reviewer, ${raisedLeads} raised as findings, ${given.length - raisedLeads} judged not an issue${leads.length > given.length ? `; ${leads.length - given.length} not given (over the bound)` : ""}.`] : []),
     ...(unsaturated.length > 0 ? [`Not saturated: the ${unsaturated.join(", ")} sweep${unsaturated.length === 1 ? "" : "s"} reached ${MAX_SWEEP_PASSES} passes with findings still surviving verification; more may be there.`] : []),
@@ -485,7 +519,7 @@ export function reviewAppendixMarkdown(d: Draft): string {
   for (const f of d.review.findings) {
     out.push(`#### ${f.id} · ${f.aspect} · ${f.severity !== undefined ? `${f.severity} · ` : ""}${f.kind} · ${f.state}${f.principle !== undefined ? ` · breaks principle ${f.principle}` : ""}`, `${f.path}:${f.startLine}-${f.endLine} (${f.side === "RIGHT" ? "head" : "base"}), raised in pass ${f.pass} of the ${f.raisedBy} sweep.`, f.content);
     if (f.evidence !== "") out.push(`The reviewer read: ${f.evidence}`);
-    if (f.verdict !== undefined) out.push(`Verifier: ${f.verdict.verdict}${f.verdict.witness !== "" ? ` at ${f.verdict.witness}` : ""}: ${f.verdict.reason}${f.verdict.quotes.length > 0 ? ` Quotes: ${f.verdict.quotes.map((q) => `${q.path}:${q.line} "${clip(oneLine(q.text), 80)}"`).join("; ")}.` : ""}`);
+    if (f.verdict !== undefined) out.push(`Verifier: ${f.verdict.verdict}${f.verdict.witness !== "" ? ` at ${f.verdict.witness}` : ""}: ${f.verdict.reason}${f.verdict.quotes.length > 0 ? ` Quotes: ${f.verdict.quotes.map((q) => `${q.path}:${q.line} "${clip(oneLine(q.text), 80)}"`).join("; ")}.` : ""}${correctionsNote(f.verdict)}`);
     if (f.notes.length > 0) out.push(`Notes: ${f.notes.join("; ")}.`);
     out.push("");
   }

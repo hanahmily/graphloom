@@ -27,7 +27,7 @@ import { hasTest, judgeRun, reproCommandId, reproSpec } from "./repro.js";
 import { reproPlanFor } from "./reproplan.js";
 import { FRESH_START_REASON } from "./reviewscope.js";
 import { draftWrites, recordedAspect, recordedRules, recordedScope, writtenDraftFiles } from "./reviewdraft.js";
-import { priorityMismatch } from "./draft.js";
+import { correctionMismatch, priorityMismatch } from "./draft.js";
 import { ledgerPriorityMismatch, publishFlow, publishPlan } from "./publish.js";
 import { aspectOfItem, registryFromEvidence } from "./prior.js";
 import { secretFindings } from "./kit/secrets.js";
@@ -289,6 +289,9 @@ export const draftComposed: Validator = profiled((input, profile) => {
     }
     const wrong = priorityMismatch(parsed, w.writes.draft);
     if (wrong !== undefined) return failed(`draft.json holds a priority the draft rules do not give: ${wrong}`);
+    // A confirmed finding's text carries its verifier's corrections (design §8.4), recomputed here.
+    const ignored = correctionMismatch(parsed, w.writes.draft);
+    if (ignored !== undefined) return failed(`draft.json does not carry a verifier's correction: ${ignored}`);
   }
   for (const key of Object.keys(written) as Array<keyof typeof written>) {
     const f = written[key];

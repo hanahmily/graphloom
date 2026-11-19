@@ -23,8 +23,8 @@ import { DIVE_COLUMNS, DIVE_COMMAND, DIVE_HEADING, DIVE_LINE, DIVE_TEXT, diveRow
 import { hotspots, hotspotText, needAuthor, openQuestions, SCOPE_KINDS, SCOPE_TITLES, type Scope } from "./kit/scope.js";
 import { describeReasons, type ModeReason } from "./kit/mode.js";
 import { exceeds, LIMITS, originOf, type Metric } from "./kit/metrics/crap.js";
-import { draftMarkdown, parseDraft, scopeLine, type Draft, type ReviewFinding } from "./draft.js";
-import { round1Lines } from "./context.js";
+import { correctionsNote, draftMarkdown, parseDraft, scopeLine, type Draft, type ReviewFinding } from "./draft.js";
+import { round1Section } from "./context.js";
 import { proofOf } from "./proof.js";
 import { SEVERITIES } from "./review.js";
 import type { MetricsRecord } from "./kit/metrics/record.js";
@@ -180,7 +180,7 @@ function findingHtml(f: ReviewFinding, d: Draft, g: Github, full: boolean): stri
     `<p>${esc(f.content)}</p>`,
     f.evidence !== "" ? `<p class="muted">The reviewer read: ${esc(f.evidence)}</p>` : "",
     f.verdict !== undefined
-      ? `<p>Checker (${esc(verifier)}): <strong>${esc(f.verdict.verdict)}</strong>${f.verdict.witness !== "" ? ` at <code>${esc(f.verdict.witness)}</code>` : ""}: ${esc(f.verdict.reason)}${f.verdict.quotes.length > 0 ? ` Quotes: ${f.verdict.quotes.map((q) => `<code>${esc(`${q.path}:${q.line}`)}</code> <q>${esc(clip(q.text.replace(/\s+/g, " "), 100))}</q>`).join("; ")}.` : ""}</p>`
+      ? `<p>Checker (${esc(verifier)}): <strong>${esc(f.verdict.verdict)}</strong>${f.verdict.witness !== "" ? ` at <code>${esc(f.verdict.witness)}</code>` : ""}: ${esc(f.verdict.reason)}${f.verdict.quotes.length > 0 ? ` Quotes: ${f.verdict.quotes.map((q) => `<code>${esc(`${q.path}:${q.line}`)}</code> <q>${esc(clip(q.text.replace(/\s+/g, " "), 100))}</q>`).join("; ")}.` : ""}${esc(correctionsNote(f.verdict))}</p>`
       : "",
     proof.state === "unproven" ? `<p class="muted">Unproven: ${esc(proof.reason)}; it is listed for your judgment and never drafted as P0 or P1.</p>` : "",
     proof.state === "proven" && f.proof?.state === "proven" ? `<p>${esc(proof.summary)}: it failed in both runs${f.proof.record.at !== undefined ? ` at <code>${esc(f.proof.record.at)}</code>` : ""}${f.proof.record.failure !== undefined ? `: ${esc(f.proof.record.failure.replace(/\s+/g, " ").slice(0, 300))}` : ""}.</p>` : "",
@@ -189,6 +189,12 @@ function findingHtml(f: ReviewFinding, d: Draft, g: Github, full: boolean): stri
     full && f.suggestion.trim() !== "" ? `<p>Suggestion:</p><pre><code>${esc(f.suggestion)}</code></pre>` : "",
   ].join("");
   return details(summary, body, isBlocking(f), "qa", full ? `f-${f.id}` : "");
+}
+
+/** Round 1's lead line and its open items as a list (each item names its comment's link as text: the report links nowhere but the pull request). */
+function round1Html(d: Draft): string {
+  const s = round1Section(d.round1, d.head);
+  return `<p>${esc(s.lead)}</p>${s.items.length > 0 ? `<ul>${s.items.map((i) => `<li>${esc(i)}</li>`).join("")}</ul>` : ""}`;
 }
 
 /** The Review part of the briefing: the findings by severity with counts, each collapsed except the blocking ones. */
@@ -205,7 +211,7 @@ function reviewHtml(d: Draft | undefined, report: Github): string {
   const body = [
     `<p>Recommended verdict: <strong>${esc(d.recommended)}</strong>${d.recommended === "approve" ? " (drafted as comment)" : ""}. Scope: ${esc(scopeLine({ source: d.review.scope.source as never, areas: d.review.scope.areas, files: { length: d.review.scope.files } }))}. The draft is draft.md in .graphloom/review/; the Publish stage posts its comments.</p>`,
     `<p class="muted">${esc(counts)} · leads: ${d.leads.given} given, ${d.leads.raised} raised. ${esc(d.review.context.reason[0]!.toUpperCase() + d.review.context.reason.slice(1))}.</p>`,
-    `<p>${round1Lines(d.round1, d.head).map(esc).join("<br>")}</p>`,
+    round1Html(d),
     ...(groups.length === 0 ? [para("No finding survived verification.")] : groups),
     ...(d.judgment.length > 0 ? [para(`${d.judgment.length} finding(s) need your judgment: confirmed but not proven by a test, or disputed. The appendix lists them with the draft.`)] : []),
   ].join("");
