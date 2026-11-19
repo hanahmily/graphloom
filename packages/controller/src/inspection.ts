@@ -376,10 +376,11 @@ export function createSupervisorInspection(hooks: InspectionHooks): SupervisorIn
         if (refusal !== undefined) return { accepted: false, reason: refusal };
         // The paths a real checkout would apply: a base path that is not part of the workspace change fails there.
         let changed: Set<string>;
+        let selected: Set<string>;
         try {
           const change = await withGitCancellation(signal, () => candidateChange(state.worktreePath, state.intake.pinnedHead));
           changed = new Set(change.fingerprints.keys());
-          selectPaths(spec, [...changed]);
+          selected = new Set(selectPaths(spec, [...changed]));
         } catch (err) {
           return { accepted: false, reason: err instanceof Error ? err.message : String(err) };
         }
@@ -390,11 +391,11 @@ export function createSupervisorInspection(hooks: InspectionHooks): SupervisorIn
           if (await existsAtBase(state.worktreePath, state.intake.pinnedHead, entry.path, signal)) {
             return { accepted: false, reason: `cannot write ${entry.path}: the pinned base already has it` };
           }
-          // Each directory on the way must be one in the checkout: the change's version where it touches it, else the base's.
+          // Each directory on the way must be one in the checkout: the change's version where the checkout applies it, else the base's.
           const parts = entry.path.split("/");
           for (let i = 1; i < parts.length; i += 1) {
             const parent = parts.slice(0, i).join("/");
-            const kind = changed.has(parent)
+            const kind = selected.has(parent)
               ? await worktreeKind(state.worktreePath, parent)
               : await baseKind(state.worktreePath, state.intake.pinnedHead, parent, signal);
             if (kind !== undefined && kind !== "directory") {

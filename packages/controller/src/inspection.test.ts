@@ -338,5 +338,7 @@ describe("candidate reads and diffs (#119)", () => {
       "cannot write new.txt/x_test.go: new.txt is not a directory in the checkout",
     );
     expect(await inspection.checkCheckout({ from: "candidate", write: write("fresh/dir/x_test.go") })).toMatchObject({ accepted: true });
+    // A base checkout that does not apply the change's new.txt has no file there: the directory can be made.
+    expect(await inspection.checkCheckout({ from: "base", paths: [], write: write("new.txt/x_test.go") })).toMatchObject({ accepted: true });
   });
 });
