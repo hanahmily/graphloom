@@ -43,6 +43,8 @@ export interface CheckoutRecord {
   revertError?: string;
   /** The revert patch text that did not apply. */
   revertPatch?: string;
+  /** Files the job added to the checkout (`CheckoutSpec.write`), each with `sha256:<hex>` of its content. */
+  written?: Array<{ path: string; digest: string; bytes: number }>;
 }
 
 export interface CommandRun {
@@ -235,16 +237,17 @@ export function agentRuns(evidence: EvidenceRecord[], stageId: string, purpose: 
   return runs;
 }
 
-export function issueSnapshot(evidence: EvidenceRecord[], number: number): { record: EvidenceRecord; issue: Issue } | undefined {
+/** The issue snapshot the run read; `number` picks one by number, absent the newest one read. */
+export function issueSnapshot(evidence: EvidenceRecord[], number?: number): { record: EvidenceRecord; issue: Issue } | undefined {
   for (const record of [...evidence].reverse()) {
     if (producer(record)?.executorId !== GET_ISSUE.id) continue;
     const item = object(object(object(record.payload)?.github)?.item);
-    if (item === undefined || item.number !== number) continue;
+    if (item === undefined || (number !== undefined && item.number !== number)) continue;
     const labels = Array.isArray(item.labels) ? item.labels.filter((l): l is string => typeof l === "string") : [];
     return {
       record,
       issue: {
-        number,
+        number: number ?? Number(item.number),
         title: String(item.title ?? ""),
         state: String(item.state ?? ""),
         url: String(item.url ?? ""),

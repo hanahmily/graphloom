@@ -312,7 +312,8 @@
       "Report at medium severity a goroutine started without run.Go or the package's existing lifecycle helper.",
       "Do not report style.",
       "Report at high severity: a benchmark that counts an error, a timeout or a partial result as a timing sample, or times a result it did not verify against an independent oracle; a hard gate (exact results, failed timed calls, accounted memory, outstanding resources, preflight fit) computed from a median, loosened after seeing results, or skipped; a benchmark-only reference or disable switch exposed as a public language or API option; a report that does not follow the ql-bench-report/v1 schema in the planning notes."
-    ]
+    ],
+    "arbiter": { "model": "gpt-6-astra", "effort": "high" }
   },
   "pullRequest": {
     "checklist": [
@@ -331,7 +332,8 @@
   "harnesses": {
     "implementer": "claude-code",
     "reviewer": "codex",
-    "verifier": "claude-code"
+    "verifier": "claude-code",
+    "arbiter": "codex"
   },
   "supervisor": {
     "harnesses": ["pi", "claude-code", "codex"]

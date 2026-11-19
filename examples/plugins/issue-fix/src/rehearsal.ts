@@ -26,10 +26,11 @@
  * the live run's own worktree the moment it succeeded — the real bytes an
  * agent actually wrote, not a guess at them.
  */
-import type { GraphRehearsal } from "@graphloom/sdk";
+import type { GraphDecision, GraphRehearsal, RehearsalExpectation, RehearsalScenario } from "@graphloom/sdk";
 import { exampleBenchReport } from "./bench.js";
 import { parseProfile } from "./profile.js";
-import { FIX_STAGE, REVIEW_STAGE } from "./constants.js";
+import { ARBITRATE_STAGE, FIX_STAGE, REVIEW_STAGE } from "./constants.js";
+import { descriptionOf, ISSUES_FILE, ISSUES_SCHEMA, severityOf, titleOf } from "./issues.js";
 
 const CHANGES_AFTER = "# Changes by Version\n\n## 0.12.0\n\n### Bug Fixes\n\n- Report long-running scheduled actions (e.g. backups) as `running` instead of incorrectly logging them as `timed out`.\n- Older fix.\n\n## 0.11.0\n\n- Old.\n";
 const SCHEDULER_FIXED = '// Licensed under the Apache License, Version 2.0.\n\npackage timestamp\n\n// Status reports a scheduled action after it has run for minutes.\nfunc Status(minutes int, running bool) string {\n\tif minutes >= generatedLimit {\n\t\tif running {\n\t\t\treturn "running"\n\t\t}\n\t\treturn "timed out"\n\t}\n\treturn "ok"\n}\n';
@@ -234,6 +235,207 @@ const REENTRY_FINDING = {
   content: "Status reports an action still running at the limit as timed out when the caller cannot tell it is running.",
 };
 const REENTRY_SUMMARY = { total_files: 2, reviewed_files: 2, skipped: [] };
+/** A verdict's design fields (finding-verification-v2) when the claim turns on the code. */
+const CODE_LEVEL = { designLevel: false, designBasis: "", ruling: "" };
+
+/**
+ * The Arbitrate scenarios (docs/design-issue-fix-graph.md, "Rehearsal and
+ * qualification"), on the recorded happy path's plan and implementation and
+ * the issue the rehearsal tests serve (#14111: "Backups over five minutes log
+ * action timed out.", with the comment "A running backup is not an error;
+ * report it as running."):
+ *
+ * - `arbitrate-review`: the verifier judges the round's finding design-level;
+ *   the graph hands it over from Review; the supervisor enters Arbitrate; the
+ *   arbiter rules implementation-stands; the supervisor leaves to Review,
+ *   whose next pass is clean.
+ * - `arbitrate-fixer`: round 1 confirms two findings and the graph sends Fix
+ *   back; the fixer fixes one and contests the other; Fix is accepted and the
+ *   graph hands over from Fix; the arbiter rules review-stands, with a proof
+ *   test that fails on the candidate; the supervisor leaves to Fix, and the
+ *   fixer fixes it.
+ * - `arbitrate-fixer-stands`: the same hand-over from Fix; the arbiter rules
+ *   implementation-stands; the supervisor leaves to Review as a forward move,
+ *   and the pass is clean.
+ * - `arbitrate-operator`: the arbiter cannot decide; the run stops for the
+ *   operator's `design-ruling` approval.
+ */
+function arbitrationScenarios(): GraphRehearsal["scenarios"] {
+  const SUPERVISE_ENTER = { action: { type: "enter" as const, enter: { stageId: ARBITRATE_STAGE, reason: "the point turns on the project's design; an independent arbiter rules" } }, reason: "enter arbitrate" };
+  const BACK = { action: { type: "return" as const, return: { summary: "back to the graph, which runs the node" } }, reason: "return" };
+  const leave = (to: string) => ({ action: { type: "reenter" as const, reenter: { stageId: to, reason: `the ruling settles the point: leave arbitrate to ${to}` } }, reason: `leave arbitrate to ${to}` });
+  const record = GO_IMPLEMENTATION!.output as Record<string, unknown>;
+  const implementation = (effects: Array<{ path: string; bytes: string }>) => ({ output: record, effects: [...effects, { path: "CHANGES.md", bytes: CHANGES_AFTER }] });
+  const designLevel = { finding: "F1", verdict: "confirmed", reason: "The code reports running at the limit; whether a caller must be able to tell is a design question.", quotes: [{ path: "pkg/timestamp/scheduler.go", line: 8, text: "if running {" }], designLevel: true, designBasis: "Whether the status string must distinguish a running action at the limit is the issue's design decision, not a code defect.", ruling: "" };
+  const reviewRaised = (arbiter: unknown, supervisor: GraphDecision[], expect: RehearsalExpectation): RehearsalScenario => ({
+    results: {
+      "decision-record-v2": [GO_PLAN!, GO_IMPLEMENTATION!],
+      "code-review-v2": [
+        { output: { contract: "dedupe-1", comments: [REENTRY_FINDING], prior: [], summary: REENTRY_SUMMARY } },
+        { output: { contract: "dedupe-1", comments: [], prior: [{ finding: "F1", status: "still_present", reason: "Unchanged on this change." }], summary: REENTRY_SUMMARY } },
+        // After the ruling: the pass is given it, and does not raise the point again.
+        { output: { contract: "dedupe-1", comments: [], prior: [], summary: REENTRY_SUMMARY } },
+      ],
+      "finding-verification-v2": [{ output: { verdicts: [designLevel] } }],
+      "design-ruling-v1": [{ output: arbiter }],
+    },
+    supervisor,
+    expect,
+  });
+  const IMPLEMENTATION_STANDS = {
+    finding: "F1",
+    ruling: "implementation-stands",
+    summary: "The issue's thread asks that a running action be reported as running; the change does exactly that at the limit, so the finding does not hold against the design.",
+    design: [{ source: "comment:1", quote: "A running backup is not an error; report it as running.", says: "An action still running at the limit is reported as running, not as an error." }],
+    code: [{ path: "pkg/timestamp/scheduler.go", line: 8, quote: "if running {" }],
+    proofTests: [],
+    undecidable: { question: "", implementation: "", review: "" },
+  };
+
+  // The fixer's scenarios: round 1 confirms F1 (scheduler.go) and F2 (the test table); the fixer contests F2.
+  const F2 = {
+    path: "pkg/timestamp/scheduler_test.go",
+    start_line: 13,
+    end_line: 17,
+    category: "test",
+    severity: "high",
+    finding: "",
+    evidence: "Status(-1, false) reports ok: a negative elapsed time is accepted silently and no case covers it.",
+    distinct: true,
+    content: "The test table covers no negative minutes, so Status accepting one goes unnoticed.",
+  };
+  const issueOf = (id: string, c: typeof F2, status: string, history: object[], ruling?: string) => ({
+    id,
+    severity: severityOf(c),
+    location: { path: c.path, startLine: c.start_line, endLine: Math.max(c.end_line, c.start_line) },
+    title: titleOf(c.content),
+    description: descriptionOf({ comment: c }),
+    status,
+    round: 1,
+    ...(ruling !== undefined ? { ruling } : {}),
+    history,
+  });
+  const issuesFile = (issues: object[]) => ({ path: ISSUES_FILE, bytes: `${JSON.stringify({ schema: ISSUES_SCHEMA, issues }, null, 2)}\n` });
+  const FIXED_I1 = { actor: "fixer", from: "open", to: "fixed", note: "Status now documents that it is evaluated per call (pkg/timestamp/scheduler.go:15)." };
+  const CONTESTED_I2 = {
+    actor: "fixer",
+    from: "open",
+    to: "design-conflict",
+    note: 'The issue scopes the change to long actions: "Backups over five minutes log action timed out." Negative elapsed time is outside it, and the thread asks only that "A running backup is not an error".',
+  };
+  const corrected = `${SCHEDULER_FIXED}\n// Status is evaluated per call; a running action is never reported as timed out.\n`;
+  const PROOF = {
+    path: "pkg/timestamp/arbiter_proof_test.go",
+    name: "TestArbiterNegativeMinutes",
+    content: `package timestamp\n\nimport "testing"\n\nfunc TestArbiterNegativeMinutes(t *testing.T) {\n\tif got := Status(-1, false); got == "ok" {\n\t\tt.Errorf("Status(-1, false) = %q: a negative elapsed time passes as ok", got)\n\t}\n}\n`,
+    expect: "fail",
+    shows: "Status reports a negative elapsed time as ok, which no test case covers.",
+  };
+  const fixerRaised = (arbiter: unknown, fixes: Array<{ output: unknown; effects?: Array<{ path: string; bytes: string }> }>, reviews: unknown[], supervisor: GraphDecision[], expect: RehearsalExpectation): RehearsalScenario => ({
+    results: {
+      "decision-record-v2": [
+        GO_PLAN!,
+        GO_IMPLEMENTATION!,
+        // The correction after round 1: I1 fixed, I2 contested in the issues file.
+        implementation([
+          { path: "pkg/timestamp/scheduler.go", bytes: corrected },
+          { path: "pkg/timestamp/scheduler_test.go", bytes: SCHEDULER_TEST },
+          issuesFile([issueOf("I1", REENTRY_FINDING, "fixed", [FIXED_I1]), issueOf("I2", F2, "design-conflict", [CONTESTED_I2])]),
+        ]),
+        ...fixes,
+      ],
+      "code-review-v2": [
+        { output: { contract: "dedupe-1", comments: [REENTRY_FINDING, F2], prior: [], summary: REENTRY_SUMMARY } },
+        { output: { contract: "dedupe-1", comments: [], prior: [{ finding: "F1", status: "still_present", reason: "Unchanged." }, { finding: "F2", status: "still_present", reason: "Unchanged." }], summary: REENTRY_SUMMARY } },
+        ...reviews.map((output) => ({ output })),
+      ],
+      "finding-verification-v2": [
+        {
+          output: {
+            verdicts: [
+              { ...CODE_LEVEL, finding: "F1", verdict: "confirmed", reason: "Present in the change.", quotes: [{ path: "pkg/timestamp/scheduler.go", line: 8, text: "if running {" }] },
+              { ...CODE_LEVEL, finding: "F2", verdict: "confirmed", reason: "No case covers a negative value.", quotes: [{ path: "pkg/timestamp/scheduler_test.go", line: 14, text: '{"under limit", generatedLimit - 1, false, "ok"},' }] },
+            ],
+          },
+        },
+      ],
+      "design-ruling-v1": [{ output: arbiter }],
+    },
+    supervisor,
+    expect,
+  });
+  const fixerCode = [{ path: "pkg/timestamp/scheduler_test.go", line: 14, quote: '{"under limit", generatedLimit - 1, false, "ok"},' }];
+  const REVIEW_STANDS = {
+    finding: "F2",
+    ruling: "review-stands",
+    summary: "The issue concerns the status a scheduled action reports; reporting a negative elapsed time as ok is that status being wrong, and the proof test shows it.",
+    design: [{ source: "issue", quote: "Backups over five minutes log action timed out.", says: "The issue is about the status reported for an action's elapsed time." }],
+    // Status answers ok for any elapsed time under the limit, a negative one included.
+    code: [{ path: "pkg/timestamp/scheduler.go", line: 13, quote: 'return "ok"' }],
+    proofTests: [PROOF],
+    undecidable: { question: "", implementation: "", review: "" },
+  };
+  const FIXER_STANDS = {
+    finding: "F2",
+    ruling: "implementation-stands",
+    summary: "The issue scopes the change to actions running past the limit; negative elapsed time is outside it, so the finding does not hold against the design.",
+    design: [{ source: "issue", quote: "Backups over five minutes log action timed out.", says: "The change is about actions that run past five minutes." }],
+    code: fixerCode,
+    proofTests: [],
+    undecidable: { question: "", implementation: "", review: "" },
+  };
+  const clean = (prior: object[]) => ({ contract: "dedupe-1", comments: [], prior, summary: REENTRY_SUMMARY });
+  const resolved = (id: string) => ({ finding: id, status: "resolved", reason: "Resolved on this change." });
+  const testWithNegative = SCHEDULER_TEST.replace('\t\t{"under limit"', '\t\t{"negative minutes", -1, false, "ok"},\n\t\t{"under limit"');
+  const RULED_I2 = { actor: "fixer", from: "open", to: "fixed", note: "The test table covers a negative elapsed time (pkg/timestamp/scheduler_test.go:14)." };
+
+  return {
+    "arbitrate-review": reviewRaised(IMPLEMENTATION_STANDS, [SUPERVISE_ENTER, BACK, leave(REVIEW_STAGE), BACK], {
+      status: "succeeded",
+      receipts: [FIX_STAGE, REVIEW_STAGE, ARBITRATE_STAGE],
+      path: [FIX_STAGE, REVIEW_STAGE],
+      recovery: ["supervise", "supervisor_node_settled"],
+    }),
+    "arbitrate-operator": reviewRaised(
+      {
+        finding: "F1",
+        ruling: "undecidable",
+        summary: "The issue and its thread say how a running action is reported, not whether a caller must tell one apart at the limit.",
+        design: [],
+        code: [],
+        proofTests: [],
+        undecidable: {
+          question: "Must the status string let a caller tell an action still running at the limit from one within it?",
+          implementation: 'The thread asks only that "A running backup is not an error; report it as running.", which the change does.',
+          review: "A caller reading the status during a long backup cannot tell it is past the limit.",
+        },
+      },
+      [SUPERVISE_ENTER, BACK, leave(REVIEW_STAGE), BACK],
+      { status: "stopped", stopReason: "design ruling needs the operator", path: [FIX_STAGE, REVIEW_STAGE], recovery: ["supervise"] },
+    ),
+    "arbitrate-fixer": fixerRaised(
+      REVIEW_STANDS,
+      // After the ruling, back in Fix: the fixer covers the negative value and marks I2 fixed.
+      [
+        implementation([
+          { path: "pkg/timestamp/scheduler.go", bytes: corrected },
+          { path: "pkg/timestamp/scheduler_test.go", bytes: testWithNegative },
+          issuesFile([issueOf("I1", REENTRY_FINDING, "fixed", [FIXED_I1]), issueOf("I2", F2, "fixed", [RULED_I2], "R1")]),
+        ]),
+      ],
+      [clean([resolved("I1"), resolved("I2")])],
+      [SUPERVISE_ENTER, BACK, leave(FIX_STAGE), BACK],
+      { status: "succeeded", receipts: [FIX_STAGE, REVIEW_STAGE, ARBITRATE_STAGE], path: [FIX_STAGE, REVIEW_STAGE], recovery: ["supervise", "supervisor_node_settled"] },
+    ),
+    "arbitrate-fixer-stands": fixerRaised(
+      FIXER_STANDS,
+      [],
+      [clean([resolved("I1")])],
+      [SUPERVISE_ENTER, BACK, leave(REVIEW_STAGE), BACK],
+      { status: "succeeded", receipts: [FIX_STAGE, REVIEW_STAGE, ARBITRATE_STAGE], path: [FIX_STAGE, REVIEW_STAGE], recovery: ["supervise", "supervisor_node_settled"] },
+    ),
+  };
+}
 
 /**
  * Hand-written on top of the recorded happy path: code review confirms one
@@ -267,12 +469,13 @@ const GO_TEST_WITH_REENTRY: GraphRehearsal = {
           // After the graph's own reentry the correction resolves it, and the review passes.
           { output: { contract: "dedupe-1", comments: [], prior: [{ finding: "F1", status: "resolved", reason: "The corrected change no longer does this." }], summary: REENTRY_SUMMARY } },
         ],
-        "finding-verification-v1": [
-          { output: { verdicts: [{ finding: "F1", verdict: "confirmed", reason: "The reported behavior is present in the change.", quotes: [{ path: "pkg/timestamp/scheduler.go", line: 8, text: "if running {" }] }] } },
+        "finding-verification-v2": [
+          { output: { verdicts: [{ ...CODE_LEVEL, finding: "F1", verdict: "confirmed", reason: "The reported behavior is present in the change.", quotes: [{ path: "pkg/timestamp/scheduler.go", line: 8, text: "if running {" }] }] } },
         ],
       },
       expect: { status: "succeeded", receipts: [FIX_STAGE, REVIEW_STAGE] },
     },
+    ...arbitrationScenarios(),
   },
 };
 

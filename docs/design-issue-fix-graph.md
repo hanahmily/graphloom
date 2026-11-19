@@ -33,7 +33,7 @@ Version 0.10.4 declares a 6 h `waitMs` in every profile, so a coding-agent harne
 Version 0.11.0 reenters Fix itself when code review fails only on confirmed findings and the loop is converging, instead of handing every such failure to the supervisor ([#193](https://github.com/hanahmily/graphloom/issues/193); see [review failures](#review-failures-the-graph-reenters-fix-or-the-supervisor-decides)).
 Version 0.12.0 reads the profile's [context documents](#context-documents) once and gives them to the planner, the implementer and the code reviewers ([#195](https://github.com/hanahmily/graphloom/issues/195)), runs a profile's [`final` tier commands](#the-final-command-tier) once after review converged ([#196](https://github.com/hanahmily/graphloom/issues/196)), and ships the [banyandb-ql profile](#the-measure-ql-profile-and-benchmark-gates) with its `bench-gates` requirement and a delivery option that keeps a private tracker out of the commit and the pull request ([#197](https://github.com/hanahmily/graphloom/issues/197)).
 Proposed for 0.18.0: [code quality gates](#code-quality-gates) on the functions a change adds or modifies (complexity, nesting, CRAP, mutation), with the metrics defined in [code quality metrics](design-code-quality-metrics.md).
-Designed for 0.17.0, not implemented: [Arbitrate](#arbitrate-designed-for-0170), a supervisor-only node in which an independent arbiter, or the operator, rules on design conflicts between review and implementation, with the Fix⇄Review loop declared as edges of the [graph topology](design-graph-topology.md).
+Version 0.17.0, 2026-11-19, adds [Arbitrate](#arbitrate-designed-for-0170), a supervisor-only node in which an independent arbiter, or the operator, rules on design conflicts between review and implementation, and declares the Fix⇄Review loop as edges of the [graph topology](design-graph-topology.md) (`sdkProtocol: 2`; a 0.16 run cannot move to it with `--update-plugin`).
 
 ## Purpose
 
@@ -579,8 +579,8 @@ findings ledger rebuilt on the evidence before the last correction, so a
 correction that changed nothing, with the same findings open, is not converging
 and goes to the supervisor.
 
-Designed for 0.17.0: this reentry follows the declared edge `review → fix`,
-and a disputed or design-level finding, or one the fixer contests, can reach
+Since 0.17.0 this reentry follows the declared edge `review → fix`, and a
+disputed or design-level finding, or one the fixer contests, can reach
 [Arbitrate](#arbitrate-designed-for-0170) through the supervisor.
 
 ## Review discovery rounds
@@ -943,6 +943,10 @@ issue-fix is.
   changelog requirement.
 - [`profiles/banyandb-ql.json`](../examples/plugins/issue-fix/profiles/banyandb-ql.json):
   the Measure QL relational tickets R01 to R06, [below](#the-measure-ql-profile-and-benchmark-gates).
+
+Since 0.17.0 every shipped profile (banyandb, banyandb-ql, canopy, graphloom)
+sets `harnesses.arbiter: "codex"` and `review.arbiter: { "model":
+"gpt-6-astra", "effort": "high" }` for [Arbitrate](#arbitrate-designed-for-0170).
 
 The example tasks are
 [`examples/issue-fix-banyandb-task.yaml`](../examples/issue-fix-banyandb-task.yaml)
@@ -1751,12 +1755,16 @@ real commands.
 
 ## Arbitrate (designed for 0.17.0)
 
-Status: designed, 2026-11-18; not implemented. It needs the
-[graph topology](design-graph-topology.md) (nodes, edges, supervisor-only
-nodes) and the generic `CheckoutSpec.write` capability scoped under
-[executable confirmations](#executable-confirmations-second-phase); both are
-core changes that land first. Arbitrate is issue-fix's only; no other graph
-declares it.
+Status: designed, 2026-11-18; implemented in issue-fix 0.17.0, 2026-11-19,
+on the [graph topology](design-graph-topology.md) (nodes, edges,
+supervisor-only nodes) and the generic `CheckoutSpec.write` capability
+described under [executable confirmations](#executable-confirmations-second-phase).
+Arbitrate is issue-fix's only; no other graph declares it. The code is
+`src/arbitration.ts` (a visit as evidence shows it), `src/arbiter.ts` (the
+arbiter's assignment), `src/rulings.ts` (`design-ruling-v1`, pinned texts,
+proof tests, approvals and which rulings a receipt accepted), the ledger in
+`src/findings.ts`, the `design-ruling` validator in `src/validators.ts`, and
+`arbitrate()` in `src/graph.ts`.
 
 ### What it settles
 
@@ -1804,8 +1812,11 @@ Fix ◄── Arbitrate ───► Review     arbitrate → fix, arbitrate →
   (`src/graph.ts:332-338`): Arbitrate's work while its side visit is open;
   otherwise the first live-path node that is open or lacks a receipt;
   otherwise, when Fix is the path's last node, the fixer's design conflicts
-  (below) and then Review (the forward move along `fix → review`); otherwise
-  delivery.
+  (below) and then Review (the forward move along `fix → review`), or
+  delivery when Review's receipts still hold; otherwise delivery. A caller
+  that shows no `view.topology` (a unit simulation) gets the first
+  graph-entered stage that is incomplete or open, with the same hand-over
+  from an accepted Fix.
 - The manifest declares `sdkProtocol: 2`. A 0.16 run cannot move to 0.17 with
   `--update-plugin`; a new run is needed.
 
@@ -1826,6 +1837,9 @@ finding contradicts, quoted, and where. The
 [diff](#how-the-graph-validates-and-restores-it) accepts the move only for an
 issue with no holding ruling; any other `design-conflict` move is rejected and
 restored like any illegal edit. The decision record's `status` stays `ready`.
+The fixer may still move a contested issue on to `fixed`: when the supervisor
+judges the contest unfounded and reenters Fix with its own instruction rather
+than entering Arbitrate, the fixer fixes it and says so the usual way.
 
 **The fixer's conflict goes from Fix.** The graph does not wait for Review.
 Fix's other work is checked first: the fixer's run is followed by Fix's own
@@ -1841,8 +1855,11 @@ run again unless a later edit changes the candidate.
 **The review's conflict goes from Review.** After verification, the graph
 returns `supervise` when a design conflict the verifier raised has no holding
 ruling, with a reason naming each one: its issue id, location, title and the
-verifier's `designBasis` or why it could not settle the claim. The graph's own
-reentry of Fix additionally requires that no design conflict is open.
+verifier's `designBasis` or why it could not settle the claim. It does so
+where it handed a disputed finding over before: once the round's sweep has
+ended and the code review does not pass, so the sweep still collects every
+other finding first. The graph's own reentry of Fix additionally requires
+that no design conflict is open.
 
 **The supervisor judges.** When it finds the point a design conflict, it
 `enter`s Arbitrate from where the run is, Fix or Review (an `enter` opens the
@@ -1860,7 +1877,11 @@ Arbitrate is current, the graph:
 
 1. **Picks the point**: the first design conflict in ledger order with no
    holding ruling. With none, it returns `supervise` ("nothing to arbitrate"),
-   and the supervisor leaves the node.
+   and the supervisor leaves the node. The graph pins the point in the
+   evidence at the start of the visit with a read-only `design-point` command
+   whose argv names the finding; the validator and the ledger read the point
+   from that record, since a validator's view of the evidence (only the latest
+   review pass of the current candidate) may lack the pass that raised it.
 2. **Checks the cap.** When the run already holds `review.maxRulings` arbiter
    rulings, the arbiter does not run; the point goes to the operator (step 7).
 3. **Dispatches the arbiter** (below), once per visit, in a fresh session.
@@ -1871,8 +1892,10 @@ Arbitrate is current, the graph:
    test, in a prepared checkout of the candidate with the test file added
    (`checkout: { from: "candidate", write: [...] }`), running the profile's
    regression runner on the named test, the same runner and checkout
-   preparation as RED and GREEN. The checkout is the controller's; the test
-   never reaches the worktree or the candidate.
+   preparation as RED and GREEN, under the command id `proof-test` (reserved,
+   like `regression`). For `go-test` the test's package is its file's
+   directory; for `vitest`, its file. The checkout is the controller's; the
+   test never reaches the worktree or the candidate.
 6. **Revises once.** When a citation does not verify or a proof test does not
    behave as the arbiter claimed, the graph continues the arbiter's session once
    (`continueFrom`) with the mismatches and the recorded runs. A second failure
@@ -1994,7 +2017,7 @@ The supervisor reads the ruling and leaves along an out-edge:
 
 | Ruling | Out-edge | What happens next |
 |---|---|---|
-| `implementation-stands` | `arbitrate → review` | Review runs; the pass gets the ruling and must not raise the point; the finding is dismissed by the ruling |
+| `implementation-stands` | `arbitrate → review` | Review runs (a reentry of Review runs a new pass even on an unchanged change); the pass gets the ruling and must not raise the point; the finding is dismissed by the ruling |
 | `review-stands` | `arbitrate → fix` | A new Fix attempt; the finding is confirmed with the ruling as its witness and goes to the fixer, which may not contest it again |
 | declined (`deferred`) | `arbitrate → review` | Review runs; the finding no longer blocks |
 
@@ -2054,10 +2077,15 @@ lines changed. The verifier gets them too. The fixer's feedback lists
 | `design-conflict`, or (new) | `dismissed` | arbiter or operator | `implementation-stands` |
 | `design-conflict`, or (new) | `open` | arbiter or operator | `review-stands` |
 | `design-conflict`, `open`, `reopened`, or (new) | `deferred` | operator | the operator declined the point |
+| `design-conflict` | `fixed` | fixer | the supervisor sent Fix back without a ruling and the fixer fixed it |
 
 "(new)" is a disputed finding, which has no issue until it gets a verdict or a
-ruling. Each issue gains `ruling` (`R<n>`) when one holds. `deferred` never
-blocks.
+ruling. Each issue gains `ruling` (`R<n>`) when one holds; like `severity`,
+only the graph sets it. `deferred` never blocks, and a later pass that names a
+deferred finding leaves it deferred. A ruling lapses (the finding and its
+issue lose `ruling`) when a pass raises a finding a ruling dismissed and the
+cited lines no longer match, or when a finding a ruling confirmed regresses
+after a fix.
 
 **The pull request body** gains "Design rulings": each ruling with its finding,
 decision, decider, the quoted design statements with their sources, the code
@@ -2086,6 +2114,11 @@ remedies are reentering Fix or stopping for a maintainer. `agentRoles` adds
   issue, its thread or the pinned documents, code citations that match the
   candidate and proof tests whose recorded runs behave as claimed; or the
   operator ruled on the point or declined it." Validator `design-ruling` v1.
+  The requirement declares `identityArtifactSchema: "design-ruling-v1"`: its
+  receipt holds while the newest ruling and the files the visit observed stand,
+  not only while the whole candidate does, so a fixer's later edit elsewhere
+  leaves it valid. Whether a ruling still holds for the code is rule 6's, not
+  the receipt's.
 - `code-review` declares `prerequisiteRequirementIds: ["design-ruling"]`, so a
   qualified replacement of the ruling validator invalidates code review
   receipts that relied on rulings. Its validator, now `open-code-review` v3,
@@ -2119,7 +2152,18 @@ Rehearsal scenarios, with the scripted supervisor's `enter` and `reenter`:
   `implementation-stands`, the supervisor leaves to Review as a forward move
   (no correction spent), the pass is clean; expect `succeeded`.
 - `arbitrate-operator`: the arbiter returns `undecidable`; expect `stopped` with
-  reason `design ruling needs the operator`.
+  reason `design ruling needs the operator`. Its convergence is met, but the
+  rehearsal's B5 boundary reports Review's passes and the arbiter's result as
+  results without a receipt, since the run waits before either node
+  validates, so its verdict is `not-ready`. The CLI test then resumes the kept
+  run with `--approve design-ruling` and the run succeeds.
+
+As implemented, `arbitrate-fixer` and `arbitrate-fixer-stands` start from a
+first round that confirms two findings, which the graph sends back to Fix
+itself; the fixer fixes one and contests the other. Their issues-file edits
+are scenario effects the real diff accepts. The scenarios belong to the
+go-test profiles' rehearsal and run with `--commands run`, so the proof test
+runs under `go test`.
 
 Qualification cases for `design-ruling`: a verified ruling passes; a quote not
 in the pinned text, a code citation that does not match, a missing design
@@ -2151,6 +2195,8 @@ request, **issue-fix 0.17.0**:
    canopy and graphloom profiles;
 6. rehearsal scenarios, qualification cases, graph tests, the regenerated
    manifest, and this section's status.
+
+All six steps landed in 0.17.0.
 
 ### Open questions
 

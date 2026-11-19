@@ -92,9 +92,11 @@ describe("the banyandb profile", () => {
       { role: "implementer", harness: "claude-code", access: "write", setting: "harnesses.implementer" },
       { role: "reviewer", harness: "codex", access: "read", setting: "harnesses.reviewer" },
       { role: "verifier", harness: "claude-code", access: "read", distinctFrom: ["reviewer"], setting: "harnesses.verifier" },
+      // 0.17.0: the arbiter's independence is its session's, so no distinctFrom.
+      { role: "arbiter", harness: "codex", access: "read", setting: "harnesses.arbiter" },
     ]);
     const swapped = createGraph().describe({ ...(BANYANDB as object), harnesses: { implementer: "pi", reviewer: "claude-code", verifier: "codex" } });
-    expect(swapped.agentRoles?.map((r) => [r.role, r.harness])).toEqual([["implementer", "pi"], ["reviewer", "claude-code"], ["verifier", "codex"]]);
+    expect(swapped.agentRoles?.map((r) => [r.role, r.harness])).toEqual([["implementer", "pi"], ["reviewer", "claude-code"], ["verifier", "codex"], ["arbiter", "codex"]]);
   });
 
   it("declares its supervisor preference, Pi first, from the profile (0.16.0, design-supervisor-harnesses.md §7.6)", () => {
@@ -152,6 +154,7 @@ describe("the graphloom profile", () => {
     expect(definition.stages).toEqual([
       { id: "fix", name: "Fix", requirementIds: ["decisions-recorded", "reproduces", "passes", "builds", "in-scope"] },
       { id: "review", name: "Review", requirementIds: ["code-review"] },
+      { id: "arbitrate", name: "Arbitrate", requirementIds: ["design-ruling"], entry: "supervisor", maxVisits: 6 },
     ]);
     expect(definition.requirements.map((r) => r.id)).not.toContain("changelog-entry");
     expect(definition.defaultValidators.map((b) => b.validatorId)).not.toContain("changes-entry");
@@ -358,13 +361,13 @@ describe("profiles", () => {
   it("every shipped profile describes the same graph identity and fixed stage ids", () => {
     for (const config of [BANYANDB, GRAPHLOOM]) {
       const d = definitionFor(parseProfile(config));
-      expect(d.stages.map((s) => s.id)).toEqual(["fix", "review"]);
+      expect(d.stages.map((s) => s.id)).toEqual(["fix", "review", "arbitrate"]);
       expect(createGraph().describe(config)).toEqual(d);
     }
   });
 
   it("hands the rehearsal the scenario for the profile's runner, and its replies satisfy that profile", () => {
-    expect(Object.keys(rehearsal(BANYANDB).scenarios)).toEqual(["happy", "review-reenters"]);
+    expect(Object.keys(rehearsal(BANYANDB).scenarios)).toEqual(["happy", "review-reenters", "arbitrate-review", "arbitrate-operator", "arbitrate-fixer", "arbitrate-fixer-stands"]);
     const record = rehearsal(GRAPHLOOM).scenarios.happy!.results["decision-record-v2"]![0]!.output as DecisionRecord;
     expect(decisionProblems(record, graphloom)).toEqual([]);
     const goRecord = rehearsal(BANYANDB).scenarios.happy!.results["decision-record-v2"]!.at(-1)!.output as DecisionRecord;

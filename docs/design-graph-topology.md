@@ -1,9 +1,10 @@
 # Graph topology: nodes, edges and supervisor-only nodes
 
-Status: designed, 2026-11-19; §13 pull requests 1 to 7 implemented (the SDK
+Status: designed, 2026-11-19; §13 pull requests 1 to 8 implemented (the SDK
 types, the traversal engine, supervisor-only nodes, resume, replay and repair
 over the engine, `CheckoutSpec.write`, the supervisor's `enter` tool, topology
-prompt and settle guidance, the operator surfaces, rehearsal and check).
+prompt and settle guidance, the operator surfaces, rehearsal and check, and
+issue-fix 0.17.0 with its Fix⇄Review edges and Arbitrate).
 Extends the
 [TypeScript core design](design-typescript-core.md) §1, §4, §5, §6 and §8, and
 keeps the [run convergence](design-run-convergence.md) rules (identity-anchored
@@ -753,7 +754,9 @@ chains (§3.3). They need no source change, rebuild or manifest regeneration. A
 plugin opts into a declared topology by declaring `edges` and writing
 `sdkProtocol: 2` from its manifest generator; issue-fix 0.17.0 is the first.
 Running runs keep their pinned definition; a run started on 0.16 cannot move to
-0.17 with `--update-plugin`.
+0.17 with `--update-plugin`, and L2 replay of a run recorded under an
+implicit chain against issue-fix 0.17.0 names the topology change instead of
+a next decision (§7.2).
 
 ### 11.3 Durable state
 

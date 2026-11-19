@@ -158,7 +158,8 @@
       "Report at high severity: a path whose behaviour changes without a test in this change covering it; a removed guarantee (a bound, a timeout, a cleanup, a lock, a cancellation) that other code or comments still rely on; a comment that describes a guarantee the change removed; a test whose expected value is derived from the new code rather than from the issue; a change to persisted run state or a wire protocol without a compatibility path; controller, SDK or CLI code that reads a plugin's own notions.",
       "Report at medium severity a promise that is neither awaited nor handled, and a child process or timer started without the cleanup the package's existing helpers give.",
       "Do not report style."
-    ]
+    ],
+    "arbiter": { "model": "gpt-6-astra", "effort": "high" }
   },
   "pullRequest": {
     "checklist": [
@@ -172,7 +173,8 @@
   "harnesses": {
     "implementer": "claude-code",
     "reviewer": "codex",
-    "verifier": "claude-code"
+    "verifier": "claude-code",
+    "arbiter": "codex"
   },
   "supervisor": {
     "harnesses": ["pi", "claude-code", "codex"]

@@ -94,7 +94,16 @@ const QUOTE_SCHEMA = {
   properties: { path: { type: "string" }, line: { type: "integer" }, text: { type: "string" } },
 };
 
-/** The verifier's result (finding-verification-v1): every property required, none extra. */
+/** The verification contract's name: v2 adds whether a verdict turns on the design, and the ruling a refutation cites. */
+export const VERIFICATION_CONTRACT = "finding-verification-v2";
+
+/**
+ * The verifier's result (finding-verification-v2): every property required,
+ * none extra. Over v1 each verdict adds `designLevel` (the claim turns on the
+ * project's design, not on the code), `designBasis` (the design statement or
+ * decision it turns on, empty when not design-level) and `ruling` (the design
+ * ruling a refutation cites, `R<n>`, empty when none).
+ */
 export const VERIFICATION_SCHEMA = JSON.stringify({
   type: "object",
   additionalProperties: false,
@@ -105,23 +114,37 @@ export const VERIFICATION_SCHEMA = JSON.stringify({
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["finding", "verdict", "reason", "quotes"],
+        required: ["finding", "verdict", "reason", "quotes", "designLevel", "designBasis", "ruling"],
         properties: {
           finding: { type: "string" },
           verdict: { type: "string", enum: VERDICTS },
           reason: { type: "string" },
           quotes: { type: "array", items: QUOTE_SCHEMA },
+          designLevel: { type: "boolean" },
+          designBasis: { type: "string" },
+          ruling: { type: "string" },
         },
       },
     },
   },
 });
 
+/** One verdict as the ledger reads it; a v1 verdict has no design fields and is not design-level. */
+export interface ParsedVerdict {
+  verdict: Verdict;
+  reason: string;
+  quotes: Quote[];
+  designLevel?: boolean;
+  designBasis?: string;
+  /** The ruling a refutation cites, `R<n>`. */
+  ruling?: string;
+}
+
 /** The verifier's verdicts by finding; conflicting verdicts for one finding count as uncertain. */
-export function parseVerification(output: unknown): { verdicts: Map<string, { verdict: Verdict; reason: string; quotes: Quote[] }> } | { problem: string } {
+export function parseVerification(output: unknown): { verdicts: Map<string, ParsedVerdict> } | { problem: string } {
   const list = object(output)?.verdicts;
   if (!Array.isArray(list)) return { problem: "the verifier returned no verdicts" };
-  const verdicts = new Map<string, { verdict: Verdict; reason: string; quotes: Quote[] }>();
+  const verdicts = new Map<string, ParsedVerdict>();
   for (const raw of list) {
     const v = object(raw);
     const verdict = VERDICTS.find((x) => x === v?.verdict);
@@ -133,9 +156,27 @@ export function parseVerification(output: unknown): { verdicts: Map<string, { ve
     const id = v.finding.trim();
     const earlier = verdicts.get(id);
     const reason = String(v.reason ?? "");
-    verdicts.set(id, earlier === undefined || earlier.verdict === verdict ? { verdict, reason: earlier?.reason ?? reason, quotes: earlier?.quotes ?? quotes } : { verdict: "uncertain", reason: "the verifier gave conflicting verdicts", quotes: [] });
+    const designLevel = v.designLevel === true;
+    const design = {
+      ...(designLevel ? { designLevel: true, designBasis: typeof v.designBasis === "string" ? v.designBasis.trim() : "" } : {}),
+      ...(typeof v.ruling === "string" && /^R\d+$/.test(v.ruling.trim()) ? { ruling: v.ruling.trim() } : {}),
+    };
+    verdicts.set(
+      id,
+      earlier === undefined
+        ? { verdict, reason, quotes, ...design }
+        : earlier.verdict === verdict
+          ? earlier
+          : { verdict: "uncertain", reason: "the verifier gave conflicting verdicts", quotes: [] },
+    );
   }
   return { verdicts };
+}
+
+/** A quote of a pinned text matches when, whitespace collapsed and at least eight characters long, it appears in that text. */
+export function quoteInText(quote: string, text: string): boolean {
+  const q = collapse(quote);
+  return q.length >= MIN_QUOTE_CHARS && collapse(text).includes(q);
 }
 
 export function clip(text: string, max: number): string {
