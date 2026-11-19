@@ -104,9 +104,15 @@ const str = (v: unknown): string => (typeof v === "string" ? v : "");
 /** Paths into the review's own files are not shown to the author. */
 export const scrub = (text: string): string => text.replace(/\.graphloom\/[^\s)`'"<>:]*/g, "[a review file]");
 
+/**
+ * A changed file as the gate reads it: its paths decide what the change touches (an `existing` item's equivalent outside it), its
+ * patch where an item anchors. Without a patch nothing in it anchors, which is all the briefing's count needs.
+ */
+export type GateFile = Pick<PullFile, "path" | "previousPath"> & Partial<Pick<PullFile, "patch" | "parsed">>;
+
 /** Whether every line of the range lies in a hunk of the file's patch on the side. */
-export function anchored(file: PullFile | undefined, side: "RIGHT" | "LEFT", start: number, end: number): boolean {
-  if (file === undefined || file.patch === null) return false;
+export function anchored(file: GateFile | undefined, side: "RIGHT" | "LEFT", start: number, end: number): boolean {
+  if (file === undefined || file.patch === undefined || file.patch === null) return false;
   const lines = sideLines(file.parsed ?? parsePatch(file.patch), side === "RIGHT" ? "head" : "base");
   for (let n = start; n <= end; n += 1) if (!lines.has(n)) return false;
   return true;
@@ -297,8 +303,8 @@ export interface Round1Input {
   necessity: string | undefined;
   /** `qa.json` as written. */
   qa: string;
-  files: readonly PullFile[];
-  /** The first head cite of each report item and high-level change, which anchors a question about it. */
+  files: readonly GateFile[];
+  /** The first head cite of each report item and high-level change, which anchors a question about it when its answer cites no line of the diff. */
   itemCites: ItemCites;
   /** The round-1 items earlier heads left open, as the ledger holds them (empty for a first run). */
   prior?: readonly PriorItem[];
@@ -307,8 +313,24 @@ export interface Round1Input {
 }
 
 /**
+ * Where an answer's evidence lies in the diff: the first line, in the answer's citation order, of the first head citation that has a
+ * line inside a hunk of its file's patch at the head. Undefined when no citation reaches into the diff (a base, dependency or
+ * unchanged-line citation does not). Deterministic: the order is the answer's own, no model judges it.
+ */
+export function evidenceAnchor(citations: ReadonlyArray<{ path: string; start: number; end: number; tree: string }>, files: readonly GateFile[]): { path: string; line: number } | undefined {
+  for (const c of citations) {
+    if (c.tree !== "head" || c.path === "" || c.start < 1) continue;
+    const file = files.find((f) => f.path === c.path);
+    for (let n = c.start; n <= Math.max(c.start, c.end); n += 1) if (anchored(file, "RIGHT", n, n)) return { path: c.path, line: n };
+  }
+  return undefined;
+}
+
+/**
  * The open items of round 1 from the artifacts, in question order (N1 first). Undefined when `qa.json` is not a Q&A file. An answer
- * can match several kinds at once; it is one item with all of them, and its status is the answer's own.
+ * can match several kinds at once; it is one item with all of them, and its status is the answer's own. A question's item anchors
+ * where its answer's evidence lies in the diff (`evidenceAnchor`), else at the first head cite of the change it is about, which puts
+ * it in the review body when that cite is outside the diff.
  */
 export function round1Record(i: Round1Input): Round1Record | undefined {
   const qa = qaOf(i.qa);
@@ -350,6 +372,7 @@ export function round1Record(i: Round1Input): Round1Record | undefined {
       else noted.push({ id: q.id, key: q.stable, note: NOTED_REASON });
     }
     if (kinds.length === 0) continue;
+    const evidence = evidenceAnchor(a.citations, i.files);
     const cite = i.itemCites[q.item];
     if (outside.length > 0) outsideOf.set(q.id, outside);
     const parts: ItemParts = {
@@ -360,7 +383,7 @@ export function round1Record(i: Round1Input): Round1Record | undefined {
       cites: citationLinks(a.citations, i.github, a.inventory).map(scrub),
       proposal: scrub(proposalText(a.proposal)),
     };
-    issues.push({ id: q.id, key: q.stable, kinds, status: a.status, body: composeParts(parts), parts, ...(cite !== undefined ? place(cite.path, cite.start) : { anchored: false }) });
+    issues.push({ id: q.id, key: q.stable, kinds, status: a.status, body: composeParts(parts), parts, ...(evidence !== undefined ? { ...evidence, anchored: true } : cite !== undefined ? place(cite.path, cite.start) : { anchored: false }) });
   }
   mergeSharedEquivalents(issues, outsideOf, qa);
   // Earlier open items are judged by their stable key (§3.5): open when this head has an open item with that key, or one that covers it.
@@ -378,6 +401,23 @@ export function round1Record(i: Round1Input): Round1Record | undefined {
   });
   return { schema: ROUND1_SCHEMA, head: i.head, necessity: conclusion, issues, ...(open.length > 0 ? { prior } : {}), ...(noted.length > 0 ? { noted } : {}) };
 }
+
+/**
+ * Round 1's open items as the gate computes them, for the briefing, which is written before the gate runs: the same pure function
+ * over the same `qa.json`, `necessity.json` and changed paths, so `review.md`, `review.html` and the posted review count the same
+ * items. The pinned commits must be the gate's too: citation links are part of an item's text, and how much text fits decides
+ * which `existing` items merge. Undefined when `qa.json` is not a Q&A file.
+ */
+export function openItems(i: { qa: string; necessity: string | undefined; files: readonly GateFile[]; github: GithubPin }): Round1Issue[] | undefined {
+  return round1Record({ head: i.github.head, necessity: i.necessity, qa: i.qa, files: i.files.map((f) => ({ path: f.path, previousPath: f.previousPath })), itemCites: {}, github: i.github })?.issues;
+}
+
+/** How the briefing names round 1's open items, in `review.md` and both HTML files. */
+export const OPEN_ITEMS_LABEL = "Open items for the author";
+export const NO_OPEN_ITEMS = "No open item for the author.";
+
+/** The question ids an open item stands for: its own and those it covers. */
+export const itemIds = (x: Pick<Round1Issue, "id" | "covers">): string[] => [x.id, ...(x.covers ?? [])];
 
 export const round1Json = (r: Round1Record): string => JSON.stringify(r);
 

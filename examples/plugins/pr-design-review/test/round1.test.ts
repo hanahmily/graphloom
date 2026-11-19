@@ -91,3 +91,47 @@ describe("the gate (design-pr-review-split §3.6)", () => {
     expect(r.issues[0]).toMatchObject({ id: "Q1", path: "pkg/a/a.go", line: 3, anchored: true });
   });
 });
+
+describe("where an item anchors: where its answer's evidence lies in the diff (#1485)", () => {
+  // #1485's shape: the change item's first head cite is a metrics.go doc comment, the answer leans on the documented query in the
+  // docs the pull request adds (lines 5 and 7 here), and a base citation and a head line outside every hunk come before it.
+  const DOC = "docs/operation/metrics.md";
+  const docPatch = "@@ -1,3 +1,8 @@\n # Metrics\n \n Old text.\n+\n+sum by (group, reason) (rate(write_dropped_total[1m]))\n+\n+Each liaison and data node counts the rows it skipped.\n+";
+  const GO = "pkg/a/metrics.go";
+  const goPatch = "@@ -10,2 +10,4 @@ func old() {\n context\n+// newWriteDropCounter counts dropped rows.\n+func newWriteDropCounter() {}\n context";
+  const files = [pullFile({ path: DOC, previousPath: null, status: "modified", additions: 5, deletions: 0, patch: docPatch })!, pullFile({ path: GO, previousPath: null, status: "modified", additions: 2, deletions: 0, patch: goPatch })!];
+  const itemCites = { R3: { path: GO, start: 11, end: 11 } };
+  const gate = (citations: NonNullable<Q["citations"]>) => round1Record({ head: HEAD, necessity: necessity("necessary"), qa: qa({ id: "Q4", type: "other", item: "R3", status: "partially answered", stable: "other|item|pkg/a/metrics.go", citations }), files, itemCites })!.issues[0]!;
+
+  it("anchors at the first line inside a hunk of the first head citation that reaches the diff, in the answer's order", () => {
+    const x = gate([
+      { path: "pkg/transfer/imported_write.go", start: 126, end: 155, tree: "base" },
+      { path: GO, start: 30, end: 31, tree: "head" },
+      { path: DOC, start: 5, end: 5, tree: "head" },
+      { path: DOC, start: 7, end: 7, tree: "head" },
+      { path: GO, start: 11, end: 11, tree: "head" },
+    ]);
+    expect(x).toMatchObject({ id: "Q4", path: DOC, line: 5, anchored: true });
+    // A range that starts before the hunk anchors at its first line inside it.
+    expect(gate([{ path: GO, start: 5, end: 12, tree: "head" }])).toMatchObject({ path: GO, line: 10, anchored: true });
+  });
+
+  it("skips a head citation outside every hunk and a base or dependency one", () => {
+    const x = gate([
+      { path: DOC, start: 40, end: 42, tree: "head" },
+      { path: DOC, start: 5, end: 5, tree: "base" },
+      { path: "vendor/lib.go", start: 5, end: 5, tree: "dependency" },
+      { path: DOC, start: 7, end: 7, tree: "head" },
+    ]);
+    expect(x).toMatchObject({ path: DOC, line: 7, anchored: true });
+  });
+
+  it("keeps today's place when no citation reaches the diff: the change's first head cite, or the body when that is outside the diff too", () => {
+    expect(gate([{ path: "pkg/meter/native/provider.go", start: 109, end: 115, tree: "base" }])).toMatchObject({ path: GO, line: 11, anchored: true });
+    const body = round1Record({ head: HEAD, necessity: necessity("necessary"), qa: qa({ id: "Q4", type: "other", item: "R3", status: "partially answered", citations: [{ path: DOC, start: 40, end: 40, tree: "head" }] }), files, itemCites: { R3: { path: GO, start: 1, end: 1 } } })!.issues[0]!;
+    expect(body).toMatchObject({ path: GO, line: 1, anchored: false });
+    const none = round1Record({ head: HEAD, necessity: necessity("necessary"), qa: qa({ id: "Q4", type: "other", item: "R3", status: "partially answered" }), files, itemCites: {} })!.issues[0]!;
+    expect(none.anchored).toBe(false);
+    expect(none.path).toBeUndefined();
+  });
+});

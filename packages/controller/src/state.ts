@@ -300,6 +300,27 @@ export interface EnvironmentRepin {
   at: string;
 }
 
+/** How a visit entered its node (docs/design-graph-topology.md §7.4). */
+export type VisitEntry = "start" | "edge" | "carried" | "reenter" | "enter" | "migrated";
+
+/** One entry of a node: kept for good, so the run's history stays acyclic when its walk is not. */
+export interface VisitRecord {
+  /** 1-based, in the order visits were made. */
+  seq: number;
+  stageId: string;
+  /** The attempt the node ran under in this visit. */
+  attempt: number;
+  entered: VisitEntry;
+  /** The visit it came from: the tail when it was entered. Absent for the first visit. */
+  from?: number;
+  /** The generation when it was entered. */
+  generation: number;
+  /** What made it: `intake`, `dispatch`, `validate`, `stop`, `reenter`, `resume`, `activate_repair`, `migration`. */
+  operation: string;
+  /** How a visit that left the live path ended, e.g. `replaced by reentry of fix`. */
+  ended?: string;
+}
+
 export interface DurableRunState {
   runId: string;
   status: RunStatus;
@@ -344,6 +365,17 @@ export interface DurableRunState {
   activeVersion: string;
   mode: "normal" | "recovery";
   current: StageAttempt;
+  /**
+   * The live path (docs/design-graph-topology.md §4.1): the sequence numbers
+   * of `visits` from a visit of the start node to the tail, no node twice.
+   * Every run written in state format 3 carries it; a state without it reads
+   * as the path traversal.ts derives (the format 2 migrator's rule).
+   */
+  path?: number[];
+  /** Every visit of a node, oldest first; appended, never removed (§7.4). */
+  visits?: VisitRecord[];
+  /** The open side visit of a supervisor-only node, by sequence number; never set before supervisor-only nodes. */
+  sideVisit?: number;
   receipts: Receipt[];
   evidence: EvidenceRecord[];
   outstanding: OutstandingOperation[];

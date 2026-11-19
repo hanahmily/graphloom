@@ -1,0 +1,9 @@
+{
+  "graphId": "fixture",
+  "version": "1.0.0",
+  "sdkProtocol": 1,
+  "entryPoints": {
+    "createGraph": "./dist/index.js"
+  },
+  "privateStateSchema": "fixture-private-v1"
+}

@@ -71,11 +71,15 @@ describe("stop classification (§8)", () => {
       "wait budget exhausted",
       "active time budget exhausted",
       "unsupported action in normal mode: accept",
+      // A graph acting for a node no declared edge reaches (docs/design-graph-topology.md §4.3).
+      "undeclared edge",
     ]) {
       expect(classOf(reason), reason).toMatchObject({ by: "controller", retryable: false });
     }
     // The operator's own stop is final, and the resume answers it.
     expect(classOf("operator stop")).toMatchObject({ retryable: false, liftedByResume: true });
+    // Beside `unsupported action in …`: a plugin defect a resume does not retry until the plugin changes.
+    expect(classOf("undeclared edge")).toMatchObject({ retryable: false, kind: "plugin defect" });
   });
 
   it("takes a graph's or supervisor's own class over any reason text, and classifies nothing for a run that is not stopped", () => {

@@ -313,7 +313,8 @@ describe("format 1 to 2 migration", () => {
     // A run saved by format 1: everything inline, no store.
     const original = JSON.stringify({ ...state, stateFormat: 1, evidence: [...hydrateEvidence(stateDir, state.evidence), ...records] }, null, 2);
     const steps = migrationPath(1, STATE_FORMATS);
-    expect(steps).toHaveLength(1);
+    // 1 -> 2 externalizes; 2 -> 3 (the live path) leaves evidence as it is.
+    expect(steps.map((s) => `${s.from}-${s.to}`)).toEqual(["1-2", "2-3"]);
     // migrateStateFiles throws when the protected view (which hydrates format 2 from the migration's own files) differs.
     const migrated = migrateStateFiles({ "state.json": original }, steps, STATE_FORMATS);
     const out = JSON.parse(migrated.files["state.json"]!) as DurableRunState;
