@@ -166,6 +166,7 @@ export {
   isModelSwitchRequest,
   type AdmissionCheck,
   type AdmissionFacts,
+  type SupervisorNodeView,
   type SupervisorAdmission,
   type SupervisorRejection,
   type CandidatePatchRequest,

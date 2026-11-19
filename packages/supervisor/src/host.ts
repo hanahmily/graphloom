@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
-import type { AgentSessionView, CaseFile, EvidenceRecord, GraphAction } from "@graphloom/sdk";
+import type { AgentSessionView, CaseFile, EvidenceRecord, GraphAction, StageAttempt } from "@graphloom/sdk";
 import { parseSupervisorDecision } from "./decision.js";
 import {
   type HarnessSession,
@@ -1064,6 +1064,8 @@ const TRIGGER_GUIDANCE: Partial<Record<string, string>> = {
     "This episode's trigger is plugin_malformed: the graph returned a decision the controller could not validate. A plugin repair (qualify_repair target plugin) may fix it when the bundle is source-repairable; otherwise stop, citing what was malformed.",
   quota_partial:
     "This episode's trigger is quota_partial: the harness hit its usage limit in the middle of a job that may already have changed the worktree or called tools, and that job's agent session cannot be continued. The controller waited out the limit's reset before this episode. Observe the worktree and the stage's evidence first, then dispatch the stage's remaining work from what is actually there (not the original assignment blindly), or return when the graph can decide from the current state.",
+  supervisor_node_settled:
+    "This episode's trigger is supervisor_node_settled: the supervisor-only node of the open side visit settled. Its validators minted a receipt for every one of its requirements, and the trigger's message cites each receipt with its requirement, validator binding and the validator's reason, and names the node's out-edges; its evidenceRefs are the records the receipts accepted. Read those records and reasons (get_evidence, list_receipts), then leave the node with reenter along the out-edge whose target fits the result, citing the evidence that shows it: the node's own records say which fits, the controller does not. To a live-path node the leave is a reentry (one correction); to a node off the live path, a forward move from the tail (no correction). When the result is not one you can act on, you still leave along an out-edge, without relying on the receipt. return does not leave the node: the controller opens this trigger again at the graph's next step, and after three inadmissible proposals in a turn its safe default is a retryable stop naming the node.",
   contract_violation:
     "This episode's trigger is contract_violation: an agent result repeatedly failed to match its job's declared result contract (a missing/mis-typed field, or a reference id outside the set it was shown) even after the harness gave it a chance to correct it in-turn. Re-dispatch the stage's work with a more explicit instruction about the required shape, or switch to another pinned executor for it, if the contract itself looks right. If the trigger message shows the contract's own schema or reference set is wrong for what the stage actually needs, qualify_repair target plugin instead (when the bundle is source-repairable) rather than repeating the same dispatch.",
 };
@@ -1238,7 +1240,7 @@ export function buildRecoveryPrompt(
           `To read the run or dry-run the controller's checks first, reply {"inspect": [{"tool", "args"}]} instead; GraphLoom answers in your next turn (at most ${MAX_INSPECT_ROUNDS} inspect rounds a turn).`,
           "Your own tools are for investigation only: you change the run only by deciding.",
         ]),
-    "Never propose Accept. Never add, remove, rename, or reorder graph steps.",
+    "Never propose Accept. Never add, remove, rename, or reorder graph steps (nodes), or change the graph's edges, start or terminal nodes: the topology is fixed for the run.",
     "Prefer further authorized remedies over Stop while budgets and authority remain.",
     "This session holds this episode only. What earlier episodes verified is the case file below, kept by the controller: a fact or refutation is listed only while the workspace candidate and plugin version it was established against are current, and attempts are the controller's own settlements of earlier proposals.",
     ...(input.recordFinding !== undefined
@@ -1260,6 +1262,7 @@ export function buildRecoveryPrompt(
     "repairAuthority shows what the operator granted and whether the graph bundle's code can be patched. An opaque bundle's code cannot be: retry the work or repair its environment instead. Substitute a validator (qualify_repair target validator with requirementId, adding files without editing existing ones) only when validatorSubstitution is granted and that requirement has a readable statement. Otherwise stop, citing the failing validation's evidenceRefs; never invent a replacement criterion.",
     "Environment faults outside the run (a full disk, a missing tool, a broken user-level config or cache) are not yours to repair: the operator owns the machine. Report them to the operator as a blocker (stop, retryable false) with the evidence that shows the fault; do not delete caches, rewrite global configuration (go env -w, git config --global, npm config), or install software to work around them. Jobs you originate run confined to the run's worktree and run-scoped temp and cache directories, and one that would change anything else is refused unless repairAuthority.grants.hostRepair is true, which the operator sets.",
     "reenter starts a new attempt but runs nothing. To have the graph run that attempt's own jobs (its instructions, result schemas and write scopes), return after reentering; dispatch only work the graph would not run itself.",
+    ...supervisorOnlyGuidance(input),
     ...(input.view.executors?.some((e) => e.inputShape !== undefined)
       ? [
           "executors lists the input shape (a JSON Schema and an example) each listed executor declares. Compose job.input for that executor exactly as its schema says: arrays are plain JSON arrays, never wrapped in an object.",
@@ -1288,11 +1291,82 @@ export function buildRecoveryPrompt(
       : []),
     `Episode: ${input.episodeId}`,
     ...caseFileLines(input.caseFile),
+    ...topologyLines(input),
     "Recovery context:",
     "```json",
     JSON.stringify(viewSummary, null, 2),
     "```",
   ].join("\n");
+}
+
+/** Most nodes and edges the topology section lists; a graph allows 64 and 256. */
+const MAX_TOPOLOGY_ITEMS = 64;
+
+function listed(items: readonly string[]): string {
+  if (items.length === 0) return "none";
+  const shown = items.slice(0, MAX_TOPOLOGY_ITEMS).join(", ");
+  return items.length > MAX_TOPOLOGY_ITEMS ? `${shown}, and ${items.length - MAX_TOPOLOGY_ITEMS} more` : shown;
+}
+
+/** Whether the run's graph has a supervisor-only node the supervisor should know how to use. */
+function hasSupervisorOnlyNodes(input: SupervisorInput): boolean {
+  return (input.nodes ?? []).some((n) => n.entry === "supervisor") || input.view.topology?.sideVisit !== undefined;
+}
+
+/**
+ * How supervisor-only nodes work, for a graph that has one
+ * (docs/design-graph-topology.md §5, §10). Generic: nothing about what a
+ * node is for; that is the plugin's.
+ */
+function supervisorOnlyGuidance(input: SupervisorInput): string[] {
+  if (!hasSupervisorOnlyNodes(input)) return [];
+  return [
+    "This graph has supervisor-only nodes. The graph never reaches one and completion never requires one: only you enter one, with enter {stageId, reason} in recovery, when it has visits left and no side visit is open, and only you leave it. Entering costs no correction; it is one remedy among others, chosen on your own judgment. While its side visit is open, every dispatch and validate names that node: return to let the graph's advance build its jobs, or dispatch and validate for it yourself; its receipts come from its own validators, never from you. Leave it with reenter along one of its out-edges: to a live-path node that is a reentry (one correction), to a node off the live path a forward move from the tail (no correction). A node whose work failed is left the same way, without a receipt.",
+  ];
+}
+
+/**
+ * The run's topology from `view.topology` and `nodes` (docs/design-graph-topology.md
+ * §10): the live path and its tail for every run; for a graph that declares
+ * edges also its nodes with their entry, the edges, start and terminal, the
+ * open side visit with the out-edges that leave it, and each supervisor-only
+ * node's visits left.
+ */
+export function topologyLines(input: SupervisorInput): string[] {
+  const topology = input.view.topology;
+  if (topology === undefined) return [];
+  const visit = (v: StageAttempt) => `${v.stageId}#${v.attempt}`;
+  const tail = topology.path.at(-1);
+  const lines = [
+    "Graph topology (fixed for the run):",
+    `- live path: ${topology.path.length > 0 ? topology.path.map(visit).join(" → ") : "empty"}${tail !== undefined ? `; tail ${visit(tail)}` : ""}`,
+  ];
+  if (topology.implicit) {
+    lines.push("- the graph is a chain of its stages in order: the run moves forward one stage at a time, and reenter names a stage on the live path.");
+    return lines;
+  }
+  const outEdges = (id: string) => topology.edges.filter((e) => e.from === id).map((e) => `${e.from} → ${e.to}`);
+  const nodes = input.nodes ?? [];
+  if (nodes.length > 0) {
+    lines.push(`- nodes: ${listed(nodes.map((n) => `${n.id} (${n.name}${n.entry === "supervisor" ? ", supervisor-only" : ""})`))}`);
+  }
+  lines.push(`- edges: ${listed(topology.edges.map((e) => `${e.from} → ${e.to}`))}`);
+  lines.push(`- start ${topology.start}; terminal ${topology.terminal.join(", ")}`);
+  for (const node of nodes.filter((n) => n.entry === "supervisor")) {
+    const visits = node.maxVisits !== undefined ? `; ${node.visitsLeft ?? node.maxVisits} of ${node.maxVisits} visits left` : "";
+    lines.push(`- supervisor-only node ${node.id}: out-edges ${listed(outEdges(node.id))}${visits}`);
+  }
+  const side = topology.sideVisit;
+  if (side !== undefined) {
+    const exits = input.admission?.facts.exits?.map((to) => `${side.stageId} → ${to}`) ?? outEdges(side.stageId);
+    lines.push(
+      `- open side visit: ${visit(side)}, entered from the tail. Only you leave it, with reenter along one of its out-edges: ${listed(exits)}. Until then, dispatch and validate name only ${side.stageId}.`,
+    );
+  } else if (nodes.some((n) => n.entry === "supervisor")) {
+    const canEnter = input.admission?.facts.canEnter;
+    lines.push(`- no side visit is open${canEnter !== undefined ? `; enter admits now: ${listed(canEnter)}` : ""}`);
+  }
+  return lines;
 }
 
 const MAX_CURRENT_GENERATION_EVIDENCE = 24;
@@ -1389,7 +1463,7 @@ export function buildRepairPrompt(args: CandidatePatchRequest): string {
     `Candidate root: ${args.candidateRoot}`,
     "Your working directory is the candidate root. Use the shell and file tools to investigate, fix the defect, and build and run the candidate's tests.",
     "Change only files inside the candidate root; the live install and the run worktree are off limits, and the controller stops the run if the patch changes the live install, the run worktree, or the run state.",
-    "Do not edit graphloom.stages.json. Do not add, remove, rename, or reorder graph steps, and do not change requirement statements or evidence schemas.",
+    "Do not edit graphloom.stages.json. Do not add, remove, rename, or reorder graph steps (nodes); do not add, remove or reorder edges, or change the start node, the terminal nodes, or any node's entry or visit cap (maxVisits): the topology is fixed for the run, and a candidate that changes it is rejected. Do not change requirement statements or evidence schemas.",
     "Keep existing tests and negative cases; do not loosen expected outcomes. Add a focused regression case when the defect is testable.",
     ...(args.reviewFeedback !== undefined
       ? [

@@ -43,6 +43,12 @@ export interface SupervisorInput {
   episodeId: string;
   trigger: RecoveryTrigger;
   view: RunView;
+  /**
+   * The pinned graph's nodes, for a graph that declares edges; with
+   * `view.topology` they are the prompt's topology section. Absent for an
+   * implicit chain, whose nodes are its stages in order.
+   */
+  nodes?: SupervisorNodeView[];
   /** What the controller settled for the supervisor's previous proposal in this run. */
   lastSettlement?: SupervisorSettlement;
   /** Provider calls this turn may spend; a turn beyond it is aborted before its request. */
@@ -145,6 +151,35 @@ export interface AdmissionFacts {
   canQualify: boolean;
   /** Candidates whose status is `qualified`; `activate_repair` needs one. */
   qualifiedArtifactIds: string[];
+  /**
+   * The supervisor-only nodes `enter` would admit now: in recovery, with no
+   * side visit open, each with visits left (docs/design-graph-topology.md
+   * §10). Absent for a graph without supervisor-only nodes; `enter` is
+   * offered only when it lists one.
+   */
+  canEnter?: string[];
+  /**
+   * The out-edge targets of the open side visit's node: the only nodes a
+   * `reenter` may name while it is open (leaving it). Absent when no side
+   * visit is open.
+   */
+  exits?: string[];
+}
+
+/**
+ * A node of the run's pinned graph as the supervisor sees it: the
+ * definition's node with its entry, and for a supervisor-only node its visit
+ * cap and the visits it has left (docs/design-graph-topology.md §10).
+ */
+export interface SupervisorNodeView {
+  id: string;
+  name: string;
+  /** `graph`: reached along edges; `supervisor`: only the supervisor enters it (`enter`). */
+  entry: "graph" | "supervisor";
+  /** Supervisor-only: most visits in a run. */
+  maxVisits?: number;
+  /** Supervisor-only: visits not yet used. */
+  visitsLeft?: number;
 }
 
 /** An inadmissible proposal, as the controller reports it: the failed precondition and the current value. */

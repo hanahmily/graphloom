@@ -289,6 +289,13 @@ these forms:
 { "switch_model": { "provider": "claude-code", "modelId": "opus", "reason": "…" } }
 ```
 
+Entering a supervisor-only node is a decision like any other,
+`{ "action": { "type": "enter", "enter": { "stageId": "arb", "reason": "…" } }, … }`,
+and leaving it is a `reenter` along one of its out-edges
+([graph topology §10](design-graph-topology.md#10-supervisor)). Pi has an
+`enter` tool, offered only when the controller's admission facts list a node
+in `canEnter`.
+
 A new `parseSupervisorReply` recognizes `inspect` and `switch_model` and
 passes anything else to `parseSupervisorDecision`. That function already
 nests flattened action fields and rejects `accept`. A decision then takes the

@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { describe, expect, it } from "vitest";
-import type { AgentSessionView, GraphAction } from "@graphloom/sdk";
+import { stableHash, type AgentSessionView, type GraphAction } from "@graphloom/sdk";
 import { createAdmissionTools, GRAPHLOOM_SUPERVISOR_ACTIONS, INSPECTION_TOOL_NAMES, offeredActions, supervisorProposalKey } from "./tools.js";
 import type { SupervisorInspection } from "./types.js";
 
@@ -186,6 +186,63 @@ describe("admission tools narrowed by state (#117)", () => {
 
   it("offers every action when the controller gives no facts", () => {
     expect(offeredActions()).toEqual([...GRAPHLOOM_SUPERVISOR_ACTIONS]);
+  });
+});
+
+describe("enter and leaving a supervisor-only node (docs/design-graph-topology.md §10)", () => {
+  const facts = (over: { canEnter?: string[]; exits?: string[] } = {}) => ({ inRecovery: true, canQualify: false, qualifiedArtifactIds: [], ...over });
+  const toolsWith = (f: ReturnType<typeof facts>, check: (d: { action: GraphAction }) => Promise<{ action: string; reason: string; remaining: number } | undefined> = async () => undefined) =>
+    createAdmissionTools([{ provider: "p", modelId: "m" }], [], 1, "supervisor_node_settled", {}, { facts: f, check, refuse: noRefuse });
+  const exec = (toolbox: ReturnType<typeof toolsWith>, name: string) => (toolbox.tools.find((t) => t.name === name) as unknown as { execute: Execute }).execute;
+
+  it("offers enter only when canEnter lists a supervisor-only node, after reenter", () => {
+    expect(toolsWith(facts()).offered).not.toContain("enter");
+    expect(toolsWith(facts({ canEnter: [] })).offered).not.toContain("enter");
+    const offered = toolsWith(facts({ canEnter: ["arb"] })).offered;
+    expect(offered.slice(offered.indexOf("reenter"), offered.indexOf("reenter") + 2)).toEqual(["reenter", "enter"]);
+    expect(GRAPHLOOM_SUPERVISOR_ACTIONS).toContain("enter");
+  });
+
+  it("proposes enter with its stageId, reason and evidenceRefs, as the SDK's enter action", async () => {
+    const toolbox = toolsWith(facts({ canEnter: ["arb"] }));
+    const tool = toolbox.tools.find((t) => t.name === "enter") as unknown as { parameters: { required: string[]; properties: Record<string, { required?: string[]; properties?: Record<string, unknown> }> } };
+    expect(tool.parameters.required).toEqual(["reason", "enter"]);
+    expect(tool.parameters.properties.enter!.required).toEqual(["stageId", "reason"]);
+    expect(Object.keys(tool.parameters.properties.enter!.properties!)).toContain("evidenceRefs");
+    const done = await exec(toolbox, "enter")("1", { reason: "a ruling is needed", enter: { stageId: "arb", reason: "arbitrate", evidenceRefs: ["ev-1"] }, evidence: ["ev-1"] });
+    expect(done.terminate).toBe(true);
+    expect(toolbox.proposal()).toEqual({ reason: "a ruling is needed", action: { type: "enter", enter: { stageId: "arb", reason: "arbitrate", evidenceRefs: ["ev-1"] } }, evidence: ["ev-1"] });
+  });
+
+  it("refuses an enter without a reason in-turn, before the controller's check", async () => {
+    const checked: string[] = [];
+    const toolbox = toolsWith(facts({ canEnter: ["arb"] }), async (d) => (checked.push(d.action.type), undefined));
+    const rejected = await exec(toolbox, "enter")("1", { reason: "r", enter: { stageId: "arb", reason: " " } });
+    expect(rejected.terminate).toBeUndefined();
+    expect(rejected.content[0]!.text).toContain("enter.reason must be a non-empty string");
+    expect(checked).toEqual([]);
+  });
+
+  it("leaves along an out-edge with reenter, and returns the controller's reason when a leave or enter is refused", async () => {
+    const check = async (d: { action: GraphAction }) =>
+      d.action.type === "reenter" && d.action.reenter.stageId === "ship"
+        ? { action: "reenter", reason: "undeclared edge: leave arb to ship: the supervisor leaves a supervisor-only node along one of its out-edges; out-edges of arb: arb → fix, arb → review", remaining: 2 }
+        : undefined;
+    const toolbox = toolsWith(facts({ canEnter: [], exits: ["fix", "review"] }), check);
+    expect(toolbox.offered).not.toContain("enter");
+    const refused = await exec(toolbox, "reenter")("1", { reason: "ship it", reenter: { stageId: "ship", reason: "done" }, evidence: ["ev-1"] });
+    expect(refused.content[0]!.text).toContain("out-edges of arb: arb → fix, arb → review");
+    const left = await exec(toolbox, "reenter")("2", { reason: "the ruling sends it back", reenter: { stageId: "fix", reason: "ruled: fix", evidenceRefs: ["ev-1"] }, evidence: ["ev-1"] });
+    expect(left.terminate).toBe(true);
+    expect(toolbox.proposal()).toMatchObject({ action: { type: "reenter", reenter: { stageId: "fix" } } });
+  });
+
+  it("keys a repeated enter by its node, as the controller's escalation.ts does", () => {
+    const enterArb: GraphAction = { type: "enter", enter: { stageId: "arb", reason: "one" } };
+    const enterOther: GraphAction = { type: "enter", enter: { stageId: "arb2", reason: "one" } };
+    // escalation.ts: stableHash([trigger, stage, type, spec without its free text]).
+    expect(supervisorProposalKey("supervise", enterArb)).toBe(stableHash(["supervise", "arb", "enter", { stageId: "arb" }]));
+    expect(supervisorProposalKey("supervise", enterArb)).not.toBe(supervisorProposalKey("supervise", enterOther));
   });
 });
 

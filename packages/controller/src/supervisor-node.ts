@@ -14,6 +14,7 @@
  * its requirements mean or which out-edge fits a result.
  */
 import { isSupervisorOnly, successors, type GraphAction, type StageId } from "@graphloom/sdk";
+import type { AdmissionFacts, SupervisorNodeView } from "@graphloom/supervisor";
 import type { Inadmissible } from "./inadmissible.js";
 import type { DurableRunState, VisitRecord } from "./state.js";
 import { forwardRoute, nextSeq, pathIndex, runTopology, sideVisitOf, SUPERVISOR_ONLY_NODE, tailOf, UNDECLARED_EDGE, withPath, type PathState } from "./traversal.js";
@@ -206,4 +207,33 @@ export function settledTrigger(state: PathState, side: VisitRecord, bound: (text
   );
   // The newest records the receipts accepted; a receipt names every record of its candidate.
   return { message, evidenceRefs: [...new Set(receipts.flatMap((r) => r.evidenceRefs))].slice(-MAX_TRIGGER_REFS) };
+}
+
+/**
+ * What the supervisor's tools learn about the topology (docs/design-graph-topology.md
+ * §10): `canEnter`, the supervisor-only nodes `enter` would admit now, and
+ * `exits`, the out-edge targets of an open side visit. A graph without
+ * supervisor-only nodes gets neither, and `exits` is set only while a side
+ * visit is open. Admission stays the authority; these narrow the tools.
+ */
+export function topologyFacts(state: NodeState): Pick<AdmissionFacts, "canEnter" | "exits"> {
+  const supervisorOnly = state.definition.stages.filter((s) => isSupervisorOnly(s));
+  if (supervisorOnly.length === 0) return {};
+  const side = sideVisitOf(state);
+  if (side !== undefined) return { canEnter: [], exits: successors(runTopology(state.definition), side.stageId) };
+  return { canEnter: supervisorOnly.filter((s) => enterRefusal(state, s.id) === undefined).map((s) => s.id) };
+}
+
+/**
+ * The pinned graph's nodes as the supervisor's prompt shows them, for a graph
+ * that declares edges: each node's entry, and for a supervisor-only node its
+ * visit cap and the visits it has left. Undefined for an implicit chain.
+ */
+export function supervisorNodes(state: PathState): SupervisorNodeView[] | undefined {
+  if (state.definition.edges === undefined) return undefined;
+  return state.definition.stages.map((s) => {
+    if (!isSupervisorOnly(s)) return { id: s.id, name: s.name, entry: "graph" as const };
+    const cap = s.maxVisits ?? 0;
+    return { id: s.id, name: s.name, entry: "supervisor" as const, maxVisits: cap, visitsLeft: Math.max(0, cap - visitsOf(state, s.id)) };
+  });
 }

@@ -1,8 +1,9 @@
 # Graph topology: nodes, edges and supervisor-only nodes
 
-Status: designed, 2026-11-19; §13 pull requests 1 to 4 implemented (the SDK
+Status: designed, 2026-11-19; §13 pull requests 1 to 6 implemented (the SDK
 types, the traversal engine, supervisor-only nodes, resume, replay and repair
-over the engine). Extends the
+over the engine, `CheckoutSpec.write`, the supervisor's `enter` tool, topology
+prompt and settle guidance). Extends the
 [TypeScript core design](design-typescript-core.md) §1, §4, §5, §6 and §8, and
 keeps the [run convergence](design-run-convergence.md) rules (identity-anchored
 receipts, `openAttempt`, correction escalation). The first graph to declare
@@ -658,16 +659,35 @@ The supervisor package gains, and still depends only on `@graphloom/sdk`:
   (`stageId`, `reason`, `evidenceRefs`), and the JSON reply form used by the
   Claude Code and Codex harnesses
   ([supervisor harnesses §4.2](design-supervisor-harnesses.md#42-decision-protocol-per-harness));
-- in the episode prompt: the live path and, for a graph that declares edges,
-  the nodes with their entry, the edges, the open side visit, and for each
-  supervisor-only node its visits left and out-edges;
-- `TRIGGER_GUIDANCE` (`packages/supervisor/src/host.ts:1046`) for
+- in the episode prompt: the live path and its tail and, for a graph that
+  declares edges, the nodes with their entry, the edges, start and terminal,
+  the open side visit, and for each supervisor-only node its visits left and
+  out-edges. `RunView.topology` gives the path, the edges and the side visit;
+  the nodes come in `SupervisorInput.nodes` (id, name, entry, and for a
+  supervisor-only node `maxVisits` and `visitsLeft`), which the controller
+  fills from the pinned definition and the visits for a graph that declares
+  edges only, and records on the episode for replay. The prompt also explains
+  supervisor-only nodes when the graph has one, and says that nodes, edges,
+  start and terminal are fixed for the run; the candidate-patch prompt says
+  the same of edges, start, terminal, `entry` and `maxVisits`;
+- `TRIGGER_GUIDANCE` (`packages/supervisor/src/host.ts`) for
   `supervisor_node_settled`: the node's receipts are cited; read the node's
   evidence, then leave it with `reenter` along one of its out-edges; the
-  plugin's own records say which fits. Its safe default after three rejections
-  is a retryable stop naming the node;
-- admission facts for the tools: `canEnter`, the supervisor-only nodes with
-  visits left, and `exits`, the out-edges of an open side visit.
+  plugin's own records say which fits. `return` does not leave it. Its safe
+  default after three rejections is a retryable stop (`supervisor_inadmissible`)
+  whose blocker names the node (`supervisor-only node X settled and was not
+  left; …`);
+- admission facts for the tools: `canEnter`, the ids of the supervisor-only
+  nodes `enter` would admit now (recovery, visits left, no side visit open),
+  and `exits`, the out-edge targets of an open side visit. A graph without
+  supervisor-only nodes gets neither; `exits` is set only while a side visit
+  is open. `enter` is offered only when `canEnter` lists a node. Admission
+  stays the authority: a refused `enter` or leave comes back to the same turn
+  with the controller's precondition and detail (`supervisor-only node: arb
+  has used 2 of its 2 visits`, `undeclared edge: … out-edges of arb: arb →
+  fix, arb → review`), as every rejection does. Episode replay checks a
+  replayed `enter` against the recorded `canEnter` and a `reenter` against
+  the recorded `exits`.
 
 Recovery's core duty is unchanged. Entering a supervisor-only node is one more
 remedy the supervisor chooses on its own judgment; the controller never enters

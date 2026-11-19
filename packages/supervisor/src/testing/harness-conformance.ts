@@ -10,6 +10,7 @@
  */
 import {
   dispatch,
+  enter,
   observe,
   reenter,
   returnToNormal,
@@ -26,7 +27,7 @@ import { loadReplayFixtures, replayEpisodes } from "../episode-replay.js";
 import type { HarnessCapabilities, SupervisorHarness, SupervisorHost, SupervisorModelRef } from "../harness.js";
 import { isSupervisorProviderError } from "../provider-failure.js";
 import { MAX_INSPECT_ROUNDS } from "../reply.js";
-import type { ProbeResult, SupervisorInput, SupervisorInspection, SupervisorRejection } from "../types.js";
+import type { AdmissionFacts, ProbeResult, SupervisorInput, SupervisorInspection, SupervisorRejection } from "../types.js";
 import type { DecisionMode, ScriptedObservation, ScriptLog, ScriptStep } from "./scripted-harness.js";
 
 export interface ConformanceBuild {
@@ -80,6 +81,8 @@ interface Controls {
   /** Rejections `admission.check` returns before it admits, in order. */
   rejections?: SupervisorRejection[];
   findings?: CaseFinding[];
+  /** Topology facts the controller would give (`canEnter`, `exits`). */
+  facts?: Pick<AdmissionFacts, "canEnter" | "exits">;
 }
 
 /** A decide() input with the controller's admission, findings and inspection as fakes that record their use. */
@@ -111,7 +114,7 @@ function turn(episodeId: string, controls: Controls = {}, extra: Partial<Supervi
     view: view(),
     maxWaitMs: 60_000,
     admission: {
-      facts: { inRecovery: true, canQualify: true, qualifiedArtifactIds: [] },
+      facts: { inRecovery: true, canQualify: true, qualifiedArtifactIds: [], ...controls.facts },
       async check(decision) {
         order.push(`check:${decision.action.type}`);
         checked.push(decision);
@@ -139,6 +142,27 @@ const SECONDARY = (name: string): SupervisorModelRef => ({ provider: name === "p
 
 const REENTER = reenter({ stageId: "fix", reason: "the job failed on a flaky step", evidenceRefs: ["ev-1"] }, "retry the stage");
 const RETURN = returnToNormal({ summary: "let the graph retry" }, "hand back");
+
+/** Fix ⇄ Review with a supervisor-only Arbitrate that leaves to either (docs/design-graph-topology.md §5). */
+const TOPOLOGY: NonNullable<RunView["topology"]> = {
+  start: "fix",
+  terminal: ["review"],
+  edges: [
+    { from: "fix", to: "review" },
+    { from: "review", to: "fix" },
+    { from: "arb", to: "fix" },
+    { from: "arb", to: "review" },
+  ],
+  implicit: false,
+  path: [{ stageId: "fix", attempt: 1 }],
+};
+const NODES: NonNullable<SupervisorInput["nodes"]> = [
+  { id: "fix", name: "Fix", entry: "graph" },
+  { id: "review", name: "Review", entry: "graph" },
+  { id: "arb", name: "Arbitrate", entry: "supervisor", maxVisits: 2, visitsLeft: 2 },
+];
+const ENTER = { ...enter({ stageId: "arb", reason: "the reviewers disagree on the design", evidenceRefs: ["ev-1"] }, "arbitrate"), evidence: ["ev-1"] };
+const LEAVE = { ...reenter({ stageId: "review", reason: "the ruling holds; review again", evidenceRefs: ["ev-1"] }, "leave along arb → review"), evidence: ["ev-1"] };
 
 /** Why the remedies did not apply, from the SupervisorProviderError `p` rejects with. */
 async function unremedied(p: Promise<unknown>): Promise<string | undefined> {
@@ -189,6 +213,33 @@ export function harnessConformance(target: ConformanceTarget): void {
       } else {
         expect(b.log.prompts[0]!.text).toContain("by calling one GraphLoom tool");
       }
+      await host.close();
+    });
+
+    it("proposes enter into a supervisor-only node, and leaves it along an out-edge once it settled", async () => {
+      const b = build([{ decide: ENTER }, { decide: LEAVE }]);
+      const host = await b.start();
+      const entering = turn("ep-1", { facts: { canEnter: ["arb"] } }, { trigger: { code: "supervise", message: "a point the graph cannot settle" }, view: view({ topology: TOPOLOGY }), nodes: NODES });
+      const entered = await host.decide(entering.input);
+      expect(entered).toMatchObject({ action: { type: "enter", enter: { stageId: "arb", reason: "the reviewers disagree on the design" } } });
+      expect(checkedTypes(entering.checked)).toEqual(["enter"]);
+      expect(b.log.prompts[0]!.text).toContain("- supervisor-only node arb: out-edges arb → fix, arb → review; 2 of 2 visits left");
+      expect(b.log.prompts[0]!.text).toContain("enter admits now: arb");
+      const settled = turn(
+        "ep-2",
+        { facts: { canEnter: [], exits: ["fix", "review"] } },
+        {
+          trigger: { code: "supervisor_node_settled", message: "supervisor-only node arb settled in visit 2 (attempt 1): rcpt-3 (req-arb, validator node v1): ruled. Leave it with reenter along an out-edge (arb → fix, arb → review).", evidenceRefs: ["ev-1"] },
+          view: view({ current: { stageId: "arb", attempt: 1 }, topology: { ...TOPOLOGY, sideVisit: { stageId: "arb", attempt: 1 } } }),
+          nodes: NODES.map((n) => (n.id === "arb" ? { ...n, visitsLeft: 1 } : n)),
+        },
+      );
+      const left = await host.decide(settled.input);
+      expect(left).toMatchObject({ action: { type: "reenter", reenter: { stageId: "review" } } });
+      expect(checkedTypes(settled.checked)).toEqual(["reenter"]);
+      const prompt = b.log.prompts.at(-1)!.text;
+      expect(prompt).toContain("This episode's trigger is supervisor_node_settled");
+      expect(prompt).toContain("- open side visit: arb#1");
       await host.close();
     });
 
