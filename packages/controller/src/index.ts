@@ -84,7 +84,8 @@ export {
 export { harnessOfSessionRef } from "./agent-sessions.js";
 export type { AgentSessionRecord } from "./state.js";
 export { TIMEOUT_CONTINUATION_NOTE } from "./agent-sessions.js";
-export type { InstallRecord, InstallTransitionRecord, StateMigrationRecord } from "./state.js";
+export type { InstallRecord, InstallTransitionRecord, StateMigrationRecord, VisitEntry, VisitRecord } from "./state.js";
+export { livePath, nodeAccepted, nodeComplete, runTopology, topologyView, withPath } from "./traversal.js";
 export {
   CURRENT_STATE_FORMAT,
   STATE_FORMATS,

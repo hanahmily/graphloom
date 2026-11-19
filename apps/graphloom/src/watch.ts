@@ -155,13 +155,18 @@ function budgetText(b: ProgressSummary["budgets"][number]): string {
 function moveLines(events: ProgressEvent[]): string[] {
   const lines: string[] = [];
   for (const e of events) {
-    if (e.kind === "stage_entered") lines.push(`entered stage ${e.stage}, attempt ${e.attempt}`);
+    if (e.kind === "stage_entered") lines.push(`entered stage ${e.stage}, attempt ${e.attempt}${typeof e.entered === "string" ? `, by ${e.entered}` : ""}`);
+    else if (e.kind === "node_entered_by_supervisor" || e.kind === "node_settled") lines.push(e.detail);
     else if (e.kind === "receipt_accepted" && e.stageComplete === true) lines.push(`stage ${e.stage} accepted`);
     else if (e.kind === "episode_started" || e.kind === "episode_ended" || e.kind === "run_resumed") lines.push(e.detail);
     else if (e.kind === "quota_pause") lines.push(`quota pause started${typeof e.resetAt === "string" ? `, resets ${e.resetAt}` : ""}`);
   }
   return lines;
 }
+
+/** ` · path a#1 → b#2` (and an open side visit) for a graph that declares edges; nothing for a chain. */
+const pathText = (s: ProgressSummary): string =>
+  s.path !== undefined ? ` · path ${s.path.join(" → ")}${s.sideVisit !== undefined ? ` · side visit ${s.sideVisit}` : ""}` : "";
 
 const spender = (stage: string | undefined): string => (stage !== undefined ? `spent mostly in stage ${stage}` : "spent across stages");
 
@@ -295,7 +300,7 @@ export function evaluate(
 
   // Pending moves go out when their window closes, or at once before an attention report.
   if (snap.pending !== undefined && (raised.length > 0 || now - snap.pending.at >= MOVE_BATCH_MS)) {
-    report("move", [...snap.pending.lines.map((l) => `- ${l}`), `${summary.stagesComplete}/${summary.stages} stages complete`]);
+    report("move", [...snap.pending.lines.map((l) => `- ${l}`), `${summary.stagesComplete}/${summary.stages} stages complete${pathText(summary)}`]);
     delete snap.pending;
   }
   // A condition is never dropped to fit: the ones that do not fit go in a follow-up report.
@@ -306,7 +311,7 @@ export function evaluate(
     const from = runStats(state).span?.from;
     const started = from !== undefined ? Date.parse(from) : snap.startedAt;
     report("heartbeat", [
-      `elapsed ${formatDuration(Math.max(0, now - started))} · ${summary.stagesComplete}/${summary.stages} stages complete`,
+      `elapsed ${formatDuration(Math.max(0, now - started))} · ${summary.stagesComplete}/${summary.stages} stages complete${pathText(summary)}`,
       ...(spend !== undefined ? [`agentInvocations ${spend.used ?? "?"}${spend.granted !== undefined ? `/${spend.granted}` : ""}`] : []),
       ...(moved.length > 0 ? [`budgets moved: ${moved.map(budgetText).join(", ")}`] : []),
       `last evidence ${formatDuration(Math.max(0, now - snap.lastEvidenceAt))} ago`,

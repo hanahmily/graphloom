@@ -40,12 +40,16 @@ import {
   type RunReport,
   type UpgradeRequest,
   hydrateEvidence,
+  livePath,
+  nodeAccepted,
+  runTopology,
 } from "@graphloom/controller";
 import { createChildPluginHost } from "@graphloom/plugin-host";
 import { createScriptedSupervisor, SUPERVISOR_HARNESS_NAMES } from "@graphloom/supervisor";
 import { loadSupervisorConfig, parseSupervisorConfig, resolveSupervisorSelection, supervisorSelectionOutcome } from "./supervisor-config.js";
 import {
   checkContract,
+  isSupervisorOnly,
   PLUGIN_ROOT_ENV,
   readCallLog,
   readUnverifiedReads,
@@ -53,6 +57,7 @@ import {
   REHEARSAL_GITHUB_TOKEN_ENV,
   REHEARSAL_RUN_ID_PREFIX,
   rehearsalBranchScope,
+  successors,
   REHEARSAL_SYNTHESIZED_ENV,
   unsupportedSchemaKeywords,
   validateResultShape,
@@ -60,6 +65,7 @@ import {
   type EvidenceRecord,
   type GraphDefinition,
   type GraphRehearsal,
+  type GraphDecision,
   type JobSpec,
   type ReferenceSet,
   type RecordedCall,
@@ -321,6 +327,89 @@ export async function describeTask(taskPath: string): Promise<{ definition: Grap
   return { definition, ...(intake.task.config !== undefined ? { config: intake.task.config } : {}), environment };
 }
 
+/**
+ * L0 over the topology (docs/design-graph-topology.md §9): a scenario's
+ * scripted supervisor `enter` and `reenter` decisions against the nodes and
+ * the declared (or implicit) edges, `expect.path` against the topology, and a
+ * scenario that expects a supervisor-only node to settle scripts an `enter`.
+ *
+ * The decisions are read in order, as the scripted supervisor gives them: an
+ * `enter` opens a side visit, the next `reenter` leaves it along one of its
+ * out-edges, and an `activate_repair` closes it. What only a run knows (the
+ * live path a `reenter` names a node of) is the controller's to judge.
+ */
+export function scenarioTopologyProblems(definition: GraphDefinition, name: string, scenario: RehearsalScenario): string[] {
+  const problems: string[] = [];
+  const topology = runTopology(definition);
+  const byId = new Map(definition.stages.map((s) => [s.id, s]));
+  const supervisorOnly = definition.stages.filter((s) => isSupervisorOnly(s)).map((s) => s.id);
+  const label = `scenario ${name}`;
+  const decisions: GraphDecision[] = scenario.supervisor ?? [];
+  const entered = new Map<string, number>();
+  let open: string | undefined;
+  decisions.forEach((decision, i) => {
+    const at = `${label}: supervisor[${i}]`;
+    const action = decision.action;
+    if (action.type === "enter") {
+      const id = action.enter.stageId;
+      const node = byId.get(id);
+      if (node === undefined) problems.push(`${at} enters ${id}, which the graph does not declare`);
+      else if (!isSupervisorOnly(node)) {
+        problems.push(
+          `${at} enters ${id}, which is graph-entered; enter opens only a supervisor-only node (${supervisorOnly.length > 0 ? supervisorOnly.join(", ") : "the graph declares none"})`,
+        );
+      } else if (open !== undefined) problems.push(`${at} enters ${id} while the side visit of ${open} is open; leave it with reenter first`);
+      else {
+        const count = (entered.get(id) ?? 0) + 1;
+        entered.set(id, count);
+        if (node.maxVisits !== undefined && count > node.maxVisits) problems.push(`${at} enters ${id} more often than its maxVisits (${node.maxVisits}) allows`);
+        open = id;
+      }
+    } else if (action.type === "reenter") {
+      const id = action.reenter.stageId;
+      const node = byId.get(id);
+      if (node === undefined) problems.push(`${at} reenters ${id}, which the graph does not declare`);
+      else if (isSupervisorOnly(node)) problems.push(`${at} reenters ${id}, which is supervisor-only; the supervisor opens it with enter`);
+      else if (open !== undefined) {
+        const exits = successors(topology, open);
+        if (!exits.includes(id)) {
+          problems.push(`${at} leaves ${open} to ${id} along no declared edge; out-edges of ${open}: ${exits.map((to) => `${open} → ${to}`).join(", ") || "none"}`);
+        }
+        open = undefined;
+      }
+    } else if (action.type === "activate_repair") {
+      open = undefined;
+    }
+  });
+
+  const expectsSettle = (scenario.expect.recovery ?? []).includes("supervisor_node_settled");
+  if (expectsSettle && entered.size === 0) problems.push(`${label}: expects supervisor_node_settled but scripts no enter`);
+  for (const id of scenario.expect.receipts ?? []) {
+    if (supervisorOnly.includes(id) && !entered.has(id)) problems.push(`${label}: expects a receipt of supervisor-only node ${id} but scripts no enter of it`);
+  }
+
+  const path = scenario.expect.path;
+  if (path !== undefined) {
+    const where = `${label}: expect.path`;
+    if (path.length === 0) problems.push(`${where} is empty; a live path starts at ${topology.start}`);
+    for (const id of path) {
+      const node = byId.get(id);
+      if (node === undefined) problems.push(`${where} names ${id}, which the graph does not declare`);
+      else if (isSupervisorOnly(node)) problems.push(`${where} names ${id}, which is supervisor-only and never on the live path`);
+    }
+    if (new Set(path).size !== path.length) problems.push(`${where} names a node twice; the live path never does`);
+    if (path.length > 0 && path[0] !== topology.start) problems.push(`${where} starts at ${path[0]}, not at the start node ${topology.start}`);
+    for (let i = 1; i < path.length; i++) {
+      if (!successors(topology, path[i - 1]!).includes(path[i]!)) problems.push(`${where} steps ${path[i - 1]} → ${path[i]} along no declared edge`);
+    }
+    const last = path.at(-1);
+    if (scenario.expect.status === "succeeded" && last !== undefined && !topology.terminal.includes(last)) {
+      problems.push(`${where} ends at ${last}, which is not terminal (${topology.terminal.join(", ")}); a run succeeds only at a terminal node`);
+    }
+  }
+  return problems;
+}
+
 /** L0 (§3.1): the declared data agrees with itself and the environment's tools are present, for zero provider calls. */
 export async function check(taskPath: string): Promise<CheckReport> {
   const intake = await intakeTask(taskPath);
@@ -359,6 +448,9 @@ export async function check(taskPath: string): Promise<CheckReport> {
     problems.push(`rehearsal entry: ${err instanceof Error ? err.message : String(err)}`);
   }
   if (rehearsal !== undefined) {
+    for (const [scenarioName, scenario] of Object.entries(rehearsal.scenarios)) {
+      problems.push(...scenarioTopologyProblems(definition, scenarioName, scenario));
+    }
     // The contract-versus-parser check (B5, §3.1): a reply that validates
     // against its own declared schema is then classified exactly as a real
     // dispatch's evidence would be (classifyAgentResult, the same function
@@ -698,7 +790,9 @@ async function rehearsalHarness(
 export interface RehearsalStopReport {
   /** The stage `--stop-at` named, as the graph names it. */
   stoppedAt: string;
-  /** Whether the run stopped there: stopped, with that stage complete and the next not. */
+  /** The live path's node ids when it stopped, start first. */
+  path: string[];
+  /** Whether the run stopped there: stopped, with that node accepted on the live path and no node after it on the path accepted. */
   ok: boolean;
   runId: string;
   stateDir: string;
@@ -712,8 +806,9 @@ export interface RehearsalStopReport {
 /**
  * `rehearse --stop-at <stage>` (docs/design-release.md §6 step 8.7): a
  * rehearsal that keeps a durable run stopped once `<stage>` (its id or name)
- * is complete, for `resume --rehearsal` to finish, possibly on a later
- * installed version after `--upgrade`. Its scratch directory is always kept.
+ * is accepted on the live path (docs/design-graph-topology.md §9; a
+ * supervisor-only node is refused as a stop point), for `resume --rehearsal`
+ * to finish, possibly on a later installed version after `--upgrade`. Its scratch directory is always kept.
  */
 export async function rehearseStopAt(
   taskPath: string,
@@ -725,13 +820,16 @@ export async function rehearseStopAt(
   const run = await performRehearsal(taskPath, { ...rest, stopAt });
   const state = await loadRunState(run.stateDir!);
   const stage = state.definition.stages.find((s) => s.id === stopAt) ?? state.definition.stages.find((s) => s.name === stopAt)!;
-  const complete = (id: string) =>
-    state.definition.stages.find((s) => s.id === id)!.requirementIds.every((req) => state.receipts.some((r) => r.stageId === id && r.requirementId === req && r.valid));
-  const index = state.definition.stages.indexOf(stage);
-  const next = state.definition.stages[index + 1];
+  // Over the live path (docs/design-graph-topology.md §9): the node accepted
+  // on it, and no node after it on the path accepted. On a chain the path is
+  // a prefix of the list, so this is "complete, and the next stage not".
+  const path = livePath(state).map((v) => v.stageId);
+  const index = path.indexOf(stage.id);
+  const later = index < 0 ? [] : path.slice(index + 1);
   return {
     stoppedAt: stage.name,
-    ok: state.status === "stopped" && complete(stage.id) && (next === undefined || !complete(next.id)),
+    path,
+    ok: state.status === "stopped" && index >= 0 && nodeAccepted(state, stage.id) && !later.some((id) => nodeAccepted(state, id)),
     runId: state.runId,
     stateDir: state.stateDir,
     status: state.status,

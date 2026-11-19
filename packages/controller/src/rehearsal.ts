@@ -11,6 +11,7 @@
  */
 import type { EvidenceRecord, RehearsalScenario, Receipt } from "@graphloom/sdk";
 import type { DurableRunState } from "./state.js";
+import { livePath } from "./traversal.js";
 
 export type Boundary = "B1" | "B2" | "B3" | "B4" | "B5" | "B6" | "B7" | "B8" | "B9" | "B10";
 
@@ -26,6 +27,8 @@ export interface RehearsalConvergence {
   actual: {
     status: DurableRunState["status"];
     receipts: string[];
+    /** The live path's node ids, start first (docs/design-graph-topology.md §9). */
+    path: string[];
     stopReason?: string;
     recovery: string[];
   };
@@ -226,16 +229,21 @@ function checkB10(state: DurableRunState, scenario: RehearsalScenario): Boundary
 function checkConvergence(state: DurableRunState, scenario: RehearsalScenario): RehearsalConvergence {
   const expected = scenario.expect;
   const actualReceipts = validReceiptStages(state.receipts);
+  const actualPath = livePath(state).map((v) => v.stageId);
   const recovery = state.recoveryTrigger !== undefined ? [state.recoveryTrigger.code] : [];
   const actual = {
     status: state.status,
     receipts: actualReceipts,
+    path: actualPath,
     ...(state.stopReason !== undefined ? { stopReason: state.stopReason } : {}),
     recovery,
   };
   let met = statusMatches(expected.status, state.status);
   if (met && expected.receipts !== undefined) {
     met = expected.receipts.every((stageId) => actualReceipts.includes(stageId));
+  }
+  if (met && expected.path !== undefined) {
+    met = expected.path.length === actualPath.length && expected.path.every((id, i) => actualPath[i] === id);
   }
   if (met && expected.stopReason !== undefined) {
     met = state.stopReason === expected.stopReason;

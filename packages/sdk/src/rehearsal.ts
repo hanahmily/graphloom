@@ -81,6 +81,11 @@ export interface RehearsalCommandResult {
 export interface RehearsalExpectation {
   status: "succeeded" | "stopped";
   receipts?: string[];
+  /**
+   * The live path's node ids when the run ends, start first
+   * (docs/design-graph-topology.md §9): `["fix", "review"]`. Compared exactly.
+   */
+  path?: string[];
   /** Agent dispatches for one stage without a receipt, the ceiling this scenario means to stay under. */
   maxAgentDispatches?: number;
   stopReason?: string;

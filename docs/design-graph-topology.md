@@ -1,9 +1,10 @@
 # Graph topology: nodes, edges and supervisor-only nodes
 
-Status: designed, 2026-11-19; §13 pull requests 1 to 6 implemented (the SDK
+Status: designed, 2026-11-19; §13 pull requests 1 to 7 implemented (the SDK
 types, the traversal engine, supervisor-only nodes, resume, replay and repair
 over the engine, `CheckoutSpec.write`, the supervisor's `enter` tool, topology
-prompt and settle guidance). Extends the
+prompt and settle guidance, the operator surfaces, rehearsal and check).
+Extends the
 [TypeScript core design](design-typescript-core.md) §1, §4, §5, §6 and §8, and
 keeps the [run convergence](design-run-convergence.md) rules (identity-anchored
 receipts, `openAttempt`, correction escalation). The first graph to declare
@@ -612,42 +613,66 @@ whose settlement still holds, not an ending. Nothing is deleted.
 `graphloom inspect` (JSON) adds, for every run:
 
 - `topology: { start, terminal, edges, implicit }` (`implicit` is true for a
-  normalized chain) and, per stage, `entry`, `maxVisits`, `visits` (count) and
-  `onPath`;
-- `path`: the live path as `["fix#3", "review#3"]`;
-- `visits`: every visit with how it was entered, where from and how it ended;
+  normalized chain, whose `edges` are the chain's forward and back edges) and,
+  per stage, `entry` (`graph` or `supervisor`), `maxVisits` (where declared),
+  `visits` (count) and `onPath`;
+- `path`: the live path as `["fix#3", "review#3"]`, and `tail`, its last visit;
+- `sideVisit`: the open side visit, `"arbitrate#1"`, when there is one;
+- `visits`: every visit with how it was entered, where from, how it ended and,
+  for a side visit, its settlement;
 - `stages[].complete` keeps its meaning (every requirement has a valid receipt)
   and `stages[].accepted` adds "and on the live path and not open".
 
-Existing fields keep their meaning.
+Existing fields keep their meaning. A run saved before visits were recorded
+shows the path and visits its state derives (§11.3).
 
 `graphloom stats` keeps its per-node rows (they are per `stageId` already) and
-adds each node's visit count; a supervisor-only node is marked. Totals are
-unchanged.
+adds each node's visit count (`stages[].visits`) and marks a supervisor-only
+node (`supervisorOnly`, `arbitrate (supervisor-only)` in the table). The table
+shows the `visits` column for a graph that declares edges; a chain's table keeps
+its columns, the JSON has the count either way. Totals are unchanged.
 
 `graphloom watch` and the progress summary (`apps/graphloom/src/progress.ts`):
 
-- the summary line keeps `k/n stages complete` as computed today and, for a
-  graph that declares edges, adds the path: `path fix#3 → review#3`;
-- `stage_entered` carries how the node was entered; two moves are added,
-  `node_entered_by_supervisor` (an `enter`) and `node_settled` (a supervisor-only
-  node settled), both reported as moves.
+- the summary keeps `k/n stages complete` as computed today and, for a graph
+  that declares edges, adds the path and an open side visit: `path fix#3 →
+  review#3  side visit arbitrate#1` (`summary.path`, `summary.sideVisit`);
+- for a graph that declares edges, `stage_entered` carries how a new visit
+  entered the node (`entered: "reenter"`, `… attempt 3, by reenter`); a chain's
+  event is as before;
+- two moves are added, `node_entered_by_supervisor` (a new visit an `enter`
+  opened, naming the visit it was entered from; it stands in for that move's
+  `stage_entered`) and `node_settled` (a side visit's settlement, with its
+  receipts and each requirement's reason). The cursor's mark records the
+  highest visit reported and the settled side visits; visits only append, so
+  neither is reported twice. A cursor from before them reports no visit once
+  and records both.
 
 ## 9. Rehearsal and check
 
 - **L0 static check** (`graphloom check`): `describe()` already passes through
   `assertGraphDefinition`, so the definition rules of §3.2 are checked there. A
   scenario's scripted supervisor decisions that `enter` or `reenter` are checked
-  against the nodes and the (declared or implicit) edges, and a scenario that
-  expects a supervisor-only node to settle must script an `enter` for it.
+  against the nodes and the (declared or implicit) edges, read in order as the
+  scripted supervisor gives them: an `enter` names a supervisor-only node, not
+  while an earlier scripted `enter` is still open, and not more often than its
+  `maxVisits`; a `reenter` names a graph-entered node, and the first after an
+  `enter` leaves along one of that node's out-edges (an `activate_repair`
+  closes the side visit). Which live-path node a plain `reenter` may name is a
+  run's fact, judged by the controller. A scenario expects a supervisor-only
+  node to settle when its `expect.recovery` names `supervisor_node_settled`
+  (it must script some `enter`) or its `expect.receipts` names the node (it
+  must script an `enter` of that node). An `expect.path` must start at the
+  start node, step along edges, name no node twice and no supervisor-only
+  node, and, for an expected success, end at a terminal node.
 - **Scenarios** gain an optional `expect.path`, the live path's node ids when
-  the run ends (`["fix", "review"]`), checked by the evaluator from durable
-  state like `expect.receipts`.
+  the run ends (`["fix", "review"]`), checked exactly by the evaluator from
+  durable state like `expect.receipts`; `convergence.actual.path` reports it.
 - **`rehearse --stop-at <node>`** stops once the node is accepted on the live
   path; `ok` means the run stopped there with the node accepted and no later
-  node on the live path accepted (today it reads `stages[index + 1]`,
-  `apps/graphloom/src/rehearsal.ts:718-735`; on an implicit chain the two
-  agree). A supervisor-only node is refused as a stop point.
+  node on the live path accepted (it read `stages[index + 1]` before the
+  engine; on an implicit chain the two agree). The report adds the live path
+  (`path`). A supervisor-only node is refused as a stop point.
 - The rehearsal's scripted supervisor answers `supervisor_node_settled` from the
   scenario's `supervisor` decisions like any other trigger.
 
@@ -817,7 +842,10 @@ a path; `expect.path`.
 
 An end-to-end fixture in `@graphloom/testkit`, a three-node graph with a cycle
 and a supervisor-only node driven by scripted agents and a scripted supervisor,
-runs the whole flow through the real controller.
+runs the whole flow through the real controller (`createTopologyFixture`;
+`apps/graphloom/test/topology-e2e.test.ts` drives it through the built CLI with
+`check`, `rehearse --stop-at`, `resume --rehearsal`, `inspect`, `stats` and
+`wait --until progress`).
 
 ## 13. Implementation plan
 

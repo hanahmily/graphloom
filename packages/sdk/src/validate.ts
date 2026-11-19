@@ -246,6 +246,9 @@ function assertRehearsalExpectation(value: unknown, label: string): RehearsalExp
   if (!REHEARSAL_STATUSES.has(status)) throw new WireValidationError("malformed", `${label}.status must be one of ${[...REHEARSAL_STATUSES].join(", ")}`);
   if (obj["receipts"] !== undefined) requireArray(obj, "receipts");
   if (obj["recovery"] !== undefined) requireArray(obj, "recovery");
+  if (obj["path"] !== undefined && !requireArray(obj, "path").every((id) => typeof id === "string" && id !== "")) {
+    throw new WireValidationError("malformed", `${label}.path must list node ids`);
+  }
   return obj as unknown as RehearsalExpectation;
 }
 

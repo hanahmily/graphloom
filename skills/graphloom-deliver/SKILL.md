@@ -27,7 +27,8 @@ graphloom inspect <run>
 graphloom stats <run>
 ```
 
-Confirm `status` is `succeeded` and every stage is complete. The issue-fix
+Confirm `status` is `succeeded` and every node on the live path is accepted
+(`stages[].accepted` where `onPath`; a supervisor-only node is never required). The issue-fix
 graph delivers a local branch `fix/<issue>` in the target repository, with the
 pull request body as its delivery report. Find the branch, its base, and the
 report (the delivery evidence `inspect` lists).

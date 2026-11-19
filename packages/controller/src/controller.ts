@@ -29,7 +29,7 @@ import {
   type RepairDeps,
 } from "./repair-lifecycle.js";
 import { admitValidation, assertLiveWorkspaceMatchesEvidence, deliveryDrift, invalidateFromNode, liveCandidateDigest, validationContext } from "./admit.js";
-import { invalidateNodes, livePath, nodeChanges, reenterPath, tailOf, topologyChanges } from "./traversal.js";
+import { invalidateNodes, livePath, nodeAccepted, nodeChanges, nodeComplete, pathIndex, reenterPath, tailOf, topologyChanges, topologyView, withPath } from "./traversal.js";
 import type { AdmissionValidator } from "./admit.js";
 import { resolveBundleEntry } from "./bundle.js";
 import { createHostValidators } from "./host-validators.js";
@@ -89,6 +89,7 @@ import {
   type SupervisorSelectionRecord,
   type SupervisorTransitionRecord,
   type VersionRecord,
+  type VisitRecord,
 } from "./state.js";
 import { returnToGraphOnResume } from "./resume-recovery.js";
 import {
@@ -205,8 +206,9 @@ export interface RunRequest {
   install?: InstallRecord;
   /**
    * A test hook (`rehearse --stop-at`): stop the run as an operator stop once
-   * every requirement of this stage (by id or name) has a valid receipt,
-   * before the graph is asked for its next step.
+   * every requirement of this node (by id or name) has a valid receipt, the
+   * node is on the live path and not open, before the graph is asked for its
+   * next step (docs/design-graph-topology.md §9). A supervisor-only node is refused.
    */
   stopAfterStage?: string;
 }
@@ -321,12 +323,33 @@ export interface InspectReport {
   runId: string;
   status: RunStatus;
   mode: "normal" | "recovery";
+  /** The nodes in declared order (docs/design-graph-topology.md §8). */
   stages: Array<{
     id: string;
     name: string;
     requirementIds: string[];
+    /** Every requirement has a valid receipt. */
     complete: boolean;
+    /** Complete, on the live path, and not opened by a reentry since its last validation. */
+    accepted: boolean;
+    /** Who enters the node: the graph along edges, or only the supervisor. */
+    entry: "graph" | "supervisor";
+    /** The node's declared visit cap (supervisor-only nodes). */
+    maxVisits?: number;
+    /** How many times the run entered the node, carried visits included. */
+    visits: number;
+    onPath: boolean;
   }>;
+  /** The run's topology: the declared one, or the implicit chain of a definition without edges (`implicit`). */
+  topology: { start: string; terminal: string[]; edges: Array<{ from: string; to: string }>; implicit: boolean };
+  /** The live path from the start node, as `node#attempt`; the last is the tail. */
+  path: string[];
+  /** The live path's last visit, `node#attempt`. */
+  tail: string;
+  /** The open side visit of a supervisor-only node, `node#attempt`. */
+  sideVisit?: string;
+  /** Every visit of the run, oldest first: how each node was entered, from where, and how a visit that left the live path ended. */
+  visits: VisitRecord[];
   current: StageAttempt;
   /** Validation receipts; a stage is complete when each of its requirements has a valid one. */
   receipts: Array<{ stageId: string; requirementId: string; validatorId: string; valid: boolean; evidenceRefs: string[] }>;
@@ -450,7 +473,7 @@ export function createController(): Controller {
         }
         const definition = described.value;
         assertDefinitionMatchesPin(definition, intake);
-        const stopAfter = request.stopAfterStage !== undefined ? stageNamed(definition, request.stopAfterStage) : undefined;
+        const stopAfter = request.stopAfterStage !== undefined ? stopNodeNamed(definition, request.stopAfterStage) : undefined;
         // Controller defaults < the graph's declared defaultBudgets < task budgets.
         const budgeted = applyGraphDefaultBudgets(intake, definition);
         // §7.3: resolved once the plugin described its preference, before any run state; a refusal refuses the run.
@@ -514,7 +537,7 @@ export function createController(): Controller {
           validators,
           shouldStop: async () =>
             (await sessionStop(session)) ||
-            (stopAfter !== undefined && stageComplete(await loadRunState(session.stateDir), stopAfter)),
+            (stopAfter !== undefined && acceptedOnPath(await loadRunState(session.stateDir), stopAfter)),
           revisionBridge,
           ...(supervisor !== undefined ? { supervisor } : {}),
           ...(repair !== undefined ? { repair } : {}),
@@ -1464,18 +1487,25 @@ async function loadCurrentFormat(stateDir: string, formats: StateFormatRegistry)
   return loadRunState(stateDir);
 }
 
-/** A stage by id, or by name; refused when the definition has neither. */
-function stageNamed(definition: GraphDefinition, ref: string): GraphDefinition["stages"][number] {
+/**
+ * The node `--stop-at` names, by id or by name; refused when the definition
+ * has neither, and for a supervisor-only node, which is never on the live
+ * path (docs/design-graph-topology.md §9).
+ */
+function stopNodeNamed(definition: GraphDefinition, ref: string): GraphDefinition["stages"][number] {
   const stage = definition.stages.find((s) => s.id === ref) ?? definition.stages.find((s) => s.name === ref);
   if (stage === undefined) {
     throw new Error(`no stage ${JSON.stringify(ref)} in graph ${definition.graphId}; its stages are ${definition.stages.map((s) => s.name).join(", ")}`);
   }
+  if (stage.entry === "supervisor") {
+    throw new Error(`stage ${stage.id} is supervisor-only and never on the live path; stop at a graph-entered node`);
+  }
   return stage;
 }
 
-/** Every requirement of `stage` has a valid receipt. */
-function stageComplete(state: DurableRunState, stage: GraphDefinition["stages"][number]): boolean {
-  return stage.requirementIds.every((reqId) => state.receipts.some((r) => r.stageId === stage.id && r.requirementId === reqId && r.valid));
+/** `--stop-at`'s condition: the node is accepted on the live path. */
+function acceptedOnPath(state: DurableRunState, stage: GraphDefinition["stages"][number]): boolean {
+  return pathIndex(state, stage.id) >= 0 && nodeAccepted(state, stage.id);
 }
 
 /**
@@ -1515,7 +1545,12 @@ async function checkPluginUpdate(state: DurableRunState, request: ResumeRequest)
   }
 }
 
+const visitLabel = (v: StageAttempt): string => `${v.stageId}#${v.attempt}`;
+
 function toInspect(state: DurableRunState): InspectReport {
+  const topology = topologyView(state);
+  const visits = withPath(state).visits;
+  const onPath = new Set(topology.path.map((v) => v.stageId));
   const report: InspectReport = {
     runId: state.runId,
     status: state.status,
@@ -1524,12 +1559,18 @@ function toInspect(state: DurableRunState): InspectReport {
       id: s.id,
       name: s.name,
       requirementIds: [...s.requirementIds],
-      complete: s.requirementIds.every((reqId) =>
-        state.receipts.some(
-          (r) => r.stageId === s.id && r.requirementId === reqId && r.valid,
-        ),
-      ),
+      complete: nodeComplete(state, s.id),
+      accepted: onPath.has(s.id) && nodeAccepted(state, s.id),
+      entry: s.entry ?? "graph",
+      ...(s.maxVisits !== undefined ? { maxVisits: s.maxVisits } : {}),
+      visits: visits.filter((v) => v.stageId === s.id).length,
+      onPath: onPath.has(s.id),
     })),
+    topology: { start: topology.start, terminal: topology.terminal, edges: topology.edges, implicit: topology.implicit },
+    path: topology.path.map(visitLabel),
+    tail: visitLabel(topology.path.at(-1)!),
+    ...(topology.sideVisit !== undefined ? { sideVisit: visitLabel(topology.sideVisit) } : {}),
+    visits: structuredClone(visits),
     current: structuredClone(state.current),
     receipts: state.receipts.map((r) => ({
       stageId: r.stageId,

@@ -725,6 +725,8 @@ interface RehearsalScenario {
   expect: {
     status: "succeeded" | "stopped";
     receipts?: string[];
+    /** The live path's node ids when the run ends, compared exactly (graph topology §9). */
+    path?: string[];
     maxAgentDispatches?: number;
     stopReason?: string;
     /** Recovery triggers this scenario means to reach, in order; any other recovery entry is a finding. */
