@@ -509,7 +509,7 @@ existing checks along the live path instead of the list:
   `entered: "reenter"` with operation `resume`, and the visits it removed end
   `replaced by reentry of X`. Executor-repair activation invalidates the same
   set from the current node. A truncation that removes the visit a side visit
-  was entered from closes the side visit. Receipts of nodes off the live path
+  was entered from closes the side visit (`closed by reentry of X`) and clears its open attempt. Receipts of nodes off the live path
   are invalidated by identity, as everywhere; they do not move the run (today's
   list walk would set `current` to such a stage; the plugins that read
   `current` key only attempt bookkeeping on it, §2).
@@ -570,7 +570,7 @@ visit it came from, the generation, the operation (`intake`, `dispatch`,
 `validate`, `stop`, `reenter`, `enter`, `resume`, `activate_repair`,
 `migration`), and for a visit that left the live path or a side visit, how it
 ended (`replaced by reentry of X`, `routed to X`, `left without receipt`,
-`closed by activation`). A side visit also records its settlement (§5.2): the
+`closed by activation`, `closed by reentry of X`). A side visit also records its settlement (§5.2): the
 receipts that settled it and each requirement's reason; a settled visit is one
 whose settlement still holds, not an ending. Nothing is deleted.
 

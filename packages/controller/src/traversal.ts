@@ -294,9 +294,20 @@ export function reenterPath<T extends PathState>(state: T, stageId: StageId, att
   if (index < 0) throw new Error(`reentry of ${stageId}, which is not on the live path`);
   const removed = new Set(base.path.slice(index));
   const tail = base.path.at(-1)!;
-  const visits = base.visits.map((v) => (removed.has(v.seq) && v.ended === undefined ? { ...v, ended: `replaced by reentry of ${stageId}` } : v));
+  // §7.1: a truncation that removes the visit an open side visit was entered from closes the side visit.
+  const side = sideVisitOf(base);
+  const orphaned = side !== undefined && side.from !== undefined && removed.has(side.from) ? side : undefined;
+  const visits = base.visits.map((v) =>
+    v.ended !== undefined ? v : removed.has(v.seq) ? { ...v, ended: `replaced by reentry of ${stageId}` } : v.seq === orphaned?.seq ? { ...v, ended: `closed by reentry of ${stageId}` } : v,
+  );
   const visit: VisitRecord = { seq: nextSeq(visits), stageId, attempt, entered: "reenter", from: from ?? tail, generation: base.generation, operation };
-  return { ...base, path: [...base.path.slice(0, index), visit.seq], visits: [...visits, visit] };
+  const next = { ...base, path: [...base.path.slice(0, index), visit.seq], visits: [...visits, visit] };
+  if (orphaned === undefined) return next;
+  const { [orphaned.stageId]: _open, ...openAttempt } = next.openAttempt ?? {};
+  void _open;
+  const { sideVisit: _closed, ...rest } = { ...next, openAttempt };
+  void _closed;
+  return rest as T & { path: number[]; visits: VisitRecord[] };
 }
 
 /**

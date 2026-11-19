@@ -44,7 +44,7 @@ import { safeDefault } from "./inadmissible.js";
 import { classifyStop } from "./stop-class.js";
 import type { DurableRunState } from "./state.js";
 import { closeSideVisit, ENTER_IS_SUPERVISORS, enterNode, enterRefusal, leaveRefusal, SUPERVISOR_NODE_SETTLED, sideVisitRefusal } from "./supervisor-node.js";
-import { forwardRefusal, livePath, moveTo, restartAtStart, startPath, SUPERVISOR_ONLY_NODE, UNDECLARED_EDGE } from "./traversal.js";
+import { forwardRefusal, livePath, moveTo, reenterPath, restartAtStart, startPath, SUPERVISOR_ONLY_NODE, UNDECLARED_EDGE } from "./traversal.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -176,6 +176,17 @@ describe("while a side visit is open (§5.2)", () => {
     const fromFix = enterNode({ ...at(["fix"]), receipts: [] }, "arb", 1);
     expect(leaveRefusal(fromFix, "review")).toBeUndefined();
   });
+});
+
+it("closes an open side visit when a resume's truncation removes the visit it was entered from (§7.1), and only then", () => {
+  const fromReview = enterNode(at(["fix", "review"]), "arb", 1);
+  const sentBack = reenterPath(fromReview, "fix", 2, "resume");
+  expect(sentBack.sideVisit).toBeUndefined();
+  expect(sentBack.visits.find((v) => v.stageId === "arb")?.ended).toBe("closed by reentry of fix");
+  expect(sentBack.openAttempt?.["arb"]).toBeUndefined();
+  const fromFix = enterNode(at(["fix", "review"]), "arb", 1);
+  const kept = reenterPath({ ...fromFix, visits: fromFix.visits!.map((v) => (v.stageId === "arb" ? { ...v, from: 1 } : v)) }, "review", 2, "resume");
+  expect(kept.sideVisit).toBe(fromFix.sideVisit);
 });
 
 it("closes an open side visit on activation and keeps the supervisor-only node's receipts (§7.3)", () => {
