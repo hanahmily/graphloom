@@ -265,14 +265,21 @@ describe("the shipped plugins as implicit chains", () => {
   const shipped: Record<string, string[]> = {
     hello: ["write", "review"],
     release: ["bump", "changelog", "review"],
-    "issue-fix": ["fix", "review"],
     "pr-review": ["fetch", "report", "review", "draft", "publish"],
     "pr-design-review": ["fetch", "report", "questions", "answers", "round1", "publish"],
+  };
+  /** Plugins that declare their own topology (edges), so they are not implicit chains. */
+  const declared: Record<string, string[]> = {
+    "issue-fix": ["fix", "review", "arbitrate"],
   };
 
   it("covers every shipped graph plugin", () => {
     const plugins = readdirSync(PLUGINS).filter((p) => p !== "review-kit");
-    expect(plugins.sort()).toEqual(Object.keys(shipped).sort());
+    expect(plugins.sort()).toEqual([...Object.keys(shipped), ...Object.keys(declared)].sort());
+  });
+
+  it.each(Object.entries(declared))("%s lists its declared nodes", (plugin, ids) => {
+    expect(shippedStageIds(plugin)).toEqual(ids);
   });
 
   it.each(Object.entries(shipped))("%s keeps its stage order on the chain", (plugin, ids) => {
