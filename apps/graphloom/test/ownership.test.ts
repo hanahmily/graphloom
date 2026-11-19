@@ -15,6 +15,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { cp, mkdir, readdir, rename, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { CURRENT_STATE_FORMAT } from "@graphloom/controller";
 import { DISPATCHED_ENV, planDispatch, type SelfInstall } from "../src/ownership.js";
 import { makeSandbox, realCli, removeTree, repoRoot, tempBase, type Sandbox } from "./install-env.js";
 
@@ -120,7 +121,7 @@ describe("run ownership across installed versions (no Node on PATH)", () => {
     const movedB = json<Inspect>(sb.graphloom(["inspect", b.stateDir], quiet), "inspect B");
     expect(movedB.install).toEqual({ version: "0.2.0", root: path.join(sb.ghome, "versions", "0.2.0") });
     expect(movedB.installHistory).toEqual([expect.objectContaining({ from: { version: "0.1.0", root: v010 }, to: movedB.install })]);
-    expect(movedB.stateFormat).toBe(2);
+    expect(movedB.stateFormat).toBe(CURRENT_STATE_FORMAT);
     expect(movedB.executorTransitions.length).toBeGreaterThan(0);
     for (const t of movedB.executorTransitions) {
       expect(t.fromSource?.startsWith(v010)).toBe(true);

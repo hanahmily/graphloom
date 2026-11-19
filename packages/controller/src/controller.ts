@@ -6,7 +6,6 @@ import { access, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   emptyCaseFile,
-  PROTOCOL_VERSION,
   type BudgetRemaining,
   type GraphDefinition,
   type GraphPlugin,
@@ -29,12 +28,13 @@ import {
   type RecreateHostFn,
   type RepairDeps,
 } from "./repair-lifecycle.js";
-import { admitValidation, assertLiveWorkspaceMatchesEvidence, deliveryDrift, invalidateStageAndAfter, liveCandidateDigest, pinnedRequest } from "./admit.js";
+import { admitValidation, assertLiveWorkspaceMatchesEvidence, deliveryDrift, invalidateFromNode, liveCandidateDigest, pinnedRequest } from "./admit.js";
+import { invalidateNodes, livePath, reenterPath, tailOf } from "./traversal.js";
 import type { AdmissionValidator } from "./admit.js";
 import { resolveBundleEntry } from "./bundle.js";
 import { createHostValidators } from "./host-validators.js";
 import { applyApproval, approvalRefusal, type ApprovalRequest } from "./approvals.js";
-import { applyGraphDefaultBudgets, intakeTask, taskConfigValue, type IntakePin } from "./intake.js";
+import { applyGraphDefaultBudgets, intakeTask, sdkProtocolProblem, taskConfigValue, topologyLevelProblem, type IntakePin } from "./intake.js";
 import { assertSafeRunId } from "./ids.js";
 import { withDirectoryLock } from "./lock.js";
 import { deleteRun, type DeleteReport } from "./delete-run.js";
@@ -1087,59 +1087,88 @@ export function createController(): Controller {
   };
 }
 
-/** Accepted evidence survives restart only while its observed inputs still match. */
+/**
+ * Sends the run back to `stageId` on the live path, as a resume does when that
+ * node's accepted evidence no longer holds (docs/design-graph-topology.md
+ * §7.1): its receipts and those of every node after it are invalidated, the
+ * path is truncated there with a new visit of the node under its next attempt,
+ * and `current` becomes that visit. No correction is charged. Routing state
+ * that may assume the invalidated prerequisites is discarded.
+ */
+function sendBackTo(state: DurableRunState, stageId: string): DurableRunState {
+  const attempt = nextStageAttempt(state, stageId);
+  const { privateState: _privateState, ...next } = invalidateFromNode(state, stageId);
+  void _privateState;
+  return reenterPath(
+    { ...next, current: { stageId, attempt }, stageAttempts: { ...state.stageAttempts, [stageId]: attempt } },
+    stageId,
+    attempt,
+    "resume",
+  );
+}
+
+/** The live path's nodes in order, then the graph-entered nodes off it in `stages` order. */
+function resumeWalk(state: DurableRunState): { onPath: string[]; offPath: string[] } {
+  const onPath = livePath(state).map((v) => v.stageId);
+  const on = new Set(onPath);
+  return { onPath, offPath: state.definition.stages.filter((s) => s.entry !== "supervisor" && !on.has(s.id)).map((s) => s.id) };
+}
+
+/**
+ * Accepted evidence survives restart only while its observed inputs still
+ * match. The live path is walked in order: the first node whose accepted
+ * evidence drifted sends the run back to it (`sendBackTo`). A drifted receipt
+ * of a node off the path invalidates its node's receipts and does not move
+ * the run. Delivery drift reads the tail.
+ */
 async function reassessAcceptedWorkspace(state: DurableRunState): Promise<DurableRunState> {
   // The last Observe revision may belong to a later candidate; each receipt is
   // assessed against its own immutable evidence, not that global revision.
   const { workspaceRevision: _revision, ...snapshot } = state;
   void _revision;
-  for (const stage of state.definition.stages) {
-    for (const receipt of state.receipts.filter((r) => r.valid && r.stageId === stage.id)) {
+  const drifted = async (stageId: string): Promise<boolean> => {
+    for (const receipt of state.receipts.filter((r) => r.valid && r.stageId === stageId)) {
       const evidence = receipt.evidenceRefs.map((ref) => state.evidence.find((e) => e.ref === ref));
       const missing = evidence.some((e) => e === undefined);
       const drift = missing || await assertLiveWorkspaceMatchesEvidence(
         snapshot,
         evidence.filter((e) => e !== undefined),
       ).catch(() => "accepted evidence is no longer readable");
-      if (!drift) continue;
-
-      const invalidated = invalidateStageAndAfter(snapshot, stage.id, state.definition);
-      // Discard routing state that may assume the invalidated prerequisites.
-      // Resume's generation fence makes historical observations unavailable to
-      // validation while preserving them for audit.
-      const { privateState: _privateState, ...next } = invalidated;
-      void _privateState;
-      return {
-        ...next,
-        current: { stageId: stage.id, attempt: nextStageAttempt(state, stage.id) },
-        stageAttempts: { ...state.stageAttempts, [stage.id]: nextStageAttempt(state, stage.id) },
-      };
+      if (drift) return true;
     }
+    return false;
+  };
+  const { onPath, offPath } = resumeWalk(state);
+  for (const stageId of onPath) {
+    // Resume's generation fence makes historical observations unavailable to
+    // validation while preserving them for audit.
+    if (await drifted(stageId)) return sendBackTo(snapshot, stageId);
   }
-  const last = state.definition.stages.at(-1);
-  if (last !== undefined && (await deliveryDrift(snapshot)) !== undefined) {
-    const { privateState: _privateState, ...next } = invalidateStageAndAfter(snapshot, last.id, state.definition);
-    void _privateState;
-    return {
-      ...next,
-      current: { stageId: last.id, attempt: nextStageAttempt(state, last.id) },
-      stageAttempts: { ...state.stageAttempts, [last.id]: nextStageAttempt(state, last.id) },
-    };
+  let next: DurableRunState = state;
+  for (const stageId of offPath) {
+    if (await drifted(stageId)) next = invalidateNodes(next, new Set([stageId]));
   }
-  return state;
+  if ((await deliveryDrift(snapshot)) !== undefined) {
+    const { workspaceRevision: _stale, ...fenced } = next;
+    void _stale;
+    return sendBackTo(fenced, tailOf(fenced).stageId);
+  }
+  return next;
 }
 
 /**
- * Rechecks each accepted receipt with the current validators on the evidence it
- * was accepted on; the first one that no longer passes invalidates its stage and
- * every later one, and the run returns to that stage.
+ * Rechecks each accepted receipt with the current validators on the evidence
+ * it was accepted on, walking the live path in order: the first one that no
+ * longer passes sends the run back to its node (`sendBackTo`). A receipt of a
+ * node off the path that no longer passes invalidates its node's receipts
+ * without moving the run.
  */
 async function recheckReceipts(
   state: DurableRunState,
   validators: Record<string, AdmissionValidator>,
 ): Promise<{ state: DurableRunState; note: string }> {
-  for (const stage of state.definition.stages) {
-    for (const receipt of state.receipts.filter((r) => r.valid && r.stageId === stage.id)) {
+  const failing = async (stageId: string): Promise<string | undefined> => {
+    for (const receipt of state.receipts.filter((r) => r.valid && r.stageId === stageId)) {
       const requirement = state.definition.requirements.find((r) => r.id === receipt.requirementId);
       const validator = validators[receipt.validatorBinding.validatorId];
       const evidence = receipt.evidenceRefs.map((ref) => state.evidence.find((e) => e.ref === ref));
@@ -1161,21 +1190,24 @@ async function recheckReceipts(
         ).catch((err: unknown) => ({ status: "failed" as const, reason: err instanceof Error ? err.message : String(err) }));
         if (result.status !== "passed") failure = `${result.status}: ${result.reason}`;
       }
-      if (failure === undefined) continue;
-      // Discard routing state that may assume the invalidated prerequisites.
-      const { privateState: _privateState, ...next } = invalidateStageAndAfter(state, stage.id, state.definition);
-      void _privateState;
-      return {
-        state: {
-          ...next,
-          current: { stageId: stage.id, attempt: nextStageAttempt(state, stage.id) },
-          stageAttempts: { ...state.stageAttempts, [stage.id]: nextStageAttempt(state, stage.id) },
-        },
-        note: `; invalidated from ${stage.id}: ${receipt.requirementId} ${failure}`,
-      };
+      if (failure !== undefined) return `${receipt.requirementId} ${failure}`;
     }
+    return undefined;
+  };
+  const { onPath, offPath } = resumeWalk(state);
+  for (const stageId of onPath) {
+    const failure = await failing(stageId);
+    if (failure !== undefined) return { state: sendBackTo(state, stageId), note: `; invalidated from ${stageId}: ${failure}` };
   }
-  return { state, note: "" };
+  let next = state;
+  let note = "";
+  for (const stageId of offPath) {
+    const failure = await failing(stageId);
+    if (failure === undefined) continue;
+    next = invalidateNodes(next, new Set([stageId]));
+    note += `; invalidated ${stageId} off the live path: ${failure}`;
+  }
+  return { state: next, note };
 }
 
 function resolveValidators(
@@ -1454,9 +1486,8 @@ async function checkPluginUpdate(state: DurableRunState, request: ResumeRequest)
   try {
     const installed = await readInstalledBundlePin(state.intake.bundle);
     const manifest = JSON.parse(installed.manifestRaw) as { sdkProtocol?: unknown };
-    if (manifest.sdkProtocol !== PROTOCOL_VERSION) {
-      return `the installed bundle speaks sdkProtocol ${String(manifest.sdkProtocol)}, not ${PROTOCOL_VERSION}`;
-    }
+    const protocolProblem = sdkProtocolProblem(manifest.sdkProtocol);
+    if (protocolProblem !== undefined) return `the installed bundle: ${protocolProblem}`;
     const intake: IntakePin = { ...state.intake, bundle: installed };
     host = await openHost({
       intake,
@@ -1561,9 +1592,9 @@ function assertDefinitionMatchesPin(definition: GraphDefinition, intake: IntakeP
       `plugin version ${definition.version} != pinned bundle ${intake.bundle.version}`,
     );
   }
-  if (intake.bundle.sdkProtocol !== PROTOCOL_VERSION) {
-    throw new Error(`pinned sdkProtocol ${intake.bundle.sdkProtocol} != ${PROTOCOL_VERSION}`);
-  }
+  // A level-1 bundle that describes a topology is refused on every describe() check (§11.1).
+  const protocolProblem = sdkProtocolProblem(intake.bundle.sdkProtocol) ?? topologyLevelProblem(definition, intake.bundle.sdkProtocol);
+  if (protocolProblem !== undefined) throw new Error(protocolProblem);
   const manifestReqs = (
     JSON.parse(intake.bundle.manifestRaw) as {
       requirements?: Array<{ id: string; statement: string; evidenceSchema: string }>;
@@ -1632,7 +1663,7 @@ function toReport(state: DurableRunState, sourceDirtyAfter: string[]): RunReport
   return report;
 }
 
-export { applyGraphDefaultBudgets, CONTROLLER_DEFAULT_BUDGETS, defaultRecoveryReserve, intakeTask, parseTaskYaml, resolveRunBudgets, resolveUnderBase, taskConfigValue, IntakeError, MAX_TASK_CONFIG_BYTES } from "./intake.js";
+export { applyGraphDefaultBudgets, CONTROLLER_DEFAULT_BUDGETS, defaultRecoveryReserve, intakeTask, parseTaskYaml, resolveRunBudgets, resolveUnderBase, taskConfigValue, IntakeError, MAX_TASK_CONFIG_BYTES, SDK_PROTOCOLS, sdkProtocolProblem, TOPOLOGY_SDK_PROTOCOL } from "./intake.js";
 export { admitValidation, freshEvidence } from "./admit.js";
 export { toRunView, bumpGeneration, classifyAgentResult } from "./loop.js";
 export type { ContractOutcome } from "./loop.js";

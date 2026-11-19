@@ -63,7 +63,6 @@ import { recordExecutorFailure } from "./executor-failure.js";
 import {
   admitValidation,
   deliveryDrift,
-  earliestIncompleteStage,
   freshEvidence,
   invalidateFromStage,
   liveCandidateDigest,
@@ -90,6 +89,7 @@ import { createChildPort, reconcileChildOperations } from "./children.js";
 import { agentSessionViews, continuationRefusal, recordAgentSession, sessionForDispatch, wipeAgentSessions } from "./agent-sessions.js";
 import { citedEvidence, loadRunState, nextStageAttempt, type ProbeRecord, NO_PROGRESS_STOP_REASON, MAX_HOST_CHANGE_RECORDS, recordRemedy, type DurableRunState, saveRunState } from "./state.js";
 import { stopMarkOf } from "./stop-class.js";
+import { carryToTerminal, completionProblem, forwardRefusal, latestAttempt, moveTo, reenterPath, reentryRefusal, startPath, topologyView } from "./traversal.js";
 import { bumpGeneration } from "./generation.js";
 import { noteGraphDecision, noteSupervisorProposal, progressMark, settleCorrectionTrial, settleSupervisorCorrection } from "./escalation.js";
 import {
@@ -1501,6 +1501,7 @@ async function preflightEnvironment(state: DurableRunState, deps: LoopDeps): Pro
     const producer: EvidenceProducer = {
       operationId: outcome.operationId,
       stageId: job.stageId,
+      attempt: state.current.attempt,
       purpose: job.purpose,
       readOnly: true,
       kind: job.kind,
@@ -1590,6 +1591,7 @@ async function applyEnvironmentRepin(
   const producer: EvidenceProducer = {
     operationId: outcome.operationId,
     stageId: job.stageId,
+    attempt: state.current.attempt,
     purpose: job.purpose,
     readOnly: true,
     kind: job.kind,
@@ -1875,6 +1877,7 @@ export function toRunView(state: DurableRunState, options: { inline?: boolean } 
   if (state.openAttempt !== undefined && Object.keys(state.openAttempt).length > 0) {
     view.openAttempt = { ...state.openAttempt };
   }
+  view.topology = topologyView(state);
   if (state.lastResume !== undefined) {
     view.resume = { ...state.lastResume };
   }
@@ -2335,6 +2338,8 @@ async function applyDecision(
       const undeclared = stopForUndeclaredStage(state, stageId);
       if (undeclared) return undeclared;
       const result = await admitValidation(state, { ...action.validate, stageId }, deps.validators);
+      // A node no forward move reaches (§4.3): a plugin defect in normal mode, an in-turn rejection in recovery.
+      if (result.refusal !== undefined) return inadmissible(state, result.refusal);
       const settled = settleCorrectionTrial(result.state, stageId, {
         evaluated: result.evaluated,
         accepted: result.accepted,
@@ -2345,6 +2350,9 @@ async function applyDecision(
       const stageId = action.reenter.stageId || (state.mode === "recovery" ? state.current.stageId : action.reenter.stageId);
       const undeclared = stopForUndeclaredStage(state, stageId);
       if (undeclared) return undeclared;
+      // §4.4: the graph reenters along a declared edge from the tail; the supervisor any live-path node.
+      const offEdge = reentryRefusal(state, stageId);
+      if (offEdge !== undefined) return inadmissible(state, offEdge);
       if (state.budgets.corrections <= 0) {
         return {
           ...state,
@@ -2370,7 +2378,9 @@ async function applyDecision(
         // unchanged candidate's still-valid receipts.
         openAttempt: { ...withoutRev.openAttempt, [stageId]: true },
       };
-      return bumpGeneration(next, "reenter");
+      // The live path is truncated after the node's earlier visit, which a new one replaces (§4.4).
+      next = bumpGeneration(next, "reenter");
+      return reenterPath(next, stageId, next.current.attempt, "reenter");
     }
     case "supervise": {
       if (!deps.supervisor) {
@@ -2460,16 +2470,18 @@ async function applyDecision(
       return activated.state;
     }
     case "stop": {
-      const complete =
-        action.stop.reason === "complete" &&
-        state.definition.stages.every((s) =>
-          stageRequirementsMet(state, s.id, s.requirementIds),
-        );
+      // §4.6: a `complete` stop first carries the live path forward across
+      // accepted nodes to a terminal one; it succeeds when the path ends at a
+      // terminal node with every node on it accepted, and the tail's receipts
+      // still describe the workspace. A carry that does not end in success
+      // leaves the path as it was.
+      const carried = action.stop.reason === "complete" ? carryToTerminal(state) : state;
+      const complete = action.stop.reason === "complete" && completionProblem(carried) === undefined;
       // What admitted the stop is what the report shows: recorded evidence and probes of this episode.
       const named = [...(Array.isArray(action.stop.evidenceRefs) ? action.stop.evidenceRefs : []), ...(decision.evidence ?? [])];
       const probed = new Set(state.probeLog?.episodeId === state.recoveryEpisodeId ? state.probeLog?.ids : []);
       const cited = [...new Set([...citedEvidence(state, named), ...named.filter((ref) => probed.has(ref))])];
-      const drift = complete ? await deliveryDrift(state) : undefined;
+      const drift = complete ? await deliveryDrift(carried) : undefined;
       if (drift !== undefined) {
         return {
           ...state,
@@ -2480,7 +2492,7 @@ async function applyDecision(
         };
       }
       return {
-        ...state,
+        ...(complete ? carried : state),
         status: complete ? "succeeded" : "stopped",
         stopReason: action.stop.reason,
         blocker: action.stop.blocker,
@@ -2680,8 +2692,11 @@ async function prepareDispatch(
 
   const operationId = `op-${state.stateRevision}-${randomUUID().slice(0, 8)}`;
   const session = sessionForDispatch(state, job, operationId);
+  // A job for a node on the live path is supporting work; one for a node ahead moves the run forward (§4.3).
+  const moved = moveTo(state, job.stageId, state.current.attempt, "dispatch");
+  if ("refusal" in moved) return { state: inadmissible(state, moved.refusal) };
   const next: DurableRunState = {
-    ...state,
+    ...moved.state,
     outstanding: [
       ...state.outstanding,
       { operationId, kind: "dispatch", stageId: job.stageId },
@@ -2754,7 +2769,7 @@ function dispatchPreconditions(
   } catch (err) {
     return { precondition: "executor pin rejected", detail: err instanceof Error ? err.message : String(err) };
   }
-  const undeclared = undeclaredStage(state, job.stageId);
+  const undeclared = undeclaredStage(state, job.stageId) ?? forwardRefusal(state, job.stageId);
   if (undeclared !== undefined) return undeclared;
   const contractProblem = contractAdmissionRefusal(state, job);
   if (contractProblem !== undefined) return { precondition: "contract rejected", detail: contractProblem };
@@ -2820,10 +2835,14 @@ export function supervisorAdmissionRefusal(
         ? undefined
         : { precondition: "observe rejected", detail: `observe paths are relative to the run worktree; ${escaping} is not` };
     }
-    case "validate":
-      return undeclaredStage(state, action.validate.stageId || state.current.stageId);
-    case "reenter":
-      return undeclaredStage(state, action.reenter.stageId || state.current.stageId);
+    case "validate": {
+      const stageId = action.validate.stageId || state.current.stageId;
+      return undeclaredStage(state, stageId) ?? forwardRefusal(state, stageId);
+    }
+    case "reenter": {
+      const stageId = action.reenter.stageId || state.current.stageId;
+      return undeclaredStage(state, stageId) ?? reentryRefusal(state, stageId);
+    }
     case "return":
       return returnRefusal(state);
     case "qualify_repair":
@@ -3063,6 +3082,7 @@ function applyDispatchResult(
   const producer: EvidenceProducer = {
     operationId,
     stageId: job.stageId,
+    attempt: producerAttempt(next, job.stageId),
     purpose: job.purpose,
     readOnly: job.readOnly === true,
     kind: job.kind,
@@ -3271,6 +3291,11 @@ function clearOpenAttempt(state: DurableRunState, stageId: string): DurableRunSt
   const { [stageId]: _cleared, ...rest } = state.openAttempt;
   void _cleared;
   return { ...state, openAttempt: rest };
+}
+
+/** The attempt of its node a job ran under: `current`'s when the run is on it (it always is after a dispatch), else the node's latest (§7.4). */
+function producerAttempt(state: DurableRunState, stageId: string): number {
+  return state.current.stageId === stageId ? state.current.attempt : latestAttempt(state, stageId);
 }
 
 function undeclaredStage(state: DurableRunState, stageId: string): Inadmissible | undefined {
@@ -3523,10 +3548,11 @@ export function initialState(args: {
   const runId = assertSafeRunId(args.runId);
   const stateDir = path.join(args.stateRoot, runId);
   const artifactDir = path.join(stateDir, "artifacts");
-  const firstStage = args.definition.stages[0];
-  if (!firstStage) {
+  if (args.definition.stages.length === 0) {
     throw new Error("graph definition has no stages");
   }
+  // The run starts at the start node: the first stage of an implicit chain (§3.3).
+  const start = startPath(args.definition, 1);
   const activeVersion = `${args.intake.bundle.graphId}@${args.intake.bundle.version}`;
   return {
     runId,
@@ -3535,7 +3561,8 @@ export function initialState(args: {
     stateRevision: 0,
     activeVersion,
     mode: "normal",
-    current: { stageId: firstStage.id, attempt: 1 },
+    current: { stageId: start.visits[0]!.stageId, attempt: 1 },
+    ...start,
     receipts: [],
     evidence: [],
     outstanding: [],
@@ -3570,5 +3597,5 @@ export async function ensureArtifactDir(state: DurableRunState): Promise<void> {
 /** Exported for restart tests: bump generation so prior evidence is stale. */
 export { bumpGeneration } from "./generation.js";
 
-export { freshEvidence, earliestIncompleteStage };
+export { freshEvidence };
 export { candidateEvidence } from "./admit.js";

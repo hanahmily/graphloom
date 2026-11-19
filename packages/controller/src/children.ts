@@ -218,6 +218,7 @@ export function createChildPort(parent: ParentJob, deps: ChildPortDeps): Control
       const producer: EvidenceProducer = {
         operationId: record.childOperationId,
         stageId: record.stageId,
+        attempt: record.attempt,
         purpose: job.purpose,
         readOnly: job.readOnly === true,
         kind: job.kind,
