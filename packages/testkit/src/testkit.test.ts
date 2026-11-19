@@ -15,6 +15,7 @@ import {
   copyBundle,
   createScope,
   createTaskWorkspace,
+  createTopologyFixture,
   exampleBundle,
   HELLO_ACTIVE_VERSION,
   HELLO_VERSION,
@@ -23,6 +24,8 @@ import {
   slowBundle,
   startFakeProvider,
   trackUnderGraphloomDir,
+  TOPOLOGY_GRAPH,
+  TOPOLOGY_REQUEST,
   watchProcessWarnings,
   type ProviderFault,
 } from "./index.js";
@@ -88,6 +91,29 @@ describe("graph bundles", () => {
     }
     // The checkout's own bundle is untouched.
     expect(JSON.parse(await readFile(path.join(exampleBundle("hello"), "graphloom.manifest.json"), "utf8")).version).toBe(HELLO_VERSION);
+  });
+
+  it("writes the topology fixture: a level-2 bundle whose graph declares a cycle and a supervisor-only node, and its rehearsal", async () => {
+    const ws = await createTopologyFixture(scope);
+    expect(await readFile(ws.taskPath, "utf8")).toBe(`graph: ${TOPOLOGY_GRAPH}\nrepo: ./repo\nrequest: ${JSON.stringify(TOPOLOGY_REQUEST)}\n`);
+    const manifest = JSON.parse(await readFile(path.join(ws.bundlePath, "graphloom.manifest.json"), "utf8")) as { sdkProtocol: number; entryPoints: { createGraph: string; rehearsal: string } };
+    expect(manifest.sdkProtocol).toBe(2);
+    const host = await createChildPluginHost({ entryModule: path.join(ws.bundlePath, manifest.entryPoints.createGraph), activeVersion: `${TOPOLOGY_GRAPH}@1.0.0`, generation: 1, cwd: ws.bundlePath });
+    try {
+      const described = await host.describe(ctx("describe"));
+      expect(described.ok, JSON.stringify(described)).toBe(true);
+      const definition = described.ok ? described.value : undefined;
+      expect(definition?.stages.map((s) => [s.id, s.entry ?? "graph"])).toEqual([
+        ["build", "graph"],
+        ["check", "graph"],
+        ["arbitrate", "supervisor"],
+      ]);
+      expect(definition?.edges).toContainEqual({ from: "check", to: "build" });
+      const rehearsal = await host.rehearsal!(ctx("rehearsal"), path.join(ws.bundlePath, manifest.entryPoints.rehearsal));
+      expect(rehearsal.ok && rehearsal.value?.scenarios.happy?.expect).toMatchObject({ status: "succeeded", path: ["build", "check"] });
+    } finally {
+      await host.close();
+    }
   });
 
   it("makes a slow plugin child whose load failure reaches the host only after it exited", async () => {

@@ -5,15 +5,16 @@
  * `graphloom wait --until progress` (docs/design-agent-skills.md §2): returns
  * when something meaningful happened to a run, computed by diffing its durable
  * state against a mark of what was already reported. Every event derives from
- * generic controller fields (current stage, receipts, recovery mode and
+ * generic controller fields (current stage, the visits of the live path and of
+ * supervisor-only nodes, receipts, recovery mode and
  * supervisor episode records, remedies, budgets, status); nothing here knows a
  * plugin notion. The mark travels as an opaque cursor so the next wait
  * (`--since`) neither repeats nor loses an event.
  */
 import { stat } from "node:fs/promises";
 import path from "node:path";
-import { classifyStop, isClaimStale, loadRunState, readOwnerClaim, resolveStateDir, type DurableRunState } from "@graphloom/controller";
-import { runStats } from "./stats.js";
+import { classifyStop, isClaimStale, loadRunState, readOwnerClaim, resolveStateDir, topologyView, type DurableRunState } from "@graphloom/controller";
+import { recordedVisits, runStats } from "./stats.js";
 
 export const PROGRESS_EVENT_KINDS = [
   "stage_entered",
@@ -25,6 +26,8 @@ export const PROGRESS_EVENT_KINDS = [
   "budget_threshold",
   "run_resumed",
   "run_stopped",
+  "node_entered_by_supervisor",
+  "node_settled",
 ] as const;
 export type ProgressEventKind = (typeof PROGRESS_EVENT_KINDS)[number];
 
@@ -61,6 +64,10 @@ export interface ProgressMark {
   remAt: string;
   /** Budgets reported at or over the threshold. */
   hot: string[];
+  /** Highest visit sequence number reported; absent in cursors written before visits were reported. */
+  vs?: number;
+  /** Side visits whose settlement was reported. */
+  sv?: number[];
 }
 
 export interface ProgressSummary {
@@ -75,6 +82,10 @@ export interface ProgressSummary {
   budgets: Array<{ budget: string; used?: number; granted?: number; percent?: number }>;
   episodes: number;
   /** A quota hold, an ordinary executor retry backoff, or a reconciliation only the operator can settle. */
+  /** The live path, `node#attempt`, for a graph that declares edges (docs/design-graph-topology.md §8). */
+  path?: string[];
+  /** The open side visit of a supervisor-only node, `node#attempt`, for a graph that declares edges. */
+  sideVisit?: string;
   waiting?: { kind: "quota"; until: string } | { kind: "retry"; until: string } | { kind: "reconcile"; stage: string; reason: string };
 }
 
@@ -126,6 +137,7 @@ function hotBudgets(state: DurableRunState): string[] {
 /** The mark of everything `state` shows: what a wait without `--since` starts from. */
 export function markOf(state: DurableRunState): ProgressMark {
   const open = openEpisode(state);
+  const visits = recordedVisits(state);
   return {
     v: 1,
     run: state.runId,
@@ -137,6 +149,8 @@ export function markOf(state: DurableRunState): ProgressMark {
     epAt: newest((state.supervisorEpisodes ?? []).map((r) => r.at)),
     remAt: newest((state.remedies ?? []).map((r) => r.at)),
     hot: hotBudgets(state),
+    vs: Math.max(0, ...visits.map((v) => v.seq)),
+    sv: visits.filter((v) => v.settlement !== undefined).map((v) => v.seq),
   };
 }
 
@@ -166,7 +180,9 @@ export function decodeCursor(cursor: string): ProgressMark {
     typeof mark.epAt !== "string" ||
     typeof mark.remAt !== "string" ||
     !Array.isArray(mark.hot) ||
-    !mark.hot.every((h) => typeof h === "string")
+    !mark.hot.every((h) => typeof h === "string") ||
+    (mark.vs !== undefined && typeof mark.vs !== "number") ||
+    (mark.sv !== undefined && (!Array.isArray(mark.sv) || !mark.sv.every((s) => typeof s === "number")))
   ) {
     throw bad("malformed");
   }
@@ -217,8 +233,39 @@ export function progressSince(mark: ProgressMark, state: DurableRunState): { eve
     events.push({ kind: "run_resumed", detail: `the run is running again (generation ${state.generation})` });
   }
 
+  // Visits append and are never removed: those after the mark's are new. A
+  // cursor written before visits were reported names none, so it reports none.
+  const declared = state.definition?.edges !== undefined;
+  const visits = recordedVisits(state);
+  const newVisits = mark.vs === undefined ? [] : visits.filter((v) => v.seq > mark.vs!);
+  const label = (seq: number | undefined): string | undefined => {
+    const v = visits.find((x) => x.seq === seq);
+    return v !== undefined ? `${v.stageId}#${v.attempt}` : undefined;
+  };
   if (next.stage !== mark.stage && state.current !== undefined) {
-    events.push({ kind: "stage_entered", stage: state.current.stageId, attempt: state.current.attempt, detail: `stage ${state.current.stageId}, attempt ${state.current.attempt}` });
+    const { stageId, attempt } = state.current;
+    // How the node was entered, for a graph that declares edges; a supporting action for a node on the path is no new visit.
+    const visit = declared ? newVisits.filter((v) => v.stageId === stageId && v.attempt === attempt).at(-1) : undefined;
+    // An `enter` is its own move, below.
+    if (visit?.entered !== "enter") {
+      events.push({
+        kind: "stage_entered",
+        stage: stageId,
+        attempt,
+        ...(visit !== undefined ? { entered: visit.entered } : {}),
+        detail: `stage ${stageId}, attempt ${attempt}${visit !== undefined ? `, by ${visit.entered}` : ""}`,
+      });
+    }
+  }
+  for (const v of newVisits.filter((x) => x.entered === "enter")) {
+    const from = label(v.from);
+    events.push({
+      kind: "node_entered_by_supervisor",
+      stage: v.stageId,
+      attempt: v.attempt,
+      ...(from !== undefined ? { from } : {}),
+      detail: `supervisor entered node ${v.stageId}, attempt ${v.attempt}${from !== undefined ? `, from ${from}` : ""}`,
+    });
   }
 
   const accepted = (state.receipts ?? []).filter((r) => r.valid && receiptNumber(r.id) > mark.rs);
@@ -235,6 +282,19 @@ export function progressSince(mark: ProgressMark, state: DurableRunState): { eve
       stageComplete: complete,
       detail: `${stageId}: accepted ${requirements.join(", ")}${complete ? " (stage complete)" : ""}`,
     });
+  }
+  if (mark.sv !== undefined) {
+    const reported = new Set(mark.sv);
+    for (const v of visits.filter((x) => x.settlement !== undefined && !reported.has(x.seq))) {
+      const reasons = v.settlement!.reasons.map((r) => `${r.requirementId}: ${r.reason}`).join("; ");
+      events.push({
+        kind: "node_settled",
+        stage: v.stageId,
+        attempt: v.attempt,
+        receipts: [...v.settlement!.receipts],
+        detail: oneLine(`node ${v.stageId}, attempt ${v.attempt}, settled${reasons !== "" ? ` (${reasons})` : ""}`),
+      });
+    }
   }
   const seenInvalid = new Set(mark.inv);
   const newlyInvalid = (state.receipts ?? []).filter((r) => !r.valid && !seenInvalid.has(r.id));
@@ -288,6 +348,23 @@ export function progressSince(mark: ProgressMark, state: DurableRunState): { eve
   return { events, mark: next };
 }
 
+/**
+ * The live path and an open side visit, for a graph that declares edges
+ * (docs/design-graph-topology.md §8); a chain's summary stays as it was.
+ */
+export function topologySummary(state: DurableRunState): Pick<ProgressSummary, "path" | "sideVisit"> {
+  if (state.definition?.edges === undefined) return {};
+  try {
+    const view = topologyView(state);
+    return {
+      path: view.path.map((v) => `${v.stageId}#${v.attempt}`),
+      ...(view.sideVisit !== undefined ? { sideVisit: `${view.sideVisit.stageId}#${view.sideVisit.attempt}` } : {}),
+    };
+  } catch {
+    return {};
+  }
+}
+
 export function progressSummary(state: DurableRunState): ProgressSummary {
   const stages = state.definition?.stages ?? [];
   const valid = new Set((state.receipts ?? []).filter((r) => r.valid).map((r) => `${r.stageId}\u0000${r.requirementId}`));
@@ -317,6 +394,7 @@ export function progressSummary(state: DurableRunState): ProgressSummary {
     stages: stages.length,
     budgets: budgetLines(state),
     episodes: runStats(state).supervisor.episodes,
+    ...topologySummary(state),
     ...(waiting !== undefined ? { waiting } : {}),
   };
 }
@@ -410,6 +488,8 @@ export function formatProgress(r: ProgressResult): string {
   const budgets = s.budgets.filter((b) => b.percent !== undefined).map((b) => `${b.budget} ${b.percent}%`).join(", ");
   lines.push(
     `run ${r.runId}  ${s.status}${s.stopReason !== undefined ? ` (${s.stopReason})` : ""}  ${s.mode}  stage ${s.stage}#${s.attempt}  ${s.stagesComplete}/${s.stages} stages complete` +
+      (s.path !== undefined ? `  path ${s.path.join(" → ")}` : "") +
+      (s.sideVisit !== undefined ? `  side visit ${s.sideVisit}` : "") +
       (budgets !== "" ? `  budgets: ${budgets}` : "") +
       (s.waiting?.kind === "quota" ? `  waiting for a quota reset until ${s.waiting.until}` : s.waiting?.kind === "retry" ? `  retrying a failed job at ${s.waiting.until}` : s.waiting?.kind === "reconcile" ? `  reconciliation required (${s.waiting.stage})` : ""),
   );

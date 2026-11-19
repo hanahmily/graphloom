@@ -192,6 +192,31 @@ describe("evaluateRehearsal", () => {
     expect(report.blocker?.boundary).toBe("B2");
   });
 
+  it("checks expect.path against the live path's node ids, exactly (docs/design-graph-topology.md §9)", () => {
+    const twoNodes: GraphDefinition = {
+      ...definition,
+      stages: [
+        { id: "fix", name: "Fix", requirementIds: [] },
+        { id: "review", name: "Review", requirementIds: ["req"] },
+      ],
+      edges: [
+        { from: "fix", to: "review" },
+        { from: "review", to: "fix" },
+      ],
+    };
+    const visits = [
+      { seq: 1, stageId: "fix", attempt: 2, entered: "reenter" as const, generation: 2, operation: "reenter" },
+      { seq: 2, stageId: "review", attempt: 2, entered: "edge" as const, from: 1, generation: 2, operation: "dispatch" },
+    ];
+    const state = baseState({ status: "succeeded", definition: twoNodes, path: [1, 2], visits });
+    const at = (path: string[]) => evaluateRehearsal(state, { ...scenario, expect: { status: "succeeded", path } }, { B2: { status: "passed", notes: [] } }).convergence;
+    expect(at(["fix", "review"])).toMatchObject({ met: true, actual: { path: ["fix", "review"] } });
+    expect(at(["fix"]).met).toBe(false);
+    expect(at(["review", "fix"]).met).toBe(false);
+    // Without expect.path, the path is reported and not judged.
+    expect(evaluateRehearsal(state, scenario, {}).convergence.actual.path).toEqual(["fix", "review"]);
+  });
+
   it("always lists what no rehearsal checks, alongside what the caller substituted", () => {
     const state = baseState({ status: "succeeded" });
     const report = evaluateRehearsal(state, scenario, {}, { substituted: ["pi: rehearsal stand-in"] });

@@ -95,7 +95,7 @@ option that addresses it:
 | Transient failure, quota reset passed, fixed environment | `graphloom resume <run>` |
 | Partial effects reconciled by hand (you checked the worktree and external state, the user agreed) | `graphloom resume <run> --reconciled` |
 | A GraphLoom upgrade changed a built-in executor | `graphloom resume <run> --update-executors` |
-| The plugin was fixed (same graph id, stages, requirements, validator bindings) | `graphloom resume <run> --update-plugin` |
+| The plugin was fixed (same graph id, nodes and edges, requirements, validator bindings) | `graphloom resume <run> --update-plugin` |
 | The run belongs to an older installed GraphLoom and should move to this one | `graphloom resume <run> --upgrade` |
 | The pinned supervisor harness is unavailable or unsuitable | `graphloom resume <run> --supervisor <harness> --reason "<why>"` |
 

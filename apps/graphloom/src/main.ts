@@ -851,10 +851,18 @@ included), an unknown state format, a missing migrator, an unsettled repair, a
 run that is not stopped, a plugin protocol change without --update-plugin, and
 an executor re-pin --update-executors would refuse.
 
-Rehearse --stop-at <stage> keeps the rehearsal's run stopped once that stage is
-complete and prints how to continue it; resume <stateDir> --rehearsal continues
-a kept rehearsal run on its own stand-ins (with --upgrade, on this version).
-Both are hooks for the release upgrade matrix (docs/design-release.md §6).
+Rehearse --stop-at <stage> keeps the rehearsal's run stopped once that stage (a
+node, by id or name) is accepted on the live path and prints how to continue it;
+a supervisor-only node is refused. Resume <stateDir> --rehearsal continues a kept
+rehearsal run on its own stand-ins (with --upgrade, on this version). Both are
+hooks for the release upgrade matrix (docs/design-release.md §6).
+
+For a graph that declares nodes and edges (docs/design-graph-topology.md §8),
+inspect shows the topology, the live path and its tail, every visit and an open
+side visit of a supervisor-only node; stats adds each node's visits; wait
+--until progress and watch add the path and two moves, the supervisor entering
+a supervisor-only node (node_entered_by_supervisor) and that node settling
+(node_settled). A graph without edges is a chain and reads as before.
 
 Resume --reconciled acknowledges a job a harness usage limit cut off after possible
 effects whose agent session could not be continued. With a supervisor, a plain

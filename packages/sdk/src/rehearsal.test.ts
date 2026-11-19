@@ -3,6 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 import { assignmentNamesField, checkAssignmentFidelity, mutateAdversarially, synthesizeFromSchema } from "./rehearsal.js";
+import { assertGraphRehearsal } from "./validate.js";
 
 describe("synthesizeFromSchema", () => {
   it("builds the smallest object satisfying required properties, enums, and nested arrays/objects", () => {
@@ -127,5 +128,15 @@ describe("mutateAdversarially (§4.4)", () => {
   it("returns undefined when the reply has nothing to corrupt", () => {
     expect(mutateAdversarially({ fail: { kind: "no-result" } }, { schema })).toBeUndefined();
     expect(mutateAdversarially({ output: { verdict: "approved", summary: "ok" } }, { schema: { type: "object" } })).toBeUndefined();
+  });
+});
+
+describe("a scenario's expect.path (docs/design-graph-topology.md §9)", () => {
+  const rehearsal = (path: unknown) => ({ scenarios: { happy: { results: {}, expect: { status: "succeeded", path } } } });
+
+  it("is accepted as a list of node ids, and refused as anything else", () => {
+    expect(assertGraphRehearsal(rehearsal(["fix", "review"])).scenarios.happy?.expect.path).toEqual(["fix", "review"]);
+    expect(() => assertGraphRehearsal(rehearsal("fix"))).toThrow(/path/);
+    expect(() => assertGraphRehearsal(rehearsal(["fix", 3]))).toThrow(/expect\.path must list node ids/);
   });
 });
