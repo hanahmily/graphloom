@@ -109,7 +109,9 @@ describe("round 1 in the posted review (design-pr-review-split §4.5)", () => {
     const text = body(s);
     expect(text.split("\n")[0]).toBe("Changes requested: 2 open");
     expect(text).toContain("Design review at 0123456 (this head): 1 open item:");
-    expect(text).toContain("- Q1: [comment](https://github.com/apache/skywalking-banyandb/pull/7#discussion_r6001)");
+    // The item says what it is (its question, from the design head's qa.json) and its state on this head.
+    expect(text).toMatch(/\n- Q1 \(open on this head\): What is the purpose of [^\n]*\? The pull request's text does not state it\. \[comment\]\(https:\/\/github\.com\/apache\/skywalking-banyandb\/pull\/7#discussion_r6001\)\n/);
+    expect(text).not.toContain("not re-checked");
     // No round-1 item is a comment or a marked item of this review.
     expect(text).not.toContain(findingMarker("Q1"));
     expect(text).not.toContain(findingMarker("N1"));
@@ -117,7 +119,16 @@ describe("round 1 in the posted review (design-pr-review-split §4.5)", () => {
   });
 
   it("says the head it is as of when the design review reviewed another head", () => {
-    expect(body(simulate({ scenarioName: "design-review-earlier-head" }))).toContain(`Design review as of ${REHEARSAL_DESIGN_HEAD.slice(0, 7)}; run pr-design-review on this head to re-check them: 1 open item:`);
+    const s = simulate({ scenarioName: "design-review-earlier-head" });
+    const text = body(s);
+    const d7 = REHEARSAL_DESIGN_HEAD.slice(0, 7);
+    expect(text).toContain(`Design review as of ${d7}; run pr-design-review on this head to re-check them: 1 open item:\n- Q1 (open as of ${d7}, not re-checked on this head): What is the purpose of `);
+    // draft.md's maintainer list nests the items under the round-1 bullet: never "- - ".
+    const md = writtenDraftFiles(s.evidence).draftMd;
+    expect(md.state).toBe("read");
+    const draftMd = (md as { value: string }).value;
+    expect(draftMd).toContain(`\n- Design review as of ${d7}; run pr-design-review on this head to re-check them: 1 open item:\n  - Q1 (open as of ${d7}, not re-checked on this head): What is the purpose of `);
+    for (const t of [text, draftMd]) expect(t).not.toMatch(/^\s*- - /m);
   });
 
   it("counts the findings only when round 1 was not run", () => {
@@ -136,7 +147,8 @@ describe("round 1 in the posted review (design-pr-review-split §4.5)", () => {
     };
     const s = simulate({ scenario: scenarioWith("reuse-lead", (x) => Object.assign(x.commands!, { "ledger-read": { exitCode: 0, stdout: `present ${sha}\n` }, "ledger-prior": { exitCode: 0, stdout: priorChunkText(JSON.stringify(v1), 0) } })) });
     ended(s);
-    expect(body(s)).toContain("- Q2: [comment](https://github.com/apache/skywalking-banyandb/pull/7#discussion_r9000)");
+    // A v1 item with no posted text has no question to show: its id, state and link still are.
+    expect(body(s)).toContain("- Q2 (open as of aaaaaaa, not re-checked on this head) [comment](https://github.com/apache/skywalking-banyandb/pull/7#discussion_r9000)");
     const write = s.jobs.find((j) => j.instruction.startsWith("Advance the ledger's review section"))!;
     expect(writtenReviewLedger((write.input as { commands: Array<{ argv: string[] }> }).commands[0]!.argv)).toMatchObject({ old: sha, migration: { mode: "v1" } });
   });

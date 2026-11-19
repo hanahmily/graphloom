@@ -89,7 +89,7 @@ describe("the report scenario, end to end through the graph", () => {
 
   it("confines every agent untrusted-read: bwrap with the network on and the repository's agent configuration masked", () => {
     const agents = sim.jobs.filter((j) => j.kind === "agent");
-    expect(agents.map((j) => j.resultSchema)).toEqual(["change-report-v1", "claim-check-v1", "pr-code-review-v2", "pr-finding-verification-v1", "pr-code-review-v2", "pr-code-review-v2", "pr-finding-verification-v1", "pr-code-review-v2", "pr-code-review-v2"]);
+    expect(agents.map((j) => j.resultSchema)).toEqual(["change-report-v1", "claim-check-v1", "pr-code-review-v2", "pr-finding-verification-v2", "pr-code-review-v2", "pr-code-review-v2", "pr-finding-verification-v2", "pr-code-review-v2", "pr-code-review-v2"]);
     for (const job of agents) {
       expect(job.readOnly).toBe(true);
       expect(job.confinement).toEqual({

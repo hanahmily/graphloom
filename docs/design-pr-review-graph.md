@@ -1699,7 +1699,7 @@ background.
   sweep of up to `MAX_SWEEP_PASSES` (4) passes on the head. Hitting the cap
   is noted "unsaturated" for that aspect and does not fail the stage.
 - **Verification:** after each pass and its reproducing tests, one
-  `pr-finding-verification-v1` job (`verificationInstruction`,
+  `pr-finding-verification-v2` job (`verificationInstruction`,
   `src/findings.ts:615`, extended for tests) runs for the aspect's pending
   findings, on that aspect's verifier. It verifies every finding that would
   be posted (P0 to P2, and a P3 comment raising a lead drafted at P0,
@@ -1707,6 +1707,20 @@ background.
   is kept only when the verifier says `fixes`, its fix run passes
   ([§8.2](#82-reproducing-tests)), it is within `suggestions.maxLines`, and
   it lies inside the comment's range.
+- **Verifier corrections (since 1.1.2).** A verifier can confirm a finding whose
+  text gets a checkable fact wrong (#1485's F6 said "All 9 drop sites" where
+  there are six). Each verdict of `pr-finding-verification-v2` carries
+  `corrections: [{ original, corrected }]` (`[]` for none, at most 5, each side
+  at most 400 characters): `original` is a span of the finding's claim, and
+  `corrected` the text that replaces it. Plugin code checks every span of a
+  confirmation against the claim (whitespace runs match any whitespace, since
+  the verifier reads the claim with its newlines folded): a span that occurs
+  nowhere or more than once, or overlaps another, goes back to the verifier
+  with the other contract problems (two retries, then the supervisor). A
+  refuted or uncertain verdict's corrections are dropped. The draft applies
+  them ([§8.4](#84-draft)). A verifier's result recorded under
+  `pr-finding-verification-v1` (1.1.1 and earlier) still reads, as verdicts
+  with no correction.
 - **Cross-aspect dedupe.** Each aspect keeps its own findings and verdicts.
   After verification, confirmed findings of different aspects on the same
   path with overlapping lines are linked as one problem (`sameAs`) unless a
@@ -1730,7 +1744,7 @@ otherwise:
   clause declaring the one named `Test` function, or a vitest file declaring the named test, a safe
   repository-relative `dir`, an `oracle` of at most 600 characters, and no test on a non-behavioral
   comment. A problem goes back with the pass (the existing correction, two retries, then the supervisor).
-  `pr-finding-verification-v1` carries `test: { demonstrates, reason }`. The verifier reclassifies a
+  `pr-finding-verification-v2` carries `test: { demonstrates, reason }`. The verifier reclassifies a
   non-behavioral comment that claims wrong behavior, as before; it then has no test, so it is
   `unproven (no test)`.
 - **Runs.** After a pass and before its verifier, each behavioral finding with a test (P0 first, then by
@@ -1921,9 +1935,10 @@ all of these hold:
 4. The verifier `confirmed` the finding and judged that the test
    `demonstrates` the claimed bug.
 
-**The verifier's judgement.** `pr-finding-verification-v1` is
+**The verifier's judgement.** `pr-finding-verification-v2` is
 `finding-verification-v1` plus, for behavioral findings, `test: {
-demonstrates, reason }`. The verifier reads the test, the recorded run and
+demonstrates, reason }`, and the `corrections` of
+[§8.1](#81-review) (v1, before 1.1.2, had no `corrections`). The verifier reads the test, the recorded run and
 the cited code. `demonstrates` is false when the test checks an unrelated
 behavior, behavior that the PR text or documentation states as intended, or
 an expected value taken from the head's own output.
@@ -2005,16 +2020,46 @@ or copied elsewhere. `draft-composed` recomputes every priority `draft.json` hol
 fails one that differs, naming it; `review-published` does the same for the ledger
 patch it records.
 
+**A verifier's corrections reach the posted text (since 1.1.2).** A confirmed
+finding's text is its claim with its verifier's `corrections`
+([§8.1](#81-review)) applied: each span is replaced where it occurs once in the
+claim and overlaps no other, by plugin code, before the body is composed. That
+corrected text is the finding's text wherever it is shown: the draft entry's body
+(and so the posted comment and the ledger's item text), `draft.json`'s report part,
+`review.md` and the HTML report, whose appendices also say what the verifier
+corrected. A correction that cannot be applied in place (a record not checked as
+v2 checks it) is not dropped: the body says it on a line of its own, `Corrected by
+the verifier: "<original>" should read "<corrected>".` A disputed or dismissed
+finding's corrections are never applied. The aspect record keeps the reviewer's
+text and the verdict's corrections; `draft-composed` recomputes the corrected body
+and fails a `draft.json` whose entry ignores a correction, naming the finding and
+the span.
+
 **No Q&A item is drafted.** The body has a section "Design review (round 1)",
 from the `design` section Fetch read (its latest head with a recorded outcome):
 
 - with open items: `Design review at <sha7> (this head)`, or `Design review as of
   <sha7>; run pr-design-review on this head to re-check them`, then each open
-  item (`N1`, `Q<n>`) with a link to its comment, or `not posted` when that run
-  did not post it. Nothing of round 1 is posted again;
+  item (`N1`, `Q<n>`) on a line that says what it is and its state (since 1.1.2):
+  its id, its state (`open on this head`, or `open as of <sha7>, not re-checked on
+  this head` when the design head is another one), its question, and a link to
+  its comment, or `(not posted)` when that run did not post it:
+  `- Q4 (open as of 8382af2, not re-checked on this head): What aggregation
+  contract should operators use …? [comment](<link>)`. The question is the design
+  head's `qa.json` question when the run read that head's records (the
+  `design-review` context), else the first paragraph of the item's posted text
+  after its `**<label>** (<id>).` lead-in (N1's is "Is this change necessary?"),
+  on one line and clipped at 200 characters. No model writes it, and the counts
+  are unchanged. Nothing of round 1 is posted again;
 - with none: `Design review at <sha7>: no open item.`;
 - with no design head: "Round 1 (the design review) was not run on this pull
   request; the verdict counts this review's findings only."
+
+The section is a lead line and its items (`round1Section`), and each surface nests
+the items under the lead: `- <item>` in the posted body and in `draft.md`'s and
+`review.md`'s round-1 lines, indented two spaces under the lead's own bullet in
+`draft.md`'s "For the maintainer" list (1.1.1 rendered those as `- - Q4: …`), and a
+list in the HTML report.
 
 ### 8.5 Publish
 
@@ -2396,7 +2441,8 @@ func TestFlushReturnsWriteError(t *testing.T) {
 #### F8 · P1 · maintainability · untested feature · pkg/schema/ttl.go:14 · RIGHT
 Group retention by TTL (W1) has no test: no test of the pull request or the base exercises `ParseTTL` or its caller, and coverage executed none of their statements.
 ## Design review (round 1)
-Design review at 9ab2c41 (this head): Q2 (link).
+Design review at 9ab2c41 (this head): 1 open item:
+- Q2 (open on this head): What is the purpose of the retention change? [comment](…)
 ## Needs your judgment (move an entry into Comments to post it)
 ### F5 · security · unproven: test does not fail · banyand/liaison/grpc/route.go:91 · RIGHT
 A group name with `../` may escape the data root … The reviewer's test passed at the head (2 of 2 runs).
@@ -3043,6 +3089,17 @@ graph over time.
   has none; `draft-composed` and `review-published` check every stored priority
   against the recomputation; a section 1.0 or 1.1.0 wrote is read at the priority
   each finding's posted label carries ([§8.4](#84-draft), [§9.1](#91-where-the-ledger-lives)).
+- **1.1.2:** fixes from the first live run (apache/skywalking-banyandb#1485). Each
+  round-1 line says what the open item is and its state: its id, its question (the
+  design head's `qa.json`, else the item's posted text; clipped at 200 characters)
+  and `open on this head` or `open as of <sha7>, not re-checked on this head`; the
+  counts are unchanged. The round-1 items nest under their lead everywhere, so
+  `draft.md`'s maintainer list no longer renders `- - Q4: …`. The verification
+  contract is `pr-finding-verification-v2`, adding `corrections` (spans of the claim
+  and their replacements, checked against the claim and sent back when one does not
+  occur once); the draft applies a confirmed finding's corrections to its posted
+  text, or states one it cannot apply, and `draft-composed` fails a draft that
+  ignores one; v1 results still read, with none ([§8.1](#81-review), [§8.4](#84-draft)).
 
 **Where 1.0 differs from its design.** The split design (now
 [a pointer](design-pr-review-split.md)) planned a Checks stage when the profile has

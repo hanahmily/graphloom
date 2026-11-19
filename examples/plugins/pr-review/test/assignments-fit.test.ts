@@ -50,7 +50,7 @@ describe("every agent assignment fits the executor's bound on a pull request at 
   it("runs through Report, Review, Draft and Publish", () => {
     expect(sim.final.action.type === "stop" ? sim.final.action.stop : sim.final.action).toMatchObject({ reason: "complete" });
     const schemas = new Set(agentJobs(sim).map((j) => j.resultSchema));
-    for (const s of ["change-report-v1", "claim-check-v1", "diagrams-v1", "pr-code-review-v2", "pr-finding-verification-v1"]) expect(schemas.has(s)).toBe(true);
+    for (const s of ["change-report-v1", "claim-check-v1", "diagrams-v1", "pr-code-review-v2", "pr-finding-verification-v2"]) expect(schemas.has(s)).toBe(true);
     for (const s of ["necessity-v1", "questions-v1", "answers-v1", "answer-check-v1"]) expect(schemas.has(s)).toBe(false);
   });
 
