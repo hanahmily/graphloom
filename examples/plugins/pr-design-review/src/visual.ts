@@ -14,7 +14,8 @@ import type { DrawnDiagram } from "./kit/diagrams.js";
 import { clip, esc } from "./kit/escape.js";
 import { featureSvg } from "./kit/flowlayout.js";
 import type { HtmlInput, ReportDoc } from "./html.js";
-import { effectiveConclusion, NECESSITY_ID } from "./necessity.js";
+import { effectiveConclusion, NECESSITY_ID, necessityJson } from "./necessity.js";
+import { itemIds, OPEN_ITEMS_LABEL, openItems, type Round1Issue } from "./round1.js";
 import { hotspots, hotspotText, SCOPE_KINDS, SCOPE_TITLES, type ScopeKind } from "./kit/scope.js";
 import { squarify } from "./kit/treemap.js";
 
@@ -365,6 +366,15 @@ export interface QuestionTile {
   status: string;
 }
 
+/**
+ * Round 1's open items as the gate computes them (`openItems`, design §8) from the documents the pages are rendered from:
+ * `qa.json`, `necessity.json` and the changed files `report.json` lists. Undefined while the Q&A is pending or skipped.
+ */
+export function htmlOpenItems(i: HtmlInput): Round1Issue[] | undefined {
+  if (i.qa === undefined || i.qa.roundsSkipped !== undefined) return undefined;
+  return openItems({ qa: JSON.stringify(i.qa), necessity: i.necessity !== undefined ? necessityJson(i.necessity) : undefined, files: i.report.files.map((f) => ({ path: f.path, previousPath: f.previousPath ?? null })) });
+}
+
 /** Why a status has its colour, for the legend. */
 const STATUS_ORDER = ["answered", "partially answered", "needs author", "unanswered"] as const;
 
@@ -395,7 +405,11 @@ function questionsSection(i: HtmlInput, l: VisualLinks): string {
   ]);
   const count = (s: string): number => tiles.filter((q) => q.status === s).length;
   const legend = STATUS_ORDER.map((s) => `<span class="key"><span class="sw ${STATUS_TONE[s] ?? "grey"}"></span>${esc(s)} ${count(s)}</span>`).join("");
+  // The count the posted review's first line carries: round 1's open items, the gate's own, not a count of statuses.
+  const items = htmlOpenItems(i) ?? [];
+  const open = tile(items.length > 0 ? "bad" : "ok", `<strong>${items.length}</strong><small>${esc(OPEN_ITEMS_LABEL.toLowerCase())}</small>`, items.length === 0 ? "round 1 has no open item for the author" : `round 1's open items: ${items.map((x) => itemIds(x).join(" + ")).join(", ")}`, undefined, " stat");
   const body = [
+    `<div class="tiles">${open}</div>`,
     n1.length > 0 ? `<div class="grp"><span class="chip" title="the necessity question">N1</span><div class="tiles">${n1.map(one).join("")}</div></div>` : "",
     ...groups.map((g) => `<div class="grp"><span class="chip" title="${esc(clip(itemText.get(g.item) ?? "other questions", 200))}">${esc(g.item === "" ? "other" : g.item)}</span><div class="tiles">${g.tiles.map(one).join("")}</div></div>`),
   ].join("");

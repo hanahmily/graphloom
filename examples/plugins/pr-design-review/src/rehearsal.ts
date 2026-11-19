@@ -1034,6 +1034,15 @@ const CLEAN_DESIGN: QaSpec = {
 const ADDED_OTHER = (question: { item: string; text: string }): QaSpec => ({ ...CLEAN_DESIGN, added: [{ key: "", type: "other", item: question.item, symbol: "", text: question.text }] });
 
 /**
+ * The `COMPLEX_PULL` change with design-level questions the questioner adds, each answered as `answer` says: with two `other`
+ * questions partially answered it is the shape of apache/skywalking-banyandb#1485, whose briefing must count round 1's two open items.
+ */
+export function addedOtherRehearsal(config: unknown, added: ReadonlyArray<{ item: string; text: string }>, answer?: QaSpec["answer"]): RehearsalScenario {
+  const profile = parseProfile(config, "pr-design-review");
+  return build(profile, COMPLEX_PULL, { toolId: "static-go-1", qa: { ...CLEAN_DESIGN, added: added.map((q) => ({ key: "", type: "other", item: q.item, symbol: "", text: q.text })), ...(answer !== undefined ? { answer } : {}) } }).scenario;
+}
+
+/**
  * The `incremental-round1` scenario (design-pr-review-split §3.5): the `LIMIT_PULL` change with a clean Q&A. A test runs it on an
  * earlier head's ledger with a delta: every question but N1 is asked again, and N1 is carried when nothing it cites changed.
  */
