@@ -1440,8 +1440,16 @@ usual, and `graphloom upgrade` clears the skip.
     - It runs on the same stand-ins and scripted supervisor. It rewrites
       the stand-in launchers for this process's Node, so a moved run runs
       the new version's Node.
+    - The scripted supervisor answers from the scenario's next unconsumed
+      decision, not from its first: one decision for each `decide()` call
+      the run's `supervisorEpisodes` record, except a call that found the
+      script exhausted (`scriptedDecisionsConsumed`,
+      `packages/supervisor/src/types.ts`). With the records at their cap
+      (`MAX_EPISODE_RECORDS`) the position cannot be derived and the resume
+      refuses.
     - It reads no runner config. It combines with `--upgrade`,
-      `--update-plugin`, `--update-executors`, and `--reconciled`.
+      `--update-plugin`, `--update-executors`, `--reconciled`, and
+      `--approve`/`--decline` (core design §17).
 - **Gate fingerprint.** It adds `productVersion` (the version from
   `graphloom version`) and `executors`, the `digestExecutorSource` of each
   built-in executor package by name (`builtinExecutorDigests`,

@@ -207,15 +207,30 @@ describe.skipIf(GO === undefined)("graphloom rehearse (L1) of issue-fix's Arbitr
     const env = await ready();
     let stateDir: string | undefined;
     const report = await rehearse(env.taskPath, { commands: "run", scenario: "arbitrate-operator", keep: true, onRunCreated: ({ stateDir: dir }: { stateDir: string }) => void (stateDir = dir) } as Parameters<typeof rehearse>[1]);
-    // The run waits inside Arbitrate as the scenario expects. B5 reports the review passes and the arbiter's result
-    // as results without a receipt yet: the run stopped before Review and Arbitrate could validate, waiting on the operator.
+    // The run waits inside Arbitrate as the scenario expects: a final stop for the declared design-ruling approval.
+    // B5 lists the review passes and the arbiter's result as pending on the operator, not stuck, so the verdict is ready.
     expect(report.convergence.met, JSON.stringify(report.convergence)).toBe(true);
     expect(report.convergence.actual).toMatchObject({ status: "stopped", stopReason: "design ruling needs the operator", path: ["fix", "review"] });
-    expect(report.boundaries.B5.notes).toEqual(["stage review: a contract-valid result never minted a receipt", "stage arbitrate: a contract-valid result never minted a receipt"]);
+    expect(report.boundaries.B5).toEqual({
+      status: "passed",
+      notes: [
+        "stage review: a contract-valid result awaits the operator's approval design-ruling (the run waits in arbitrate)",
+        "stage arbitrate: a contract-valid result awaits the operator's approval design-ruling (the run waits in arbitrate)",
+      ],
+    });
+    expect(report.verdict, JSON.stringify({ blocker: report.blocker, convergence: report.convergence })).toBe("ready");
     expect(stateDir).toBeDefined();
+    const episodesOf = async () =>
+      ((JSON.parse(await readFile(path.join(stateDir!, "state.json"), "utf8")) as { supervisorEpisodes?: Array<{ proposal?: { action: { type: string } }; admission: { outcome: string } }> }).supervisorEpisodes ?? []);
+    const before = await episodesOf();
     const resumed = await resumeRehearsal(stateDir!, { approval: { approvalId: "design-ruling", decision: "approve", inputs: { finding: "F1", ruling: "implementation-stands", note: "The thread asks only that a running backup be reported as running." }, operator: "maintainer" } });
     expect(resumed.status, JSON.stringify(resumed)).toBe("succeeded");
     expect(resumed.receipts.some((r) => r.stageId === "arbitrate" && r.requirementId === "design-ruling")).toBe(true);
+    // A clean resume: the scripted supervisor continued at its leave, never replaying its enter, and nothing was rejected.
+    expect(before.map((r) => r.proposal?.action.type)).toEqual(["enter", "return"]);
+    const after = await episodesOf();
+    expect(after.slice(before.length).map((r) => r.proposal?.action.type)).toEqual(["reenter", "return"]);
+    expect(after.map((r) => r.admission.outcome)).not.toContain("inadmissible");
     // The operator's ruling reaches the pull request body the delivery wrote.
     const delivered = resumed.evidence.find((e) => (e.payload as { command?: { id?: string } } | undefined)?.command?.id === "deliver");
     const body = (delivered?.payload as { command: { report?: { text: string } } } | undefined)?.command.report?.text ?? "";

@@ -2157,11 +2157,14 @@ Rehearsal scenarios, with the scripted supervisor's `enter` and `reenter`:
   `implementation-stands`, the supervisor leaves to Review as a forward move
   (no correction spent), the pass is clean; expect `succeeded`.
 - `arbitrate-operator`: the arbiter returns `undecidable`; expect `stopped` with
-  reason `design ruling needs the operator`. Its convergence is met, but the
-  rehearsal's B5 boundary reports Review's passes and the arbiter's result as
-  results without a receipt, since the run waits before either node
-  validates, so its verdict is `not-ready`. The CLI test then resumes the kept
-  run with `--approve design-ruling` and the run succeeds.
+  reason `design ruling needs the operator`. The stop is final and waits for the
+  declared `design-ruling` approval inside Arbitrate, so the rehearsal's B5
+  boundary lists Review's passes and the arbiter's result as pending on the
+  operator rather than as results that never minted a receipt
+  ([rehearsal §4.7](design-graph-rehearsal.md#47-evaluation-and-verdict)), and the
+  verdict is `ready`. The CLI test then resumes the kept run with
+  `--approve design-ruling`; the scripted supervisor continues at its leave to
+  Review (it does not replay its `enter`), and the run succeeds.
 
 As implemented, `arbitrate-fixer` and `arbitrate-fixer-stands` start from a
 first round that confirms two findings, which the graph sends back to Fix

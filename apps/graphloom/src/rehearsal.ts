@@ -45,7 +45,7 @@ import {
   runTopology,
 } from "@graphloom/controller";
 import { createChildPluginHost } from "@graphloom/plugin-host";
-import { createScriptedSupervisor, SUPERVISOR_HARNESS_NAMES } from "@graphloom/supervisor";
+import { createScriptedSupervisor, scriptedDecisionsConsumed, SUPERVISOR_HARNESS_NAMES, type SupervisorEpisodeRecord } from "@graphloom/supervisor";
 import { loadSupervisorConfig, parseSupervisorConfig, resolveSupervisorSelection, supervisorSelectionOutcome } from "./supervisor-config.js";
 import {
   checkContract,
@@ -843,7 +843,9 @@ export async function rehearseStopAt(
  * `resume <run> --rehearsal`: continue a rehearsal's kept run on the same
  * stand-ins and scripted supervisor it started with, from its scratch
  * directory. The run must be a rehearsal's (`rehearsal-` id, under
- * `<scratch>/state/`). Returns the run's report; with `upgrade`, the run first
+ * `<scratch>/state/`). The scripted supervisor answers from its next
+ * unconsumed decision, counted from the run's recorded episodes, so a resumed
+ * rehearsal is deterministic. Returns the run's report; with `upgrade`, the run first
  * moves to this GraphLoom (`resume --upgrade`).
  */
 export async function resumeRehearsal(
@@ -851,7 +853,7 @@ export async function resumeRehearsal(
   options: { stateRoot?: string; upgrade?: UpgradeRequest; updatePlugin?: boolean; updateExecutors?: boolean; reconciled?: boolean; approval?: ApprovalRequest } = {},
 ): Promise<RunReport> {
   const stateDir = await resolveStateDir(runRef, options.stateRoot);
-  const raw = JSON.parse(await readFile(path.join(stateDir, "state.json"), "utf8")) as { runId?: string; definition?: GraphDefinition };
+  const raw = JSON.parse(await readFile(path.join(stateDir, "state.json"), "utf8")) as { runId?: string; definition?: GraphDefinition; supervisorEpisodes?: SupervisorEpisodeRecord[] };
   const rehearsalRoot = path.dirname(path.dirname(stateDir));
   const scenarioPath = path.join(rehearsalRoot, "scenario.json");
   if (raw.runId === undefined || !raw.runId.startsWith(REHEARSAL_RUN_ID_PREFIX) || path.basename(path.dirname(stateDir)) !== "state" || !existsSync(scenarioPath)) {
@@ -859,13 +861,16 @@ export async function resumeRehearsal(
   }
   const scenario = JSON.parse(await readFile(scenarioPath, "utf8")) as RehearsalScenario;
   const saved = JSON.parse(await readFile(path.join(rehearsalRoot, REHEARSAL_OPTIONS_FILE), "utf8").catch(() => "{}")) as RehearsalHarnessOptions;
+  // The script continues where the run left it: one decision per decide() call the run recorded, never from the first again.
+  const start = scriptedDecisionsConsumed(raw.supervisorEpisodes);
+  const scripted = async () => createScriptedSupervisor({ decisions: scenario.supervisor ?? [], start });
   const harness = await rehearsalHarness(rehearsalRoot, raw.definition !== undefined ? environmentCommandsOf(raw.definition) : new Map(), saved);
   try {
     return await createController().resume({
       runRef: stateDir,
       runner: harness.runner,
-      supervisorFactory: async () => createScriptedSupervisor({ decisions: scenario.supervisor ?? [] }),
-      restoreSupervisor: async () => createScriptedSupervisor({ decisions: scenario.supervisor ?? [] }),
+      supervisorFactory: scripted,
+      restoreSupervisor: scripted,
       ...(options.upgrade !== undefined ? { upgrade: options.upgrade, updateExecutors: true } : {}),
       ...(options.updateExecutors === true ? { updateExecutors: true } : {}),
       ...(options.updatePlugin === true ? { updatePlugin: true } : {}),

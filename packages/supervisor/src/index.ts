@@ -163,6 +163,8 @@ export {
 
 export {
   createScriptedSupervisor,
+  scriptedDecisionsConsumed,
+  SCRIPTED_SUPERVISOR_EXHAUSTED,
   isModelSwitchRequest,
   type AdmissionCheck,
   type AdmissionFacts,

@@ -16,6 +16,8 @@ import {
   createScope,
   createTaskWorkspace,
   createTopologyFixture,
+  TOPOLOGY_APPROVAL,
+  TOPOLOGY_APPROVAL_STOP,
   exampleBundle,
   HELLO_ACTIVE_VERSION,
   HELLO_VERSION,
@@ -111,6 +113,9 @@ describe("graph bundles", () => {
       expect(definition?.edges).toContainEqual({ from: "check", to: "build" });
       const rehearsal = await host.rehearsal!(ctx("rehearsal"), path.join(ws.bundlePath, manifest.entryPoints.rehearsal));
       expect(rehearsal.ok && rehearsal.value?.scenarios.happy?.expect).toMatchObject({ status: "succeeded", path: ["build", "check"] });
+      // The operator scenario waits inside Arbitrate for the approval the graph declares there.
+      expect(definition?.approvals).toEqual([expect.objectContaining({ id: TOPOLOGY_APPROVAL, stageId: "arbitrate" })]);
+      expect(rehearsal.ok && rehearsal.value?.scenarios.operator?.expect).toMatchObject({ status: "stopped", stopReason: TOPOLOGY_APPROVAL_STOP, path: ["build", "check"] });
     } finally {
       await host.close();
     }

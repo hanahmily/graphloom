@@ -57,6 +57,8 @@ export {
 } from "./issue-fix.js";
 export { prependPath } from "./env.js";
 export {
+  TOPOLOGY_APPROVAL,
+  TOPOLOGY_APPROVAL_STOP,
   TOPOLOGY_ARTIFACT,
   TOPOLOGY_GRAPH,
   TOPOLOGY_REQUEST,
