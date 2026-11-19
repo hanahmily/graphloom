@@ -7,6 +7,14 @@ of this design, including durable execution, Pi recovery, executor extensions,
 and qualified repair. Live-provider qualification and full local-release
 verification remain pending.
 [Agent-host mode](design-agent-host.md) is newly designed, not implemented.
+[Graph topology](design-graph-topology.md) is designed, not implemented: one
+traversal engine, in which a graph declares nodes (its stages) and directed
+edges, admission follows the path the run took, and a node may be
+supervisor-only. A definition without edges is normalized to an implicit chain
+on the same engine, which keeps today's behaviour
+([topology §3.3](design-graph-topology.md#33-definitions-without-edges-the-implicit-chain)).
+Where this document speaks of an ordered step list, it describes today's
+implementation.
 
 ## 1. Decisions and scope
 
@@ -33,7 +41,10 @@ The plugin's declared steps (called stages in the SDK) are fixed for a run.
 The supervisor may repair any failing implementation inside the plugin, but cannot
 add, delete, rename, reorder, or bypass a step. Required outcomes remain unchanged.
 The controller applies decisions from either source; the plugin cannot veto an
-otherwise admitted supervisor recovery operation.
+otherwise admitted supervisor recovery operation. With the
+[graph topology](design-graph-topology.md#1-decisions) (designed), the fixed set
+is the nodes and the edges: the supervisor cannot add, delete or rename a node,
+or add, delete or redirect an edge.
 
 Diagnostic, build, test, review-of-repair, and retry jobs are supporting executions
 attached to an existing step or its recovery episode. They do not become new plugin
@@ -349,7 +360,9 @@ and private-state schema. Required outcomes must be understandable without readi
 the predicate that checks them. The controller freezes this requirement definition
 and the complete ordered step list, including stable IDs and names. Every dispatched
 job references an existing step or a recovery episode associated with one. There
-is no operation for inserting or removing steps during a run.
+is no operation for inserting or removing steps during a run. On the topology
+engine (designed, [topology §3](design-graph-topology.md#3-the-definition)) the
+node set, edges, start and terminal nodes are frozen the same way.
 
 `advance` is deterministic over a detached view. It constructs job descriptions
 and chooses normal routes; it does not directly call models, launch processes,
@@ -407,6 +420,12 @@ plugin schedules ordinary work and validation but has no final completion veto.
 A supervisor can ask for the same validation during recovery; it cannot supply a
 passing receipt itself. Completion is derived from valid required-stage receipts.
 
+On the topology engine (designed), Reenter needs a declared or implicit edge
+from the graph and reaches any node on the run's live path for the supervisor; a new
+operation, Enter, lets only the supervisor enter a supervisor-only node; and
+completion is a terminal node reached with every node on the live path accepted
+([topology §6](design-graph-topology.md#6-operations)).
+
 ## 5. Requirements, validators, and acceptance gates
 
 A gate is the admission rule for an outcome. Separate three records:
@@ -432,7 +451,10 @@ missing or stale evidence does not count.
 
 The controller checks provenance, candidate/workspace fingerprint, predecessor
 receipts, required check coverage, validator version, and independent reviewer
-identity before accepting. It cannot prove arbitrary predicates or prose correct.
+identity before accepting. Predecessor receipts are those of every stage earlier
+in the list; on the topology engine (designed), those of every node before it
+on the run's live path ([topology §4.5](design-graph-topology.md#45-admission)). It cannot prove
+arbitrary predicates or prose correct.
 Separate tests and review provide evidence against weakening the criterion; they
 are not a mathematical guarantee. User ambiguity remains a possible blocker.
 
@@ -615,6 +637,13 @@ reserve a correction attempt, move the stage cursor, invalidate the target and
 downstream receipts and dependent checks, cancel dependent pending jobs, and record
 reason/evidence. Retain history and artifacts. Do not reset the worktree or discard
 operator edits. Retries append attempts, so the execution history remains acyclic.
+The controller checks that the target is declared, not its direction
+(`packages/controller/src/loop.ts:2344-2374`). On the topology engine
+(designed), the graph reenters along a declared or implicit edge, the supervisor reenters
+any node on the live path, and a supervisor-only node is entered with Enter and
+left only by the supervisor
+([topology §4.4](design-graph-topology.md#44-reentry-over-a-graph),
+[§5](design-graph-topology.md#5-supervisor-only-nodes)).
 
 The active decision source then dispatches the recovery trial using that reservation.
 **In recovery, the supervisor authors the `Dispatch` instruction** (agent prompt or
@@ -775,7 +804,10 @@ hook has no way to load the candidate, so only a definition returned by the
 operator's preflight is compared. A mismatch rejects the candidate with a reason
 naming what changed; the run stays in recovery on its old version. Activation
 repeats the `describe()` check on the host it switches to. An independent review
-cannot authorize a structural difference.
+cannot authorize a structural difference. On the topology engine (designed), a
+graph's declared edges, start and terminal nodes, and each node's entry and
+visit cap join this match and to the candidate's stages pin
+([topology §7.3](design-graph-topology.md#73-repair-qualification-and-activation)).
 Runtime admission also rejects jobs and routes that name undeclared steps.
 Arbitrary state migration is deferred. Moving a run's durable state to a newer
 GraphLoom release, across ordered state-format migrators that change only how
@@ -813,7 +845,9 @@ required stage and cancel its dependent pending jobs/checks. This prevents a run
 at Review from remaining there with its accepted Write prerequisite invalidated.
 The MVP may conservatively invalidate from the earliest affected stage when
 dependencies are uncertain. Reentry and activation share the existing repair
-reservation.
+reservation. Today activation invalidates from the first listed stage
+(`packages/controller/src/repair-lifecycle.ts:709-712`); on the topology engine
+(designed) it invalidates the live path from its start node.
 
 A failed candidate does not mutate the original bundle. Before switching, it can
 be rejected with the old version still pinned and the run in recovery. After a
