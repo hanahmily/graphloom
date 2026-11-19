@@ -10,7 +10,7 @@ import { HostObservationError } from "./host-validators.js";
 import { hydrateOne } from "./evidence.js";
 import { activateRefusal, checkoutSpecRefusal, describeInadmissible } from "./inadmissible.js";
 import type { DurableRunState, ProbeRecord } from "./state.js";
-import { selectPaths } from "./checkout.js";
+import { selectPaths, writeConflict } from "./checkout.js";
 import { candidateChange, readWorktreeFile, withGitCancellation } from "./worktree.js";
 
 const execFileAsync = promisify(execFile);
@@ -365,8 +365,9 @@ export function createSupervisorInspection(hooks: InspectionHooks): SupervisorIn
           return { accepted: false, reason: err instanceof Error ? err.message : String(err) };
         }
         // A supplied file adds to the checkout: not a changed path, nor one the pinned base already holds.
+        const conflict = writeConflict(spec, changed);
+        if (conflict !== undefined) return { accepted: false, reason: conflict };
         for (const entry of spec.write ?? []) {
-          if (changed.has(entry.path)) return { accepted: false, reason: `cannot write ${entry.path}: the workspace change touches it` };
           if (await existsAtBase(state.worktreePath, state.intake.pinnedHead, entry.path, signal)) {
             return { accepted: false, reason: `cannot write ${entry.path}: the pinned base already has it` };
           }

@@ -293,6 +293,14 @@ describe("runInCheckout: write (CheckoutSpec.write)", () => {
     expect(recordOf(result.evidence ?? [])).not.toHaveProperty("written");
   });
 
+  it("refuses a supplied file the revertPatch touches, so the checkout never runs bytes other than those it digests", async () => {
+    const { dir, pinnedHead } = await writeRepo();
+    const revertPatch = "diff --git a/proof_test.go b/proof_test.go\nnew file mode 100644\n--- /dev/null\n+++ b/proof_test.go\n@@ -0,0 +1 @@\n+package calc\n";
+    const { result } = await run(dir, pinnedHead, showJob({ from: "candidate", revertPatch, write: [{ path: "proof_test.go", content: "package calc\n" }] }, "proof_test.go"));
+    expect(result.status).toBe("failed");
+    expect(result.summary).toBe("checkout failed: cannot write proof_test.go: the revertPatch touches it");
+  });
+
   it.each([
     ["a path the workspace change touches", "calc.go", /cannot write calc\.go: the workspace change touches it/],
     ["a file the base already has", "README.md", /cannot write README\.md: the checkout already has a file there/],

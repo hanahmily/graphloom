@@ -122,9 +122,8 @@ export async function runInCheckout(args: {
   };
   try {
     applied = selectPaths(checkout, [...change.fingerprints.keys()]);
-    // A supplied file adds to the change, never replaces part of it.
-    const touched = writes.filter((w) => change.fingerprints.has(w.path)).map((w) => w.path);
-    if (touched.length > 0) throw new Error(`cannot write ${touched.join(", ")}: the workspace change touches it`);
+    const conflict = writeConflict(checkout, change.fingerprints);
+    if (conflict !== undefined) throw new Error(conflict);
     await cloneAt(args.repoPath, args.pinnedHead, dir);
     if (checkout.from === "candidate") {
       await apply();
@@ -341,6 +340,24 @@ export function identityMismatch(
 ): string | undefined {
   if (result.runId === expected.runId && result.operationId === expected.operationId && result.generation === expected.generation) return undefined;
   return `${result.runId}/${result.operationId}/g${result.generation}, expected ${expected.runId}/${expected.operationId}/g${expected.generation}`;
+}
+
+/**
+ * Why a checkout's supplied files clash with what else it applies, or
+ * undefined. A supplied file adds to the change, never replaces part of it,
+ * and a `revertPatch` must not alter it, or the checkout would run bytes other
+ * than the ones its record digests.
+ */
+export function writeConflict(spec: CheckoutSpec, changed: { has(rel: string): boolean }): string | undefined {
+  const writes = spec.write ?? [];
+  const touched = writes.filter((w) => changed.has(w.path)).map((w) => w.path);
+  if (touched.length > 0) return `cannot write ${touched.join(", ")}: the workspace change touches it`;
+  if (spec.from === "candidate" && spec.revertPatch !== undefined) {
+    const reverted = new Set(revertPatchPaths(spec.revertPatch));
+    const altered = writes.filter((w) => reverted.has(w.path)).map((w) => w.path);
+    if (altered.length > 0) return `cannot write ${altered.join(", ")}: the revertPatch touches it`;
+  }
+  return undefined;
 }
 
 /** The changed paths a checkout applies: all of them, or those under the listed paths. */
