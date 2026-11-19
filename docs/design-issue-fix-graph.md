@@ -32,7 +32,7 @@ supervisor-dispatched work run without one no longer crashes the graph
 Version 0.10.4 declares a 6 h `waitMs` in every profile, so a coding-agent harness's usage-limit reset can be waited out instead of stopping the run ([#189](https://github.com/hanahmily/graphloom/issues/189)).
 Version 0.11.0 reenters Fix itself when code review fails only on confirmed findings and the loop is converging, instead of handing every such failure to the supervisor ([#193](https://github.com/hanahmily/graphloom/issues/193); see [review failures](#review-failures-the-graph-reenters-fix-or-the-supervisor-decides)).
 Version 0.12.0 reads the profile's [context documents](#context-documents) once and gives them to the planner, the implementer and the code reviewers ([#195](https://github.com/hanahmily/graphloom/issues/195)), runs a profile's [`final` tier commands](#the-final-command-tier) once after review converged ([#196](https://github.com/hanahmily/graphloom/issues/196)), and ships the [banyandb-ql profile](#the-measure-ql-profile-and-benchmark-gates) with its `bench-gates` requirement and a delivery option that keeps a private tracker out of the commit and the pull request ([#197](https://github.com/hanahmily/graphloom/issues/197)).
-Proposed for 0.17.0: [code quality gates](#code-quality-gates) on the functions a change adds or modifies (complexity, nesting, CRAP, mutation), with the metrics defined in [code quality metrics](design-code-quality-metrics.md).
+Proposed for 0.18.0: [code quality gates](#code-quality-gates) on the functions a change adds or modifies (complexity, nesting, CRAP, mutation), with the metrics defined in [code quality metrics](design-code-quality-metrics.md).
 Designed for 0.17.0, not implemented: [Arbitrate](#arbitrate-designed-for-0170), a supervisor-only node in which an independent arbiter, or the operator, rules on design conflicts between review and implementation, with the Fix⇄Review loop declared as edges of the [graph topology](design-graph-topology.md).
 
 ## Purpose
@@ -1038,7 +1038,7 @@ context document.
 
 ## Code quality gates
 
-Status: proposed, 2026-10-28, for 0.17.0. Not implemented.
+Status: proposed, 2026-10-28, for 0.18.0 (moved from 0.17.0, which takes [Arbitrate](#arbitrate-designed-for-0170)). Not implemented.
 
 The operator's two "ub-mode" rules become hard gates on the code issue-fix's
 agents write:
@@ -1523,7 +1523,7 @@ section never shows a number the validators did not recompute.
 ### Profile switches
 
 An optional `quality` field; absent means no gates and the definition of
-0.16.0:
+0.17.0:
 
 ```json
 "quality": {
@@ -1866,16 +1866,20 @@ Arbitrate is current, the graph:
 ### The arbiter
 
 - **Independence.** A separate read-only agent job (`purpose: "review"`,
-  `readOnly: true`) in a fresh session that never wrote or reviewed the change:
-  never a continued implementer, reviewer or verifier session. Its harness
-  differs from the implementer's and the reviewer's: `harnesses.arbiter`,
-  defaulting to the one of Claude Code, Codex and Pi that neither uses (Pi under
-  the default roles); `parseProfile` refuses an arbiter harness equal to either.
-  Its model is the profile's `review.arbiter.model`, the strongest the operator
-  has for that harness; Claude Code defaults to `opus`, Codex and Pi need it
-  named. A Pi arbiter is read-only through its sandbox: the runner mounts the
-  worktree read-only for a read-only job under `bwrap` confinement
-  ([a job's own confinement](design-typescript-core.md#a-jobs-own-confinement)).
+  `readOnly: true`) in a fresh session that never wrote, reviewed or verified
+  the change: never a continued implementer, reviewer or verifier session, and
+  never one of their sessions' forks. The harness may be the same as another
+  role's; independence is the session's, not the harness's.
+- **Harness and model.** `harnesses.arbiter`, default `codex`, with
+  `review.arbiter`, default `{ "model": "gpt-6-astra", "effort": "high" }`;
+  every shipped profile (banyandb, banyandb-ql, canopy, graphloom) sets both.
+  The job passes them as `harnessOptions.model` and `harnessOptions.effort`.
+  Both are carried today: the coding-agent executor's Codex harness takes a
+  job's `harnessOptions.effort`, checks it against Codex's reasoning efforts
+  (`executors/coding-agent/src/codex-harness.ts:45`, `98-102`), and the Codex
+  driver passes it as `--config model_reasoning_effort="high"`
+  (`packages/agent-harness/src/codex/driver.ts:51`, `103`). The Codex harness
+  serves read-only jobs only (`codex-harness.ts:92`), which the arbiter is.
 - **Inputs.** The issue snapshot and its comments (the owners' comments
   included); the pinned [context documents](#context-documents) and the
   profile's principles file (`review.principles`, read at the base like a
@@ -2042,17 +2046,16 @@ each deferred point with both cases.
 
 | Field | Meaning | Default |
 |---|---|---|
-| `harnesses.arbiter` | The arbiter's harness; must differ from `harnesses.implementer` and `harnesses.reviewer` | The one neither uses |
-| `review.arbiter` | `{ model, effort? }`: the arbiter's model | `model` required for Codex and Pi; `opus` for Claude Code |
+| `harnesses.arbiter` | The arbiter's harness; any harness, its session fresh (above) | `codex` |
+| `review.arbiter` | `{ model, effort? }`: the arbiter's model and reasoning effort, passed as the job's `harnessOptions` | `{ "model": "gpt-6-astra", "effort": "high" }` |
 | `review.maxRulings` | Arbiter rulings per run before every further conflict goes to the operator; 0 sends each to the operator | 3 |
 | `review.principles` | `{ path, ref? }`: the project's design principles file, read at `ref` or the pinned base | none |
 
 Arbitrate's `maxVisits` is `review.maxRulings + 3`: three more points the
 operator rules on after the cap. Past it the supervisor cannot enter, and its
 remedies are reentering Fix or stopping for a maintainer. `agentRoles` adds
-`{ role: "arbiter", access: "read", distinctFrom: ["implementer", "reviewer"],
-setting: "harnesses.arbiter" }`, so `graphloom doctor --task` checks the
-harness.
+`{ role: "arbiter", access: "read", setting: "harnesses.arbiter" }`, with no
+`distinctFrom`, so `graphloom doctor --task` checks the harness.
 
 ### Requirements and validators
 
@@ -2121,14 +2124,13 @@ request, **issue-fix 0.17.0**:
    citation checks, proof checkouts, the revision, the `design-ruling` approval;
 4. rulings in the ledger and the issues file, the pass, verifier and fixer
    assignments, the pull request sections, `open-code-review` v3;
-5. the profile fields and the shipped profiles' arbiter settings;
+5. the profile fields, and `harnesses.arbiter: codex` with `review.arbiter:
+   { model: "gpt-6-astra", effort: "high" }` in the banyandb, banyandb-ql,
+   canopy and graphloom profiles;
 6. rehearsal scenarios, qualification cases, graph tests, the regenerated
    manifest, and this section's status.
 
 ### Open questions
 
-1. The [code quality gates](#code-quality-gates) are also proposed for 0.17.0.
-   Whichever lands second takes the next minor version.
-2. Which model each shipped profile names for the arbiter. The design needs the
-   strongest model the operator has on the arbiter's harness, and Pi's model
-   ids depend on the operator's providers.
+None. The version is settled: 0.17.0 takes Arbitrate, and the
+[code quality gates](#code-quality-gates) move to 0.18.0.

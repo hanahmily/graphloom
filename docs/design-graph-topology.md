@@ -30,7 +30,8 @@ enters. Existing plugins keep their behaviour without a change.
    requires accepted receipts on every node before it on the live path.
 4. The run moves forward along declared edges by acting for a node ahead of the
    path; it moves back along a declared edge with `reenter`. Each reentry spends
-   one `corrections`, so cycles stay finite.
+   one `corrections`, so cycles stay finite. There is no `route` operation: a
+   forward move happens on the first dispatch or validation that names the node.
 5. A run completes when the live path ends at a terminal node and every node on
    it is accepted.
 6. A node may be **supervisor-only**: no edge enters it, the graph can never
@@ -213,8 +214,10 @@ reenters it or it validates again.
 
 ### 4.3 Moving forward
 
-An action naming a node N that is not on the live path and is not the open side
-visit is a forward move. It is admitted when:
+There is no `route` operation. An action naming a node N (a `dispatch` job's
+`stageId`, a `validate`; `observe` names no node and never moves the run) that
+is not on the live path and is not the open side visit is a forward move. It is
+admitted when:
 
 - N is graph-entered and no side visit is open;
 - a route of declared edges between graph-entered nodes leads from the tail to
@@ -774,11 +777,7 @@ Ordered pull requests. Each is reviewed and merged before the next starts.
 
 ## 14. Open questions
 
-1. Whether a forward move should also be expressible as an explicit `route`
-   action, so a graph that wants to move before it has a job to dispatch can.
-   No current graph needs it; the design moves on the first action naming the
-   node.
-2. How [agent-host mode](design-agent-host.md), designed and not implemented,
+1. How [agent-host mode](design-agent-host.md), designed and not implemented,
    carries `enter` and the settle trigger to an attached host acting as
    supervisor. Its host protocol lists the supervisor's operations; this
    design adds one, and the host design has to say how a host proposes it.
