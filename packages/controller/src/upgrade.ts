@@ -11,7 +11,7 @@
  */
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { PROTOCOL_VERSION } from "@graphloom/sdk";
+import { SDK_PROTOCOLS } from "./intake.js";
 import type { Runner } from "@graphloom/runner";
 import { newEvidenceRef } from "./admit.js";
 import { rebaseBudgetUsage } from "./budget-usage.js";
@@ -145,9 +145,9 @@ export async function upgradeRun(stateDir: string, request: UpgradeRequest, deps
     throw new UpgradeRefusedError(err instanceof Error ? err.message : String(err));
   }
   let state = rebaseBudgetUsage(JSON.parse(migrated.files["state.json"]!) as DurableRunState);
-  if (state.intake.bundle.sdkProtocol !== PROTOCOL_VERSION && !deps.updatePlugin) {
+  if (!SDK_PROTOCOLS.includes(state.intake.bundle.sdkProtocol) && !deps.updatePlugin) {
     throw new UpgradeRefusedError(
-      `the run's plugin bundle speaks sdkProtocol ${state.intake.bundle.sdkProtocol}, and GraphLoom ${target.version} speaks ${PROTOCOL_VERSION}; combine --upgrade with --update-plugin on a bundle built for it`,
+      `the run's plugin bundle speaks sdkProtocol ${state.intake.bundle.sdkProtocol}, and GraphLoom ${target.version} speaks ${SDK_PROTOCOLS.join(" and ")}; combine --upgrade with --update-plugin on a bundle built for it`,
     );
   }
   // A refusal the ordinary resume would make anyway is made before the move, so the run is not moved and then held.

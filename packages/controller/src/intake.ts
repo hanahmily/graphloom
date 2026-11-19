@@ -179,6 +179,39 @@ export interface RepairGrants {
   hostRepair?: boolean;
 }
 
+/**
+ * The `sdkProtocol` levels a bundle's manifest may state
+ * (docs/design-graph-topology.md §11.1). Level 1 describes a stage list,
+ * which runs as the implicit chain; level 2 may also describe a topology
+ * (`edges`, `start`, `terminal`, a node's `entry` or `maxVisits`). The wire
+ * envelope's `protocolVersion` stays `PROTOCOL_VERSION`.
+ */
+export const SDK_PROTOCOLS: readonly number[] = [PROTOCOL_VERSION, 2];
+/** The level a bundle that describes a topology must state. */
+export const TOPOLOGY_SDK_PROTOCOL = 2;
+
+/** Why a manifest's `sdkProtocol` is not one this controller accepts, or undefined. */
+export function sdkProtocolProblem(level: unknown): string | undefined {
+  if (typeof level === "number" && SDK_PROTOCOLS.includes(level)) return undefined;
+  return `manifest sdkProtocol ${String(level)} is not one this host accepts (${SDK_PROTOCOLS.join(", ")})`;
+}
+
+/**
+ * Why `definition` may not be described by a bundle at `level`, or undefined:
+ * a level-1 bundle that describes a topology is refused, at intake and on
+ * every describe() check, so it never runs as a list by mistake.
+ */
+export function topologyLevelProblem(definition: GraphDefinition, level: number): string | undefined {
+  if (level >= TOPOLOGY_SDK_PROTOCOL) return undefined;
+  const fields = [
+    ...(["edges", "start", "terminal"] as const).filter((key) => definition[key] !== undefined),
+    ...(definition.stages.some((s) => s.entry !== undefined) ? ["entry"] : []),
+    ...(definition.stages.some((s) => s.maxVisits !== undefined) ? ["maxVisits"] : []),
+  ];
+  if (fields.length === 0) return undefined;
+  return `the bundle states sdkProtocol ${level} but describes ${fields.join(", ")}: a topology needs sdkProtocol ${TOPOLOGY_SDK_PROTOCOL}`;
+}
+
 /** How far a bundle's code may be repaired; grants decide whether it may be at all. */
 export type RepairContract = "source-repairable" | "opaque";
 
@@ -451,11 +484,8 @@ export async function intakeTask(taskPath: string): Promise<IntakePin> {
   if (typeof manifest.version !== "string" || typeof manifest.sdkProtocol !== "number") {
     throw new IntakeError("manifest missing version or sdkProtocol");
   }
-  if (manifest.sdkProtocol !== PROTOCOL_VERSION) {
-    throw new IntakeError(
-      `manifest sdkProtocol ${manifest.sdkProtocol} != host ${PROTOCOL_VERSION}`,
-    );
-  }
+  const protocolProblem = sdkProtocolProblem(manifest.sdkProtocol);
+  if (protocolProblem !== undefined) throw new IntakeError(protocolProblem);
   manifestRepairContract(manifestRaw);
   const config = task.config !== undefined ? await pinTaskConfig(taskDir, task.config) : undefined;
   if (manifestRequiresConfig(manifestRaw) && config === undefined) {

@@ -375,7 +375,7 @@ describe("resume --upgrade (docs/design-release.md §5.2)", () => {
     { name: "a downgrade to a dev build of an older version", target: { version: "0.0.0-dev+abc1234", root: "/src/graphloom" }, edit: (s) => (s.install = { version: "0.0.1", root: "/x" }), error: /downgrade/ },
     { name: "crossing a major (0.x to 1.0)", target: { version: "1.0.0", root: "/opt/graphloom/versions/1.0.0" }, error: /another major version; a run never crosses a major version, so finish it on 0\.0\.0/ },
     { name: "an unknown future format", edit: (s) => (s.stateFormat = 7), error: new RegExp(`unknown state format 7: GraphLoom 0\\.1\\.0 writes format ${CURRENT_STATE_FORMAT}`) },
-    { name: "a missing migrator", formats: { current: 3, migrators: [{ from: 1, to: 2, migrate: (f) => f }] }, error: /no state migrator from format 2 to 3/ },
+    { name: "a missing migrator", formats: { current: CURRENT_STATE_FORMAT + 1, migrators: [] }, error: new RegExp(`no state migrator from format ${CURRENT_STATE_FORMAT} to ${CURRENT_STATE_FORMAT + 1}`) },
     {
       name: "an unsettled repair activation",
       edit: (s) => (s.activationIntent = { artifactId: "cand-1", fromVersion: "fixture@1.0.0", toVersion: "fixture@repair-cand-1", generation: 1, at: "2026-10-27T00:00:00Z", status: "intent" }),
@@ -391,7 +391,7 @@ describe("resume --upgrade (docs/design-release.md §5.2)", () => {
       error: /active repair: executor acme\/x runs the run-local copy cand-3/,
     },
     { name: "a run that is not stopped", edit: (s) => (s.status = "running"), error: /run up1 is running; only a stopped run can be moved/ },
-    { name: "a plugin protocol change without --update-plugin", edit: (s) => ((s.intake as { bundle: { sdkProtocol: number } }).bundle.sdkProtocol = 2), error: /sdkProtocol 2.*combine --upgrade with --update-plugin/ },
+    { name: "a plugin protocol change without --update-plugin", edit: (s) => ((s.intake as { bundle: { sdkProtocol: number } }).bundle.sdkProtocol = 3), error: /sdkProtocol 3.*combine --upgrade with --update-plugin/ },
   ];
   for (const refusal of refusals) {
     it(`refuses ${refusal.name}, with the run unchanged`, async () => {
@@ -482,7 +482,7 @@ describe("resume --upgrade (docs/design-release.md §5.2)", () => {
     // The run pinned a bundle speaking another protocol; the installed bundle speaks this host's.
     await editState(stateDir, (s) => {
       const bundle = (s.intake as { bundle: { sdkProtocol: number; manifestDigest: string } }).bundle;
-      bundle.sdkProtocol = 2;
+      bundle.sdkProtocol = 3;
       bundle.manifestDigest = "0".repeat(64);
     });
     const report = await createController().resume({

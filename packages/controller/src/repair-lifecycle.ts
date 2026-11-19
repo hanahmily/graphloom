@@ -16,7 +16,8 @@ import type {
 import type { Supervisor } from "@graphloom/supervisor";
 import type { PluginHost } from "@graphloom/plugin-host";
 import { hydrateEvidenceBestEffort } from "./evidence.js";
-import { invalidateStageAndAfter, type AdmissionValidator } from "./admit.js";
+import { type AdmissionValidator } from "./admit.js";
+import { restartAtStart } from "./traversal.js";
 import { resolveBundleEntryFromManifest } from "./bundle.js";
 import { manifestRepairContract } from "./intake.js";
 import { activateRefusal, inadmissible, qualifyRefusal } from "./inadmissible.js";
@@ -706,11 +707,11 @@ export async function applyActivateRepair(
       intake: { ...state.intake, bundle: candidatePin },
     };
 
-    // Validator repairs typically invalidate Write and everything after.
-    const earliest = next.definition.stages[0]?.id ?? next.current.stageId;
-    next = invalidateStageAndAfter(next, earliest, next.definition);
-    next = { ...next, current: { stageId: earliest, attempt: 1 } };
+    // The live path restarts at the start node (docs/design-graph-topology.md
+    // §7.3): every graph-entered node's receipts become invalid and `current`
+    // is the start node, attempt 1.
     next = bumpGeneration(next, `activate_repair:${artifact.artifactId}`);
+    next = restartAtStart(next, "activate_repair");
 
     if (deps.recreateHost) {
       host = await deps.recreateHost({
