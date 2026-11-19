@@ -233,6 +233,8 @@ const RETURN_REPRODUCES_TRIGGER = new Set([
   "correction_limit",
   "stalled",
   "recovery_budget_reached",
+  // A settled side visit opens the trigger again at the graph's next step; only leaving it ends it.
+  "supervisor_node_settled",
 ]);
 
 /**
@@ -294,7 +296,9 @@ export function groundingRefusal(
       ? action.stop.evidenceRefs
       : action.type === "reenter"
         ? action.reenter.evidenceRefs
-        : action.type === "qualify_repair"
+        : action.type === "enter"
+          ? action.enter.evidenceRefs
+          : action.type === "qualify_repair"
           ? action.qualify.evidenceRefs
           : undefined;
   // A citation list that is not an array of strings is returned for correction, not thrown at the loop.

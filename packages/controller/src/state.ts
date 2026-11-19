@@ -317,8 +317,18 @@ export interface VisitRecord {
   generation: number;
   /** What made it: `intake`, `dispatch`, `validate`, `stop`, `reenter`, `resume`, `activate_repair`, `migration`. */
   operation: string;
-  /** How a visit that left the live path ended, e.g. `replaced by reentry of fix`. */
+  /**
+   * How a visit that left the live path ended, e.g. `replaced by reentry of fix`;
+   * for a side visit, `routed to X`, `left without receipt` or `closed by activation`.
+   */
   ended?: string;
+  /**
+   * A side visit's settlement (docs/design-graph-topology.md §5.2): the
+   * receipts the node's latest validation in this visit minted, one per
+   * requirement, and each requirement's validation reason as the validator
+   * gave it. The visit is settled while those receipts stay valid.
+   */
+  settlement?: { receipts: string[]; reasons: Array<{ requirementId: string; reason: string }> };
 }
 
 export interface DurableRunState {

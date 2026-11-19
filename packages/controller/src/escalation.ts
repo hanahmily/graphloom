@@ -117,6 +117,8 @@ function stageForAction(action: GraphAction): string | undefined {
       return action.validate.stageId;
     case "reenter":
       return action.reenter.stageId;
+    case "enter":
+      return action.enter.stageId;
     default:
       return undefined;
   }
@@ -165,6 +167,8 @@ function describeAction(decision: GraphDecision): string {
       return `validate of ${action.validate.stageId}`;
     case "reenter":
       return `reenter of ${action.reenter.stageId}`;
+    case "enter":
+      return `enter of ${action.enter.stageId}`;
     default:
       return action.type;
   }
