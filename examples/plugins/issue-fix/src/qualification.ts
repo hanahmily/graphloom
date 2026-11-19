@@ -2,12 +2,13 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { readFileSync } from "node:fs";
-import type { EvidenceRecord, ValidationStatus, Validator } from "@graphloom/sdk";
+import { checkoutWriteDigest, type EvidenceRecord, type ValidationStatus, type Validator } from "@graphloom/sdk";
 import { exampleBenchReport } from "./bench.js";
-import { CODING_AGENT, COMMAND, FIX_STAGE, REVIEW_STAGE } from "./constants.js";
+import { ARBITRATE_STAGE, CODING_AGENT, COMMAND, DESIGN_RULING_APPROVAL, FIX_STAGE, GET_ISSUE, LIST_ISSUE_COMMENTS, REVIEW_STAGE } from "./constants.js";
 import type { DecisionRecord } from "./decision-record.js";
 import { definitionFor } from "./graph.js";
 import { parseProfile } from "./profile.js";
+import { designPointCommand, proofTestRef, type ArbiterResult, type ProofTest } from "./rulings.js";
 import { goTestRunner } from "./runners/go-test.js";
 import { vitestRunner } from "./runners/vitest.js";
 
@@ -277,8 +278,109 @@ const benchEnvelope = (patch?: (report: Record<string, unknown>) => void): strin
 const benchRun = (report: string, o: RunOptions & { exitCode?: number } = {}): EvidenceRecord => command("bench-gates", o.exitCode ?? 0, { stageId: REVIEW_STAGE, report, ...o });
 const gate = (report: Record<string, unknown>, name: string): Record<string, number> => (report.gates as Record<string, Record<string, number>>)[name]!;
 
+// ---- design-ruling (docs/design-issue-fix-graph.md, "Rehearsal and qualification") -----------
+
+const ISSUE_BODY = "Backups longer than five minutes are reported as action timed out. A running backup is not an error; report it as running.";
+const issueRead = (): EvidenceRecord => ({
+  ref: ref(),
+  kind: "other",
+  candidateDigest: DIGEST,
+  payload: {
+    github: { item: { number: 14111, title: "Scheduler reports long actions as timed out", state: "open", url: "u", labels: [], body: ISSUE_BODY } },
+    producer: { operationId: "op-issue", stageId: FIX_STAGE, purpose: "diagnostic", readOnly: true, kind: "command", executorId: GET_ISSUE.id },
+  },
+});
+const commentsRead = (): EvidenceRecord => ({
+  ref: ref(),
+  kind: "other",
+  candidateDigest: DIGEST,
+  payload: {
+    github: { items: [{ author: "maintainer", createdAt: "2026-09-01", body: "Close must stay bounded: never wait on an action without a deadline." }], page: { complete: true } },
+    producer: { operationId: "op-comments", stageId: FIX_STAGE, purpose: "diagnostic", readOnly: true, kind: "command", executorId: LIST_ISSUE_COMMENTS.id },
+  },
+});
+/** The visit's pinned design point: F1, raised and disputed at the design level. */
+const pinnedPoint = (finding = "F1"): EvidenceRecord => ({
+  ref: ref(),
+  kind: "command",
+  candidateDigest: DIGEST,
+  payload: {
+    command: { ...designPointCommand(finding), exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 1, stdoutTail: `${finding}\n`, stderrTail: "" },
+    producer: { operationId: "op-point", stageId: ARBITRATE_STAGE, attempt: 1, purpose: "diagnostic", readOnly: true, kind: "command" },
+  },
+});
+const PROOF: ProofTest = {
+  path: "pkg/timestamp/arbiter_proof_test.go",
+  name: "TestCloseIsBounded",
+  content: "package timestamp\n\nimport \"testing\"\n\nfunc TestCloseIsBounded(t *testing.T) {}\n",
+  expect: "pass",
+  shows: "Close returns once its timeout passes.",
+};
+const RULING: ArbiterResult = {
+  finding: "F1",
+  ruling: "implementation-stands",
+  summary: "The maintainer asks for a bounded Close, and Close waits under a timeout.",
+  design: [{ source: "comment:1", quote: "Close must stay bounded", says: "Close may not wait without a deadline." }],
+  code: [{ path: SCHEDULER_PATH, line: 4, quote: BOUNDED.text }],
+  proofTests: [],
+  undecidable: { question: "", implementation: "", review: "" },
+};
+const arbiterRun = (output: unknown, o: { continued?: boolean; sessionRef?: string } = {}): EvidenceRecord => ({
+  ref: ref(),
+  kind: "other",
+  candidateDigest: DIGEST,
+  resultSchema: "design-ruling-v1",
+  payload: {
+    codingAgent: { harness: "codex", status: "completed", output, continued: o.continued ?? false, sessionRef: o.sessionRef ?? "codex-arbiter" },
+    producer: { operationId: "op-arbiter", stageId: ARBITRATE_STAGE, attempt: 1, purpose: "review", readOnly: true, kind: "agent", executorId: CODING_AGENT.id },
+  },
+});
+const proofRunRecord = (t: ProofTest, report: string, exitCode: number): EvidenceRecord => {
+  const record = command(COMMAND.proof, exitCode, { stageId: ARBITRATE_STAGE, report, argv: goTestRunner.argv(proofTestRef(parseProfile(BANYANDB), t)) });
+  const payload = record.payload as { checkout: Record<string, unknown> };
+  payload.checkout.written = [{ path: t.path, digest: checkoutWriteDigest(t.content), bytes: Buffer.byteLength(t.content) }];
+  return record;
+};
+const proofEvents = (status: "pass" | "fail") => events({ Action: "run", Test: PROOF.name }, ...(status === "fail" ? [{ Action: "output", Test: PROOF.name, Output: "proof_test.go:5: got unbounded\n" }] : []), { Action: status, Test: PROOF.name }, { Action: status, Package: "p" });
+/** The verifier's design-level verdict on F1, the review pass that raised it, the issue and its thread: the design point a visit takes up. */
+const disputedPoint = (): EvidenceRecord[] => [
+  issueRead(),
+  commentsRead(),
+  codeReviewRun(reviewed([comment("high")])),
+  {
+    ...verification("confirmed", [{ path: SCHEDULER_PATH, line: 6, text: "s.wait(ctx)" }]),
+    payload: {
+      codingAgent: { harness: "claude-code", status: "completed", output: { verdicts: [{ finding: "F1", verdict: "confirmed", reason: "Close waits", quotes: [], designLevel: true, designBasis: "Whether Close must be bounded is the design's call.", ruling: "" }] } },
+      producer: { operationId: "op-verify", stageId: REVIEW_STAGE, purpose: "diagnostic", readOnly: true, kind: "agent", executorId: CODING_AGENT.id },
+    },
+  },
+  pinnedPoint(),
+];
+const approvalRecord = (decision: "approve" | "decline", inputs?: Record<string, string>): EvidenceRecord => ({
+  ref: ref(),
+  kind: "other",
+  payload: { type: "operator-approval", approvalId: DESIGN_RULING_APPROVAL, decision, files: [], ...(inputs !== undefined ? { inputs } : {}), operator: "maintainer", at: "2026-11-19T00:00:00.000Z", generation: 2 },
+});
+const dr = (name: string, evidence: EvidenceRecord[], expected: ValidationStatus): QualificationCase => c("design-ruling", name, evidence, expected);
+
 /** Positive and negative cases for every shipped validator. */
 export const QUALIFICATION_CASES: readonly QualificationCase[] = [
+  dr("a verified ruling", [...disputedPoint(), arbiterRun(RULING), scheduler()], "passed"),
+  dr("a design quote not in the pinned text", [...disputedPoint(), arbiterRun({ ...RULING, design: [{ ...RULING.design[0]!, quote: "Close may wait as long as it likes" }] }), scheduler()], "failed"),
+  dr("a design quote from a source the run did not pin", [...disputedPoint(), arbiterRun({ ...RULING, design: [{ ...RULING.design[0]!, source: "doc:design.md" }] }), scheduler()], "failed"),
+  dr("a code citation that does not match the change", [...disputedPoint(), arbiterRun(RULING), scheduler(SCHEDULER.replace("s.closeTimeout", "time.Hour"))], "failed"),
+  dr("no design statement", [...disputedPoint(), arbiterRun({ ...RULING, design: [] }), scheduler()], "failed"),
+  dr("a ruling on another finding than the point", [...disputedPoint(), arbiterRun({ ...RULING, finding: "F2" }), scheduler()], "failed"),
+  dr("a proof test whose run contradicts its claim", [...disputedPoint(), arbiterRun({ ...RULING, proofTests: [PROOF] }), scheduler(), proofRunRecord(PROOF, proofEvents("fail"), 1)], "failed"),
+  dr("a proof test that behaved as claimed", [...disputedPoint(), arbiterRun({ ...RULING, proofTests: [PROOF] }), scheduler(), proofRunRecord(PROOF, proofEvents("pass"), 0)], "passed"),
+  dr("an arbiter session that continued another role's", [...disputedPoint(), arbiterRun(RULING, { continued: true }), scheduler()], "failed"),
+  dr("an arbiter that ran in the implementer's session", [...disputedPoint(), arbiterRun(RULING, { sessionRef: "claude-implementer" }), scheduler(), { ...implementer(READY), payload: { ...(implementer(READY).payload as object), codingAgent: { harness: "claude-code", status: "completed", output: READY, sessionRef: "claude-implementer" } } }], "failed"),
+  dr("an undecidable ruling", [...disputedPoint(), arbiterRun({ ...RULING, ruling: "undecidable", undecidable: { question: "Bounded?", implementation: "It is.", review: "It is not." } }), scheduler()], "failed"),
+  dr("the operator's ruling on the waiting finding", [...disputedPoint(), approvalRecord("approve", { finding: "I1", ruling: "review-stands", note: "Close must be bounded." })], "passed"),
+  dr("the operator's ruling on another finding", [...disputedPoint(), approvalRecord("approve", { finding: "F2", ruling: "review-stands", note: "x" })], "failed"),
+  dr("the operator declined to rule", [...disputedPoint(), approvalRecord("decline")], "passed"),
+  dr("no ruling yet", [...disputedPoint()], "inconclusive"),
+
   c("decisions-recorded", "complete ready record", [implementer(READY)], "passed"),
   c("decisions-recorded", "a product decision taken", [implementer({ ...READY, decisions: [{ ...READY.decisions[1]!, chosen: "stop" }] })], "failed"),
   c("decisions-recorded", "a behaviour point without a choice", [implementer({ ...READY, decisions: [{ ...READY.decisions[0]!, chosen: "" }] })], "failed"),

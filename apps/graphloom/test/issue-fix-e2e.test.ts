@@ -142,7 +142,7 @@ describe.skipIf(GO === undefined)("issue-fix with the banyandb profile on a Go r
     expect(agentJobs).toHaveLength(4);
 
     // Claude Code verified the high comment read-only in a fresh session; the controller observed the lines it quoted, and they matched.
-    expect(agentJobs[3]).toMatchObject({ stageId: "review", kind: "agent", purpose: "diagnostic", readOnly: true, resultSchema: "finding-verification-v1", input: { harness: "claude-code" } });
+    expect(agentJobs[3]).toMatchObject({ stageId: "review", kind: "agent", purpose: "diagnostic", readOnly: true, resultSchema: "finding-verification-v2", input: { harness: "claude-code" } });
     expect(agentJobs[3]!.continueFrom).toBeUndefined();
     const observed = state.evidence.find((e) => e.kind === "file" && (e.payload as { path: string }).path === "pkg/timestamp/scheduler.go")!;
     expect(observed).toMatchObject({ candidateDigest: state.candidateDigest, payload: { bytes: FIXED } });

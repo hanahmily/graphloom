@@ -5,7 +5,8 @@
  * The shipped plugins on the traversal engine (docs/design-graph-topology.md
  * §2, §3.3, §12 item 2): each plugin's reliances, as named cases. They
  * declare no edges and keep `sdkProtocol: 1`; the engine runs them as
- * implicit chains.
+ * implicit chains. issue-fix 0.17.0 is the exception: it declares its
+ * topology (Fix ⇄ Review and the supervisor-only Arbitrate) at `sdkProtocol: 2`.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { execFile } from "node:child_process";
@@ -16,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  assertGraphDefinition,
   createScriptedGraph,
   dispatch,
   normalizeTopology,
@@ -52,10 +54,31 @@ const pluginsRoot = path.join(repoRoot, "examples/plugins");
 const SHIPPED: Record<string, string[]> = {
   hello: manifestStages("hello"),
   release: manifestStages("release"),
-  "issue-fix": ["fix", "review"],
   "pr-review": ["fetch", "report", "review", "draft", "publish"],
   "pr-design-review": ["fetch", "report", "questions", "answers", "round1", "publish"],
 };
+
+/**
+ * issue-fix 0.17.0 declares its topology (§3.1): Fix ⇄ Review as two edges,
+ * and the supervisor-only Arbitrate leaving to either. Its stages and
+ * requirements come from a profile, so its manifest pins none; this is the
+ * shape `definitionFor` returns, on this test's node requirements.
+ */
+function issueFixTopology(): GraphDefinition {
+  const base = chain(["fix", "review", "arbitrate"], "issue-fix");
+  return {
+    ...base,
+    stages: base.stages.map((s) => (s.id === "arbitrate" ? { ...s, entry: "supervisor" as const, maxVisits: 6 } : s)),
+    edges: [
+      { from: "fix", to: "review" },
+      { from: "review", to: "fix" },
+      { from: "arbitrate", to: "fix" },
+      { from: "arbitrate", to: "review" },
+    ],
+    start: "fix",
+    terminal: ["review"],
+  };
+}
 
 function manifestStages(plugin: string): string[] {
   const manifest = JSON.parse(readFileSync(path.join(pluginsRoot, plugin, "graphloom.manifest.json"), "utf8")) as { stages?: Array<{ id: string }> };
@@ -84,8 +107,7 @@ const receipt = (stageId: string, i: number): Receipt => ({
 });
 
 /** A normal-mode state whose live path holds every stage of `ids`, each accepted. */
-function throughAll(ids: string[]): DurableRunState {
-  const definition = chain(ids);
+function throughAll(ids: string[], definition: GraphDefinition = chain(ids)): DurableRunState {
   let state = {
     definition,
     current: { stageId: ids[0]!, attempt: 1 },
@@ -113,14 +135,19 @@ describe("the shipped plugins are implicit chains", () => {
       expect(topology).toMatchObject({ implicit: true, start: SHIPPED[plugin]![0], terminal: [SHIPPED[plugin]!.at(-1)] });
     });
   }
+
+  it("issue-fix 0.17.0 states sdkProtocol 2 and declares its topology, which the definition rules accept", () => {
+    const manifest = JSON.parse(readFileSync(path.join(pluginsRoot, "issue-fix", "graphloom.manifest.json"), "utf8")) as { sdkProtocol?: number };
+    expect(manifest.sdkProtocol).toBe(2);
+    expect(() => assertGraphDefinition(issueFixTopology())).not.toThrow();
+    expect(normalizeTopology(issueFixTopology())).toMatchObject({ implicit: false, start: "fix", terminal: ["review"] });
+  });
 });
 
 describe("reentries the shipped graphs make, along implicit back edges (§2)", () => {
   const cases: Array<[string, string, string, string]> = [
     ["hello", "Review → Write", "review", "write"], // examples/plugins/hello/src/graph.ts:325
     ["release", "Review → Changelog", "review", "changelog"], // examples/plugins/release/src/graph.ts:212
-    ["issue-fix", "Review → Fix after a failed review", "review", "fix"], // examples/plugins/issue-fix/src/graph.ts:732
-    ["issue-fix", "Review → Fix after failed final checks", "review", "fix"], // examples/plugins/issue-fix/src/graph.ts:810
   ];
   for (const [plugin, name, from, to] of cases) {
     it(`${plugin}: ${name} is admitted from the graph`, () => {
@@ -129,6 +156,13 @@ describe("reentries the shipped graphs make, along implicit back edges (§2)", (
       expect(reentryRefusal(state, to)).toBeUndefined();
     });
   }
+
+  // issue-fix 0.17.0 reenters Fix after a failed review and after failed final checks along its declared edge review → fix.
+  it("issue-fix: Review → Fix is admitted from the graph along the declared edge", () => {
+    const state = throughAll(["fix", "review"], issueFixTopology());
+    expect(livePath(state).at(-1)!.stageId).toBe("review");
+    expect(reentryRefusal(state, "fix")).toBeUndefined();
+  });
 
   it("a reentry of a stage ahead of the live path is refused", () => {
     const ids = SHIPPED["release"]!;

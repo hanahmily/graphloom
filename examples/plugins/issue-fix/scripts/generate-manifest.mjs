@@ -60,7 +60,8 @@ if (schemas.size !== 1) throw new Error(`profiles disagree on the private-state 
 const manifest = {
   graphId: GRAPH_ID,
   version: GRAPH_VERSION,
-  sdkProtocol: 1,
+  // The graph declares a topology (Fix ⇄ Review, the supervisor-only Arbitrate): docs/design-graph-topology.md §11.1.
+  sdkProtocol: 2,
   taskConfig: pkg.graphloom.taskConfig,
   entryPoints: {
     createGraph: "./dist/index.js",

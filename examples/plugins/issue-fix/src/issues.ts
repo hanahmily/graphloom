@@ -32,10 +32,17 @@ export const ISSUES_MARKDOWN = `${ISSUES_DIR}/issues.md`;
 export const ISSUES_SCHEMA = "graphloom-issues-v1";
 export const ISSUES_COMMAND = { write: "issues-write", read: "issues-read" } as const;
 
-export type IssueStatus = "open" | "fixed" | "done" | "reopened" | "dismissed";
-export const ISSUE_STATUSES: readonly IssueStatus[] = ["open", "fixed", "done", "reopened", "dismissed"];
+/**
+ * `design-conflict`: the fixer contests the issue as contradicting the
+ * project's design, awaiting a ruling; `deferred`: the operator declined to
+ * rule on that design point, so it no longer blocks (docs/design-issue-fix-graph.md, "Arbitrate").
+ */
+export type IssueStatus = "open" | "fixed" | "done" | "reopened" | "dismissed" | "design-conflict" | "deferred";
+export const ISSUE_STATUSES: readonly IssueStatus[] = ["open", "fixed", "done", "reopened", "dismissed", "design-conflict", "deferred"];
 export type IssueSeverity = "P0" | "P1" | "P2" | "P3";
-export type IssueActor = "reviewer" | "fixer" | "verifier" | "graph";
+export type IssueActor = "reviewer" | "fixer" | "verifier" | "graph" | "arbiter" | "operator";
+/** The longest argument the fixer may give when it contests an issue. */
+export const MAX_CONFLICT_NOTE = 2_000;
 
 export interface IssueEvent {
   actor: IssueActor;
@@ -66,6 +73,8 @@ export interface Issue {
   status: IssueStatus;
   /** The review round the finding was raised in. */
   round: number;
+  /** The design ruling that holds for the issue's finding, `R<n>`. */
+  ruling?: string;
   history: IssueEvent[];
 }
 
@@ -107,16 +116,22 @@ export function severityOf(c: Pick<ReviewComment, "severity">): IssueSeverity {
 
 export const SEVERITY_WORD: Record<IssueSeverity, string> = { P0: "critical", P1: "high", P2: "medium", P3: "low" };
 
-/** An issue that keeps the code review requirement from passing: P0 or P1, and not done or dismissed. */
+/** An issue that keeps the code review requirement from passing: P0 or P1, and not done, dismissed or deferred. */
 export function isUnsettled(i: Issue): boolean {
-  return (i.severity === "P0" || i.severity === "P1") && (i.status === "open" || i.status === "reopened" || i.status === "fixed");
+  return (i.severity === "P0" || i.severity === "P1") && (i.status === "open" || i.status === "reopened" || i.status === "fixed" || i.status === "design-conflict");
+}
+
+/** The fixer's argument on an issue it contests, when its last move was that. */
+export function conflictNote(issue: Issue): IssueEvent | undefined {
+  const last = issue.history.at(-1);
+  return issue.status === "design-conflict" && last?.actor === "fixer" && last.to === "design-conflict" ? last : undefined;
 }
 
 const MAX_TITLE = 120;
 const MAX_DESCRIPTION = 1_500;
 const MAX_NOTE = 1_000;
 
-function titleOf(content: string): string {
+export function titleOf(content: string): string {
   const line = content.trim().split("\n")[0] ?? "";
   const sentence = /^(.+?[.!?])(\s|$)/.exec(line)?.[1] ?? line;
   return clip(sentence, MAX_TITLE);
@@ -189,8 +204,8 @@ interface IssueFile {
 
 export const FILE_PROTOCOL = [
   "The issue-fix graph owns this file and rewrites it from the run's evidence; .graphloom/issues.md is its readable copy.",
-  "Statuses: open (confirmed by an independent verifier), fixed (the fixer says it is fixed; not yet verified), done (the reviewer verified the fix), reopened (the reviewer found it still present after a fix), dismissed (the verifier refuted it).",
-  "The fixer may only change an open or reopened issue's status to fixed, and append to its history one entry {\"actor\": \"fixer\", \"from\": <old status>, \"to\": \"fixed\", \"note\": <what you changed, with file:line>}. Any other edit (another status, a new, deleted or reworded issue) is rejected and the file is restored.",
+  "Statuses: open (confirmed by an independent verifier), fixed (the fixer says it is fixed; not yet verified), done (the reviewer verified the fix), reopened (the reviewer found it still present after a fix), dismissed (the verifier refuted it, or a design ruling dismissed it), design-conflict (the fixer contests it as contradicting the project's design; an independent arbiter rules), deferred (the operator left the design point open; it does not block).",
+  "The fixer may only change an open or reopened issue's status to fixed, and append to its history one entry {\"actor\": \"fixer\", \"from\": <old status>, \"to\": \"fixed\", \"note\": <what you changed, with file:line>}; or, for an issue with no ruling, to design-conflict, with one entry {\"actor\": \"fixer\", \"from\": <old status>, \"to\": \"design-conflict\", \"note\": <the design statement or decision the issue contradicts, quoted, and where>}. Any other edit (another status, a new, deleted or reworded issue) is rejected and the file is restored.",
   "The code reviewer verifies each fixed issue in its result (resolved makes it done; still_present reopens it with the reviewer's note) and reports new issues there; it does not edit this file.",
 ];
 
@@ -254,7 +269,7 @@ export function issueMarkdown(table: IssueTable, extra: { round?: number; phase?
     ...issueTableRows(table.issues),
   ];
   for (const i of table.issues) {
-    lines.push("", `## ${i.id}: ${i.title}`, "", `${i.severity} (${SEVERITY_WORD[i.severity]}), ${i.status}, \`${where(i.location)}\`, raised in review round ${i.round}.`, "", i.description, "", "History:");
+    lines.push("", `## ${i.id}: ${i.title}`, "", `${i.severity} (${SEVERITY_WORD[i.severity]}), ${i.status}${i.ruling !== undefined ? ` (design ruling ${i.ruling})` : ""}, \`${where(i.location)}\`, raised in review round ${i.round}.`, "", i.description, "", "History:");
     for (const h of i.history) {
       lines.push(`- round ${h.round}, ${h.actor}: ${h.from ?? "new"} → ${h.to} (${h.evidence}, candidate ${h.candidate.slice(0, 8)})${h.note !== "" ? `: ${h.note.replace(/\s+/g, " ")}` : ""}`);
     }
@@ -401,16 +416,22 @@ export function parseIssueFile(text: string): { issues: Map<string, Record<strin
 }
 
 /** Fields only the graph sets; the fixer changing one is a reword. */
-const FIXED_FIELDS = ["severity", "location", "title", "description", "round"] as const;
+const FIXED_FIELDS = ["severity", "location", "title", "description", "round", "ruling"] as const;
 
 /**
  * Apply the fixer's edits, as a read of the file shows them, to the table:
  * an open or reopened issue moved to `fixed` with a new fixer history entry
- * is accepted; everything else the fixer changed is rejected. The read is
- * compared with what the graph last wrote, so fields nobody touched never
- * look edited.
+ * is accepted, and so is one moved to `design-conflict` with the fixer's
+ * argument when no ruling holds for it (`ruled` names the ruling that does);
+ * everything else the fixer changed is rejected. The read is compared with
+ * what the graph last wrote, so fields nobody touched never look edited.
  */
-export function applyFixerRead(table: IssueTable, read: { present: boolean; text?: string; truncated?: boolean }, ctx: EventContext): void {
+export function applyFixerRead(
+  table: IssueTable,
+  read: { present: boolean; text?: string; truncated?: boolean },
+  ctx: EventContext,
+  ruled: (issueId: string) => string | undefined = () => undefined,
+): void {
   const written = table.written;
   // The graph never handed the file out: nothing the fixer could have edited.
   if (written === undefined) return;
@@ -438,28 +459,54 @@ export function applyFixerRead(table: IssueTable, read: { present: boolean; text
     const to = after.status;
     if (to === before.status) continue;
     if (issue.status !== before.status) continue;
-    if (to !== "fixed" || (before.status !== "open" && before.status !== "reopened")) {
-      const why = to === "done" ? "only the code reviewer marks an issue done" : to === "dismissed" ? "only the verifier dismisses an issue" : "the fixer may only move an open or reopened issue to fixed";
+    // A contested issue the fixer then fixes after all (the supervisor sent Fix back without a ruling) may go to fixed too.
+    const fixable = before.status === "open" || before.status === "reopened" || before.status === "design-conflict";
+    const contestable = before.status === "open" || before.status === "reopened";
+    if (!((to === "fixed" && fixable) || (to === "design-conflict" && contestable))) {
+      const why =
+        to === "done"
+          ? "only the code reviewer marks an issue done"
+          : to === "dismissed"
+            ? "only the verifier or a design ruling dismisses an issue"
+            : to === "deferred"
+              ? "only the operator defers a design point"
+              : "the fixer may only move an open or reopened issue to fixed or design-conflict";
       reject(`the fixer moved ${id} from ${before.status} to ${typeof to === "string" ? to : JSON.stringify(to)}: ${why}`, issue);
       continue;
     }
-    const note = newFixerNote(before.history, after.history);
+    if (to === "design-conflict") {
+      const ruling = ruled(id);
+      if (ruling !== undefined) {
+        reject(`the fixer contested ${id}, but ruling ${ruling} holds for it; fix it as the ruling says`, issue);
+        continue;
+      }
+    }
+    const note = newFixerNote(before.history, after.history, to);
     if (note === undefined) {
-      reject(`the fixer marked ${id} fixed without a history entry {"actor": "fixer", "to": "fixed", "note": …} saying what it changed`, issue);
+      reject(
+        to === "fixed"
+          ? `the fixer marked ${id} fixed without a history entry {"actor": "fixer", "to": "fixed", "note": …} saying what it changed`
+          : `the fixer contested ${id} without a history entry {"actor": "fixer", "to": "design-conflict", "note": …} quoting the design statement it contradicts`,
+        issue,
+      );
       continue;
     }
-    moveIssue(issue, "fixer", "fixed", note, ctx);
+    if (to === "design-conflict" && note.length > MAX_CONFLICT_NOTE) {
+      reject(`the fixer's argument for contesting ${id} is ${note.length} characters, more than ${MAX_CONFLICT_NOTE}`, issue);
+      continue;
+    }
+    moveIssue(issue, "fixer", to, note, ctx);
   }
 }
 
-/** The newest fixer history entry the read adds, moving the issue to fixed with a note. */
-function newFixerNote(before: Issue["history"], after: unknown): string | undefined {
+/** The newest fixer history entry the read adds, moving the issue to `to` with a note. */
+function newFixerNote(before: Issue["history"], after: unknown, to: IssueStatus): string | undefined {
   if (!Array.isArray(after)) return undefined;
   const known = new Set(before.map((h) => JSON.stringify(h)));
   for (const raw of [...after].reverse()) {
     const h = object(raw);
     if (h === undefined || known.has(JSON.stringify(raw))) continue;
-    if (h.actor === "fixer" && h.to === "fixed" && typeof h.note === "string" && h.note.trim() !== "") return h.note.trim();
+    if (h.actor === "fixer" && h.to === to && typeof h.note === "string" && h.note.trim() !== "") return h.note.trim();
   }
   return undefined;
 }

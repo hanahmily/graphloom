@@ -174,7 +174,7 @@ describe("graphloom rehearse (L1)", () => {
 });
 
 describe("graphloom replay (L2)", () => {
-  it("replays a recorded run against the bundle that replaced its graph, reclassifying its evidence under that bundle's contracts", async () => {
+  it("replays a recorded run against the bundle that replaced its graph, and refuses it once that bundle declares another topology", async () => {
     // The run was recorded under banyandb-fix@0.4.0, the graph issue-fix's
     // banyandb profile has since replaced. Replay reads the bundle's current
     // code, not the recorded intake's frozen absolute path, so the copy pins
@@ -197,16 +197,13 @@ describe("graphloom replay (L2)", () => {
     await writeFile(path.join(stateDir, "state.json"), JSON.stringify(state), "utf8");
     const report = await replay(stateDir, { bundlePath });
     expect(report.activeVersion).toBe("banyandb-fix@0.4.0");
-    // The run's plan review and its decision-record-v1 plan are no contract
-    // issue-fix declares (it records decision-record-v2): none of its agent
-    // evidence reclassifies as valid, and no requirement had a receipt.
+    // issue-fix 0.17.0 declares its topology (Fix ⇄ Review and the
+    // supervisor-only Arbitrate), and the recorded run walked an implicit
+    // chain: its live path cannot be judged on another topology, so replay
+    // names what changed instead of reclassifying (docs/design-graph-topology.md §7.2).
     expect(report.contracts.valid).toBe(0);
-    expect(report.contracts.byName["decision-record-v1"]).toBeUndefined();
-    expect(report.requirements.map((r) => r.requirementId)).toEqual(["decisions-recorded", "reproduces", "passes", "builds", "in-scope", "changelog-entry", "code-review"]);
-    expect(report.requirements.every((r) => !r.hadReceipt)).toBe(true);
-    // The current graph would go on to implement the plan, but this run's
-    // own recorded budget was already spent on the real plan-review churn.
-    expect(report.nextDecision).toMatchObject({ decision: { action: { type: "stop", stop: { reason: "budgets exhausted" } } } });
+    expect(report.requirements).toEqual([]);
+    expect(report.nextDecision).toMatchObject({ error: expect.stringContaining("the run's pinned topology differs from the current plugin's describe()") });
   });
 });
 

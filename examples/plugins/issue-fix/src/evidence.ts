@@ -43,6 +43,8 @@ export interface CheckoutRecord {
   revertError?: string;
   /** The revert patch text that did not apply. */
   revertPatch?: string;
+  /** Files the job added to the checkout (`CheckoutSpec.write`), each with `sha256:<hex>` of its content. */
+  written?: Array<{ path: string; digest: string; bytes: number }>;
 }
 
 export interface CommandRun {
@@ -73,6 +75,23 @@ function object(value: unknown): Record<string, unknown> | undefined {
 export function producer(e: EvidenceRecord): Producer | undefined {
   const p = object(object(e.payload)?.producer);
   return p !== undefined && typeof p.operationId === "string" ? (p as unknown as Producer) : undefined;
+}
+
+const SEQUENCED_REF = /^ev-g\d+-(\d+)-/;
+
+/**
+ * A validator's `history` and `evidence` back in the order the run recorded
+ * them. The controller passes the superseded candidates' records first, then
+ * the live candidate's with every record that names no candidate (an
+ * operator's approval among them), so concatenating the two can put an older
+ * record after a newer one. The controller's evidence refs carry the run's
+ * record sequence (`ev-g<generation>-<seq>-…`); when every ref does, the
+ * records are sorted by it, otherwise they are left as given.
+ */
+export function chronological(evidence: EvidenceRecord[]): EvidenceRecord[] {
+  const seqs = evidence.map((e) => SEQUENCED_REF.exec(e.ref)?.[1]);
+  if (seqs.some((s) => s === undefined)) return evidence;
+  return evidence.map((e, i) => ({ e, seq: Number(seqs[i]) })).sort((a, b) => a.seq - b.seq).map(({ e }) => e);
 }
 
 /** Evidence for the given accepted candidate identity, or carrying no candidate identity at all (e.g. environment checks). */
@@ -235,16 +254,17 @@ export function agentRuns(evidence: EvidenceRecord[], stageId: string, purpose: 
   return runs;
 }
 
-export function issueSnapshot(evidence: EvidenceRecord[], number: number): { record: EvidenceRecord; issue: Issue } | undefined {
+/** The issue snapshot the run read; `number` picks one by number, absent the newest one read. */
+export function issueSnapshot(evidence: EvidenceRecord[], number?: number): { record: EvidenceRecord; issue: Issue } | undefined {
   for (const record of [...evidence].reverse()) {
     if (producer(record)?.executorId !== GET_ISSUE.id) continue;
     const item = object(object(object(record.payload)?.github)?.item);
-    if (item === undefined || item.number !== number) continue;
+    if (item === undefined || (number !== undefined && item.number !== number)) continue;
     const labels = Array.isArray(item.labels) ? item.labels.filter((l): l is string => typeof l === "string") : [];
     return {
       record,
       issue: {
-        number,
+        number: number ?? Number(item.number),
         title: String(item.title ?? ""),
         state: String(item.state ?? ""),
         url: String(item.url ?? ""),

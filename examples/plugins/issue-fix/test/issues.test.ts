@@ -102,7 +102,7 @@ describe("issues table", () => {
 
   const illegal: Array<[string, Edit, RegExp]> = [
     ["marking an issue done", (f) => void (f.issues[0]!.status = "done"), /the fixer moved I1 from open to done: only the code reviewer marks an issue done/],
-    ["dismissing an issue", (f) => void (f.issues[0]!.status = "dismissed"), /from open to dismissed: only the verifier dismisses an issue/],
+    ["dismissing an issue", (f) => void (f.issues[0]!.status = "dismissed"), /from open to dismissed: only the verifier or a design ruling dismisses an issue/],
     ["reopening a done issue", (f) => void (f.issues[2]!.status = "open"), /from done to open: the fixer may only move an open or reopened issue to fixed/],
     ["skipping to done from reopened", (f) => void (f.issues[1]!.status = "done"), /from reopened to done/],
     ["marking fixed without a note", (f) => void (f.issues[0]!.status = "fixed"), /marked I1 fixed without a history entry/],

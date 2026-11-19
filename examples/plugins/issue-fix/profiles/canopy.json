@@ -225,7 +225,8 @@
       "Report at high severity: a path whose behaviour changes without a test in this change covering it; a removed guarantee (a bound, a timeout, a cleanup, an authorization check, a cancellation) that other code or comments still rely on; a comment that describes a guarantee the change removed; a test whose expected value is derived from the new code rather than from the issue; a change to a session, cookie or API contract between canopy/web and canopy/server without both sides updated.",
       "Report at medium severity a promise that is neither awaited nor handled, an effect or timer without cleanup, and a dependency added without its license artifacts.",
       "Do not report style."
-    ]
+    ],
+    "arbiter": { "model": "gpt-6-astra", "effort": "high" }
   },
   "pullRequest": {
     "checklist": [
@@ -241,7 +242,8 @@
   "harnesses": {
     "implementer": "claude-code",
     "reviewer": "codex",
-    "verifier": "claude-code"
+    "verifier": "claude-code",
+    "arbiter": "codex"
   },
   "supervisor": {
     "harnesses": ["pi", "claude-code", "codex"]

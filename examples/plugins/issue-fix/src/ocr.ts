@@ -157,9 +157,16 @@ export function codeReviewInstruction(
       ? [
           "",
           args.issues !== undefined
-            ? "Settled issues (done or dismissed). Do not report them again unless the defect is back in the current code; then report it with its id in `finding`."
+            ? "Settled issues (done, dismissed or deferred). Do not report them again unless the defect is back in the current code; then report it with its id in `finding`."
             : "Settled findings. Do not report them again unless the defect is back in the current code; then report it with its name in `finding`.",
           ...settled.map((f) => `- ${f.id} (${f.state}) ${f.description}`),
+        ]
+      : []),
+    ...((args.known?.rulings ?? []).length > 0
+      ? [
+          "",
+          "Design rulings that hold in this run: an independent arbiter, or the operator, decided each design point, quoting the issue, its discussion or the pinned documents. Do not raise a ruled point again, by its id or as a new comment, unless the lines the ruling cites have changed in the current code.",
+          ...args.known!.rulings!.map((r) => `- ${r}`),
         ]
       : []),
     ...(args.issues !== undefined && !verifying
@@ -224,6 +231,8 @@ export interface KnownFinding {
 export interface KnownFindings {
   open: KnownFinding[];
   settled: KnownFinding[];
+  /** The design rulings that hold, described: a pass must not raise their points again unless their cited lines changed. */
+  rulings?: string[];
 }
 
 function shellQuote(value: string): string {

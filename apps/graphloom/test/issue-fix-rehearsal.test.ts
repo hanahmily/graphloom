@@ -9,7 +9,7 @@ import type { JobResult } from "@graphloom/runner";
 import { GITHUB_API_URL_ENV } from "@graphloom/executor-github";
 import { startFakeGitHub, type FakeGitHub } from "@graphloom/executor-github/testing";
 import { createScope, createTaskWorkspace, goVersion, issueFixRepoFiles, ISSUE_FIX_ISSUE as ISSUE, repoRoot as root } from "@graphloom/testkit";
-import { check, probe, rehearse, REHEARSAL_GITHUB_TOKEN_ENV } from "../src/rehearsal.js";
+import { check, probe, rehearse, resumeRehearsal, REHEARSAL_GITHUB_TOKEN_ENV } from "../src/rehearsal.js";
 import { RUNNER_CONFIG_ENV } from "../src/runner-config.js";
 import { fakeRunnerConfig, writeFakeCodingAgents } from "./fixtures/fake-coding-agents.js";
 
@@ -180,6 +180,48 @@ describe.skipIf(GO === undefined)("graphloom rehearse (L1) on issue-fix with the
     expect(report.boundaries.B2.status).toBe("unverified");
     expect(report.boundaries.B2.notes.some((n) => n.startsWith("offline: no recorded read for graphloom.github/"))).toBe(true);
   }, 30_000);
+});
+
+/**
+ * issue-fix 0.17.0's Arbitrate (docs/design-issue-fix-graph.md, "Rehearsal
+ * and qualification"): the graph hands a design conflict to the scripted
+ * supervisor, which enters the supervisor-only node, and leaves it along the
+ * out-edge the ruling fits, through the real controller, plugin host and
+ * harness stand-ins, the proof test run by `go test` in a checkout with the
+ * test added.
+ */
+describe.skipIf(GO === undefined)("graphloom rehearse (L1) of issue-fix's Arbitrate scenarios", () => {
+  for (const scenario of ["arbitrate-review", "arbitrate-fixer", "arbitrate-fixer-stands"]) {
+    it(`reaches ready for ${scenario}, ending on the live path fix → review with Arbitrate's receipt`, async () => {
+      const env = await ready();
+      const report = await rehearse(env.taskPath, { commands: "run", scenario });
+      expect(report.verdict, JSON.stringify({ blocker: report.blocker, convergence: report.convergence })).toBe("ready");
+      expect(report.convergence.actual.path).toEqual(["fix", "review"]);
+      expect(report.convergence.actual.receipts.sort()).toEqual(["arbitrate", "fix", "review"]);
+      // B7: the recovery entries were the scenario's own, the hand-over and the settle, and nothing else.
+      expect(report.boundaries.B7.status, JSON.stringify(report.boundaries.B7)).toBe("passed");
+    }, 300_000);
+  }
+
+  it("stops arbitrate-operator for the operator's design ruling, and the operator's approval lets the run finish", async () => {
+    const env = await ready();
+    let stateDir: string | undefined;
+    const report = await rehearse(env.taskPath, { commands: "run", scenario: "arbitrate-operator", keep: true, onRunCreated: ({ stateDir: dir }: { stateDir: string }) => void (stateDir = dir) } as Parameters<typeof rehearse>[1]);
+    // The run waits inside Arbitrate as the scenario expects. B5 reports the review passes and the arbiter's result
+    // as results without a receipt yet: the run stopped before Review and Arbitrate could validate, waiting on the operator.
+    expect(report.convergence.met, JSON.stringify(report.convergence)).toBe(true);
+    expect(report.convergence.actual).toMatchObject({ status: "stopped", stopReason: "design ruling needs the operator", path: ["fix", "review"] });
+    expect(report.boundaries.B5.notes).toEqual(["stage review: a contract-valid result never minted a receipt", "stage arbitrate: a contract-valid result never minted a receipt"]);
+    expect(stateDir).toBeDefined();
+    const resumed = await resumeRehearsal(stateDir!, { approval: { approvalId: "design-ruling", decision: "approve", inputs: { finding: "F1", ruling: "implementation-stands", note: "The thread asks only that a running backup be reported as running." }, operator: "maintainer" } });
+    expect(resumed.status, JSON.stringify(resumed)).toBe("succeeded");
+    expect(resumed.receipts.some((r) => r.stageId === "arbitrate" && r.requirementId === "design-ruling")).toBe(true);
+    // The operator's ruling reaches the pull request body the delivery wrote.
+    const delivered = resumed.evidence.find((e) => (e.payload as { command?: { id?: string } } | undefined)?.command?.id === "deliver");
+    const body = (delivered?.payload as { command: { report?: { text: string } } } | undefined)?.command.report?.text ?? "";
+    expect(body).toContain("## Design rulings");
+    expect(body).toContain("**R1** on I1: `implementation-stands`, decided by the operator (maintainer)");
+  }, 300_000);
 });
 
 describe.skipIf(GO === undefined)("rehearsal under a profile that declares a live recoveryReserve (#151 review)", () => {

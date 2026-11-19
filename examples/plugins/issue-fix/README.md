@@ -131,6 +131,45 @@ about ten minutes; its commands allow 45.
 GRAPHLOOM_GITHUB_LIVE_TOKEN="$(gh auth token)" node ../apps/graphloom/dist/main.js run issue-fix-graphloom-task.yaml
 ```
 
+## Arbitrate: design rulings (0.17.0)
+
+The graph declares its topology (`sdkProtocol: 2`): Fix and Review joined by
+the edges `fix → review` and `review → fix`, and **Arbitrate**, a node only
+the supervisor enters and leaves, along `arbitrate → fix` or
+`arbitrate → review`
+([design](../../../docs/design-issue-fix-graph.md#arbitrate-designed-for-0170),
+[graph topology](../../../docs/design-graph-topology.md)). A run started on
+0.16 cannot move to 0.17 with `--update-plugin`; start a new run.
+
+A **design conflict** is a finding the verifier could not settle or judged at
+the design level (`finding-verification-v2` adds `designLevel` and
+`designBasis`), or an issue the fixer contests by moving it to
+`design-conflict` in `.graphloom/issues.json` with its argument. The graph
+hands the review's conflicts to the supervisor from Review, and the fixer's
+from Fix once Fix is accepted on its other work. The supervisor may `enter`
+Arbitrate, where an independent arbiter (`harnesses.arbiter`, default Codex,
+with `review.arbiter`'s model and effort, default `gpt-6-astra` at `high`)
+rules in a fresh read-only session with `design-ruling-v1`: design statements
+quoted from the issue, its comments, the pinned context documents or
+`review.principles`, code citations that match the candidate, and up to two
+proof tests the graph runs in a checkout of the candidate. A ruling the graph
+cannot verify gets one revision; an `undecidable` ruling, a second failure,
+or a point past `review.maxRulings` (default 3) arbiter rulings stops the run
+for the operator:
+
+```sh
+graphloom resume <run> --approve design-ruling --input finding=F5 --input ruling=review-stands --input note="…"
+graphloom resume <run> --decline design-ruling --reason "…"
+```
+
+`review-stands` sends the run back to Fix with the finding confirmed;
+`implementation-stands` dismisses it and moves on to Review. A decline defers
+the point. Rulings (`R1`, …) persist in the findings ledger, reach later
+review passes, the verifier and the fixer, and are listed in the pull
+request's "Design rulings"; deferred points under "Open design questions".
+The go-test profiles' rehearsal adds the scenarios `arbitrate-review`,
+`arbitrate-fixer`, `arbitrate-fixer-stands` and `arbitrate-operator`.
+
 ## Supervisor preference (0.16.0)
 
 Each profile declares which supervisor harness its runs prefer for recovery,
@@ -149,8 +188,10 @@ assign the jobs' agents.
 
 The graph declares the roles its profile assigns harnesses to, in
 `GraphDefinition.agentRoles`: the implementer (write, `harnesses.implementer`),
-the reviewer (read, `harnesses.reviewer`), and the verifier (read,
-`harnesses.verifier`, which must differ from the reviewer's). The controller
+the reviewer (read, `harnesses.reviewer`), the verifier (read,
+`harnesses.verifier`, which must differ from the reviewer's), and since 0.17.0
+the arbiter (read, `harnesses.arbiter`; its independence is its session's, so
+it may share a harness with any role). The controller
 never reads them. `graphloom doctor --task <task.yaml>` reports, per role,
 whether its harness is enabled in the runner config, available on this machine,
 and able to give the access, and lists the harnesses that could take the role

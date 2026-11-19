@@ -26,9 +26,14 @@ import {
   type ValidatorBinding,
 } from "@graphloom/sdk";
 import {
+  ARBITER_JOB,
+  ARBITRATE_STAGE,
   CODING_AGENT,
   COMMAND,
+  DESIGN_RULING_APPROVAL,
   FIX_STAGE,
+  OPERATOR_VISITS,
+  REQUIREMENT_RULING,
   DEFAULT_MAX_REVIEW_REENTRIES,
   GET_FILE,
   GET_ISSUE,
@@ -69,12 +74,18 @@ import {
   type CommandRun,
 } from "./evidence.js";
 import {
+  describeConflict,
   describeFinding,
   describeFollowUp,
+  designConflicts,
   findingById,
   findingLedger,
+  fixerRaised,
+  parseVerification,
+  holdingRulings,
   isOpen,
   knownFindings,
+  pointCases,
   passUsable,
   pathsToObserve,
   reviewPhase,
@@ -128,6 +139,8 @@ import {
   issueRef,
   listAnd,
   parseProfile,
+  pinnedRefs,
+  principlesRef,
   ProfileError,
   type Profile,
 } from "./profile.js";
@@ -145,10 +158,26 @@ import {
 } from "./prompts.js";
 import { BENCH_SCHEMA } from "./bench.js";
 import { finalSections } from "./final.js";
+import { arbitration, judgeArbiterRun, type Arbitration } from "./arbitration.js";
+import { VERIFICATION_CONTRACT } from "./review-common.js";
+import {
+  deferredSectionLines,
+  describeRuling,
+  designPointCommand,
+  proofResult,
+  proofRun,
+  proofTestRef,
+  rulingSectionLines,
+  RULING_CONTRACT,
+  RULING_SCHEMA,
+  type ProofTest,
+  type Undecidable,
+} from "./rulings.js";
+import { arbiterInstruction, arbiterRevisionInstruction } from "./arbiter.js";
 import { cleanRun, codeReview, finalRun, implementerRecord, latestImplementerRecord, plannerRecord, reportText, validatorById, verifiedChecks } from "./validators.js";
 
 export const GRAPH_ID = "issue-fix";
-export const GRAPH_VERSION = "0.16.5";
+export const GRAPH_VERSION = "0.17.0";
 
 /** Graph bookkeeping; everything else is read back from recorded evidence. */
 export interface FixPrivateState {
@@ -228,8 +257,10 @@ export function definitionFor(profile: Profile): GraphDefinition {
       : []),
     {
       id: REQUIREMENT_REVIEW,
-      statement: `The latest read-only ${harnessName(profile.roles.reviewer)} review pass on the current change, following open-code-review's delegation workflow in this generation, reviewed every changed file, test files included, skipped none, and gave a status for every open finding; every critical or high finding it raised was refuted by an independent read-only verifier with quotes that match the change; and no finding of the run is confirmed and unfixed, disputed, or awaiting verification.`,
+      statement: `The latest read-only ${harnessName(profile.roles.reviewer)} review pass on the current change, following open-code-review's delegation workflow in this generation, reviewed every changed file, test files included, skipped none, and gave a status for every open finding; every critical or high finding it raised was refuted by an independent read-only verifier with quotes that match the change, dismissed by a design ruling that holds, or deferred by the operator; and no finding of the run is confirmed and unfixed, disputed, contested as a design conflict without a ruling, or awaiting verification.`,
       evidenceSchema: "code-review-v2",
+      // A qualified replacement of the ruling validator invalidates code review receipts that relied on rulings.
+      prerequisiteRequirementIds: [REQUIREMENT_RULING],
     },
     // Review's further requirements: the profile's `final` tier, run once after code review converged.
     ...(commandsFor(profile, "final-checks").length > 0
@@ -250,8 +281,19 @@ export function definitionFor(profile: Profile): GraphDefinition {
           },
         ]
       : []),
+    // Arbitrate's one requirement (docs/design-issue-fix-graph.md, "Requirements and validators").
+    {
+      id: REQUIREMENT_RULING,
+      statement:
+        "An arbiter that neither wrote nor reviewed the change ruled on the design point with statements quoted from the issue, its thread or the pinned documents, code citations that match the candidate and proof tests whose recorded runs behave as claimed; or the operator ruled on the point or declined it.",
+      evidenceSchema: RULING_CONTRACT,
+      // A ruling is an artifact: its receipt holds while the ruling and the files it observed stand, not only while the
+      // whole candidate does, so a later edit elsewhere (the fixer's, after review-stands) leaves it valid.
+      identityArtifactSchema: RULING_CONTRACT,
+    },
   ];
   const bindings: Record<string, ValidatorBinding> = {
+    [REQUIREMENT_RULING]: { requirementId: REQUIREMENT_RULING, validatorId: "design-ruling", version: "1" },
     [REQUIREMENT_BENCH]: { requirementId: REQUIREMENT_BENCH, validatorId: "bench-gates", version: "1" },
     [REQUIREMENT_FINAL]: { requirementId: REQUIREMENT_FINAL, validatorId: "final-checks", version: "1" },
     [REQUIREMENT_DECISIONS]: { requirementId: REQUIREMENT_DECISIONS, validatorId: "decisions-recorded", version: "1" },
@@ -260,22 +302,47 @@ export function definitionFor(profile: Profile): GraphDefinition {
     [REQUIREMENT_BUILDS]: { requirementId: REQUIREMENT_BUILDS, validatorId: "build-checks", version: "1" },
     [REQUIREMENT_SCOPE]: { requirementId: REQUIREMENT_SCOPE, validatorId: "write-scope", version: "1" },
     [REQUIREMENT_CHANGELOG]: { requirementId: REQUIREMENT_CHANGELOG, validatorId: "changes-entry", version: "1" },
-    [REQUIREMENT_REVIEW]: { requirementId: REQUIREMENT_REVIEW, validatorId: "open-code-review", version: "2" },
+    // v3: honours design rulings and deferred points, and a design conflict without a ruling blocks.
+    [REQUIREMENT_REVIEW]: { requirementId: REQUIREMENT_REVIEW, validatorId: "open-code-review", version: "3" },
   };
   const reviewRequirements: string[] = requirements.map((r) => r.id).filter((id) => id === REQUIREMENT_REVIEW || id === REQUIREMENT_FINAL || id === REQUIREMENT_BENCH);
-  const fixRequirements = requirements.map((r) => r.id).filter((id) => !reviewRequirements.includes(id));
+  const fixRequirements = requirements.map((r) => r.id).filter((id) => !reviewRequirements.includes(id) && id !== REQUIREMENT_RULING);
   return {
     graphId: GRAPH_ID,
     version: GRAPH_VERSION,
     privateStateSchema: "issue-fix-private-v1",
     resultContracts: [
       { name: "decision-record-v2", schema: asSchema(DECISION_RECORD_SCHEMA), evidenceKind: "other" },
-      { name: "finding-verification-v1", schema: asSchema(VERIFICATION_SCHEMA), evidenceKind: "other" },
+      { name: VERIFICATION_CONTRACT, schema: asSchema(VERIFICATION_SCHEMA), evidenceKind: "other" },
       { name: "code-review-v2", schema: asSchema(CODE_REVIEW_SCHEMA), evidenceKind: "review" },
+      // "other", so an arbiter's ruling never counts as the code review's independent review evidence.
+      { name: RULING_CONTRACT, schema: asSchema(RULING_SCHEMA), evidenceKind: "other" },
     ],
+    // Fix ⇄ Review, and Arbitrate, which only the supervisor enters and leaves (docs/design-issue-fix-graph.md, "The graph's topology").
     stages: [
       { id: FIX_STAGE, name: "Fix", requirementIds: fixRequirements },
       { id: REVIEW_STAGE, name: "Review", requirementIds: reviewRequirements },
+      { id: ARBITRATE_STAGE, name: "Arbitrate", requirementIds: [REQUIREMENT_RULING], entry: "supervisor", maxVisits: profile.maxRulings + OPERATOR_VISITS },
+    ],
+    edges: [
+      { from: FIX_STAGE, to: REVIEW_STAGE },
+      { from: REVIEW_STAGE, to: FIX_STAGE },
+      { from: ARBITRATE_STAGE, to: FIX_STAGE },
+      { from: ARBITRATE_STAGE, to: REVIEW_STAGE },
+    ],
+    start: FIX_STAGE,
+    terminal: [REVIEW_STAGE],
+    approvals: [
+      {
+        id: DESIGN_RULING_APPROVAL,
+        stageId: ARBITRATE_STAGE,
+        description: "Rule on a design question the arbiter could not decide",
+        inputs: [
+          { name: "finding", pattern: "[FI][0-9]+" },
+          { name: "ruling", pattern: "implementation-stands|review-stands" },
+          { name: "note", description: "The design basis, in a sentence or two" },
+        ],
+      },
     ],
     requirements,
     defaultValidators: requirements.map((r) => bindings[r.id]!),
@@ -289,14 +356,17 @@ export function definitionFor(profile: Profile): GraphDefinition {
 
 /**
  * The roles the profile assigns harnesses to, for `graphloom doctor --task`:
- * the implementer writes; the reviewer and the verifier read, and the
- * verifier must not share the reviewer's harness (parseProfile refuses that).
+ * the implementer writes; the reviewer, the verifier and the arbiter read,
+ * and the verifier must not share the reviewer's harness (parseProfile
+ * refuses that). The arbiter's independence is its session's, not its
+ * harness's, so it names no `distinctFrom`.
  */
 export function agentRoles(profile: Profile): AgentRoleDeclaration[] {
   return [
     { role: "implementer", harness: profile.roles.implementer, access: "write", setting: "harnesses.implementer" },
     { role: "reviewer", harness: profile.roles.reviewer, access: "read", setting: "harnesses.reviewer" },
     { role: "verifier", harness: profile.roles.verifier, access: "read", distinctFrom: ["reviewer"], setting: "harnesses.verifier" },
+    { role: "arbiter", harness: profile.roles.arbiter, access: "read", setting: "harnesses.arbiter" },
   ];
 }
 
@@ -329,13 +399,61 @@ export function advanceFix(view: RunView): GraphDecision {
     return stop({ reason: "incompatible task", blocker: `the request names no ${profile.issues.owner}/${profile.issues.repo} issue`, retryable: false }, "reject a request without an issue");
   }
   const state = readPrivate(view);
-  const stage = ctx.definition.stages.find(
-    (s) =>
-      !s.requirementIds.every((id) => view.receipts.some((r) => r.stageId === s.id && r.requirementId === id && r.valid)) ||
-      view.openAttempt?.[s.id] === true,
-  );
+  const accepted = (id: string): boolean => {
+    const stage = ctx.definition.stages.find((s) => s.id === id)!;
+    return stage.requirementIds.every((r) => view.receipts.some((x) => x.stageId === id && x.requirementId === r && x.valid)) && view.openAttempt?.[id] !== true;
+  };
+  const work = (id: string): GraphDecision => (id === FIX_STAGE ? fix(ctx, view, issue, state) : review(ctx, view, issue, state));
+  const topology = view.topology;
+  // Arbitrate's work while the supervisor's side visit of it is open.
+  if (topology?.sideVisit?.stageId === ARBITRATE_STAGE) return arbitrate(ctx, view, issue, state, topology.sideVisit.attempt);
+  if (topology !== undefined && topology.path.length > 0) {
+    // The first live-path node that is open or lacks a receipt.
+    const open = topology.path.find((v) => !accepted(v.stageId));
+    if (open !== undefined) return work(open.stageId);
+    if (topology.path.at(-1)!.stageId === FIX_STAGE) {
+      // Fix is the path's last node and accepted: the fixer's design conflicts go to the supervisor first, then on to Review.
+      const contested = fixerHandover(ctx, view, state);
+      if (contested !== undefined) return contested;
+      return accepted(REVIEW_STAGE) ? deliver(ctx, view, issue, state) : work(REVIEW_STAGE);
+    }
+    return deliver(ctx, view, issue, state);
+  }
+  // A caller that shows no topology: the first graph-entered stage that is incomplete or open.
+  const stage = ctx.definition.stages.find((s) => s.entry !== "supervisor" && !accepted(s.id));
   if (stage === undefined) return deliver(ctx, view, issue, state);
-  return stage.id === FIX_STAGE ? fix(ctx, view, issue, state) : review(ctx, view, issue, state);
+  if (stage.id === REVIEW_STAGE) {
+    const contested = fixerHandover(ctx, view, state);
+    if (contested !== undefined) return contested;
+  }
+  return work(stage.id);
+}
+
+/** The findings ledger as the graph reads it: rulings count on Arbitrate's receipts under the bindings admitted now. */
+function ledgerOf(view: RunView, profile: Profile, evidence: EvidenceRecord[] = view.evidence): FindingLedger {
+  return findingLedger(evidence, { receipts: view.receipts, bindings: view.validatorBindings, profile });
+}
+
+/**
+ * Fix is accepted on its other work and the fixer contests findings no ruling
+ * holds for: the graph hands the run to the supervisor from Fix, naming each,
+ * instead of moving to Review. Undefined when there is none.
+ */
+function fixerHandover(ctx: Context, view: RunView, state: FixPrivateState): GraphDecision | undefined {
+  const ledger = ledgerOf(view, ctx.profile);
+  const contested = designConflicts(ledger).filter((f) => fixerRaised(ledger, f));
+  if (contested.length === 0) return undefined;
+  const named = contested.slice(0, 3).map((f) => describeConflict(ledger, f));
+  const more = contested.length > named.length ? `; and ${contested.length - named.length} more` : "";
+  const reads = view.evidence.filter((e) => issueCommand(e, ISSUES_COMMAND.read)?.ok === true).map((e) => e.ref).slice(-1);
+  return supervise(
+    {
+      reason: `Fix is accepted on its other work, and the fixer contests ${contested.length} finding(s) as contradicting the project's design, with no ruling for them: ${named.join("; ")}${more}. To have an independent arbiter rule on the first, enter ${ARBITRATE_STAGE} from Fix; a review-stands ruling leaves along ${ARBITRATE_STAGE} → ${FIX_STAGE} (one correction), implementation-stands along ${ARBITRATE_STAGE} → ${REVIEW_STAGE} (a forward move). If the fixer is avoiding work, reenter Fix with your own instruction, or stop for a maintainer.`,
+      evidenceRefs: reads,
+    },
+    "hand the fixer's design conflict to the supervisor from the accepted Fix",
+    JSON.stringify(state),
+  );
 }
 
 function fix(ctx: Context, view: RunView, issue: number, state: FixPrivateState): GraphDecision {
@@ -395,7 +513,7 @@ function fix(ctx: Context, view: RunView, issue: number, state: FixPrivateState)
     if (read !== undefined) return read;
   }
   // Every implementer job starts from the file as the graph last accepted it.
-  const restore = issuesRestore(view, findingLedger(view.evidence), FIX_STAGE, state);
+  const restore = issuesRestore(view, ledgerOf(view, profile), FIX_STAGE, state);
   const implementer = (job: JobSpec, summary: string, next: FixPrivateState): GraphDecision => restore ?? dispatchAgent(view, job, summary, next);
   if (implemented === undefined || implemented.status !== "completed" || stalePreReentry) {
     return implementer(
@@ -609,7 +727,7 @@ function review(ctx: Context, view: RunView, issue: number, state: FixPrivateSta
   if (unread !== undefined) return unread;
   const filed = contextRestore(view, contextDocuments(view.evidence, profile), REVIEW_STAGE, state);
   if (filed !== undefined) return filed;
-  const ledger = findingLedger(view.evidence);
+  const ledger = ledgerOf(view, profile);
   const passes = ledger.passes.filter((p) => p.digest === digest && currentRefs.has(p.run.record.ref));
   const last = passes.at(-1);
   // Rounds 1..MAX_DISCOVERY_ROUNDS may raise new findings; later rounds only verify the known ones.
@@ -653,6 +771,8 @@ function review(ctx: Context, view: RunView, issue: number, state: FixPrivateSta
     return dispatchAgent(view, codeReviewJob(profile, assignment), summary, state);
   };
   if (last === undefined) return pass(false);
+  // Review was reentered (the supervisor left Arbitrate to it): it runs again on this change, and the pass gets the ruling.
+  if (view.openAttempt?.[REVIEW_STAGE] === true && (last.run.record.generation ?? 0) < view.generation) return pass(false);
   // An unusable pass (incomplete coverage, a crash, a non-read-only run) is not
   // a verdict to re-evaluate forever: retry a fresh pass the same way a sweep
   // continuation would, bounded by the same cap, rather than reporting the
@@ -663,7 +783,7 @@ function review(ctx: Context, view: RunView, issue: number, state: FixPrivateSta
   if (paths.length > 0) return withPrivate(observe({ paths }, "observe the lines a refutation quotes on the current change"), state);
   const pending = toVerify(ledger, digest);
   if (pending.length > 0) {
-    const assignment = verificationInstruction(profile, { findings: pending, background, changed: green?.checkout?.paths ?? [], context: contextDocuments(view.evidence, profile) });
+    const assignment = verificationInstruction(profile, { findings: pending, background, changed: green?.checkout?.paths ?? [], context: contextDocuments(view.evidence, profile), rulings: holdingRulings(ledger) });
     return dispatchAgent(
       view,
       verificationJob(profile, assignment),
@@ -680,7 +800,7 @@ function review(ctx: Context, view: RunView, issue: number, state: FixPrivateSta
 
   const statement = definition.requirements.find((r) => r.id === REQUIREMENT_REVIEW)!.statement;
   const history = view.evidence.filter((e) => e.candidateDigest !== undefined && e.candidateDigest !== view.candidateDigest);
-  const result = codeReview.evaluate({ requirementId: REQUIREMENT_REVIEW, statement, evidence: current, history, candidateDigest: digest }) as ValidationResult;
+  const result = codeReview.evaluate({ requirementId: REQUIREMENT_REVIEW, statement, evidence: current, history, candidateDigest: digest, receipts: view.receipts, validatorBindings: view.validatorBindings }) as ValidationResult;
   if (result.status === "passed") {
     // The final tier runs once, here: review converged, delivery has not happened.
     const final = finalStep(ctx, view, state, digest, current);
@@ -688,6 +808,20 @@ function review(ctx: Context, view: RunView, issue: number, state: FixPrivateSta
     return withPrivate(validate({ stageId: REVIEW_STAGE }, "validate the reviewed change"), state);
   }
   const refs = [...passes.map((p) => p.run.record.ref), ...ledger.verifications.filter((v) => v.digest === digest && currentRefs.has(v.run.record.ref)).map((v) => v.run.record.ref)];
+  // A design conflict the verifier raised, with no ruling, is the supervisor's to take to Arbitrate.
+  const conflicts = designConflicts(ledger);
+  if (conflicts.length > 0) {
+    const named = conflicts.slice(0, 3).map((f) => describeConflict(ledger, f));
+    const more = conflicts.length > named.length ? `; and ${conflicts.length - named.length} more` : "";
+    return supervise(
+      {
+        reason: `code review did not pass: ${result.reason}. It left ${conflicts.length} design conflict(s) no ruling holds for: ${named.join("; ")}${more}. To have an independent arbiter rule on the first, enter ${ARBITRATE_STAGE} from Review; a review-stands ruling leaves along ${ARBITRATE_STAGE} → ${FIX_STAGE}, implementation-stands along ${ARBITRATE_STAGE} → ${REVIEW_STAGE} (each a reentry, one correction). A plain defect: reenter Fix with your own instruction; or stop for a maintainer. ${roundSummary(ledger, digest, passes)}; ${view.budgets.agentInvocations} agent invocation(s) left`,
+        evidenceRefs: refs.slice(-10),
+      },
+      "hand the design conflicts of the code review to the supervisor",
+      JSON.stringify(state),
+    );
+  }
   const back = reviewReentry(profile, view, ledger, last, digest, state);
   if (back !== undefined) return back;
   return supervise(
@@ -707,6 +841,8 @@ function review(ctx: Context, view: RunView, issue: number, state: FixPrivateSta
  */
 function reviewReentry(profile: Profile, view: RunView, ledger: FindingLedger, last: ReviewPass, digest: string, state: FixPrivateState): GraphDecision | undefined {
   if (!passUsable(last)) return undefined;
+  // A design conflict is the supervisor's, through Arbitrate, never a known correction.
+  if (designConflicts(ledger).length > 0) return undefined;
   const open = ledger.findings.filter(isOpen);
   const confirmed = open.filter((f) => f.state === "confirmed");
   if (confirmed.length === 0 || confirmed.length !== open.length) return undefined;
@@ -723,7 +859,7 @@ function reviewReentry(profile: Profile, view: RunView, ledger: FindingLedger, l
   // Converging: the first failing round, or fewer confirmed findings than when the last correction was asked for, read
   // from the evidence before that correction. A correction that changed nothing leaves the same findings: not converging.
   const lastCorrection = corrections.at(-1);
-  const previous = lastCorrection === undefined ? undefined : findingLedger(view.evidence.slice(0, lastCorrection.i)).findings.filter((f) => f.state === "confirmed").length;
+  const previous = lastCorrection === undefined ? undefined : ledgerOf(view, profile, view.evidence.slice(0, lastCorrection.i)).findings.filter((f) => f.state === "confirmed").length;
   if (previous !== undefined && confirmed.length >= previous) return undefined;
 
   const named = confirmed.slice(0, 3).map((f) => `${issueIdOf(f.id)} ${f.comment.path}:${f.comment.start_line}-${f.comment.end_line} ${clip(f.comment.content, 100)}`);
@@ -843,6 +979,184 @@ function latestFinalFailure(ctx: Context, view: RunView): string[] | undefined {
   return results.every((r) => r.result.status === "passed") ? undefined : finalFeedback(profile, evidence, digest, results);
 }
 
+/**
+ * Arbitrate, while the supervisor's side visit of it is open
+ * (docs/design-issue-fix-graph.md, "Inside Arbitrate"): pin the design point,
+ * take the operator's answer when there is one, send a capped point to the
+ * operator, dispatch the arbiter in a fresh session, observe the lines it
+ * cites, run its proof tests, revise once, ask the operator about what stays
+ * undecided, and validate. The supervisor leaves the node once it settles.
+ */
+function arbitrate(ctx: Context, view: RunView, issue: number, state: FixPrivateState, attempt: number): GraphDecision {
+  const { profile } = ctx;
+  const digest = view.candidateDigest;
+  const arb = arbitration(view.evidence, { receipts: view.receipts, bindings: view.validatorBindings, profile, attempt });
+  // 1. The point: the first design conflict no ruling holds for, pinned once per visit.
+  if (arb.point === undefined) {
+    if (arb.next === undefined) {
+      return supervise(
+        { reason: `nothing to arbitrate: every design conflict has a ruling that holds (${arb.ledger.rulings.map((r) => `${r.id} on ${issueIdOf(r.finding)}`).join(", ") || "none raised"}); leave ${ARBITRATE_STAGE} along ${ARBITRATE_STAGE} → ${FIX_STAGE} or ${ARBITRATE_STAGE} → ${REVIEW_STAGE}` },
+        "nothing to arbitrate",
+        JSON.stringify(state),
+      );
+    }
+    const job: JobSpec = { stageId: ARBITRATE_STAGE, kind: "command", purpose: "diagnostic", readOnly: true, instruction: `Record the design point ${arb.next.id}`, input: { commands: [designPointCommand(arb.next.id)] } };
+    return withPrivate(dispatch(job, `record ${issueIdOf(arb.next.id)} as the design point this visit of ${ARBITRATE_STAGE} settles`), state);
+  }
+  const point = findingById(arb.ledger, arb.point);
+  // 7. The operator's answer to this point settles it; one naming another point stops again.
+  const run = arb.runs.at(-1);
+  if (arb.approval !== undefined && (run === undefined || arb.approval.index > run.index)) {
+    const a = arb.approval;
+    if (a.decision === "decline" || a.finding === arb.point) {
+      return withPrivate(validate({ stageId: ARBITRATE_STAGE }, `validate the operator's ${a.decision === "decline" ? "decline of" : "ruling on"} ${issueIdOf(arb.point)}`), state);
+    }
+    return operatorStop(view, arb, point, `the operator's approval names ${a.finding !== undefined ? issueIdOf(a.finding) : "no finding"}, but the design point waiting is ${issueIdOf(arb.point)}`, undefined, [a.record.ref]);
+  }
+  // 2. The cap: past review.maxRulings arbiter rulings, every point goes to the operator.
+  if (arb.capped) {
+    return operatorStop(view, arb, point, `the run already holds ${arb.arbiterRulings} arbiter ruling(s), its review.maxRulings of ${profile.maxRulings}`);
+  }
+  if (point === undefined) {
+    return supervise({ reason: `the design point ${arb.point} recorded for this visit is not in the findings ledger` }, "escalate an unknown design point", JSON.stringify(state));
+  }
+  const docs = arbiterDocuments(view, profile);
+  // 3. The arbiter, once per visit, in a fresh session.
+  if (run === undefined) {
+    const filed = contextRestore(view, docs, ARBITRATE_STAGE, state);
+    if (filed !== undefined) return filed;
+    const assignment = arbiterInstruction(profile, { ...arbiterInputs(view, issue, arb, point), context: docs });
+    return dispatchAgent(view, arbiterJob(profile, assignment), `ask a fresh read-only ${harnessName(profile.roles.arbiter)} arbiter to rule on ${issueIdOf(point.id)}`, state);
+  }
+  const judged = judgeArbiterRun(arb, run, { profile, evidence: view.evidence, digest });
+  switch (judged.kind) {
+    case "ruled":
+      // 8. Validate: the receipt settles the node, and the supervisor leaves along the out-edge that fits.
+      return withPrivate(validate({ stageId: ARBITRATE_STAGE }, `validate the arbiter's ${judged.result.ruling} ruling on ${issueIdOf(point.id)}`), state);
+    case "undecidable":
+      return operatorStop(view, arb, point, "the arbiter could not decide the design point", judged.result.undecidable, [run.run.record.ref]);
+    case "observe":
+      // 4. The candidate files its code citations name, in one read-only observation.
+      return withPrivate(observe({ paths: judged.paths }, `observe the candidate lines the arbiter's ruling on ${issueIdOf(point.id)} cites`), state);
+    case "proofs": {
+      // 5. One read-only checkout job per proof test, the test added to a checkout of the candidate.
+      const t = judged.tests[0]!;
+      return withPrivate(dispatch(proofJob(profile, t), `run the arbiter's proof test ${t.name} (${t.path}) in a checkout of the candidate, expecting it to ${t.expect}`), state);
+    }
+    case "problems": {
+      // 6. One revision, continuing the arbiter's own session; a second failure goes to the operator.
+      if (arb.runs.length >= 2) return operatorStop(view, arb, point, `the arbiter's ruling did not verify after one revision: ${judged.problems.slice(0, 3).join("; ")}`, undefined, [run.run.record.ref]);
+      const runs = (judged.result?.proofTests ?? []).map((t) => `${t.path}: ${proofResult(profile, t, proofRun(view.evidence, profile, t, digest, run.index))}`);
+      const assignment = arbiterRevisionInstruction({ problems: judged.problems, proofRuns: runs, sources: pinnedSourceNames(view, profile) });
+      const from = arbiterSession(view, attempt);
+      return dispatchAgent(view, arbiterJob(profile, assignment, from), `ask the arbiter to revise its ruling on ${issueIdOf(point.id)}: ${clip(judged.problems[0] ?? "", 200)}`, state);
+    }
+  }
+}
+
+/** What the arbiter is handed beside the documents: the issue, the finding with every verdict, the fixer's argument, the issue's history and the holding rulings. */
+function arbiterInputs(view: RunView, issue: number, arb: Arbitration, point: Finding) {
+  const { ledger } = arb;
+  const snapshot = issueSnapshot(view.evidence, issue);
+  const comments = issueComments(view.evidence);
+  const profile = parseProfile(view.config);
+  const text = snapshot !== undefined && comments !== undefined ? snapshotText(profile, snapshot.issue, comments.comments, comments.complete) : undefined;
+  const verdicts = ledger.verifications
+    .filter((v) => v.covered.includes(point.id))
+    .flatMap((v) => {
+      const parsed = v.run.status === "completed" ? parseVerification(v.run.output) : undefined;
+      const verdict = parsed !== undefined && "verdicts" in parsed ? parsed.verdicts.get(point.id) : undefined;
+      return verdict === undefined ? [] : [{ digest: v.digest, ref: v.run.record.ref, verdict }];
+    });
+  const issueEntry = issueById(ledger.issues, issueIdOf(point.id));
+  return {
+    issue: issueRef(profile, issue),
+    snapshot: text !== undefined && "text" in text ? text.text : (snapshot?.issue.body ?? ""),
+    commentCount: comments?.comments.length ?? 0,
+    finding: point,
+    verdicts,
+    ...(issueEntry !== undefined ? { issueEntry } : {}),
+    rulings: holdingRulings(ledger),
+    changed: latestCheckoutRun(view.evidence, COMMAND.regression, "candidate", view.candidateDigest)?.checkout?.paths ?? [],
+    sources: pinnedSourceNames(view, profile),
+  };
+}
+
+/** The source names a design statement may give, as the run pinned them. */
+function pinnedSourceNames(view: RunView, profile: Profile): string[] {
+  const comments = issueComments(view.evidence)?.comments.length ?? 0;
+  const principles = principlesRef(profile);
+  return [
+    "issue",
+    ...Array.from({ length: comments }, (_, i) => `comment:${i + 1}`),
+    ...contextDocuments(view.evidence, profile).map((d) => `doc:${d.name}`),
+    ...(principles !== undefined && readContext(view.evidence, principles).kind === "read" ? ["principles"] : []),
+  ];
+}
+
+/** The documents the arbiter reads: the context documents, then the principles file. */
+function arbiterDocuments(view: RunView, profile: Profile): ContextDocument[] {
+  const principles = principlesRef(profile);
+  const read = principles !== undefined ? readContext(view.evidence, principles) : undefined;
+  const docs = contextDocuments(view.evidence, profile);
+  return read?.kind === "read" && !docs.some((d) => d.name === read.doc.name) ? [...docs, read.doc] : docs;
+}
+
+/**
+ * The run waits for the operator: a final stop, lifted by the `design-ruling`
+ * approval, whose blocker states the question, both cases with their
+ * citations, and the two commands that answer it.
+ */
+function operatorStop(view: RunView, arb: Arbitration, point: Finding | undefined, why: string, undecided?: Undecidable, refs: string[] = []): GraphDecision {
+  const id = arb.point ?? point?.id ?? "F?";
+  const cases = undecided ?? (point !== undefined ? pointCases(arb.ledger, point) : { question: `Does ${issueIdOf(id)} hold against the project's design?`, implementation: "", review: "" });
+  const blocker = [
+    `${why}. The design point is ${issueIdOf(id)}.`,
+    `Question: ${clip(cases.question, 800)}`,
+    `The implementation's case: ${clip(cases.implementation, 1_200)}`,
+    `The review's case: ${clip(cases.review, 1_200)}`,
+    `Rule on it: graphloom resume ${view.runId} --approve ${DESIGN_RULING_APPROVAL} --input finding=${id} --input ruling=review-stands --input note="…" (or ruling=implementation-stands)`,
+    `Or leave it open, as an open design question in the pull request: graphloom resume ${view.runId} --decline ${DESIGN_RULING_APPROVAL} --reason "…"`,
+  ].join("\n");
+  return stop({ reason: "design ruling needs the operator", blocker, evidenceRefs: refs, retryable: false }, `wait for the operator's design ruling on ${issueIdOf(id)}`);
+}
+
+/** The arbiter's job: a read-only review job in a fresh session (or its own, revising), on the profile's arbiter harness and model. */
+function arbiterJob(profile: Profile, assignment: string, continueFrom?: string): JobSpec {
+  return {
+    jobId: ARBITER_JOB,
+    stageId: ARBITRATE_STAGE,
+    kind: "agent",
+    purpose: "review",
+    readOnly: true,
+    instruction: "Rule on a design conflict",
+    resultSchema: RULING_CONTRACT,
+    executor: CODING_AGENT,
+    input: { assignment, harness: profile.roles.arbiter, harnessOptions: { model: profile.arbiter.model, ...(profile.arbiter.effort !== undefined ? { effort: profile.arbiter.effort } : {}) } },
+    ...agentClock(profile),
+    ...(continueFrom !== undefined ? { continueFrom } : {}),
+  };
+}
+
+/** The arbiter's own session of this visit, which only its revision continues. */
+function arbiterSession(view: RunView, attempt: number): string | undefined {
+  const sessions = (view.agentSessions ?? []).filter((s) => s.stageId === ARBITRATE_STAGE && s.dispatchKey === ARBITER_JOB && s.attempt === attempt);
+  return sessions.at(-1)?.operationId;
+}
+
+/** A proof test's run: the profile's regression runner on the named test, in a prepared checkout of the candidate with the test added. */
+function proofJob(profile: Profile, t: ProofTest): JobSpec {
+  return {
+    stageId: ARBITRATE_STAGE,
+    kind: "command",
+    purpose: "check",
+    readOnly: true,
+    instruction: `Proof test ${t.name}`,
+    checkout: { from: "candidate", write: [{ path: t.path, content: t.content }] },
+    input: { commands: [{ id: COMMAND.proof, argv: profile.runner.argv(proofTestRef(profile, t)), timeoutMs: profile.regressionTimeoutMs }] },
+  };
+}
+
 function deliver(ctx: Context, view: RunView, issue: number, state: FixPrivateState): GraphDecision {
   const { profile } = ctx;
   const current = forIdentity(view.evidence, view.candidateDigest);
@@ -857,7 +1171,7 @@ function deliver(ctx: Context, view: RunView, issue: number, state: FixPrivateSt
   const branch = isRehearsalRunId(view.runId) ? `${rehearsalBranchScope(view.runId)}/fix-${issue}` : `fix/${issue}`;
   if (delivered === undefined) {
     // Leave the final table in the worktree for the operator; it stays out of the commit.
-    const ledger = findingLedger(view.evidence);
+    const ledger = ledgerOf(view, profile);
     const restore = issuesRestore(view, ledger, REVIEW_STAGE, state);
     if (restore !== undefined) return restore;
     const record = latestImplementerRecord(view.evidence);
@@ -877,6 +1191,8 @@ function deliver(ctx: Context, view: RunView, issue: number, state: FixPrivateSt
       ...reviewSummary(profile, view),
       sections: finalSections(profile, view.evidence, view.candidateDigest),
       ...(ledger.issues.issues.length > 0 ? { issues: issueTableRows(ledger.issues.issues) } : {}),
+      ...(ledger.rulings.length > 0 ? { rulings: ledger.rulings.flatMap((r) => rulingSectionLines(r, issueIdOf(r.finding))) } : {}),
+      ...(ledger.deferred.length > 0 ? { openDesignQuestions: ledger.deferred.flatMap((d) => deferredSectionLines(d, issueIdOf(d.finding))) } : {}),
     });
     return withPrivate(
       dispatch(
@@ -924,8 +1240,11 @@ function partialSnapshot(problem: string, refs: string[]): GraphDecision {
  * that together do not fit an agent's prompt, stop the run before any agent.
  */
 function contextStep(profile: Profile, view: RunView, state: FixPrivateState): { docs: ContextDocument[] } | { decision: GraphDecision } {
-  const refs = contextRefs(profile);
+  // The principles file is read and pinned the same way; only the arbiter is handed it.
+  const refs = pinnedRefs(profile);
   if (refs.length === 0) return { docs: [] };
+  const principles = principlesRef(profile);
+  const forAgents = (docs: ContextDocument[]) => (principles === undefined ? docs : docs.filter((d) => contextRefs(profile).some((r) => contextName(r) === d.name)));
   const reads = refs.map((ref) => ({ ref, read: readContext(view.evidence, ref) }));
   for (const { ref, read } of reads) {
     if (read.kind === "missing") {
@@ -938,7 +1257,7 @@ function contextStep(profile: Profile, view: RunView, state: FixPrivateState): {
     return { decision: stop({ reason: "incompatible task", blocker: `the context documents are ${bytes} bytes (${describeContext(docs)}), more than the ${MAX_CONTEXT_BYTES} a run carries`, evidenceRefs: docs.map((d) => d.record.ref), retryable: false }, "stop: the context documents are too large") };
   }
   const unread = reads.filter(({ read }) => read.kind === "unread").map(({ ref }) => ref);
-  if (unread.length === 0) return { docs };
+  if (unread.length === 0) return { docs: forAgents(docs) };
   const local = unread.filter((ref) => ref.repo === undefined);
   if (local.length > 0) {
     return { decision: withPrivate(observe({ paths: local.map((ref) => ref.path) }, `observe the context documents of the target repository (${local.map((ref) => ref.path).join(", ")})`), state) };
@@ -999,7 +1318,7 @@ function contextRestore(view: RunView, docs: ContextDocument[], stageId: string,
 
 /** The test plan's line for the code review, and the dismissed findings a maintainer can overrule. */
 function reviewSummary(profile: Profile, view: RunView): { review: string; dismissed: string[]; reviewFollowUps: string[] } {
-  const ledger = findingLedger(view.evidence);
+  const ledger = ledgerOf(view, profile);
   const last = ledger.passes.filter((p) => p.digest === view.candidateDigest).at(-1);
   if (last?.report === undefined) return { review: "Code review did not produce a result.", dismissed: [], reviewFollowUps: [] };
   const { report } = last;
@@ -1023,7 +1342,7 @@ function reviewSummary(profile: Profile, view: RunView): { review: string; dismi
 
 /** Why the run is back in Fix: the confirmed findings of the code review, when there are any. Dismissed and disputed ones never reach the implementer. */
 function reentryFeedback(ctx: Context, view: RunView): string[] {
-  const ledger = findingLedger(view.evidence);
+  const ledger = ledgerOf(view, ctx.profile);
   // Driven by the issues file: open and reopened issues first, then the ones marked fixed that the reviewer has yet to verify.
   const status = (f: Finding) => issueById(ledger.issues, issueIdOf(f.id))?.status ?? "open";
   const unsettled = ledger.findings.filter((f) => f.state === "confirmed");
@@ -1213,7 +1532,7 @@ function verificationJob(profile: Profile, assignment: string): JobSpec {
     purpose: "diagnostic",
     readOnly: true,
     instruction: "Verify the code review findings",
-    resultSchema: "finding-verification-v1",
+    resultSchema: VERIFICATION_CONTRACT,
     executor: CODING_AGENT,
     input: { assignment, harness: profile.roles.verifier },
     ...agentClock(profile),
@@ -1226,7 +1545,9 @@ function implementJob(ctx: Context, view: RunView, issue: number, given: Decisio
   const planned = plannerRecord(view.evidence)?.acceptance;
   const record: DecisionRecord = given.acceptance === undefined && planned !== undefined ? { ...given, acceptance: planned } : given;
   const from = implementerSession(view);
-  const table = findingLedger(view.evidence).issues;
+  const ledger = ledgerOf(view, profile);
+  const table = ledger.issues;
+  const rulings = ledger.rulings.filter((r) => ledger.findings.some((f) => f.ruling === r.id)).map((r) => ({ text: describeRuling(r, issueIdOf(r.finding)), decision: r.decision }));
   // The fixer's last edits to the issues file the graph refused, so it does not repeat them.
   const rejected = rejectedSinceLastWork(view, table).map((r) => `${ISSUES_FILE}: the graph rejected your edit and restored the file: ${r.note}.`);
   const all = [...rejected, ...(feedback ?? [])];
@@ -1240,7 +1561,7 @@ function implementJob(ctx: Context, view: RunView, issue: number, given: Decisio
     writeScope: writeScopeFor(record, profile),
     executor: CODING_AGENT,
     input: {
-      assignment: implementInstruction(profile, { issue, plan: record, context: contextDocuments(view.evidence, profile), ...(all.length > 0 ? { feedback: all } : {}), ...(table.issues.length > 0 ? { issues: true } : {}) }),
+      assignment: implementInstruction(profile, { issue, plan: record, context: contextDocuments(view.evidence, profile), ...(all.length > 0 ? { feedback: all } : {}), ...(table.issues.length > 0 ? { issues: true } : {}), ...(rulings.length > 0 ? { rulings } : {}) }),
       harness: profile.roles.implementer,
     },
     ...agentClock(profile),

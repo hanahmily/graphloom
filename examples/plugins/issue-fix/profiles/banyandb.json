@@ -265,7 +265,8 @@
       "Report at high severity: a path whose behaviour changes without a test in this change covering it; a removed guarantee (a bound, a timeout, a cleanup, a cancellation) that other code or comments still rely on; a comment that describes a guarantee the change removed; a test whose expected value is derived from the new code rather than from the issue; a change to an on-disk or wire format.",
       "Report at medium severity a goroutine started without run.Go or the package's existing lifecycle helper.",
       "Do not report style."
-    ]
+    ],
+    "arbiter": { "model": "gpt-6-astra", "effort": "high" }
   },
   "pullRequest": {
     "checklist": [
@@ -281,7 +282,8 @@
   "harnesses": {
     "implementer": "claude-code",
     "reviewer": "codex",
-    "verifier": "claude-code"
+    "verifier": "claude-code",
+    "arbiter": "codex"
   },
   "supervisor": {
     "harnesses": ["pi", "claude-code", "codex"]

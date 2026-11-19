@@ -6,6 +6,8 @@ import type { ExecutorPin } from "@graphloom/sdk";
 
 export const FIX_STAGE = "fix";
 export const REVIEW_STAGE = "review";
+/** The supervisor-only node that rules on a design conflict (docs/design-issue-fix-graph.md, "Arbitrate"). */
+export const ARBITRATE_STAGE = "arbitrate";
 
 export const REQUIREMENT_DECISIONS = "decisions-recorded";
 export const REQUIREMENT_REPRODUCES = "reproduces";
@@ -18,9 +20,15 @@ export const REQUIREMENT_REVIEW = "code-review";
 export const REQUIREMENT_FINAL = "final-checks";
 /** Review requirement for the `final` tier commands judged by the hard gates of the benchmark report they write. */
 export const REQUIREMENT_BENCH = "bench-gates";
+/** Arbitrate's requirement: an independent arbiter, or the operator, ruled on the design point. */
+export const REQUIREMENT_RULING = "design-ruling";
+/** The operator approval an undecidable or capped design point waits on; its id is the requirement's. */
+export const DESIGN_RULING_APPROVAL = "design-ruling";
 
 /** Plan, implement and corrections share this key, so each continues the previous session. */
 export const IMPLEMENTER_JOB = "implementer";
+/** The arbiter's dispatch key: a fresh session per Arbitrate visit, continued only by its own revision. */
+export const ARBITER_JOB = "arbiter";
 
 export const CODING_AGENT: ExecutorPin = { id: "graphloom.coding-agent/run", version: "1" };
 export const GET_ISSUE: ExecutorPin = { id: "graphloom.github/get-issue", version: "1" };
@@ -41,6 +49,12 @@ export const MAX_SWEEP_PASSES = 4;
  * becomes a non-blocking follow-up for the pull request.
  */
 export const MAX_DISCOVERY_ROUNDS = 3;
+/** Arbiter rulings per run before every further design conflict goes to the operator (`review.maxRulings`). */
+export const DEFAULT_MAX_RULINGS = 3;
+/** The arbiter's model and reasoning effort when the profile does not say (`review.arbiter`). */
+export const DEFAULT_ARBITER = { model: "gpt-6-astra", effort: "high" } as const;
+/** Visits of Arbitrate beyond `review.maxRulings`: points the operator rules on after the cap. */
+export const OPERATOR_VISITS = 3;
 
 /**
  * Command ids the graph itself owns. A profile's own commands (GREEN's
@@ -50,4 +64,6 @@ export const COMMAND = {
   regression: "regression",
   changesDiff: "changes-diff",
   deliver: "deliver",
+  /** An arbiter's proof test, run by the profile's regression runner in a checkout with the test added. */
+  proof: "proof-test",
 } as const;

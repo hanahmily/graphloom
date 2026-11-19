@@ -169,6 +169,13 @@ describe("graphloom doctor --task", () => {
       fix: "codex login",
     });
     expect(row(report, "role verifier")).toMatchObject({ status: "pass" });
+    // issue-fix 0.17.0: the arbiter's harness (harnesses.arbiter, Codex in every shipped profile) is checked too.
+    // It names no distinctFrom, so Claude Code is an alternative, unlike for the reviewer's verifier pairing.
+    expect(row(report, "role arbiter")).toMatchObject({
+      status: "fail",
+      detail: "arbiter: codex (read): codex is not available: not logged in (codex login status); alternatives: claude-code",
+      fix: expect.stringMatching(/^set harnesses\.arbiter to "claude-code" in .*profiles\/graphloom\.json, or codex login$/),
+    });
   });
 
   it("names a plugin that cannot be loaded", async () => {
