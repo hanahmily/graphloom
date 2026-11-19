@@ -1,7 +1,8 @@
 # Graph topology: nodes, edges and supervisor-only nodes
 
-Status: designed, 2026-11-19; §13 pull requests 1 to 3 implemented (the SDK
-types, the traversal engine, supervisor-only nodes). Extends the
+Status: designed, 2026-11-19; §13 pull requests 1 to 4 implemented (the SDK
+types, the traversal engine, supervisor-only nodes, resume, replay and repair
+over the engine). Extends the
 [TypeScript core design](design-typescript-core.md) §1, §4, §5, §6 and §8, and
 keeps the [run convergence](design-run-convergence.md) rules (identity-anchored
 receipts, `openAttempt`, correction escalation). The first graph to declare
@@ -286,8 +287,10 @@ node the run has reached. A reentry of a node ahead of the path is refused with
 
 A reentry does what it does today (`loop.ts:2344-2374`): it requires one
 `corrections` (else the run stops `corrections budget exhausted`), spends it,
-runs identity-aware invalidation, sets `openAttempt[X]`, opens X's next attempt,
-sets `current` and bumps the generation. It also truncates the live path after
+runs identity-aware invalidation, sets `openAttempt[X]`, opens X's next attempt
+(one past every attempt X has run under, its visits included, so a reentry of a
+start node that never recorded an attempt runs under attempt 2), sets
+`current` and bumps the generation. It also truncates the live path after
 X's earlier visit, replaces that visit with the new one, and closes an open side
 visit. Visits removed from the live path stay in `visits` with the reentry that
 removed them.
@@ -509,10 +512,15 @@ existing checks along the live path instead of the list:
   `entered: "reenter"` with operation `resume`, and the visits it removed end
   `replaced by reentry of X`. Executor-repair activation invalidates the same
   set from the current node. A truncation that removes the visit a side visit
-  was entered from closes the side visit (`closed by reentry of X`) and clears its open attempt. Receipts of nodes off the live path
-  are invalidated by identity, as everywhere; they do not move the run (today's
-  list walk would set `current` to such a stage; the plugins that read
-  `current` key only attempt bookkeeping on it, §2).
+  was entered from closes the side visit (`closed by reentry of X`) and clears
+  its open attempt. When no node on the live path drifted or fails, the
+  graph-entered nodes off it are checked the same way, in `stages` order: one
+  whose accepted evidence drifted or no longer passes has its own receipts
+  invalidated and does not move the run (today's list walk would set `current`
+  to such a stage; the plugins that read `current` key only attempt
+  bookkeeping on it, §2); the recheck's note names it (`invalidated X off the
+  live path: …`). Receipts are otherwise invalidated by identity, as
+  everywhere.
 - `deliveryDrift` reads the tail.
 - A run resumed in recovery returns to normal mode as today. When a side visit
   is open and settled, the next step opens `supervisor_node_settled` again
@@ -523,23 +531,40 @@ existing checks along the live path instead of the list:
 
 L2 replay ([rehearsal §3.3](design-graph-rehearsal.md#33-l2-replay)) asks the
 current `advance()` what it would do next. On the engine it also reports
-whether that action is admissible from the recorded live path (an action for a
-path node, a forward move, a reentry along an edge, an action for the open side
-visit). Replay refuses a run whose pinned topology differs from the current
-plugin's `describe()`, as it would differ structurally.
+whether that action is admissible from the recorded live path, judged as the
+controller judges a graph decision in normal mode: the report's `admission` is
+an action for a path node, a forward move (naming the route and the nodes it
+carries), a reentry along an edge (naming the correction it costs), an action
+for the open side visit, a stop (for `complete`, whether the carry and the
+completion rule of §4.6 would hold), or an action that names no node; or the
+precondition and detail of the refusal (`undeclared edge`, `supervisor-only
+node`, `enter is the supervisor's`). Replay refuses a run whose pinned topology
+differs from the current plugin's `describe()`, as it would differ
+structurally: the declared nodes in order, each node's `entry` and
+`maxVisits`, `edges`, `start` and `terminal` are compared as §7.3 compares
+them, and the report names what changed in place of a next decision. Other
+definition changes (a node's requirements, contracts, validators) are what
+replay exists to try, so they do not refuse it.
 
 ### 7.3 Repair qualification and activation
 
 The structural match grows by the topology. `assertDefinitionUnchanged`
-(`controller.ts:1585`), `assertCandidateDefinitionCompatible`
-(`repair-lifecycle.ts:886`) and the `graphloom.stages.json` pin
-(`repair-lifecycle.ts:862-880` writes it, `repair.ts:245-280` checks it) compare
-the declared `edges`, `start` and `terminal` (absent in a chain, so a candidate
-cannot add them) with the same JSON equality they use for `stages`; `entry` and
-`maxVisits` are part of each stage, so the stages comparison covers them. A
-candidate whose `describe()` adds, removes or reorders an edge, changes `start`
-or `terminal`, or changes a node's entry or visit cap is rejected naming what
-changed, even when its tests and independent review pass.
+(`controller.ts`), `assertCandidateDefinitionCompatible`
+(`repair-lifecycle.ts`) and the `graphloom.stages.json` pin (`writeStagesPin`
+writes it, `assertCandidateStepsUnchanged` in `repair.ts` checks it) compare,
+by one function (`topologyChanges`, `traversal.ts`), what each declares: the
+node ids in order, each node's `entry` and `maxVisits`, the `edges` as an
+ordered list of `from → to` pairs, `start` and `terminal`. Each is compared as
+declared, not normalized: absent in a chain, so a candidate cannot add them,
+and a chain and a definition declaring the same edges differ. The pin carries
+each stage's `entry` and `maxVisits` and the graph's `edges`, `start` and
+`terminal` only where the definition declares them, so a chain's pin is the
+stages alone, as before. A candidate whose `describe()` or pin adds, removes
+or reorders a node or an edge, changes `start` or `terminal`, or changes a
+node's entry or visit cap is rejected naming what changed (`candidate
+describe() alters pinned topology: edge arb → review removed`; a change of the
+node set keeps the stages' wording, `alters pinned stages: node ship added`),
+even when its tests and independent review pass.
 
 Activation restarts the live path at `start`, as it restarts at `stages[0]`
 today (`repair-lifecycle.ts:709-712`): every graph-entered node's receipts
@@ -552,9 +577,16 @@ activation; a reading node's `prerequisiteRequirementIds` decides whether a
 replaced validator matters to it (§5.4).
 
 `resume --update-plugin` and `resume --upgrade --update-plugin` run the same
-match (`checkPluginUpdate`, `controller.ts:1452`), so an update cannot turn a
-chain run into a declared topology or change a topology's edges. A plugin that
-adopts edges needs a new run.
+match (`assertDefinitionUnchanged`; `checkPluginUpdate` decides it before an
+`--upgrade` moves the run), so an update cannot turn a chain run into a
+declared topology or change a topology's edges: the plain resume stops `pin
+mismatch` naming the change (`plugin topology changed since run start: …`),
+and `--upgrade` refuses with the run unchanged. Both also refuse an installed
+bundle whose manifest states another `sdkProtocol` than the run's (§11.1);
+only a run whose level this GraphLoom no longer accepts moves to the installed
+bundle's level, the `--upgrade --update-plugin` across a protocol change of
+the [release design](design-release.md#52-moving-a-run-forward-resume---upgrade).
+A plugin that adopts edges needs a new run.
 
 ### 7.4 Evidence and history across generations
 
@@ -665,7 +697,8 @@ run a topology as a list. The bundle's manifest therefore states its level:
   action, which never crosses the plugin wire as a graph decision the
   controller would admit.
 - A run pins its bundle's level. `--update-plugin` keeps the run's level and its
-  topology (§7.3).
+  topology (§7.3): an installed bundle at another level is refused, a level-1
+  chain run's update to level 2 included, even without edges.
 
 ### 11.2 Existing plugins
 

@@ -16,6 +16,7 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import type { RepairTarget } from "@graphloom/sdk";
+import { topologyChanges } from "./traversal.js";
 
 export interface RepairSnapshot {
   artifactId: string;
@@ -242,9 +243,22 @@ export async function makeTreeWritable(root: string): Promise<void> {
   await visit(root);
 }
 
-/** Reject patches that alter the pinned step list; stages pin is required. */
+/**
+ * The controller-written `graphloom.stages.json` in every plugin candidate:
+ * the pinned stages and, where the graph declares them, each node's entry and
+ * visit cap and the edges, start and terminal (docs/design-graph-topology.md
+ * §7.3).
+ */
+export interface StagesPin {
+  stages: Array<{ id: string; name: string; requirementIds: string[]; entry?: "graph" | "supervisor"; maxVisits?: number }>;
+  edges?: Array<{ from: string; to: string }>;
+  start?: string;
+  terminal?: string[];
+}
+
+/** Reject patches that alter the pinned step list or topology; stages pin is required. */
 export async function assertCandidateStepsUnchanged(args: {
-  baseDefinitionStages: Array<{ id: string; name: string; requirementIds: string[] }>;
+  base: StagesPin;
   candidateRoot: string;
   /** Relative path to a JSON GraphDefinition-like file inside the candidate. */
   definitionRelativePath?: string;
@@ -259,18 +273,17 @@ export async function assertCandidateStepsUnchanged(args: {
       `candidate missing required stages pin (${rel}); add/delete/rename/reorder check cannot be deferred`,
     );
   }
-  const parsed = JSON.parse(raw) as {
-    stages?: Array<{ id: string; name: string; requirementIds: string[] }>;
-  };
-  const stages = parsed.stages;
-  if (!Array.isArray(stages)) {
+  const parsed = JSON.parse(raw) as Partial<StagesPin> | null;
+  const stages = parsed?.stages;
+  if (!Array.isArray(stages) || stages.some((s) => s === null || typeof s !== "object")) {
     throw new Error("candidate stages pin is malformed");
   }
-  if (stages.length !== args.baseDefinitionStages.length) {
+  const baseStages = args.base.stages;
+  if (stages.length !== baseStages.length) {
     throw new Error("candidate alters pinned stage count");
   }
   for (let i = 0; i < stages.length; i++) {
-    const want = args.baseDefinitionStages[i]!;
+    const want = baseStages[i]!;
     const got = stages[i]!;
     if (
       got.id !== want.id ||
@@ -281,6 +294,13 @@ export async function assertCandidateStepsUnchanged(args: {
         `candidate alters pinned steps (stage ${want.id}): add/delete/rename/reorder rejected`,
       );
     }
+  }
+  if (parsed!.edges !== undefined && (!Array.isArray(parsed!.edges) || parsed!.edges.some((e) => e === null || typeof e !== "object"))) {
+    throw new Error("candidate stages pin is malformed");
+  }
+  const changes = topologyChanges({ ...parsed, stages }, args.base);
+  if (changes.length > 0) {
+    throw new Error(`candidate alters pinned topology: ${changes.join(", ")}`);
   }
 }
 

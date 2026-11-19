@@ -778,11 +778,13 @@ export async function removeStaleTmp(stateDir: string): Promise<void> {
  * The attempt number a re-opened stage runs under: one past the highest it
  * has run before. A run saved before `stageAttempts` existed falls back to the
  * attempts its agent sessions recorded for the stage, and to the current
- * attempt when the run is still on that stage.
+ * attempt when the run is still on that stage. A node's visits count too: the
+ * start node's first visit runs under attempt 1 before anything records it.
  */
 export function nextStageAttempt(state: DurableRunState, stageId: string): number {
   const recorded = state.stageAttempts?.[stageId] ?? 0;
   const fromSessions = Math.max(0, ...(state.agentSessions ?? []).filter((r) => r.stageId === stageId).map((r) => r.attempt));
   const current = state.current.stageId === stageId ? state.current.attempt : 0;
-  return Math.max(recorded, fromSessions, current) + 1;
+  const visited = Math.max(0, ...(state.visits ?? []).filter((v) => v.stageId === stageId).map((v) => v.attempt));
+  return Math.max(recorded, fromSessions, current, visited) + 1;
 }

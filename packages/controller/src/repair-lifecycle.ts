@@ -17,7 +17,7 @@ import type { Supervisor } from "@graphloom/supervisor";
 import type { PluginHost } from "@graphloom/plugin-host";
 import { hydrateEvidenceBestEffort } from "./evidence.js";
 import { type AdmissionValidator } from "./admit.js";
-import { restartAtStart } from "./traversal.js";
+import { nodeChanges, restartAtStart, topologyChanges } from "./traversal.js";
 import { resolveBundleEntryFromManifest } from "./bundle.js";
 import { manifestRepairContract } from "./intake.js";
 import { activateRefusal, inadmissible, qualifyRefusal } from "./inadmissible.js";
@@ -30,6 +30,7 @@ import {
   linkDependencies,
   snapshotRepairCandidate,
   type QualifiedRepairArtifact,
+  type StagesPin,
 } from "./repair.js";
 import type { DurableRunState } from "./state.js";
 import { bumpGeneration } from "./generation.js";
@@ -512,7 +513,7 @@ async function bundleRepairSubject(state: DurableRunState, qualify: QualifyRepai
     async checkCandidate({ candidateRoot }) {
       await assertCandidateFullyReviewed(candidateRoot);
       await assertCandidateStepsUnchanged({
-        baseDefinitionStages: stagePins(state.definition),
+        base: stagesPin(state.definition),
         candidateRoot,
       });
       await assertCandidateManifestCompatible(candidateRoot, state);
@@ -681,7 +682,7 @@ export async function applyActivateRepair(
     await assertCandidateFullyReviewed(artifact.candidateRoot);
     // Stages pin must still match — cannot be deleted after review.
     await assertCandidateStepsUnchanged({
-      baseDefinitionStages: stagePins(state.definition),
+      base: stagesPin(state.definition),
       candidateRoot: artifact.candidateRoot,
     });
 
@@ -803,12 +804,25 @@ export function activeRepairValidators(
   return { ok: true };
 }
 
-function stagePins(definition: GraphDefinition) {
-  return definition.stages.map((s) => ({
-    id: s.id,
-    name: s.name,
-    requirementIds: [...s.requirementIds],
-  }));
+/**
+ * The `graphloom.stages.json` pin of a definition: each stage's id, name and
+ * requirements, and, where declared, its entry and visit cap and the graph's
+ * edges, start and terminal (docs/design-graph-topology.md §7.3). A chain
+ * declares none of the topology fields, so its pin has none.
+ */
+export function stagesPin(definition: GraphDefinition): StagesPin {
+  return {
+    stages: definition.stages.map((s) => ({
+      id: s.id,
+      name: s.name,
+      requirementIds: [...s.requirementIds],
+      ...(s.entry !== undefined ? { entry: s.entry } : {}),
+      ...(s.maxVisits !== undefined ? { maxVisits: s.maxVisits } : {}),
+    })),
+    ...(definition.edges !== undefined ? { edges: definition.edges.map((e) => ({ from: e.from, to: e.to })) } : {}),
+    ...(definition.start !== undefined ? { start: definition.start } : {}),
+    ...(definition.terminal !== undefined ? { terminal: [...definition.terminal] } : {}),
+  };
 }
 
 function resolvePatchAuthor(
@@ -868,17 +882,7 @@ export async function writeStagesPin(
   const { writeFile } = await import("node:fs/promises");
   await writeFile(
     path.join(candidateRoot, "graphloom.stages.json"),
-    JSON.stringify(
-      {
-        stages: definition.stages.map((s) => ({
-          id: s.id,
-          name: s.name,
-          requirementIds: s.requirementIds,
-        })),
-      },
-      null,
-      2,
-    ),
+    JSON.stringify(stagesPin(definition), null, 2),
     "utf8",
   );
 }
@@ -898,6 +902,15 @@ export function assertCandidateDefinitionCompatible(
   }
   if (candidate.privateStateSchema !== base.privateStateSchema) {
     throw new Error("candidate describe() alters pinned privateStateSchema");
+  }
+  // The steps and the topology are fixed for a run (docs/design-graph-topology.md §7.3).
+  const nodes = nodeChanges(candidate, base);
+  if (nodes.length > 0) {
+    throw new Error(`candidate describe() alters pinned stages: ${nodes.join(", ")}`);
+  }
+  const topology = topologyChanges(candidate, base);
+  if (topology.length > 0) {
+    throw new Error(`candidate describe() alters pinned topology: ${topology.join(", ")}`);
   }
   if (JSON.stringify(candidate.stages) !== JSON.stringify(base.stages)) {
     throw new Error("candidate describe() alters pinned stages");
@@ -971,7 +984,7 @@ export async function defaultRepairPreflight(args: {
   // Executor candidates carry no stages pin; the controller checks their executor contract.
   if (args.target !== "executor") {
     await assertCandidateStepsUnchanged({
-      baseDefinitionStages: stagePins(args.baseDefinition),
+      base: stagesPin(args.baseDefinition),
       candidateRoot: args.candidateRoot,
     });
   }

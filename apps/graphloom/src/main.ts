@@ -820,9 +820,11 @@ state directory. --force also discards uncommitted changes and branch commits.
 Resume --update-plugin pins the installed plugin bundle when its bytes changed
 since the run started, including a new version of the same graph (the run's
 active version moves with it). It is refused unless the graph keeps its id, stages,
-requirements, validator bindings and private-state schema. Each accepted receipt
-is rechecked with the updated validators on the evidence it was accepted on; the
-first that no longer passes sends the run back to its stage.
+topology (nodes, edges, start, terminal, each node's entry and visit cap),
+sdkProtocol level, requirements, validator bindings and private-state schema.
+Each accepted receipt is rechecked with the updated validators on the evidence it
+was accepted on, along the live path; the first that no longer passes sends the
+run back to its node, and one off the live path is invalidated in place.
 
 Resume --update-executors pins the installed executors whose bytes changed since
 the run started (a GraphLoom upgrade that touches a built-in executor, say),

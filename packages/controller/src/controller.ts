@@ -29,12 +29,12 @@ import {
   type RepairDeps,
 } from "./repair-lifecycle.js";
 import { admitValidation, assertLiveWorkspaceMatchesEvidence, deliveryDrift, invalidateFromNode, liveCandidateDigest, validationContext } from "./admit.js";
-import { invalidateNodes, livePath, reenterPath, tailOf } from "./traversal.js";
+import { invalidateNodes, livePath, nodeChanges, reenterPath, tailOf, topologyChanges } from "./traversal.js";
 import type { AdmissionValidator } from "./admit.js";
 import { resolveBundleEntry } from "./bundle.js";
 import { createHostValidators } from "./host-validators.js";
 import { applyApproval, approvalRefusal, type ApprovalRequest } from "./approvals.js";
-import { applyGraphDefaultBudgets, intakeTask, sdkProtocolProblem, taskConfigValue, topologyLevelProblem, type IntakePin } from "./intake.js";
+import { applyGraphDefaultBudgets, intakeTask, protocolLevelChange, sdkProtocolProblem, taskConfigValue, topologyLevelProblem, type IntakePin } from "./intake.js";
 import { assertSafeRunId } from "./ids.js";
 import { withDirectoryLock } from "./lock.js";
 import { deleteRun, type DeleteReport } from "./delete-run.js";
@@ -713,6 +713,8 @@ export function createController(): Controller {
             }
             const installed = await readInstalledBundlePin(state.intake.bundle);
             if (installed.manifestDigest !== state.intake.bundle.manifestDigest || installed.entryDigest !== state.intake.bundle.entryDigest) {
+              const levelChange = protocolLevelChange(state.intake.bundle.sdkProtocol, installed.sdkProtocol);
+              if (levelChange !== undefined) throw new Error(levelChange);
               pluginUpdate = installed;
             }
           }
@@ -1488,6 +1490,8 @@ async function checkPluginUpdate(state: DurableRunState, request: ResumeRequest)
     const manifest = JSON.parse(installed.manifestRaw) as { sdkProtocol?: unknown };
     const protocolProblem = sdkProtocolProblem(manifest.sdkProtocol);
     if (protocolProblem !== undefined) return `the installed bundle: ${protocolProblem}`;
+    const levelChange = protocolLevelChange(state.intake.bundle.sdkProtocol, installed.sdkProtocol);
+    if (levelChange !== undefined) return levelChange;
     const intake: IntakePin = { ...state.intake, bundle: installed };
     host = await openHost({
       intake,
@@ -1618,6 +1622,15 @@ function assertDefinitionUnchanged(live: GraphDefinition, pinned: GraphDefinitio
   // (its version is checked against the newly pinned bundle instead).
   if (live.graphId !== pinned.graphId || (!updating && live.version !== pinned.version)) {
     throw new Error("plugin graphId/version changed since run start");
+  }
+  // The nodes, each node's entry and visit cap, the edges, start and terminal are fixed for a run (docs/design-graph-topology.md §7.3).
+  const nodes = nodeChanges(live, pinned);
+  if (nodes.length > 0) {
+    throw new Error(`plugin stages changed since run start: ${nodes.join(", ")}`);
+  }
+  const topology = topologyChanges(live, pinned);
+  if (topology.length > 0) {
+    throw new Error(`plugin topology changed since run start: ${topology.join(", ")}`);
   }
   if (JSON.stringify(live.stages) !== JSON.stringify(pinned.stages)) {
     throw new Error("plugin stages changed since run start");
