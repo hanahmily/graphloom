@@ -675,9 +675,27 @@ export interface DockerConfinement {
 export type ConfinementSpec = BwrapConfinement | DockerConfinement;
 
 /**
+ * A file a checkout adds before it is committed: its repository-relative path
+ * and its whole text, written as UTF-8 with mode 0644.
+ */
+export interface CheckoutWrite {
+  path: string;
+  content: string;
+}
+
+/**
  * `candidate`: the pinned base commit plus the whole current workspace change.
  * `base`: the pinned base commit plus only the listed changed paths, such as
  * new tests, to show they fail without the rest of the change.
+ *
+ * `write` adds files the job supplies (such as a test an agent returned in
+ * its result) to either checkout before it is committed, never to the
+ * worktree. Each path is relative, without empty, `.` or `..` segments,
+ * outside `.git`, not a path the workspace change touches, not already
+ * present in the checkout and not below a symbolic link; at most
+ * `MAX_CHECKOUT_WRITE_FILES` files of `MAX_CHECKOUT_WRITE_BYTES` each. The
+ * checkout record lists each added path with `checkoutWriteDigest` of its
+ * content.
  */
 export type CheckoutSpec =
   | {
@@ -693,8 +711,10 @@ export type CheckoutSpec =
        * the infrastructure it depends on live in the same file.
        */
       revertPatch?: string;
+      write?: CheckoutWrite[];
     }
-  | { from: "base"; paths: string[] };
+  /** `paths` may be empty only when `write` adds at least one file. */
+  | { from: "base"; paths: string[]; write?: CheckoutWrite[] };
 
 export interface ObserveSpec {
   paths?: string[];

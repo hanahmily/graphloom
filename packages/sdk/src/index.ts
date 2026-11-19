@@ -65,6 +65,7 @@ export type {
   BwrapBind,
   BwrapConfinement,
   CheckoutSpec,
+  CheckoutWrite,
   ConfinementSpec,
   CorrectionHandoff,
   DockerConfinement,
@@ -219,6 +220,8 @@ export {
 export { executorFailureOf, failuresSinceResume, isStaleFailure, type ExecutorFailureEvidence } from "./resume.js";
 
 export { createScriptedGraph, type ScriptedAdvance, type ScriptedGraphOptions } from "./scripted.js";
+
+export { checkoutWriteDigest, checkoutWritePathProblem, checkoutWriteProblem, MAX_CHECKOUT_WRITE_BYTES, MAX_CHECKOUT_WRITE_FILES } from "./checkout-write.js";
 
 export { writeScopeAllows, writeScopeExceptions, writeScopeExcludes, writeScopeIncludes, writeScopeProblem } from "./scope.js";
 

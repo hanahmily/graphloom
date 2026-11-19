@@ -580,7 +580,7 @@ function createInspectionTools(inspect: SupervisorInspection): ToolDefinition[] 
     ),
     tool(
       "check_checkout",
-      `Would a job's checkout spec ({from:"candidate", revertPatch?} or {from:"base", paths}) apply, and if not why? ${probeNote}`,
+      `Would a job's checkout spec ({from:"candidate", revertPatch?, write?} or {from:"base", paths, write?}; write: [{path, content}] files added before the commit) apply, and if not why? ${probeNote}`,
       { spec: { type: "object", additionalProperties: true } },
       ["spec"],
       (p, signal) => inspect.checkCheckout(p.spec as Parameters<SupervisorInspection["checkCheckout"]>[0], signal),

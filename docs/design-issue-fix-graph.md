@@ -458,7 +458,7 @@ contract, never from the candidate's output, and the verifier states its
 source. A confirmed reproduction becomes part of the finding: after Fix, GREEN
 runs it by name with the file's bytes pinned, so it cannot be dropped or
 weakened to close the finding. This needs the controller to add an
-agent-written file to a checkout, which it cannot do yet.
+agent-written file to a checkout: `CheckoutSpec.write`, as implemented below.
 
 **Scope of the missing controller capability.** `CheckoutSpec` (`packages/sdk/src/types.ts`)
 is `{ from: "candidate" }` or `{ from: "base"; paths: string[] }`; `selectPaths`
@@ -494,6 +494,28 @@ Closing this needs, at minimum:
 This is a `packages/sdk` and `packages/controller` change, not a plugin change:
 every graph that uses checkouts would gain the capability, but only a graph
 that opts into executable confirmations (like issue-fix) would use it.
+
+**As implemented** ([topology plan](design-graph-topology.md#13-implementation-plan)
+item 5). Both variants take `write?: Array<{ path: string; content: string }>`
+(`content`, as the arbiter's proof tests name it, rather than `bytes`; UTF-8
+text, written with mode 0644). A base checkout's `paths` may be empty when
+`write` adds a file. Admission (`checkoutWriteProblem` in the SDK) refuses a
+path that is empty, absolute, has an empty, `.` or `..` segment, has a `.git`
+segment in any case, or holds a backslash or control character; a path listed
+twice or that is another written path's directory; more than 16 files; and a
+file over 64 KiB. The checkout refuses, as a failed job whose summary names the
+path: a path the workspace change touches; a path a candidate's `revertPatch`
+names or alters (the bytes are compared again after the patch); anything
+already at the path (file, directory or symbolic link); and a symbolic link or
+file on the way. The `check_checkout` probe reports a clash with the change, a
+`revertPatch` header or the pinned base, and a non-directory on the way, ahead
+of time. Written files are committed even where ignore rules would leave them
+out. The checkout record keeps `paths` as the changed paths only and lists the
+added files in `written: [{ path, digest, bytes }]`, `digest` being
+`checkoutWriteDigest` (`sha256:<hex>` of the content), so a validator
+recomputes it from the `write` it asked for. The file-extension rule of
+`observablePath` stays the plugin's: a generic checkout also adds files such
+as a `Makefile` fragment.
 
 ### Cost and budgets
 
