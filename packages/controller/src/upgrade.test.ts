@@ -160,8 +160,8 @@ async function makeEnv(bundle: Record<string, string> = BUNDLE_FILES): Promise<E
 }
 
 /** A run stopped after Write, owned by `OWNER`, in the current format. */
-async function stoppedRun(runId = "up1"): Promise<{ env: Env; stateDir: string }> {
-  const env = await makeEnv();
+async function stoppedRun(runId = "up1", bundle: Record<string, string> = BUNDLE_FILES): Promise<{ env: Env; stateDir: string }> {
+  const env = await makeEnv(bundle);
   const report = await createController().run({
     taskPath: env.taskPath,
     plugin: createScriptedGraph({ definition, advances: [...WRITE_STEPS, ...REVIEW_STEPS] }),
@@ -495,6 +495,47 @@ describe("resume --upgrade (docs/design-release.md §5.2)", () => {
     });
     expect(report.status).toBe("succeeded");
     expect((await loadRunState(stateDir)).intake.bundle.sdkProtocol).toBe(1);
+  });
+
+  /** The fixture bundle's manifest at `sdkProtocol`, with `extra` fields (a changed manifest is an installed update). */
+  const manifestAt = (sdkProtocol: number, extra: Record<string, unknown> = {}) =>
+    `${JSON.stringify({ ...(JSON.parse(BUNDLE_FILES["graphloom.manifest.json"]!) as Record<string, unknown>), sdkProtocol, ...extra }, null, 2)}\n`;
+
+  it("refuses --upgrade --update-plugin to a bundle at another protocol level, with the run unchanged (docs/design-graph-topology.md §11.1)", async () => {
+    const { env, stateDir } = await stoppedRun();
+    // The installed bundle moved to the level that may describe a topology; the run keeps its level 1.
+    await writeFile(path.join(env.taskDir, "plugins", "fixture", "graphloom.manifest.json"), manifestAt(2), "utf8");
+    const before = await snapshot(stateDir);
+    await expect(
+      createController().resume({
+        runRef: stateDir,
+        plugin: createScriptedGraph({ definition, advances: REVIEW_STEPS }),
+        validators,
+        runner: reviewRunner(),
+        updatePlugin: true,
+        upgrade: { install: target },
+      }),
+    ).rejects.toThrow(/--update-plugin: the installed bundle states sdkProtocol 2, the run's bundle 1: a plugin update keeps the run's protocol level/);
+    expect(await snapshot(stateDir)).toEqual(before);
+  });
+
+  it("refuses --upgrade --update-plugin to a graph that declares edges, with the run unchanged (docs/design-graph-topology.md §7.3)", async () => {
+    // A level-2 bundle without edges runs as an implicit chain; an update that declares edges would change its topology.
+    const { env, stateDir } = await stoppedRun("up-edges", { ...BUNDLE_FILES, "graphloom.manifest.json": manifestAt(2) });
+    await writeFile(path.join(env.taskDir, "plugins", "fixture", "graphloom.manifest.json"), manifestAt(2, { description: "declares edges" }), "utf8");
+    const declared: GraphDefinition = { ...definition, edges: [{ from: "write", to: "review" }, { from: "review", to: "write" }] };
+    const before = await snapshot(stateDir);
+    await expect(
+      createController().resume({
+        runRef: stateDir,
+        plugin: createScriptedGraph({ definition: declared, advances: REVIEW_STEPS }),
+        validators,
+        runner: reviewRunner(),
+        updatePlugin: true,
+        upgrade: { install: target },
+      }),
+    ).rejects.toThrow(/--update-plugin: plugin topology changed since run start: edges declared \(the run walks an implicit chain\)/);
+    expect(await snapshot(stateDir)).toEqual(before);
   });
 
   it("refuses an executor re-pin the update would refuse, with the run unchanged", async () => {

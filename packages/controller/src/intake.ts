@@ -197,6 +197,19 @@ export function sdkProtocolProblem(level: unknown): string | undefined {
 }
 
 /**
+ * Why a plugin update from a bundle at `pinned` to one at `installed` is
+ * refused, or undefined: a run keeps its protocol level
+ * (docs/design-graph-topology.md §11.1), so an update cannot carry a chain run
+ * to the level that may describe a topology, or back. A run whose level this
+ * host no longer accepts moves to the installed bundle's (`resume --upgrade
+ * --update-plugin` across a protocol change).
+ */
+export function protocolLevelChange(pinned: number, installed: number): string | undefined {
+  if (installed === pinned || !SDK_PROTOCOLS.includes(pinned)) return undefined;
+  return `the installed bundle states sdkProtocol ${installed}, the run's bundle ${pinned}: a plugin update keeps the run's protocol level; a plugin that adopts a topology needs a new run`;
+}
+
+/**
  * Why `definition` may not be described by a bundle at `level`, or undefined:
  * a level-1 bundle that describes a topology is refused, at intake and on
  * every describe() check, so it never runs as a list by mistake.

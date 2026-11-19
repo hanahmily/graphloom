@@ -371,6 +371,61 @@ export function restartAtStart<T extends PathState & Pick<DurableRunState, "stat
   return restarted as T & { path: number[]; visits: VisitRecord[] };
 }
 
+/** The declared parts of a definition its topology is made of: the node set with each node's entry and visit cap, and `edges`, `start`, `terminal`. */
+export type DeclaredTopology = Pick<GraphDefinition, "edges" | "start" | "terminal"> & {
+  stages: ReadonlyArray<Pick<GraphDefinition["stages"][number], "id" | "entry" | "maxVisits">>;
+};
+
+const edgeText = (e: { from: StageId; to: StageId }) => `${e.from} → ${e.to}`;
+const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+
+/** The node set's changes: ids added or removed, or the same ids reordered (a step-list change, reported as the stages'). */
+export function nodeChanges(candidate: Pick<DeclaredTopology, "stages">, base: Pick<DeclaredTopology, "stages">): string[] {
+  const changes: string[] = [];
+  const baseIds = base.stages.map((s) => s.id);
+  const candidateIds = candidate.stages.map((s) => s.id);
+  for (const id of candidateIds) if (!baseIds.includes(id)) changes.push(`node ${id} added`);
+  for (const id of baseIds) if (!candidateIds.includes(id)) changes.push(`node ${id} removed`);
+  if (changes.length === 0 && !same(candidateIds, baseIds)) changes.push("nodes reordered");
+  return changes;
+}
+
+/**
+ * What `candidate` declares differently from `base` about the topology
+ * (docs/design-graph-topology.md §7.3), each named: nodes added, removed or
+ * reordered (a chain's edges follow the order), a node's `entry` or
+ * `maxVisits`, edges added, removed or reordered, `start`, `terminal`. The
+ * comparison is of what each declares, not of the normalized topology: a
+ * chain (no `edges`) and a definition declaring the same edges differ. Empty
+ * when the two declare the same topology.
+ */
+export function topologyChanges(candidate: DeclaredTopology, base: DeclaredTopology): string[] {
+  const changes = nodeChanges(candidate, base);
+  for (const want of base.stages) {
+    const got = candidate.stages.find((s) => s.id === want.id);
+    if (got === undefined) continue;
+    if (got.entry !== want.entry) changes.push(`node ${want.id} entry ${want.entry ?? "(none)"} → ${got.entry ?? "(none)"}`);
+    if (got.maxVisits !== want.maxVisits) changes.push(`node ${want.id} maxVisits ${want.maxVisits ?? "(none)"} → ${got.maxVisits ?? "(none)"}`);
+  }
+  const edgePairs = (edges: DeclaredTopology["edges"]) => edges?.map((e) => ({ from: e.from, to: e.to }));
+  if (!same(edgePairs(candidate.edges), edgePairs(base.edges))) {
+    if (base.edges === undefined) changes.push("edges declared (the run walks an implicit chain)");
+    else if (candidate.edges === undefined) changes.push("edges removed (the run walks a declared topology)");
+    else {
+      const baseEdges = base.edges.map(edgeText);
+      const candidateEdges = candidate.edges.map(edgeText);
+      const edgeChanges = [
+        ...candidateEdges.filter((e) => !baseEdges.includes(e)).map((e) => `edge ${e} added`),
+        ...baseEdges.filter((e) => !candidateEdges.includes(e)).map((e) => `edge ${e} removed`),
+      ];
+      changes.push(...(edgeChanges.length > 0 ? edgeChanges : ["edges reordered"]));
+    }
+  }
+  if (!same(candidate.start, base.start)) changes.push(`start ${base.start ?? "(default)"} → ${candidate.start ?? "(default)"}`);
+  if (!same(candidate.terminal, base.terminal)) changes.push(`terminal ${base.terminal?.join(", ") ?? "(default)"} → ${candidate.terminal?.join(", ") ?? "(default)"}`);
+  return changes;
+}
+
 /** `RunView.topology`: the topology with its defaults, the live path and an open side visit. */
 export function topologyView(state: PathState & Pick<DurableRunState, "sideVisit">): TopologyView {
   const topology = runTopology(state.definition);

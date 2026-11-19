@@ -185,10 +185,12 @@ describe("repair snapshot", () => {
     );
     await expect(
       assertCandidateStepsUnchanged({
-        baseDefinitionStages: [
-          { id: "write", name: "Write", requirementIds: ["greeting-bytes"] },
-          { id: "review", name: "Review", requirementIds: ["independent-review"] },
-        ],
+        base: {
+          stages: [
+            { id: "write", name: "Write", requirementIds: ["greeting-bytes"] },
+            { id: "review", name: "Review", requirementIds: ["independent-review"] },
+          ],
+        },
         candidateRoot: candidate,
       }),
     ).rejects.toThrow(/alters pinned steps/i);
@@ -201,9 +203,7 @@ describe("repair snapshot", () => {
     await mkdir(candidate, { recursive: true });
     await expect(
       assertCandidateStepsUnchanged({
-        baseDefinitionStages: [
-          { id: "write", name: "Write", requirementIds: ["greeting-bytes"] },
-        ],
+        base: { stages: [{ id: "write", name: "Write", requirementIds: ["greeting-bytes"] }] },
         candidateRoot: candidate,
       }),
     ).rejects.toThrow(/missing required stages pin/i);
