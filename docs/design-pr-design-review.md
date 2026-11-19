@@ -1,6 +1,6 @@
 # PR design review graph (`pr-design-review`)
 
-Status: implemented, `pr-design-review` 0.1.1 (`examples/plugins/pr-design-review`).
+Status: implemented, `pr-design-review` 0.1.2 (`examples/plugins/pr-design-review`).
 This is round 1 of a pull request's review: the design-level review. Round 2, the
 detail review, is the [PR-review graph](design-pr-review-graph.md) (`pr-review`
 1.x). The two graphs are independent plugins that share the review kit
@@ -294,11 +294,19 @@ copies are `report.json` (`pr-change-report-v1`), `qa.json` (`pr-qa-v1`) and
 `necessity.json` (`pr-necessity-v1`); the ledger's `design` section keeps the
 latest head's three, which is what `pr-review` reads as its context.
 
-The briefing's **Open questions** list only the questions whose answer is `needs
-author` or `partially answered` (or that have no answer), and N1 when its
-conclusion is questionable or unnecessary, each with the first lines of its answer
-and a link into the appendix; every other question is a count. The Q&A part is
-grouped by high-level change. Every search shows the count the plugin measured.
+The briefing's verdict says **Open items for the author: n**, and its open list
+names those items, each with its kinds, the first lines of its answer and a link
+into the appendix; every other question is a count. They are round 1's open
+items ([§8](#8-the-gate)), not a separate rule: the Answers stage writes the
+briefing before the gate runs, so it calls the gate's own pure function
+(`openItems` in `src/round1.ts`) on the `qa.json` and `necessity.json` it writes
+and the pull request's changed files. `review.md`, `review.html` (a tile beside
+the question grid), `review-appendix.html` and the posted review's first line
+(`Changes requested: <n> open`) therefore count the same items; a `partially
+answered` answer, an `existing` item and N1 when it is not `necessary` count, as
+the gate counts them. The question grid and the Q&A headings still count answers
+by status. The Q&A part is grouped by high-level change. Every search shows the
+count the plugin measured.
 
 ### 5.6 The necessity question N1
 
@@ -470,6 +478,17 @@ A missing test is not a round-1 item. Each item has its id (`N1`, `Q<n>`), kinds
 status, text and, when its place lies inside a hunk at the head, its anchor. The
 record recomputes from the recorded Q&A and must equal what was written.
 
+A question's item is placed where its answer's evidence lies in the diff, by plugin
+code and no model: the answer's citations are read in their own order, and the
+first `head` citation with a line inside a hunk of its file's patch at the head
+anchors the item at its first such line. Base, dependency and unchanged-line
+citations never anchor. When no citation reaches the diff, the item is placed as
+before: at the first head cite of the change it is about (the high-level change or
+change item), inline when that lies in a hunk, else in the review body. N1 is placed
+at the first head line of its `design.changed`. On #1485 both `other` items had
+been anchored at the doc comment of the change item's first cite, though one was
+about the aggregation query in the docs the answer cited first.
+
 ## 9. Publish and the run's result
 
 Publish uses the kit's post of one review
@@ -563,3 +582,10 @@ and `large-artifacts` exercise the shared report. The design review's own:
 - **0.1.1:** the kit's record of the report's claim checks, so a reentry to Fetch
   with the candidate unchanged accepts the Report stage again
   ([PR review §5.1](design-pr-review-graph.md#51-convergence-after-a-reentry)).
+- **0.1.2:** the briefing counts round 1's open items with the gate's own
+  function, labelled **Open items for the author** in `review.md`, `review.html`
+  and `review-appendix.html`, so it always agrees with `round1.json` and the
+  posted verdict (it counted only `needs author` answers, and said 0 while
+  apache/skywalking-banyandb#1485 had two partially answered items)
+  ([§5.5](#55-output-one-file)); an item anchors at the first in-diff line its
+  answer cites, before the change's first cite ([§8](#8-the-gate)).

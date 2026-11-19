@@ -20,14 +20,15 @@ import { clip, esc } from "./kit/escape.js";
 import { changeMapSvg, stateDiagramSvg, type BarRow } from "./kit/htmlsvg.js";
 import { STATIC_ONLY_NOTE } from "./kit/measurements.js";
 import { brokenNote, effectiveConclusion, NECESSITY_ID, parseNecessityRecord, SKIPPED_NOTE, type NecessityRecord } from "./necessity.js";
+import { itemIds, NO_OPEN_ITEMS, OPEN_ITEMS_LABEL, ROUND1_LABEL } from "./round1.js";
 import { DIVE_COLUMNS, DIVE_COMMAND, DIVE_HEADING, DIVE_LINE, DIVE_TEXT, diveRow } from "./kit/dive.js";
-import { hotspots, hotspotText, needAuthor, openQuestions, SCOPE_KINDS, SCOPE_TITLES, type Scope } from "./kit/scope.js";
+import { hotspots, hotspotText, SCOPE_KINDS, SCOPE_TITLES, type Scope } from "./kit/scope.js";
 import { incrementalLine, type IncrementalNote } from "./incremental.js";
 import { describeReasons, type ModeReason } from "./kit/mode.js";
 import { exceeds, LIMITS, originOf, type Metric } from "./kit/metrics/crap.js";
 import type { MetricsRecord } from "./kit/metrics/record.js";
 import { searchWhere, type MeasuredSearch } from "./kit/searches.js";
-import { VISUAL_CSS, visualHeader, visualSections, type VisualLinks } from "./visual.js";
+import { htmlOpenItems, VISUAL_CSS, visualHeader, visualSections, type VisualLinks } from "./visual.js";
 
 // ---- the documents it renders ----
 
@@ -263,13 +264,12 @@ function scopeHtml(sc: Scope): string {
   return `<table class="scope"><thead><tr><th></th><th>Files</th><th>Added</th><th>Deleted</th></tr></thead><tbody>${rows.join("")}<tr class="total"><th>Total</th><td>${total.files}</td><td class="plus">+${total.added}</td><td class="minus">−${total.deleted}</td></tr></tbody></table>`;
 }
 
-/** N1's conclusion, the principles touched with their verdicts (design §7.5.1), and how many questions need the author. */
+/** N1's conclusion, the principles touched with their verdicts (design §7.5.1), and how many open items round 1 has for the author. */
 function verdictHtml(i: HtmlInput): string {
   const n = i.necessity;
   const conclusion = n !== undefined ? effectiveConclusion(n.final) : undefined;
   const principles = n?.final.necessity?.principles ?? [];
-  const asked = (i.qa?.questions ?? []).filter((q) => q.id !== NECESSITY_ID);
-  const need = needAuthor(asked);
+  const items = htmlOpenItems(i);
   const skipped = i.qa?.roundsSkipped;
   if (skipped !== undefined) {
     return [`<div class="verdict">`, `<div><span class="label">N1: is it necessary?</span> ${badge("grey", "skipped")}</div>`, `<div><span class="label">Questions and answers</span> ${badge("grey", "skipped")} <span class="muted">by the operator's choice (${esc(skipped.reason)})</span></div>`, `</div>`].join("");
@@ -278,7 +278,7 @@ function verdictHtml(i: HtmlInput): string {
     `<div class="verdict">`,
     `<div><span class="label">N1: is it necessary?</span> ${conclusion === undefined ? badge("grey", "pending") : badge(CONCLUSION_CLASS[conclusion] ?? "grey", conclusion)}</div>`,
     `<div><span class="label">Principles touched</span> ${n === undefined ? badge("grey", "pending") : principles.length === 0 ? `<span class="muted">none</span>` : principles.map((p) => `<span title="${esc(clip(p.explanation, 200))}">${badge(VERDICT_CLASS[p.verdict] ?? "grey", `${p.id}: ${p.verdict}`)}</span>`).join(" ")}</div>`,
-    `<div><span class="label">Questions that need the author</span> ${i.qa === undefined ? badge("grey", "pending") : badge(need > 0 ? "bad" : "ok", String(need))}</div>`,
+    `<div><span class="label">${esc(OPEN_ITEMS_LABEL)}</span> ${items === undefined ? badge("grey", "pending") : badge(items.length > 0 ? "bad" : "ok", String(items.length))}</div>`,
     `</div>`,
   ].join("");
 }
@@ -341,22 +341,29 @@ function areasHtml(r: ReportDoc): string {
   return details("<h2>Areas</h2>", `${list}${para(DIVE_LINE)}<pre><code>${esc(DIVE_COMMAND)}</code></pre>`, true, "sec");
 }
 
-/** Only the questions that need a person; answered ones are a count, with a link to the appendix. */
+/** Round 1's open items, the gate's own (design §8); the other questions are a count, with a link to the appendix. */
 function openQuestionsHtml(i: HtmlInput): string {
   const qa = i.qa;
-  if (qa === undefined) return details(`<h2>Open questions</h2> ${badge("grey", "pending")}`, para("The Questions and Answers stages follow the report; this file is rewritten when the answers are checked."), true, "sec");
-  if (qa.roundsSkipped !== undefined) return details(`<h2>Open questions</h2> ${badge("grey", "skipped")}`, para(qa.roundsSkipped.note), true, "sec");
+  const title = `<h2>${esc(OPEN_ITEMS_LABEL)}</h2>`;
+  if (qa === undefined) return details(`${title} ${badge("grey", "pending")}`, para("The Questions and Answers stages follow the report; this file is rewritten when the answers are checked."), true, "sec");
+  if (qa.roundsSkipped !== undefined) return details(`${title} ${badge("grey", "skipped")}`, para(qa.roundsSkipped.note), true, "sec");
+  const items = htmlOpenItems(i) ?? [];
   const n1 = i.necessity !== undefined ? effectiveConclusion(i.necessity.final) : undefined;
-  const sel = openQuestions(qa.questions, { id: NECESSITY_ID, conclusion: n1 });
-  const rows = sel.open.map((q) => {
-    const status = q.answer?.status ?? "not answered";
-    return `<li><a href="${APPENDIX_HREF}#q-${esc(q.id)}"><strong>${esc(q.id)}</strong></a> <span class="muted">[${esc(q.type)}]</span> ${badge(STATUS_CLASS[status] ?? "grey", status)} ${esc(clip(q.text, 200))}${q.answer !== undefined ? ` <div class="muted">${esc(clip(q.answer.answer, 240))}</div>` : ""}</li>`;
+  const byId = new Map(qa.questions.map((q) => [q.id, q] as const));
+  const rows = items.map((x) => {
+    const q = byId.get(x.id);
+    const said = x.id === NECESSITY_ID ? (i.necessity?.final.necessity?.rationale ?? "") : (q?.answer?.answer ?? "");
+    const label = `${x.kinds.map((k) => ROUND1_LABEL[k]).join("; ")}${x.id === NECESSITY_ID ? `: ${n1 ?? "needs author"}` : ""}`;
+    const also = (x.covers ?? []).length > 0 ? ` <span class="muted">also ${x.covers!.map((c) => `<a href="${APPENDIX_HREF}#q-${esc(c)}">${esc(c)}</a>`).join(", ")}</span>` : "";
+    return `<li><a href="${APPENDIX_HREF}#q-${esc(x.id)}"><strong>${esc(x.id)}</strong></a> <span class="muted">[${esc(q?.type ?? "necessity")}]</span> ${badge(STATUS_CLASS[x.status] ?? "grey", label)}${also} ${esc(clip(q?.text ?? "", 200))}${said !== "" ? ` <div class="muted">${esc(clip(said, 240))}</div>` : ""}</li>`;
   });
+  const inItems = new Set(items.flatMap(itemIds));
+  const rest = qa.questions.filter((q) => !inItems.has(q.id)).length;
   const body = [
-    sel.open.length === 0 ? para("No question needs a person.") : `<ul class="plain open">${rows.join("")}</ul>`,
-    para(`${sel.answered} answered — see the appendix.`),
+    items.length === 0 ? para(NO_OPEN_ITEMS) : `<ul class="plain open">${rows.join("")}</ul>`,
+    para(`${rest} other question${rest === 1 ? "" : "s"} answered — see the appendix.`),
   ].join("");
-  return details(`<h2>Open questions</h2> <span class="muted">${sel.open.length} of ${sel.total}</span>`, body, true, "sec");
+  return details(`${title} <span class="muted">${items.length} of ${qa.questions.length} question${qa.questions.length === 1 ? "" : "s"}</span>`, body, true, "sec");
 }
 
 // ---- change map ----

@@ -235,7 +235,7 @@ export const necessityRecordCommands = (record: NecessityRecord): EnvironmentCom
 /** `qa.json`, the Q&A part and the Necessity part of `review.md` the answers recompute to. */
 export function qaOutputs(ctx: QaContext, set: QuestionSet, answers: FinalAnswer[], necessity?: NecessityRecord): { json: string; markdown: string; verdict: string; open: string; necessity?: string } {
   const large = isLarge(ctx.mode) && !set.skipped;
-  const input: QaInput = { pr: ctx.pr, base: ctx.base, view: ctx.view, groundwork: ctx.groundwork, purposes: set.purposes, questions: set.questions, answers, skipped: set.skipped, mode: ctx.mode, ...(incrementalNote(ctx, set) !== undefined ? { incremental: incrementalNote(ctx, set)! } : {}), ...(large ? { batches: answerBatches(afterNecessity(set)).length } : {}), ...(necessity !== undefined ? { necessity } : {}) };
+  const input: QaInput = { pr: ctx.pr, base: ctx.base, view: ctx.view, groundwork: ctx.groundwork, files: ctx.analysis.snapshot.files, purposes: set.purposes, questions: set.questions, answers, skipped: set.skipped, mode: ctx.mode, ...(incrementalNote(ctx, set) !== undefined ? { incremental: incrementalNote(ctx, set)! } : {}), ...(large ? { batches: answerBatches(afterNecessity(set)).length } : {}), ...(necessity !== undefined ? { necessity } : {}) };
   return { json: qaJson(input), markdown: renderQa(input), ...briefingQa(input), ...(necessity !== undefined ? { necessity: renderNecessity(necessity) } : {}) };
 }
 
