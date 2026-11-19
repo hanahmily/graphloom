@@ -7,8 +7,8 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
-import type { CheckoutSpec, EnvironmentCommand, JobSpec } from "@graphloom/sdk";
-import { writeScopeAllows } from "@graphloom/sdk";
+import type { CheckoutSpec, CheckoutWrite, EnvironmentCommand, JobSpec } from "@graphloom/sdk";
+import { checkoutWriteDigest, checkoutWritePathProblem, writeScopeAllows } from "@graphloom/sdk";
 import type { ExecutorSourceOverride, JobEvidenceItem, JobResult, Runner } from "@graphloom/runner";
 import { cacheKey, dropEntry, environmentInput, isCacheable, outputsBlocked, restoreOutputs, saveOutputs } from "./prepare-cache.js";
 import { candidateChange } from "./worktree.js";
@@ -24,6 +24,13 @@ export interface CheckoutRecord {
   commit: string;
   /** Changed paths copied from the worktree. */
   paths: string[];
+  /**
+   * Files the job supplied (`CheckoutSpec.write`) and the checkout's commit
+   * holds, in the order given, each with `checkoutWriteDigest` of its content
+   * and its size in bytes. Absent when the job supplied none, and on a base
+   * checkout's preparation, which runs before they are added.
+   */
+  written?: CheckoutWritten[];
   /** Whether the graph's preparation commands succeeded without changing tracked files. */
   prepared: boolean;
   /** Files the preparation (phase `prepare`) or the job (phase `run`) changed in the checkout. */
@@ -41,6 +48,13 @@ export interface CheckoutRecord {
   revertError?: string;
   /** The `revertPatch` text that failed to apply, to tell it from a later, corrected patch. */
   revertPatch?: string;
+}
+
+/** One file a checkout added, as its record lists it. */
+export interface CheckoutWritten {
+  path: string;
+  digest: string;
+  bytes: number;
 }
 
 export function checkoutsDir(stateDir: string): string {
@@ -100,11 +114,17 @@ export async function runInCheckout(args: {
   let commit = args.pinnedHead;
   let reverted = false;
   let revertedPaths: string[] = [];
+  const writes = checkout.write ?? [];
+  let written: CheckoutWritten[] = [];
   const apply = async () => {
-    commit = await commitPaths(args.worktreePath, dir, applied, args.pinnedHead);
+    commit = await commitPaths(args.worktreePath, dir, applied, args.pinnedHead, writes);
+    written = writes.map((w) => ({ path: w.path, digest: checkoutWriteDigest(w.content), bytes: Buffer.byteLength(w.content, "utf8") }));
   };
   try {
     applied = selectPaths(checkout, [...change.fingerprints.keys()]);
+    // A supplied file adds to the change, never replaces part of it.
+    const touched = writes.filter((w) => change.fingerprints.has(w.path)).map((w) => w.path);
+    if (touched.length > 0) throw new Error(`cannot write ${touched.join(", ")}: the workspace change touches it`);
     await cloneAt(args.repoPath, args.pinnedHead, dir);
     if (checkout.from === "candidate") {
       await apply();
@@ -130,6 +150,7 @@ export async function runInCheckout(args: {
                       base: args.pinnedHead,
                       commit,
                       paths: applied,
+                      ...(written.length > 0 ? { written } : {}),
                       prepared: false,
                       mutations: [],
                       phase: "run",
@@ -174,6 +195,7 @@ export async function runInCheckout(args: {
       base: args.pinnedHead,
       commit,
       paths: applied,
+      ...(written.length > 0 ? { written } : {}),
       prepared,
       ...(reverted ? { reverted: true, revertedPaths } : {}),
       mutations,
@@ -344,13 +366,49 @@ async function cloneAt(repoPath: string, pinnedHead: string, dir: string): Promi
 
 /**
  * Copy `paths` from the worktree into the checkout (a path missing there is
- * deleted) and commit the result with an isolated identity. Returns the commit.
+ * deleted), add the supplied files, and commit the result with an isolated
+ * identity. Returns the commit.
  */
-async function commitPaths(worktreePath: string, dir: string, paths: string[], base: string): Promise<string> {
+async function commitPaths(worktreePath: string, dir: string, paths: string[], base: string, writes: readonly CheckoutWrite[] = []): Promise<string> {
   for (const rel of paths) {
     await applyPath(worktreePath, dir, rel);
   }
+  for (const entry of writes) {
+    await writeSupplied(dir, entry);
+  }
+  // A supplied file is committed even where the repository's ignore rules would leave it out.
+  if (writes.length > 0) await git(dir, ["add", "--force", "--", ...writes.map((w) => `:(literal)${w.path}`)]);
   return commitCheckoutState(dir, "GraphLoom candidate", base);
+}
+
+/**
+ * Add one supplied file to the checkout. The path's static rules
+ * (`checkoutWriteProblem`) were checked at admission; this refuses what only
+ * the checkout shows: a symbolic link or a file on the way, or anything
+ * already at the path.
+ */
+async function writeSupplied(dir: string, entry: CheckoutWrite): Promise<void> {
+  const rel = entry.path;
+  const problem = checkoutWritePathProblem(rel);
+  if (problem !== undefined) throw new Error(`cannot write ${rel}: ${problem}`);
+  let current = dir;
+  for (const part of rel.split("/").slice(0, -1)) {
+    current = path.join(current, part);
+    const stat = await lstat(current).catch(() => undefined);
+    if (stat === undefined) break;
+    if (stat.isSymbolicLink()) throw new Error(`cannot write ${rel}: ${path.relative(dir, current)} is a symbolic link`);
+    if (!stat.isDirectory()) throw new Error(`cannot write ${rel}: ${path.relative(dir, current)} is not a directory`);
+  }
+  const dst = path.join(dir, rel);
+  const existing = await lstat(dst).catch(() => undefined);
+  if (existing !== undefined) {
+    const what = existing.isSymbolicLink() ? "a symbolic link" : existing.isDirectory() ? "a directory" : "a file";
+    throw new Error(`cannot write ${rel}: the checkout already has ${what} there`);
+  }
+  await mkdir(path.dirname(dst), { recursive: true });
+  // `wx` refuses to follow or replace anything that appeared since the checks.
+  await writeFile(dst, entry.content, { encoding: "utf8", flag: "wx", mode: 0o644 });
+  await chmod(dst, 0o644);
 }
 
 /**

@@ -7,10 +7,12 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
-import type { JobSpec } from "@graphloom/sdk";
+import type { CheckoutSpec, JobSpec } from "@graphloom/sdk";
+import { checkoutWriteDigest, MAX_CHECKOUT_WRITE_BYTES, MAX_CHECKOUT_WRITE_FILES } from "@graphloom/sdk";
 import { confinementUnsupported, createBuiltinExecutorRunner } from "@graphloom/runner";
 import { commandBinding, commandExecutorPackage } from "@graphloom/executor-command";
-import { revertPatchPaths, runInCheckout } from "./checkout.js";
+import { revertPatchPaths, runInCheckout, type CheckoutRecord } from "./checkout.js";
+import { checkoutSpecRefusal } from "./inadmissible.js";
 import { matchFiles } from "./prepare-cache.js";
 
 const execFileAsync = promisify(execFile);
@@ -53,7 +55,7 @@ function catJob(path_: string): JobSpec & { checkout: { from: "candidate"; rever
   };
 }
 
-async function run(dir: string, pinnedHead: string, job: JobSpec & { checkout: { from: "candidate"; revertPatch?: string } }, repoPath = dir, scratchDir?: string) {
+async function run(dir: string, pinnedHead: string, job: JobSpec & { checkout: CheckoutSpec }, repoPath = dir, scratchDir?: string) {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "graphloom-checkout-state-"));
   cleanup.push(stateDir);
   const runner = createBuiltinExecutorRunner({
@@ -205,6 +207,129 @@ describe("runInCheckout: revertPatch", () => {
     expect(checkout?.reverted).toBeUndefined();
     expect(checkout?.revertPatch).toBe(bogusPatch);
     expect(result.evidence).toHaveLength(1);
+  });
+});
+
+describe("runInCheckout: write (CheckoutSpec.write)", () => {
+  const PROOF = "package calc\n\nimport \"testing\"\n\nfunc TestStrictLarge(t *testing.T) {}\n";
+
+  /** `candidateRepo` plus base files a write may collide with: a tracked file, a directory, a symlink out of the repo and an ignore rule. */
+  async function writeRepo(): Promise<{ dir: string; pinnedHead: string; outside: string }> {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "graphloom-checkout-write-"));
+    const outside = await mkdtemp(path.join(os.tmpdir(), "graphloom-checkout-outside-"));
+    cleanup.push(dir, outside);
+    const git = (...args: string[]) => execFileAsync("git", args, { cwd: dir });
+    await git("init", "-q");
+    await git("config", "user.email", "test@example.com");
+    await git("config", "user.name", "Test");
+    await writeFile(path.join(dir, "calc.go"), BEFORE);
+    await writeFile(path.join(dir, "README.md"), "readme\n");
+    await writeFile(path.join(dir, ".gitignore"), "*.log\n");
+    await mkdir(path.join(dir, "pkg"));
+    await writeFile(path.join(dir, "pkg", "util.go"), "package pkg\n");
+    await symlink(outside, path.join(dir, "escape"));
+    await git("add", ".");
+    await git("commit", "-q", "-m", "init");
+    const pinnedHead = (await git("rev-parse", "HEAD")).stdout.trim();
+    await writeFile(path.join(dir, "calc.go"), CANDIDATE);
+    return { dir, pinnedHead, outside };
+  }
+
+  /** A job that prints `file` and lists it in the checkout's commit, failing when the commit lacks it. */
+  function showJob(checkout: CheckoutSpec, file: string): JobSpec & { checkout: CheckoutSpec } {
+    return {
+      stageId: "fix",
+      kind: "command",
+      purpose: "check",
+      instruction: "show",
+      readOnly: true,
+      checkout,
+      input: { commands: [{ id: "cat", argv: ["sh", "-c", 'cat "$1" && git ls-files --error-unmatch -- "$1" >/dev/null && git status --porcelain', "sh", file] }] },
+    };
+  }
+
+  const recordOf = (evidence: NonNullable<Awaited<ReturnType<typeof run>>["result"]["evidence"]>): CheckoutRecord | undefined =>
+    (evidence.find((e) => e.kind === "command")?.payload as { checkout?: CheckoutRecord } | undefined)?.checkout;
+
+  it("adds the files to a candidate checkout's commit and records each with its digest, never touching the worktree", async () => {
+    const { dir, pinnedHead } = await writeRepo();
+    const write = [{ path: "proof/calc_proof_test.go", content: PROOF }];
+    const { result } = await run(dir, pinnedHead, showJob({ from: "candidate", write }, "proof/calc_proof_test.go"));
+    expect(result.status, result.summary).toBe("ok");
+    // The file's bytes, then a clean status: committed, so the job sees a clean tree.
+    expect(stdout(result.evidence ?? [])).toBe(PROOF);
+    const record = recordOf(result.evidence ?? []);
+    expect(record?.paths).toEqual(["calc.go"]);
+    expect(record?.written).toEqual([{ path: "proof/calc_proof_test.go", digest: checkoutWriteDigest(PROOF), bytes: Buffer.byteLength(PROOF) }]);
+    expect(record?.mutations).toEqual([]);
+    await expect(readdir(dir)).resolves.not.toContain("proof");
+  });
+
+  it("adds the files to a base checkout with no changed path: the pinned base plus the supplied test alone", async () => {
+    const { dir, pinnedHead } = await writeRepo();
+    const write = [{ path: "calc_proof_test.go", content: PROOF }];
+    const job = showJob({ from: "base", paths: [], write }, "calc_proof_test.go");
+    const both = { ...job, input: { commands: [...(job.input as { commands: unknown[] }).commands, { id: "base", argv: ["cat", "calc.go"] }] } };
+    const { result } = await run(dir, pinnedHead, both);
+    expect(result.status, result.summary).toBe("ok");
+    const outputs = (result.evidence ?? []).map((e) => (e.payload as { command?: { stdoutTail?: string } }).command?.stdoutTail);
+    expect(outputs).toEqual([PROOF, BEFORE]);
+    const record = recordOf(result.evidence ?? []);
+    expect(record?.paths).toEqual([]);
+    expect(record?.written?.map((w) => w.digest)).toEqual([checkoutWriteDigest(PROOF)]);
+  });
+
+  it("commits a supplied file the repository's ignore rules would leave out", async () => {
+    const { dir, pinnedHead } = await writeRepo();
+    const { result } = await run(dir, pinnedHead, showJob({ from: "candidate", write: [{ path: "proof.log", content: "x\n" }] }, "proof.log"));
+    expect(result.status, result.summary).toBe("ok");
+    expect(stdout(result.evidence ?? [])).toBe("x\n");
+  });
+
+  it("records nothing written for a checkout without write", async () => {
+    const { dir, pinnedHead } = await writeRepo();
+    const { result } = await run(dir, pinnedHead, catJob("calc.go"));
+    expect(result.status, result.summary).toBe("ok");
+    expect(recordOf(result.evidence ?? [])).not.toHaveProperty("written");
+  });
+
+  it.each([
+    ["a path the workspace change touches", "calc.go", /cannot write calc\.go: the workspace change touches it/],
+    ["a file the base already has", "README.md", /cannot write README\.md: the checkout already has a file there/],
+    ["a directory", "pkg", /cannot write pkg: the checkout already has a directory there/],
+    ["a path below a file", "README.md/x_test.go", /cannot write README\.md\/x_test\.go: README\.md is not a directory/],
+    ["a path through a symbolic link out of the checkout", "escape/x_test.go", /cannot write escape\/x_test\.go: escape is a symbolic link/],
+    ["the symbolic link itself", "escape", /cannot write escape: the checkout already has a symbolic link there/],
+  ])("refuses %s, with the reason, and runs nothing", async (_what, rel, reason) => {
+    const { dir, pinnedHead, outside } = await writeRepo();
+    for (const from of ["candidate", "base"] as const) {
+      const checkout: CheckoutSpec = from === "candidate" ? { from, write: [{ path: rel, content: PROOF }] } : { from, paths: [], write: [{ path: rel, content: PROOF }] };
+      const { result } = await run(dir, pinnedHead, showJob(checkout, rel));
+      expect(result.status).toBe("failed");
+      expect(result.summary).toMatch(/^checkout failed: /);
+      expect(result.summary).toMatch(reason);
+      expect((result.evidence ?? []).filter((e) => e.kind === "command")).toEqual([]);
+    }
+    await expect(readdir(outside)).resolves.toEqual([]);
+  });
+
+  it("refuses at admission what needs no checkout: absolute, .., .git, too many, too large, listed twice, another's directory", () => {
+    const one = (p: string, content = "") => ({ from: "candidate" as const, write: [{ path: p, content }] });
+    expect(checkoutSpecRefusal(one("/tmp/x_test.go"))).toMatch(/must be relative/);
+    expect(checkoutSpecRefusal(one("../x_test.go"))).toMatch(/\. or \.\. segment/);
+    expect(checkoutSpecRefusal(one(".git/hooks/post-checkout"))).toMatch(/outside \.git/);
+    expect(checkoutSpecRefusal(one("big.txt", "x".repeat(MAX_CHECKOUT_WRITE_BYTES + 1)))).toMatch(/more than 65536/);
+    const many = Array.from({ length: MAX_CHECKOUT_WRITE_FILES + 1 }, (_, i) => ({ path: `t${i}_test.go`, content: "" }));
+    expect(checkoutSpecRefusal({ from: "base", paths: [], write: many })).toMatch(/more than 16/);
+    expect(checkoutSpecRefusal({ from: "candidate", write: [{ path: "a.go", content: "" }, { path: "a.go", content: "" }] })).toMatch(/listed twice/);
+    expect(checkoutSpecRefusal({ from: "candidate", write: [{ path: "d", content: "" }, { path: "d/a.go", content: "" }] })).toMatch(/is a directory of/);
+    expect(checkoutSpecRefusal({ from: "candidate", write: "a.go" })).toMatch(/must be an array/);
+    // A base checkout must take something: a changed path or a supplied file.
+    expect(checkoutSpecRefusal({ from: "base", paths: [] })).toMatch(/must list the changed paths to apply or add files with write/);
+    expect(checkoutSpecRefusal({ from: "base", paths: [], write: [] })).toMatch(/must list the changed paths/);
+    expect(checkoutSpecRefusal({ from: "base", paths: [], write: [{ path: "a_test.go", content: "" }] })).toBeUndefined();
+    expect(checkoutSpecRefusal({ from: "base", paths: ["calc.go"] })).toBeUndefined();
+    expect(checkoutSpecRefusal({ from: "candidate" })).toBeUndefined();
   });
 });
 

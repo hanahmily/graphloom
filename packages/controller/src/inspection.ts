@@ -364,6 +364,13 @@ export function createSupervisorInspection(hooks: InspectionHooks): SupervisorIn
         } catch (err) {
           return { accepted: false, reason: err instanceof Error ? err.message : String(err) };
         }
+        // A supplied file adds to the checkout: not a changed path, nor one the pinned base already holds.
+        for (const entry of spec.write ?? []) {
+          if (changed.has(entry.path)) return { accepted: false, reason: `cannot write ${entry.path}: the workspace change touches it` };
+          if (await existsAtBase(state.worktreePath, state.intake.pinnedHead, entry.path, signal)) {
+            return { accepted: false, reason: `cannot write ${entry.path}: the pinned base already has it` };
+          }
+        }
         if (spec.from === "candidate" && spec.revertPatch !== undefined) {
           // A real checkout holds the pinned base plus the changed paths only; the live worktree also
           // holds ignored files. A patch that touches a path in neither would pass here and fail there.

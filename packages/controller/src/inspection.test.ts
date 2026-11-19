@@ -316,5 +316,18 @@ describe("candidate reads and diffs (#119)", () => {
     // A patch that deletes a file creates it when reversed: a file added and later removed is not "missing".
     const restores = "diff --git a/gone.txt b/gone.txt\ndeleted file mode 100644\n--- a/gone.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-removed later\n";
     expect(await inspection.checkCheckout({ from: "candidate", revertPatch: restores })).toMatchObject({ accepted: true });
+
+    // A supplied file must be new to the checkout: not a changed path, not in the pinned base, and safe.
+    const write = (p: string) => [{ path: p, content: "x\n" }];
+    expect(await inspection.checkCheckout({ from: "base", paths: [], write: write("proof_test.go") })).toMatchObject({ accepted: true });
+    expect(await inspection.checkCheckout({ from: "candidate", write: write("new.txt") })).toMatchObject({
+      accepted: false,
+      reason: "cannot write new.txt: the workspace change touches it",
+    });
+    expect(await inspection.checkCheckout({ from: "candidate", write: write("kept.txt") })).toMatchObject({
+      accepted: false,
+      reason: "cannot write kept.txt: the pinned base already has it",
+    });
+    expect((await inspection.checkCheckout({ from: "candidate", write: write("../x.go") })).reason).toMatch(/\. or \.\. segment/);
   });
 });
