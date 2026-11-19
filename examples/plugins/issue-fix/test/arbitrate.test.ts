@@ -736,6 +736,9 @@ describe("rulings in the findings ledger", () => {
     // A new comment after it is numbered past it.
     const more = findingLedger([...partial, agent("review", "review", pass([SECOND]), D1)], { receipts });
     expect(more.findings.map((f) => f.id)).toEqual(["F1", "F2"]);
+    // An unrelated finding in the view's only pass does not take the id a waiting ruling reserves.
+    const unrelated = findingLedger([...evidence.slice(1), agent("review", "review", pass([SECOND]), D1)], { receipts });
+    expect(unrelated.findings.map((f) => f.id)).toEqual(["F2"]);
   });
 
   it("keeps a declined point deferred in a validator's view that lacks the pass that raised it", () => {

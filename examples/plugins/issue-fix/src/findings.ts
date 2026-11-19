@@ -361,6 +361,12 @@ function applyRuling(ledger: FindingLedger, evidence: EvidenceRecord[], at: numb
   else rule(ledger, f, r, ctx);
 }
 
+/** The next finding id: one past every finding the ledger holds and every id a waiting ruling or deferral reserves. */
+function nextFindingId(ledger: FindingLedger): string {
+  const ids = [...ledger.findings.map((f) => f.id), ...(ledger.unapplied?.keys() ?? [])];
+  return `F${ids.reduce((n, id) => Math.max(n, Number(id.slice(1)) || 0), 0) + 1}`;
+}
+
 /** The operator's decline: the point no longer blocks. */
 function defer(ledger: FindingLedger, f: Finding, note: string, ctx: EventContext): void {
   settle(f, "deferred", ctx.digest);
@@ -660,8 +666,8 @@ function applyPass(ledger: FindingLedger, run: AgentRun, digest: string, files: 
       mergeInto(twin, c, { digest, ref: run.record.ref });
       continue;
     }
-    // The next number after every finding the ledger holds (a ruled one recovered from a later comment may skip ahead).
-    const f: Finding = { id: `F${ledger.findings.reduce((n, x) => Math.max(n, Number(x.id.slice(1)) || 0), 0) + 1}`, comment: c, state: "pending", on: digest, raisedOn: digest, round };
+    // The next number after every finding the ledger holds or a waiting ruling reserves (a partial view may skip ahead).
+    const f: Finding = { id: nextFindingId(ledger), comment: c, state: "pending", on: digest, raisedOn: digest, round };
     ledger.findings.push(f);
     pass.raised.push(f.id);
   }
