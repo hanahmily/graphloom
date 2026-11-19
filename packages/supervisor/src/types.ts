@@ -30,6 +30,8 @@ export interface RecoveryTrigger {
     | "contract_violation"
     | "quota_partial"
     | "recovery_budget_reached"
+    /** A supervisor-only node's side visit settled (docs/design-graph-topology.md §5.2). */
+    | "supervisor_node_settled"
     | "unhandled";
   message: string;
   /** Recorded evidence the escalation cites, such as the failing validation's inputs. */

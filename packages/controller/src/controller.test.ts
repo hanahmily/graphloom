@@ -19,6 +19,7 @@ import {
   type GraphDefinition,
   type GraphPlugin,
   type RunView,
+  type ValidationInput,
   type Validator,
 } from "@graphloom/sdk";
 import { createScriptedRunner, type Runner } from "@graphloom/runner";
@@ -691,6 +692,24 @@ describe("release scenarios (#60)", () => {
       expect(resumed.stopReason).toBe("resumed");
       expect(seen).toEqual([PINNED_REQUEST]);
       expect(resumed.receipts.filter((r) => r.valid).map((r) => r.stageId)).toEqual(["write"]);
+    });
+
+    it("rechecks a receipt with the run's receipts and admitted validator bindings (§5.4)", async () => {
+      const paused = await acceptedWrite("update-recheck-receipts");
+      const seen: ValidationInput[] = [];
+      const recording: Validator = { evaluate: (input) => (seen.push(input), exactGreeting.evaluate(input)) };
+      const resumed = await createController().resume({
+        runRef: paused.stateDir,
+        plugin: resumedStop(),
+        runner: createScriptedRunner({ jobs: [] }),
+        validators: { ...validators, "exact-greeting": recording },
+        updatePlugin: true,
+      });
+      expect(resumed.stopReason).toBe("resumed");
+      const state = await loadRunState(paused.stateDir);
+      expect(seen).toHaveLength(1);
+      expect(seen[0]!.receipts?.map((r) => [r.stageId, r.requirementId, r.valid])).toEqual([["write", "greeting-bytes", true]]);
+      expect(seen[0]!.validatorBindings).toEqual(state.validatorBindings);
     });
 
     it("invalidates a receipt the updated validator no longer accepts and returns to its stage", async () => {

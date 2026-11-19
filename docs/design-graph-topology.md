@@ -1,6 +1,7 @@
 # Graph topology: nodes, edges and supervisor-only nodes
 
-Status: designed, 2026-11-19; not implemented. Extends the
+Status: designed, 2026-11-19; §13 pull requests 1 to 3 implemented (the SDK
+types, the traversal engine, supervisor-only nodes). Extends the
 [TypeScript core design](design-typescript-core.md) §1, §4, §5, §6 and §8, and
 keeps the [run convergence](design-run-convergence.md) rules (identity-anchored
 receipts, `openAttempt`, correction escalation). The first graph to declare
@@ -50,6 +51,7 @@ enters. Existing plugins keep their behaviour without a change.
 | Start | `packages/controller/src/loop.ts:3526-3538` | The run starts at `stages[0]` |
 | Moving | `packages/controller/src/loop.ts:2700` | A dispatch sets `current` to the job's stage, whichever declared stage it names; `undeclaredStage` (`loop.ts:3276-3282`) refuses only an undeclared id |
 | Admission | `packages/controller/src/admit.ts:270-281` | Validating a stage needs valid receipts for every stage earlier in the list |
+| Re-validation | `packages/controller/src/admit.ts:216` (`earliestIncompleteStage`) | Validation of any stage other than the first incomplete one is refused before a validator runs (`not the next incomplete stage`), so a stage whose requirements all hold valid receipts is never validated again: no receipt is minted, and the caller still clears the stage's open attempt (`loop.ts:3269-3274`) |
 | Reentry | `packages/controller/src/loop.ts:2344-2374` | Any declared stage; spends one `corrections`, sets `openAttempt`, opens the next attempt and bumps the generation. Invalidation is identity-aware (`admit.ts:451`), not positional. The "current or earlier" rule of core §6 is prose; the code does not check direction |
 | Completion | `packages/controller/src/loop.ts:2462-2491` | `stop` with reason `complete` succeeds when every listed stage has valid receipts for all its requirements, and `deliveryDrift` (`admit.ts:133-142`) finds the last listed stage's receipts still describe the workspace |
 | Receipt replacement | `packages/controller/src/admit.ts:385-391` | A new receipt for a stage requirement invalidates the earlier valid one |
@@ -201,16 +203,34 @@ node: `current` follows it, as today, and the live path does not change. Every
 routing rule below reads the tail, not `current`.
 
 A node is **accepted** when each of its requirements has a valid receipt and
-`openAttempt[node]` is not set. Validity is identity-anchored and evaluated at
-the check (the controller runs its identity invalidation first, as
-`admitValidation` does today, `admit.ts:203-216`).
+`openAttempt[node]` is not set. Validity is identity-anchored. Admission
+evaluates it at the check: `admitValidation` runs its identity invalidation
+first, as today. A forward move (§4.3) and the completion carry (§4.6) read the
+receipts as recorded, which is what the graph saw in its view when it chose
+the node. A receipt that is stale but not yet marked invalid then moves the run
+where today's code would have admitted the action and rejected the validation,
+instead of stopping the run with `undeclared edge`.
 
 ### 4.2 Actions for nodes on the path
 
-A `dispatch` or `validate` naming a node on the live path is admitted as today:
-supporting work or a re-validation of that node. A failed re-validation leaves
-the node unaccepted; nodes after it then cannot validate (§4.5) until the run
-reenters it or it validates again.
+A `dispatch` naming a node on the live path is admitted as today: supporting
+work for that node. A `validate` naming a node on the live path is a
+re-validation:
+
+- a node that is not complete (some requirement lacks a valid receipt, after
+  identity invalidation) is validated; a failed validation leaves it
+  unaccepted, and nodes after it then cannot validate (§4.5) until the run
+  reenters it or it validates;
+- a node that is complete is refused before any validator runs (`stage X is
+  already accepted`): no receipt is minted again, its receipts stand, and the
+  validation still clears `openAttempt[X]`. This keeps today's rule, where the
+  `earliestIncompleteStage` gate refused the validation of every stage but the
+  first incomplete one (§2). A reentry that kept the candidate's identity
+  therefore reopens the node and its next validation closes it again on the
+  receipts it holds.
+
+The open side visit's node is the one exception: each visit of a
+supervisor-only node is judged afresh (§5.3).
 
 ### 4.3 Moving forward
 
@@ -289,8 +309,9 @@ unchanged: the requirement set must be covered, the evidence is the live
 candidate's (`candidateEvidence`), history is the superseded candidates'
 evidence, independence, contracts and identity anchoring apply as before, and a
 new receipt for a node requirement replaces the earlier valid one
-(`admit.ts:385-391`). A validation clears `openAttempt` for its node, accepted
-or rejected, as today (`loop.ts:3269-3274`).
+(`admit.ts:385-391`). A node that is already complete is refused as already
+accepted (§4.2). A validation clears `openAttempt` for its node, accepted,
+rejected or refused as already accepted, as today (`loop.ts:3269-3274`).
 
 ### 4.6 Completion
 
@@ -300,7 +321,8 @@ from the tail to a terminal node along the forward-move rule (§4.3) on which
 every node after the tail, the terminal included, is accepted; when there is
 one (the same deterministic choice), it appends those nodes as carried visits.
 This is the case of a reentry that kept the candidate's identity: the reentered
-node validates again, the later nodes still hold valid receipts but left the
+node's validation is refused as already accepted and clears its open attempt
+(§4.2), the later nodes still hold valid receipts but left the
 live path with the reentry, and a graph that selects "the first incomplete
 stage" (`pr-review/src/graph.ts:312-314`, `pr-design-review/src/graph.ts:307`)
 finds none and stops `complete`, as it does today. Then the stop makes the run
@@ -356,10 +378,10 @@ plugin notion enters the controller, SDK or CLI.
 | Step | Who | Operation | Effect |
 |---|---|---|---|
 | Hand over | graph (or the controller's own triggers) | `supervise` | Recovery opens, as today, from wherever the tail is |
-| Enter | supervisor, in recovery | `enter { stageId: S, reason, evidenceRefs? }` | S is supervisor-only, has visits left, and no side visit is open. A side visit of S opens, entered from the tail (any graph-entered node); `current` becomes S; `openAttempt[S]` is set. No correction, no generation bump |
-| Work | graph in normal mode after the supervisor's `return`, or the supervisor itself in recovery | `dispatch`, `observe`, `validate` for S | The node's jobs and validators run; a supervisor-authored dispatch follows the core's recovery rules |
-| Settle | controller | — | When a validation of S mints a receipt for every requirement of S, the controller records the side visit settled and opens a recovery episode with trigger `supervisor_node_settled`, citing the receipts and carrying each requirement's validation reason as the validator gave it |
-| Leave | supervisor, in recovery | `reenter { stageId: X }` | A declared edge `S → X` exists. When X is on the live path, a reentry (§4.4): one correction. When X is not, a forward move from the tail (§4.3): the route rule applies, no correction. The side visit closes with outcome `routed to X` |
+| Enter | supervisor, in recovery | `enter { stageId: S, reason, evidenceRefs? }` | S is supervisor-only, has visits left, and no side visit is open. A side visit of S opens, entered from the tail (any graph-entered node), under S's next attempt; `current` becomes S; `openAttempt[S]` is set. No correction, no generation bump |
+| Work | graph in normal mode after the supervisor's `return`, or the supervisor itself in recovery | `dispatch`, `observe`, `validate` for S | The node's jobs and validators run; a supervisor-authored dispatch follows the core's recovery rules (it names the current node, which is S) |
+| Settle | controller | — | When a validation of S mints a receipt for every requirement of S, the controller records the settlement on the side visit (the receipts and each requirement's validation reason as the validator gave it) and opens a recovery episode with trigger `supervisor_node_settled`, a new episode also when the supervisor's own validation settled it. The trigger's message cites each receipt with its requirement, binding and reason, and names S's out-edges; its evidence refs are the records the receipts accepted (the newest 20) |
+| Leave | supervisor, in recovery | `reenter { stageId: X }` | A declared edge `S → X` exists. When X is on the live path, a reentry (§4.4): one correction, X's new visit entered from the side visit. When X is not, a forward move from the tail (§4.3): the route rule applies, no correction, no generation bump, X under its next attempt. The side visit closes with outcome `routed to X` and `openAttempt[S]` is cleared |
 
 Leaving to a node off the live path covers a side visit entered from a node
 whose successor is the fitting exit: entered from Fix, the supervisor can leave
@@ -377,20 +399,33 @@ While S is open:
   the core design);
 - the graph may not act for any other node, `reenter`, or stop `complete`:
   each is inadmissible (`supervisor-only node`), which in normal mode stops the
-  run as a plugin defect;
+  run, a final stop classified as a plugin defect;
+- the supervisor too dispatches and validates only for S, and `reenter` is
+  only a leave along an out-edge of S; any other is an in-turn rejection
+  (`supervisor-only node`, or `undeclared edge` for a leave without the
+  edge);
 - at each normal-mode step, before calling `advance`, the controller checks
-  whether S's open visit holds a receipt for each requirement; if it does, it
-  opens the `supervisor_node_settled` episode instead (this also covers a
-  resume after the settle).
+  whether S's open visit is settled: its settlement's receipts, one per
+  requirement, are all still valid. If it is, the controller opens the
+  `supervisor_node_settled` episode instead. This also covers a resume after
+  the settle, and a supervisor that `return`s without leaving: the episode
+  opens again, so the trigger's safe default after three rejections is a stop.
 
 `enter` is a supervisor action only. A graph decision with `enter` is
-inadmissible (`enter is the supervisor's`).
+inadmissible (`enter is the supervisor's`), a final plugin-defect stop; a
+supervisor's `enter` outside recovery is refused the same way. An `enter` of a
+graph-entered node, of a node with no visits left, or while a side visit is
+open is an in-turn rejection (`supervisor-only node`) naming the reason.
 
 ### 5.3 The node's work and its receipt
 
-Validating S needs no predecessor receipts (§4.5). S's requirements are
-ordinary requirements with validator bindings, contracts and independence
-rules. The node's work is the plugin's: the graph builds S's jobs in `advance`
+Validating S needs no predecessor receipts (§4.5). Each visit of S is judged
+afresh: the "already accepted" refusal of §4.2 does not apply to the open side
+visit's node, so a second visit's validation runs S's validators even when the
+first visit's receipts are still valid, and its receipts replace them. The
+settlement recorded on the visit names which receipts settled it. S's
+requirements are ordinary requirements with validator bindings, contracts and
+independence rules. The node's work is the plugin's: the graph builds S's jobs in `advance`
 from evidence, so the jobs keep the plugin's own assignments, contracts and
 confinement. A supervisor that dispatches for S in recovery writes its own
 instruction, as for any recovery trial.
@@ -410,9 +445,12 @@ receipts?: Receipt[];
 validatorBindings?: ValidatorBinding[];
 ```
 
-The controller passes both on every validator call of a run (run, resume and a
-resume's receipt recheck), from the run's state at the call, like `request`; a
-validator that ignores them behaves as before. A receipt names its node and its
+The controller passes both on every validator call of a run (run, resume, a
+resume's receipt recheck, the supervisor's validation probes, and L2 replay
+over the recorded state), from the run's state at the call, like `request`; a
+validator that ignores them behaves as before. In a validation, `receipts` are
+the run's receipts after identity invalidation and before the validation's own
+new receipts. A receipt names its node and its
 `evidenceRefs`, so "a receipt of S was minted on this record" is a plain lookup.
 A replaced or identity-invalidated receipt still records that S's validators
 accepted the record when it was minted; whether that still holds is the reading
@@ -445,7 +483,7 @@ on the engine:
 
 | Operation | Who requests it | Result over a graph |
 |---|---|---|
-| Dispatch | Graph or supervisor | A job for a live-path node, or a forward move (§4.3); a supervisor-only node only while its side visit is open |
+| Dispatch | Graph or supervisor | A job for a live-path node, or a forward move (§4.3); a supervisor-only node only while its side visit is open. The supervisor dispatches only for the current node, as today; it moves forward by `validate` or by returning to the graph |
 | Observe | Graph or supervisor | Unchanged; names no node |
 | Validate | Graph, supervisor, or controller | Admission along the live path (§4.5) |
 | Reenter | Graph along a declared edge from the tail; supervisor to any live-path node, or out of a supervisor-only node along its out-edge | New attempt, live path truncated, one correction (§4.4) |
@@ -464,9 +502,13 @@ existing checks along the live path instead of the list:
 
 - `reassessAcceptedWorkspace` and the receipt recheck walk the live path in
   order. The first node whose accepted evidence drifted or no longer passes is
-  invalidated with every node after it on the live path; the path is truncated
-  there and that node gets its next attempt and becomes `current`, as today,
-  with no correction charged. A truncation that removes the visit a side visit
+  invalidated with every node after it on the live path and every
+  graph-entered node off it (on a chain, exactly today's positional set); the
+  path is truncated there and that node gets its next attempt and becomes
+  `current`, as today, with no correction charged. The new visit is recorded
+  `entered: "reenter"` with operation `resume`, and the visits it removed end
+  `replaced by reentry of X`. Executor-repair activation invalidates the same
+  set from the current node. A truncation that removes the visit a side visit
   was entered from closes the side visit. Receipts of nodes off the live path
   are invalidated by identity, as everywhere; they do not move the run (today's
   list walk would set `current` to such a stage; the plugins that read
@@ -500,10 +542,11 @@ or `terminal`, or changes a node's entry or visit cap is rejected naming what
 changed, even when its tests and independent review pass.
 
 Activation restarts the live path at `start`, as it restarts at `stages[0]`
-today (`repair-lifecycle.ts:709-712`): every live-path node's receipts become
-invalid, the live path becomes a visit of `start`, `current` becomes `start`
-with attempt 1 as today, and an open side visit closes with outcome `closed by
-activation`. Visits are identified by sequence number, so the repeated attempt
+today (`repair-lifecycle.ts:709-712`): every graph-entered node's receipts
+become invalid, on the live path or off it, as today's restart invalidates
+every stage; the live path becomes a visit of `start`, `current` becomes
+`start` with attempt 1 as today, and an open side visit closes with outcome
+`closed by activation`. Visits are identified by sequence number, so the repeated attempt
 number is unambiguous. Receipts of supervisor-only nodes are not invalidated by
 activation; a reading node's `prerequisiteRequirementIds` decides whether a
 replaced validator matters to it (§5.4).
@@ -523,10 +566,13 @@ the existing `producer.stageId` (`packages/controller/src/admit.ts:577-588`), so
 the evidence of every lap stays attributable after the live path forgets it.
 `DurableRunState.visits` records each visit: sequence number, node, attempt, how
 it was entered (`start`, `edge`, `carried`, `reenter`, `enter`, `migrated`), the
-visit it came from, the generation, the operation, and for a visit that left
-the live path or a side visit, how it ended (`replaced by reentry of X`,
-`routed to X`, `left without receipt`, `closed by activation`, `settled`).
-Nothing is deleted.
+visit it came from, the generation, the operation (`intake`, `dispatch`,
+`validate`, `stop`, `reenter`, `enter`, `resume`, `activate_repair`,
+`migration`), and for a visit that left the live path or a side visit, how it
+ended (`replaced by reentry of X`, `routed to X`, `left without receipt`,
+`closed by activation`). A side visit also records its settlement (§5.2): the
+receipts that settled it and each requirement's reason; a settled visit is one
+whose settlement still holds, not an ending. Nothing is deleted.
 
 ## 8. Operator surfaces
 
@@ -664,9 +710,9 @@ Controller and SDK tests, each named for the PR that adds it (§13):
    first stage of a five-stage chain whose later stages hold valid receipts, the
    graph's dispatch for the first incomplete stage is a forward move with carried
    visits; after a supervisor reentry of an early pr-review stage that keeps
-   the candidate's identity, the stage validates again and the graph's
-   `stop complete` carries the accepted later stages onto the path and
-   succeeds; `current` follows a supporting dispatch for an earlier stage; a
+   the candidate's identity, the stage's validation is refused as already
+   accepted and clears its open attempt, and the graph's `stop complete`
+   carries the accepted later stages onto the path and succeeds; `current` follows a supporting dispatch for an earlier stage; a
    reentry of a stage ahead is refused.
 3. Forward moves: a direct edge; a route across accepted nodes with carried
    visits; refused across an unaccepted node, without a route, or while a side

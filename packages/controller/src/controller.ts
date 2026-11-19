@@ -28,7 +28,7 @@ import {
   type RecreateHostFn,
   type RepairDeps,
 } from "./repair-lifecycle.js";
-import { admitValidation, assertLiveWorkspaceMatchesEvidence, deliveryDrift, invalidateFromNode, liveCandidateDigest, pinnedRequest } from "./admit.js";
+import { admitValidation, assertLiveWorkspaceMatchesEvidence, deliveryDrift, invalidateFromNode, liveCandidateDigest, validationContext } from "./admit.js";
 import { invalidateNodes, livePath, reenterPath, tailOf } from "./traversal.js";
 import type { AdmissionValidator } from "./admit.js";
 import { resolveBundleEntry } from "./bundle.js";
@@ -1184,7 +1184,7 @@ async function recheckReceipts(
               evidence: evidence.filter((e) => e !== undefined),
               candidateFingerprint: receipt.candidateFingerprint,
               ...(receipt.candidateDigest !== undefined ? { candidateDigest: receipt.candidateDigest } : {}),
-              ...pinnedRequest(state),
+              ...validationContext(state),
             }),
           ),
         ).catch((err: unknown) => ({ status: "failed" as const, reason: err instanceof Error ? err.message : String(err) }));

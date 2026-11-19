@@ -109,6 +109,14 @@ export function tailOf(state: PathState): VisitRecord {
   return tail;
 }
 
+/** The open side visit of a supervisor-only node (§5.2), or undefined. */
+export function sideVisitOf(state: PathState): VisitRecord | undefined {
+  if (state.sideVisit === undefined) return undefined;
+  const visit = withPath(state).visits.find((v) => v.seq === state.sideVisit);
+  if (visit === undefined) throw new Error(`run state names side visit ${state.sideVisit} but records no such visit`);
+  return visit;
+}
+
 /** The node's position on the live path, or -1. */
 export function pathIndex(state: PathState, stageId: StageId): number {
   return livePath(state).findIndex((v) => v.stageId === stageId);
@@ -183,11 +191,17 @@ function pathText(state: PathState): string {
  * receipts as recorded, which is what the graph saw when it chose the node.
  */
 export function forwardRefusal(state: PathState, stageId: StageId): Inadmissible | undefined {
-  if (pathIndex(state, stageId) >= 0) return undefined;
   const tail = tailOf(state).stageId;
-  if (state.sideVisit !== undefined) {
-    return { precondition: SUPERVISOR_ONLY_NODE, detail: `tail ${tail}, node ${stageId}: a side visit of a supervisor-only node is open; only the supervisor leaves it` };
+  // §5.2: while a side visit is open, the only node an action may name is its own.
+  const side = sideVisitOf(state);
+  if (side !== undefined) {
+    if (stageId === side.stageId) return undefined;
+    return {
+      precondition: SUPERVISOR_ONLY_NODE,
+      detail: `tail ${tail}, node ${stageId}: the side visit of supervisor-only node ${side.stageId} is open; only actions for ${side.stageId} are admitted until the supervisor leaves it`,
+    };
   }
+  if (pathIndex(state, stageId) >= 0) return undefined;
   if (forwardRoute(state, stageId) !== undefined) return undefined;
   const why = !isGraphEntered(state.definition, stageId)
     ? `${stageId} is supervisor-only`
@@ -204,7 +218,7 @@ export function forwardRoute(state: PathState, stageId: StageId): StageId[] | un
   return routeFromTail(state, (node) => node === stageId, (node) => nodeAccepted(state, node));
 }
 
-function nextSeq(visits: readonly VisitRecord[]): number {
+export function nextSeq(visits: readonly VisitRecord[]): number {
   return Math.max(0, ...visits.map((v) => v.seq)) + 1;
 }
 
@@ -239,9 +253,10 @@ function extend<T extends PathState>(state: T, route: StageId[], last: { entered
  * one `current` takes).
  */
 export function moveTo<T extends PathState>(state: T, stageId: StageId, attempt: number, operation: string): { state: T } | { refusal: Inadmissible } {
-  if (pathIndex(state, stageId) >= 0) return { state };
   const refusal = forwardRefusal(state, stageId);
   if (refusal !== undefined) return { refusal };
+  // A node on the live path, or the open side visit's own (§5.2): the path does not change.
+  if (pathIndex(state, stageId) >= 0 || state.sideVisit !== undefined) return { state };
   return { state: extend(state, forwardRoute(state, stageId)!, { entered: "edge", attempt }, operation) };
 }
 
@@ -273,14 +288,14 @@ export function reentryRefusal(state: PathState & Pick<DurableRunState, "mode">,
  * back to a node (§7.1). The removed visits stay in `visits`, each recording
  * the reentry that removed it.
  */
-export function reenterPath<T extends PathState>(state: T, stageId: StageId, attempt: number, operation: string): T & { path: number[]; visits: VisitRecord[] } {
+export function reenterPath<T extends PathState>(state: T, stageId: StageId, attempt: number, operation: string, from?: number): T & { path: number[]; visits: VisitRecord[] } {
   const base = withPath(state);
   const index = livePath(base).findIndex((v) => v.stageId === stageId);
   if (index < 0) throw new Error(`reentry of ${stageId}, which is not on the live path`);
   const removed = new Set(base.path.slice(index));
   const tail = base.path.at(-1)!;
   const visits = base.visits.map((v) => (removed.has(v.seq) && v.ended === undefined ? { ...v, ended: `replaced by reentry of ${stageId}` } : v));
-  const visit: VisitRecord = { seq: nextSeq(visits), stageId, attempt, entered: "reenter", from: tail, generation: base.generation, operation };
+  const visit: VisitRecord = { seq: nextSeq(visits), stageId, attempt, entered: "reenter", from: from ?? tail, generation: base.generation, operation };
   return { ...base, path: [...base.path.slice(0, index), visit.seq], visits: [...visits, visit] };
 }
 
@@ -336,10 +351,13 @@ export function restartAtStart<T extends PathState & Pick<DurableRunState, "stat
   const base = withPath(state);
   const start = runTopology(base.definition).start;
   const graphNodes = new Set(base.definition.stages.filter((s) => !isSupervisorOnly(s)).map((s) => s.id));
-  const removed = new Set(base.path);
+  // The live path's visits and an open side visit close (§7.3).
+  const removed = new Set([...base.path, ...(base.sideVisit !== undefined ? [base.sideVisit] : [])]);
   const visits = base.visits.map((v) => (removed.has(v.seq) && v.ended === undefined ? { ...v, ended: "closed by activation" } : v));
   const visit: VisitRecord = { seq: nextSeq(visits), stageId: start, attempt: 1, entered: "start", from: base.path.at(-1)!, generation: base.generation, operation };
-  return { ...invalidateNodes(base, graphNodes), path: [visit.seq], visits: [...visits, visit], current: { stageId: start, attempt: 1 } };
+  const { sideVisit: _closed, ...restarted } = { ...invalidateNodes(base, graphNodes), path: [visit.seq], visits: [...visits, visit], current: { stageId: start, attempt: 1 } };
+  void _closed;
+  return restarted as T & { path: number[]; visits: VisitRecord[] };
 }
 
 /** `RunView.topology`: the topology with its defaults, the live path and an open side visit. */

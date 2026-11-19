@@ -8,11 +8,12 @@ import type {
   EvidenceRecord,
   Receipt,
   ValidateSpec,
+  ValidationInput,
   ValidatorBinding,
 } from "@graphloom/sdk";
 import type { DurableRunState } from "./state.js";
 import { describeInadmissible, type Inadmissible } from "./inadmissible.js";
-import { invalidateNodes, livePath, moveTo, nodeAccepted, nodeComplete, nodesFrom, tailOf } from "./traversal.js";
+import { invalidateNodes, livePath, moveTo, nodeAccepted, nodeComplete, nodesFrom, sideVisitOf, tailOf } from "./traversal.js";
 import { hydrateOne, validatorInput } from "./evidence.js";
 import { candidateChange, readWorktreeFile, workspaceChangeManifest } from "./worktree.js";
 
@@ -174,9 +175,24 @@ export async function assertLiveWorkspaceMatchesEvidence(
  * read from the run's state (never the task file, which may have changed since).
  * Opaque here; empty only for a state with no request at all.
  */
-export function pinnedRequest(state: DurableRunState): { request?: string } {
+export function pinnedRequest(state: Pick<DurableRunState, "intake">): { request?: string } {
   const request = (state.intake as { task?: { request?: unknown } } | undefined)?.task?.request;
   return typeof request === "string" ? { request } : {};
+}
+
+/**
+ * What every validator call of a run carries besides the requirement and
+ * its evidence (docs/design-graph-topology.md §5.4): the pinned request,
+ * every receipt of the run (valid and replaced) and the currently admitted
+ * validator bindings, as `RunView.receipts` and `RunView.validatorBindings`
+ * show them, from the run's state at the call.
+ */
+export function validationContext(state: Pick<DurableRunState, "intake" | "receipts" | "validatorBindings">): Pick<ValidationInput, "request" | "receipts" | "validatorBindings"> {
+  return {
+    ...pinnedRequest(state),
+    receipts: structuredClone(state.receipts),
+    validatorBindings: structuredClone(state.validatorBindings),
+  };
 }
 
 export async function admitValidation(
@@ -218,8 +234,10 @@ export async function admitValidation(
   // A node whose requirements all hold valid receipts has nothing to accept:
   // its receipts stand and are not minted again (a reentry that kept the
   // candidate's identity counts on them, §4.7). The caller still clears an
-  // open attempt, accepted or not.
-  if (nodeComplete(state, spec.stageId)) {
+  // open attempt, accepted or not. The open side visit's node is the
+  // exception (§5.2): each visit is judged afresh, and its validation mints
+  // receipts that replace an earlier visit's.
+  if (nodeComplete(state, spec.stageId) && sideVisitOf(state)?.stageId !== spec.stageId) {
     return {
       state: bumpRevision(state),
       accepted: false,
@@ -335,7 +353,7 @@ export async function admitValidation(
         history,
         candidateFingerprint: fingerprint,
         ...(liveDigest !== undefined ? { candidateDigest: liveDigest } : {}),
-        ...pinnedRequest(state),
+        ...validationContext(working),
       }),
     );
     const resolved = await Promise.resolve(result);

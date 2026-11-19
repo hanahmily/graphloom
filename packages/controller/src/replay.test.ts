@@ -121,6 +121,23 @@ describe("replayRun", () => {
     expect(report.requirements).toEqual([{ requirementId: "req", hadReceipt: false, now: { status: "passed", reason: "found by stage" } }]);
   });
 
+  it("gives each validator the recorded run's receipts and admitted bindings (§5.4)", async () => {
+    const recorded: DurableRunState["receipts"][number] = {
+      id: "rcpt-1",
+      stageId: "review",
+      requirementId: "req",
+      validatorBinding: { requirementId: "req", validatorId: "v", version: "1" },
+      candidateFingerprint: "fp",
+      evidenceRefs: ["ev-1"],
+      valid: false,
+    };
+    const seen: ValidationInput[] = [];
+    const host = fakeHost({ definition, evaluateImpl: (input) => (seen.push(input), { status: "passed", reason: "ok" }) });
+    await replayRun(recordedState([misclassifiedReview], [recorded]), host);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ receipts: [recorded], validatorBindings: definition.defaultValidators });
+  });
+
   it("leaves a record with an unrecognized or missing contract untouched", async () => {
     const noContract: EvidenceRecord = { ref: "ev-2", kind: "other", generation: 2, payload: { foo: "bar" } };
     const state = recordedState([noContract]);

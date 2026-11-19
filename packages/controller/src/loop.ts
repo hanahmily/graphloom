@@ -89,7 +89,8 @@ import { createChildPort, reconcileChildOperations } from "./children.js";
 import { agentSessionViews, continuationRefusal, recordAgentSession, sessionForDispatch, wipeAgentSessions } from "./agent-sessions.js";
 import { citedEvidence, loadRunState, nextStageAttempt, type ProbeRecord, NO_PROGRESS_STOP_REASON, MAX_HOST_CHANGE_RECORDS, recordRemedy, type DurableRunState, saveRunState } from "./state.js";
 import { stopMarkOf } from "./stop-class.js";
-import { carryToTerminal, completionProblem, forwardRefusal, latestAttempt, moveTo, reenterPath, reentryRefusal, startPath, topologyView } from "./traversal.js";
+import { carryToTerminal, completionProblem, forwardRefusal, latestAttempt, moveTo, pathIndex, reenterPath, reentryRefusal, sideVisitOf, startPath, topologyView } from "./traversal.js";
+import { closeSideVisit, enterNode, enterRefusal, recordSettlement, settledSideVisit, settledTrigger, sideVisitRefusal, SUPERVISOR_NODE_SETTLED } from "./supervisor-node.js";
 import { bumpGeneration } from "./generation.js";
 import { noteGraphDecision, noteSupervisorProposal, progressMark, settleCorrectionTrial, settleSupervisorCorrection } from "./escalation.js";
 import {
@@ -1051,6 +1052,16 @@ async function runNormalLoopSteps(
           decision = decided;
         }
       } else {
+        // §5.2: before the graph is asked, a settled side visit hands the run
+        // to the supervisor (also after a resume that found it settled).
+        const settled = openSettledEpisode(state);
+        if (settled !== undefined) {
+          lastAction = "supervisor-only node settled";
+          state = { ...settled, stateRevision: settled.stateRevision + 1 };
+          await saveRunState(state);
+          syncRevision(deps, state);
+          return { done: false as const, state };
+        }
         // A graph may check the input it composes against the limits an executor declares.
         const declared = executorViews(state);
         const view = { ...toRunView(state), ...(declared !== undefined ? { executors: declared } : {}) };
@@ -1723,6 +1734,18 @@ function enterRecovery(
 }
 
 /**
+ * §5.2: when the open side visit is settled, the recovery episode the
+ * controller opens (trigger `supervisor_node_settled`), citing the receipts
+ * and each requirement's validation reason; undefined when it is not.
+ */
+function openSettledEpisode(state: DurableRunState): DurableRunState | undefined {
+  const side = settledSideVisit(state);
+  if (side === undefined) return undefined;
+  const trigger = settledTrigger(state, side, boundText);
+  return enterRecovery(state, SUPERVISOR_NODE_SETTLED, trigger.message, trigger.evidenceRefs);
+}
+
+/**
  * After crash/timeout the child process is dead. Replace it before recovery
  * continues so Return can advance again. In-process hosts need no restart.
  */
@@ -2344,14 +2367,40 @@ async function applyDecision(
         evaluated: result.evaluated,
         accepted: result.accepted,
       });
-      return clearOpenAttempt(settled, stageId);
+      const validated = clearOpenAttempt(settled, stageId);
+      // §5.2: a validation that settles the open side visit hands the run to the supervisor.
+      if (result.accepted && sideVisitOf(validated)?.stageId === stageId) {
+        const before = new Set(state.receipts.map((r) => r.id));
+        const minted = validated.receipts.filter((r) => r.stageId === stageId && r.valid && !before.has(r.id)).map((r) => r.id);
+        const recorded = recordSettlement(validated, minted, result.requirements ?? []);
+        return openSettledEpisode(recorded) ?? recorded;
+      }
+      return validated;
     }
     case "reenter": {
       const stageId = action.reenter.stageId || (state.mode === "recovery" ? state.current.stageId : action.reenter.stageId);
       const undeclared = stopForUndeclaredStage(state, stageId);
       if (undeclared) return undeclared;
+      // §5.2: out of an open side visit, only the supervisor, along the node's out-edges.
+      const side = sideVisitOf(state);
+      if (side !== undefined) {
+        const refused = sideVisitRefusal(state, action);
+        if (refused !== undefined) return inadmissible(state, refused);
+      }
+      const leaving = side !== undefined ? (settledSideVisit(state) !== undefined ? `routed to ${stageId}` : "left without receipt") : undefined;
+      if (leaving !== undefined && pathIndex(state, stageId) < 0) {
+        // Leaving to a node off the live path is a forward move from the tail: no correction (§5.2).
+        const attempt = nextStageAttempt(state, stageId);
+        const moved = moveTo(closeSideVisit(state, leaving), stageId, attempt, "reenter");
+        if ("refusal" in moved) return inadmissible(state, moved.refusal);
+        return {
+          ...moved.state,
+          current: { stageId, attempt },
+          stageAttempts: { ...moved.state.stageAttempts, [stageId]: attempt },
+        };
+      }
       // §4.4: the graph reenters along a declared edge from the tail; the supervisor any live-path node.
-      const offEdge = reentryRefusal(state, stageId);
+      const offEdge = side !== undefined ? undefined : reentryRefusal(state, stageId);
       if (offEdge !== undefined) return inadmissible(state, offEdge);
       if (state.budgets.corrections <= 0) {
         return {
@@ -2380,7 +2429,16 @@ async function applyDecision(
       };
       // The live path is truncated after the node's earlier visit, which a new one replaces (§4.4).
       next = bumpGeneration(next, "reenter");
+      // Leaving a side visit to a live-path node is a reentry entered from the side visit (§5.2).
+      if (side !== undefined && leaving !== undefined) return reenterPath(closeSideVisit(next, leaving), stageId, next.current.attempt, "reenter", side.seq);
       return reenterPath(next, stageId, next.current.attempt, "reenter");
+    }
+    case "enter": {
+      // §5.2: the supervisor's, in recovery; a graph decision with `enter` is a plugin defect.
+      const stageId = action.enter.stageId;
+      const refused = enterRefusal(state, stageId);
+      if (refused !== undefined) return inadmissible(state, refused);
+      return enterNode(state, stageId, nextStageAttempt(state, stageId));
     }
     case "supervise": {
       if (!deps.supervisor) {
@@ -2474,7 +2532,9 @@ async function applyDecision(
       // accepted nodes to a terminal one; it succeeds when the path ends at a
       // terminal node with every node on it accepted, and the tail's receipts
       // still describe the workspace. A carry that does not end in success
-      // leaves the path as it was.
+      // leaves the path as it was. The graph may not stop `complete` inside a side visit (§5.2).
+      const insideSide = sideVisitRefusal(state, action);
+      if (insideSide !== undefined) return inadmissible(state, insideSide);
       const carried = action.stop.reason === "complete" ? carryToTerminal(state) : state;
       const complete = action.stop.reason === "complete" && completionProblem(carried) === undefined;
       // What admitted the stop is what the report shows: recorded evidence and probes of this episode.
@@ -2841,8 +2901,13 @@ export function supervisorAdmissionRefusal(
     }
     case "reenter": {
       const stageId = action.reenter.stageId || state.current.stageId;
-      return undeclaredStage(state, stageId) ?? reentryRefusal(state, stageId);
+      const undeclared = undeclaredStage(state, stageId);
+      if (undeclared !== undefined) return undeclared;
+      // Out of an open side visit: along the node's out-edges only (§5.2).
+      return sideVisitOf(state) !== undefined ? sideVisitRefusal(state, action) : reentryRefusal(state, stageId);
     }
+    case "enter":
+      return enterRefusal(state, action.enter.stageId);
     case "return":
       return returnRefusal(state);
     case "qualify_repair":
