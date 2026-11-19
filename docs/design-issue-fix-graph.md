@@ -32,7 +32,8 @@ supervisor-dispatched work run without one no longer crashes the graph
 Version 0.10.4 declares a 6 h `waitMs` in every profile, so a coding-agent harness's usage-limit reset can be waited out instead of stopping the run ([#189](https://github.com/hanahmily/graphloom/issues/189)).
 Version 0.11.0 reenters Fix itself when code review fails only on confirmed findings and the loop is converging, instead of handing every such failure to the supervisor ([#193](https://github.com/hanahmily/graphloom/issues/193); see [review failures](#review-failures-the-graph-reenters-fix-or-the-supervisor-decides)).
 Version 0.12.0 reads the profile's [context documents](#context-documents) once and gives them to the planner, the implementer and the code reviewers ([#195](https://github.com/hanahmily/graphloom/issues/195)), runs a profile's [`final` tier commands](#the-final-command-tier) once after review converged ([#196](https://github.com/hanahmily/graphloom/issues/196)), and ships the [banyandb-ql profile](#the-measure-ql-profile-and-benchmark-gates) with its `bench-gates` requirement and a delivery option that keeps a private tracker out of the commit and the pull request ([#197](https://github.com/hanahmily/graphloom/issues/197)).
-Proposed for 0.17.0: [code quality gates](#code-quality-gates) on the functions a change adds or modifies (complexity, nesting, CRAP, mutation), with the metrics defined in [code quality metrics](design-code-quality-metrics.md).
+Proposed for 0.18.0: [code quality gates](#code-quality-gates) on the functions a change adds or modifies (complexity, nesting, CRAP, mutation), with the metrics defined in [code quality metrics](design-code-quality-metrics.md).
+Designed for 0.17.0, not implemented: [Arbitrate](#arbitrate-designed-for-0170), a supervisor-only node in which an independent arbiter, or the operator, rules on design conflicts between review and implementation, with the Fix⇄Review loop declared as edges of the [graph topology](design-graph-topology.md).
 
 ## Purpose
 
@@ -556,6 +557,10 @@ findings ledger rebuilt on the evidence before the last correction, so a
 correction that changed nothing, with the same findings open, is not converging
 and goes to the supervisor.
 
+Designed for 0.17.0: this reentry follows the declared edge `review → fix`,
+and a disputed or design-level finding, or one the fixer contests, can reach
+[Arbitrate](#arbitrate-designed-for-0170) through the supervisor.
+
 ## Review discovery rounds
 
 The reviewer may raise new findings for at most three rounds
@@ -1033,7 +1038,7 @@ context document.
 
 ## Code quality gates
 
-Status: proposed, 2026-10-28, for 0.17.0. Not implemented.
+Status: proposed, 2026-10-28, for 0.18.0 (moved from 0.17.0, which takes [Arbitrate](#arbitrate-designed-for-0170)). Not implemented.
 
 The operator's two "ub-mode" rules become hard gates on the code issue-fix's
 agents write:
@@ -1518,7 +1523,7 @@ section never shows a number the validators did not recompute.
 ### Profile switches
 
 An optional `quality` field; absent means no gates and the definition of
-0.16.0:
+0.17.0:
 
 ```json
 "quality": {
@@ -1721,3 +1726,411 @@ built-in runner in the bundle, a source change qualified like any other.
 Not yet verified: a live run with either profile, a live run with the issues
 file, and a full rehearsal (L1) of the graphloom profile, which would run its
 real commands.
+
+## Arbitrate (designed for 0.17.0)
+
+Status: designed, 2026-11-18; not implemented. It needs the
+[graph topology](design-graph-topology.md) (nodes, edges, supervisor-only
+nodes) and the generic `CheckoutSpec.write` capability scoped under
+[executable confirmations](#executable-confirmations-second-phase); both are
+core changes that land first. Arbitrate is issue-fix's only; no other graph
+declares it.
+
+### What it settles
+
+Two disagreements end today without a judge:
+
+- **The review is in doubt.** The verifier cannot settle a finding (`uncertain`,
+  no verdict, or a refutation whose quotes do not match), so the finding is
+  disputed and goes to the supervisor, which can reenter Fix or stop for a
+  maintainer and cannot dismiss it ([verifying findings](#verifying-findings)).
+  A finding about the design, not the code, is the same: two readings of the
+  project's design meet, and neither the reviewer nor the verifier is the one
+  to choose.
+- **The implementer disagrees.** The fixer can only move an issue to `fixed`
+  ([the issues file](#the-flow)); a finding it believes contradicts the design
+  is either fixed against its judgment or left open until the loop's limits
+  end the run.
+
+Arbitrate is a supervisor-only node that hands such a point to an independent
+arbiter and turns its answer into a **ruling**: a recorded design decision that
+later review passes, the verifier and the fixer must follow. A point the arbiter
+cannot decide goes to the operator through an approval; the run waits, it does
+not break.
+
+### The graph's topology
+
+0.17.0 declares three nodes and four edges
+([topology §3.1](design-graph-topology.md#31-nodes-and-edges)):
+
+```text
+Fix ─────────────────► Review     fix → review       start: Fix
+Fix ◄───────────────── Review     review → fix       terminal: Review
+Fix ◄── Arbitrate ───► Review     arbitrate → fix, arbitrate → review
+        (entry: supervisor; maxVisits: review.maxRulings + 3; no edge enters it)
+```
+
+- The Fix⇄Review loop is the two edges. The graph's own reentry after a failed
+  review ([review failures](#review-failures-the-graph-reenters-fix-or-the-supervisor-decides))
+  and after failed final checks is the same `reenter` for Fix, now along the
+  declared edge `review → fix`; its conditions, cap and correction charge are
+  unchanged.
+- No edge enters Arbitrate. Only the supervisor enters it, and only the
+  supervisor leaves it, to Fix or to Review.
+- Stage selection reads the live path (`view.topology.path`) and the open side
+  visit instead of "the first listed stage that is incomplete or open"
+  (`src/graph.ts:332-338`): Arbitrate's work while its side visit is open;
+  otherwise the first live-path node that is open or lacks a receipt;
+  otherwise, when Fix is the path's last node, the fixer's design conflicts
+  (below) and then Review (the forward move along `fix → review`); otherwise
+  delivery.
+- The manifest declares `sdkProtocol: 2`. A 0.16 run cannot move to 0.17 with
+  `--update-plugin`; a new run is needed.
+
+### When the graph hands a design conflict to the supervisor
+
+**From the review.** The verification result becomes `finding-verification-v2`:
+each verdict gains `designLevel` (boolean) and, when it is true, `designBasis`,
+the design statement or decision the claim turns on, in one or two sentences.
+A finding is a **design conflict** when it is disputed (as today) or its latest
+verdict is `confirmed` or `uncertain` with `designLevel: true`. A design-level
+confirmation does not go to Fix: it is disputed until ruled on. A design-level
+`refuted` whose quotes match is dismissed as today.
+
+**From the fixer.** The fixer may move an `open` or `reopened` issue to
+`design-conflict` instead of fixing it, with its argument as the history note
+(non-empty, at most 2,000 characters): which design statement or decision the
+finding contradicts, quoted, and where. The
+[diff](#how-the-graph-validates-and-restores-it) accepts the move only for an
+issue with no holding ruling; any other `design-conflict` move is rejected and
+restored like any illegal edit. The decision record's `status` stays `ready`.
+
+**The fixer's conflict goes from Fix.** The graph does not wait for Review.
+Fix's other work is checked first: the fixer's run is followed by Fix's own
+checks and validation as usual (RED, GREEN, builds, scope, changelog; the
+contested finding is not one of Fix's requirements), and a failing check is a
+Fix correction as today. Once Fix is accepted and a fixer-raised conflict
+without a holding ruling exists, the graph returns `supervise` from Fix instead
+of moving to Review, with a reason naming each such issue: its id, location,
+title and a clip of the fixer's argument. Fix's receipt keeps the other work:
+whichever way the point is ruled, nothing the fixer did besides contesting is
+run again unless a later edit changes the candidate.
+
+**The review's conflict goes from Review.** After verification, the graph
+returns `supervise` when a design conflict the verifier raised has no holding
+ruling, with a reason naming each one: its issue id, location, title and the
+verifier's `designBasis` or why it could not settle the claim. The graph's own
+reentry of Fix additionally requires that no design conflict is open.
+
+**The supervisor judges.** When it finds the point a design conflict, it
+`enter`s Arbitrate from where the run is, Fix or Review (an `enter` opens the
+side visit from the live path's last node, whichever it is;
+[topology §5.2](design-graph-topology.md#52-operations)), and returns, so the
+graph runs the node. When it does not (the fixer is avoiding work, the claim is
+a plain defect), it uses the existing remedies: reenter Fix with its own
+instruction, or stop for a maintainer. It still cannot dismiss a finding
+itself: only verification or a ruling does.
+
+### Inside Arbitrate
+
+One visit settles one **design point**: one finding. On each `advance` while
+Arbitrate is current, the graph:
+
+1. **Picks the point**: the first design conflict in ledger order with no
+   holding ruling. With none, it returns `supervise` ("nothing to arbitrate"),
+   and the supervisor leaves the node.
+2. **Checks the cap.** When the run already holds `review.maxRulings` arbiter
+   rulings, the arbiter does not run; the point goes to the operator (step 7).
+3. **Dispatches the arbiter** (below), once per visit, in a fresh session.
+4. **Verifies its citations**: observes the candidate files its code citations
+   name (one read-only observation, as for refutation quotes) and matches its
+   design quotes against the pinned texts (below).
+5. **Runs its proof tests**, when it wrote any: one read-only command job per
+   test, in a prepared checkout of the candidate with the test file added
+   (`checkout: { from: "candidate", write: [...] }`), running the profile's
+   regression runner on the named test, the same runner and checkout
+   preparation as RED and GREEN. The checkout is the controller's; the test
+   never reaches the worktree or the candidate.
+6. **Revises once.** When a citation does not verify or a proof test does not
+   behave as the arbiter claimed, the graph continues the arbiter's session once
+   (`continueFrom`) with the mismatches and the recorded runs. A second failure
+   makes the ruling `undecidable`.
+7. **Asks the operator** for an `undecidable` ruling or a capped point: a final
+   stop that waits for the `design-ruling` approval (below).
+8. **Validates Arbitrate.** The `design-ruling` requirement passes on a ruling
+   whose citations and proof tests verified, or on the operator's answer to
+   this point. The receipt settles the node: the controller opens a supervisor
+   episode (`supervisor_node_settled`) whose message carries the validator's
+   reason, which names the ruling and the out-edge that fits.
+
+### The arbiter
+
+- **Independence.** A separate read-only agent job (`purpose: "review"`,
+  `readOnly: true`) in a fresh session that never wrote, reviewed or verified
+  the change: never a continued implementer, reviewer or verifier session, and
+  never one of their sessions' forks. The harness may be the same as another
+  role's; independence is the session's, not the harness's.
+- **Harness and model.** `harnesses.arbiter`, default `codex`, with
+  `review.arbiter`, default `{ "model": "gpt-6-astra", "effort": "high" }`;
+  every shipped profile (banyandb, banyandb-ql, canopy, graphloom) sets both.
+  The job passes them as `harnessOptions.model` and `harnessOptions.effort`.
+  Both are carried today: the coding-agent executor's Codex harness takes a
+  job's `harnessOptions.effort`, checks it against Codex's reasoning efforts
+  (`executors/coding-agent/src/codex-harness.ts:45`, `98-102`), and the Codex
+  driver passes it as `--config model_reasoning_effort="high"`
+  (`packages/agent-harness/src/codex/driver.ts:51`, `103`). The Codex harness
+  serves read-only jobs only (`codex-harness.ts:92`), which the arbiter is.
+- **Inputs.** The issue snapshot and its comments (the owners' comments
+  included); the pinned [context documents](#context-documents) and the
+  profile's principles file (`review.principles`, read at the base like a
+  context document and handed over the same way); the finding with the
+  reviewer's claim, every verifier verdict and witness, the fixer's argument
+  when it raised the conflict, and the issue's history; the candidate code (it
+  reads the worktree); every holding ruling, so it does not contradict one.
+- **Proof tests.** It may write proof tests: at most two files, returned in its
+  result as `{ path, content }` with the test's name, whether it must `fail` or
+  `pass` on the candidate, and what that shows. It may try them in the run's
+  scratch directory, which a read-only job may write; only the graph's checkout
+  run (step 5) counts. A path must be a test path under the profile's
+  `testPaths`, relative, without `.` or `..` segments, outside `.git`, at most
+  64 KiB, and not a path the candidate changes.
+- **Result contract `design-ruling-v1`** (`evidenceKind: "other"`, so it never
+  counts as the code review's independent review evidence):
+
+```text
+finding:     "F5"                         the point it rules on
+ruling:      "implementation-stands" | "review-stands" | "undecidable"
+summary:     one paragraph
+design:      [{ source, quote, says }]    1 to 5; source is "issue", "comment:<n>" (the nth comment
+                                          of the snapshot), "doc:<name>" (a context document by its
+                                          source name) or "principles"
+code:        [{ path, line, quote }]      1 to 5; lines of the candidate
+proofTests:  [{ path, name, content, expect: "fail" | "pass", shows }]    0 to 2
+undecidable: { question, implementation, review }   for "undecidable" only: the question for the
+                                          operator and the best case for each side
+```
+
+- **Rules.** `implementation-stands` and `review-stands` need at least one
+  design statement and one code citation, all verified, and every proof test's
+  run as claimed. A ruling grounded only in the arbiter's own view of good
+  design is not a ruling: a statement must quote the issue, its thread or a
+  pinned document. `undecidable` needs the question and both cases.
+
+### Verifying quotes and citations
+
+The checks reuse what the review graphs already do:
+
+- **Design quotes** follow the necessity answer's rule in the PR design review
+  ([N1](design-pr-design-review.md#56-the-necessity-question-n1)): every quote
+  matches the pinned text it names. The texts are already evidence (the issue
+  snapshot, the comments, the context documents and principles file pinned
+  with their blob sha or SHA-256), so matching is a pure function in the
+  validator: the quote, whitespace collapsed, at least eight characters,
+  appears in that text. A quote from a source the run did not pin never
+  matches.
+- **Code citations** use `quoteMatches` (`src/review-common.ts:60`), the rule
+  for refutation quotes: the quote appears within three lines of the cited line
+  in the observed candidate file, with the same path rules.
+- **Proof tests** use the RED contract for `fail` (the named test failed by
+  assertion, the package built, no panic, no timeout, no file changed) and, for
+  `pass`, the named test ran and passed with the run otherwise clean.
+
+### The operator
+
+The graph declares one approval
+([operator approvals](design-typescript-core.md#17-operator-approvals-and-their-inputs)):
+
+```ts
+{ id: "design-ruling", stageId: "arbitrate",
+  description: "Rule on a design question the arbiter could not decide",
+  inputs: [
+    { name: "finding", pattern: "[FI][0-9]+" },
+    { name: "ruling", pattern: "implementation-stands|review-stands" },
+    { name: "note", description: "The design basis, in a sentence or two" },
+  ] }
+```
+
+When a point needs the operator, the graph stops with `retryable: false`,
+reason `design ruling needs the operator`, and a blocker that states the
+question, both cases with their citations, and the two commands:
+
+```text
+graphloom resume <run> --approve design-ruling --input finding=F5 --input ruling=review-stands --input note="…"
+graphloom resume <run> --decline design-ruling --reason "…"
+```
+
+The approval lifts the final stop. An approval naming another finding than the
+one waiting stops again, naming the expected one. The approved answer is the
+ruling, decided by the operator, with the note as its basis. A **decline**
+defers the point: the finding stops blocking, becomes `deferred`, and the pull
+request lists it as an open design question with both cases. Either way the
+validator passes and the node settles.
+
+### Leaving Arbitrate
+
+The supervisor reads the ruling and leaves along an out-edge:
+
+| Ruling | Out-edge | What happens next |
+|---|---|---|
+| `implementation-stands` | `arbitrate → review` | Review runs; the pass gets the ruling and must not raise the point; the finding is dismissed by the ruling |
+| `review-stands` | `arbitrate → fix` | A new Fix attempt; the finding is confirmed with the ruling as its witness and goes to the fixer, which may not contest it again |
+| declined (`deferred`) | `arbitrate → review` | Review runs; the finding no longer blocks |
+
+What each exit costs depends on where the point came from
+([topology §5.2](design-graph-topology.md#52-operations)):
+
+| Entered from | Exit to Fix | Exit to Review |
+|---|---|---|
+| Fix (the fixer's conflict; the live path ends at an accepted Fix) | A reentry of Fix: one `corrections` | A forward move along `fix → review`: no correction; Review's first visit on this lap, on Fix's receipt |
+| Review (the verifier's conflict; the path ends at Review) | A reentry of Fix: one `corrections` | A reentry of Review: one `corrections` |
+
+No new edge is needed for the fixer's path: `arbitrate → fix` and
+`arbitrate → review` cover both rulings, and the exit to Review from a Fix-time
+entry is admissible because `fix → review` is a route from the path's last
+node, Fix, which holds its receipts.
+
+### Rulings in the ledger
+
+The findings ledger stays a pure function of evidence. It gains **rulings**,
+`R1`, `R2`, … in the order of the Arbitrate receipts: each names its finding,
+its decision, who decided (the arbiter's harness and model, or the operator),
+its verified design statements and code citations, its proof tests with their
+recorded runs, and the receipt that accepted it. A ruling counts only when a
+receipt of `design-ruling` was minted on its evidence under the currently
+admitted `design-ruling` binding (receipts and the admitted bindings reach
+validators as `ValidationInput.receipts` and `ValidationInput.validatorBindings`,
+[topology §5.4](design-graph-topology.md#54-a-supervisor-only-nodes-receipt-as-evidence)).
+
+Rules 6 to 8 join the [monotone rules](#monotone-rules):
+
+6. **A ruling holds while every code line it cites matches the candidate.**
+   Under `implementation-stands` the finding is dismissed, citing the ruling;
+   raised again with its name, it stays dismissed while the ruling holds. A new
+   comment on the same point is verified as usual; the verifier is given the
+   rulings and refutes it citing the ruling (`ruling: "R1"` on the verdict),
+   and the refutation's quotes are the ruling's code citations, matched as
+   usual. Under `review-stands` the finding is confirmed with the ruling as its
+   witness. An operator's ruling holds for the rest of the run.
+7. **One ruling per design point.** A finding with a holding ruling is never
+   arbitrated again. When a ruling's cited lines change, it lapses; the finding
+   is verified again, and a new conflict about it may be arbitrated again and
+   counts toward `review.maxRulings`.
+8. **Only quoted design grounds a ruling** (the arbiter's rules above), and only
+   a ruling or verification dismisses a finding.
+
+Every review pass assignment lists the holding rulings beside the settled
+findings, and says the reviewer must not raise them again unless their cited
+lines changed. The verifier gets them too. The fixer's feedback lists
+`review-stands` rulings with the finding they confirm, and
+`implementation-stands` rulings as code it must not change for that point.
+
+**The issues file** gains two statuses and two actors:
+
+| From | To | Actor | When |
+|---|---|---|---|
+| `open`, `reopened` | `design-conflict` | fixer | the fixer contests the issue, with its argument as the note |
+| `design-conflict`, or (new) | `dismissed` | arbiter or operator | `implementation-stands` |
+| `design-conflict`, or (new) | `open` | arbiter or operator | `review-stands` |
+| `design-conflict`, `open`, `reopened`, or (new) | `deferred` | operator | the operator declined the point |
+
+"(new)" is a disputed finding, which has no issue until it gets a verdict or a
+ruling. Each issue gains `ruling` (`R<n>`) when one holds. `deferred` never
+blocks.
+
+**The pull request body** gains "Design rulings": each ruling with its finding,
+decision, decider, the quoted design statements with their sources, the code
+citations, and the proof tests with their results; and "Open design questions":
+each deferred point with both cases.
+
+### Profile
+
+| Field | Meaning | Default |
+|---|---|---|
+| `harnesses.arbiter` | The arbiter's harness; any harness, its session fresh (above) | `codex` |
+| `review.arbiter` | `{ model, effort? }`: the arbiter's model and reasoning effort, passed as the job's `harnessOptions` | `{ "model": "gpt-6-astra", "effort": "high" }` |
+| `review.maxRulings` | Arbiter rulings per run before every further conflict goes to the operator; 0 sends each to the operator | 3 |
+| `review.principles` | `{ path, ref? }`: the project's design principles file, read at `ref` or the pinned base | none |
+
+Arbitrate's `maxVisits` is `review.maxRulings + 3`: three more points the
+operator rules on after the cap. Past it the supervisor cannot enter, and its
+remedies are reentering Fix or stopping for a maintainer. `agentRoles` adds
+`{ role: "arbiter", access: "read", setting: "harnesses.arbiter" }`, with no
+`distinctFrom`, so `graphloom doctor --task` checks the harness.
+
+### Requirements and validators
+
+- Arbitrate's requirement `design-ruling`: "An arbiter that neither wrote nor
+  reviewed the change ruled on the design point with statements quoted from the
+  issue, its thread or the pinned documents, code citations that match the
+  candidate and proof tests whose recorded runs behave as claimed; or the
+  operator ruled on the point or declined it." Validator `design-ruling` v1.
+- `code-review` declares `prerequisiteRequirementIds: ["design-ruling"]`, so a
+  qualified replacement of the ruling validator invalidates code review
+  receipts that relied on rulings. Its validator, now `open-code-review` v3,
+  honours holding rulings and deferred points in the acceptance rule: a
+  dismissal by ruling counts as dismissed, a deferred finding does not block,
+  and a design conflict without a ruling blocks.
+- Contracts: `finding-verification-v2`, `design-ruling-v1`.
+- The requirement set and statements change, so 0.17.0 is a new graph
+  definition; existing runs stay on 0.16.
+
+### Budgets
+
+An arbitration costs one arbiter job, at most one continuation, one
+observation, up to two proof checkouts, and the supervisor's two episodes
+(entering and leaving). The arbiter's model calls draw from
+`agentInvocations` like any agent job's. The shipped profiles keep their
+measured budgets until a live run measures arbitration.
+
+### Rehearsal and qualification
+
+Rehearsal scenarios, with the scripted supervisor's `enter` and `reenter`:
+
+- `arbitrate-review`: the verifier marks a finding design-level, the supervisor
+  enters Arbitrate, the arbiter rules `implementation-stands`, the supervisor
+  leaves to Review, the next pass is clean; expect `succeeded` and
+  `expect.path` `["fix", "review"]`.
+- `arbitrate-fixer`: the fixer contests a finding and fixes another; Fix is
+  accepted and the graph hands over from Fix; the arbiter rules
+  `review-stands`, the supervisor leaves to Fix, the fixer fixes it.
+- `arbitrate-fixer-stands`: the same hand-over from Fix; the arbiter rules
+  `implementation-stands`, the supervisor leaves to Review as a forward move
+  (no correction spent), the pass is clean; expect `succeeded`.
+- `arbitrate-operator`: the arbiter returns `undecidable`; expect `stopped` with
+  reason `design ruling needs the operator`.
+
+Qualification cases for `design-ruling`: a verified ruling passes; a quote not
+in the pinned text, a code citation that does not match, a missing design
+statement, a proof test whose run contradicts its claim, and an arbiter session
+that continued another role's each fail; an operator answer for the waiting
+finding passes, one for another finding does not. Graph tests cover the
+hand-over from Fix (only after Fix is accepted; a failing Fix check is
+corrected first) and from Review, the cap, the revision, a ruling's lapse when its
+lines change, the issues-file moves and the pull request sections.
+
+### Implementation plan
+
+The core pull requests come first, in the
+[topology plan](design-graph-topology.md#13-implementation-plan): SDK and
+controller traversal, supervisor-only nodes, resume and repair over a topology,
+`CheckoutSpec.write`, the supervisor, then the CLI and rehearsal. Then one pull
+request, **issue-fix 0.17.0**:
+
+1. the topology (three nodes, four edges, start, terminal), stage selection by
+   the live path, `sdkProtocol: 2`, the graph's reentry along `review → fix`;
+2. `finding-verification-v2`, the fixer's hand-over from an accepted Fix and
+   the verifier's from Review;
+3. the Arbitrate node: the arbiter job and `design-ruling-v1`, quote and
+   citation checks, proof checkouts, the revision, the `design-ruling` approval;
+4. rulings in the ledger and the issues file, the pass, verifier and fixer
+   assignments, the pull request sections, `open-code-review` v3;
+5. the profile fields, and `harnesses.arbiter: codex` with `review.arbiter:
+   { model: "gpt-6-astra", effort: "high" }` in the banyandb, banyandb-ql,
+   canopy and graphloom profiles;
+6. rehearsal scenarios, qualification cases, graph tests, the regenerated
+   manifest, and this section's status.
+
+### Open questions
+
+None. The version is settled: 0.17.0 takes Arbitrate, and the
+[code quality gates](#code-quality-gates) move to 0.18.0.
