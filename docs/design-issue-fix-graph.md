@@ -504,16 +504,18 @@ path that is empty, absolute, has an empty, `.` or `..` segment, has a `.git`
 segment in any case, or holds a backslash or control character; a path listed
 twice or that is another written path's directory; more than 16 files; and a
 file over 64 KiB. The checkout refuses, as a failed job whose summary names the
-path, a path the workspace change touches or a candidate's `revertPatch` names,
-anything already at the path (file, directory or symbolic link), and a
-symbolic link or file on the way; the `check_checkout` probe reports a clash
-with the change, the `revertPatch` or the pinned base ahead of time. Written files are
-committed even where ignore rules would leave them out. The checkout record
-keeps `paths` as the changed paths only and lists the added files in
-`written: [{ path, digest, bytes }]`, `digest` being `checkoutWriteDigest`
-(`sha256:<hex>` of the content), so a validator recomputes it from the `write`
-it asked for. The file-extension rule of `observablePath` stays the plugin's:
-a generic checkout also adds files such as a `Makefile` fragment.
+path: a path the workspace change touches; a path a candidate's `revertPatch`
+names or alters (the bytes are compared again after the patch); anything
+already at the path (file, directory or symbolic link); and a symbolic link or
+file on the way. The `check_checkout` probe reports a clash with the change, a
+`revertPatch` header or the pinned base, and a non-directory on the way, ahead
+of time. Written files are committed even where ignore rules would leave them
+out. The checkout record keeps `paths` as the changed paths only and lists the
+added files in `written: [{ path, digest, bytes }]`, `digest` being
+`checkoutWriteDigest` (`sha256:<hex>` of the content), so a validator
+recomputes it from the `write` it asked for. The file-extension rule of
+`observablePath` stays the plugin's: a generic checkout also adds files such
+as a `Makefile` fragment.
 
 ### Cost and budgets
 

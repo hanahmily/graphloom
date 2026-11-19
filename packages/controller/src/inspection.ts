@@ -2,6 +2,8 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { execFile } from "node:child_process";
+import { lstat } from "node:fs/promises";
+import path from "node:path";
 import { promisify } from "node:util";
 import type { CheckoutSpec, EvidenceRecord, Receipt } from "@graphloom/sdk";
 import type { EvidenceFilter, ProbeResult, SupervisorInspection } from "@graphloom/supervisor";
@@ -158,6 +160,23 @@ async function deletedByPatch(patch: string, cwd: string, signal: AbortSignal): 
     if (match !== null) deleted.add(match[1]!);
   }
   return deleted;
+}
+
+/** What the pinned base holds at `rel`: a directory, something else (a file or symbolic link), or nothing. */
+async function baseKind(cwd: string, pinnedHead: string, rel: string, signal: AbortSignal): Promise<"directory" | "other" | undefined> {
+  try {
+    const { stdout } = await execFileAsync("git", ["cat-file", "-t", `${pinnedHead}:${rel}`], { cwd, signal, timeout: INSPECTION_TIMEOUT_MS });
+    return stdout.trim() === "tree" ? "directory" : "other";
+  } catch {
+    return undefined;
+  }
+}
+
+/** What the worktree holds at a changed path, without following a symbolic link. */
+async function worktreeKind(worktreePath: string, rel: string): Promise<"directory" | "other" | undefined> {
+  const stat = await lstat(path.join(worktreePath, rel)).catch(() => undefined);
+  if (stat === undefined) return undefined;
+  return stat.isDirectory() ? "directory" : "other";
 }
 
 async function existsAtBase(cwd: string, pinnedHead: string, file: string, signal: AbortSignal): Promise<boolean> {
@@ -370,6 +389,17 @@ export function createSupervisorInspection(hooks: InspectionHooks): SupervisorIn
         for (const entry of spec.write ?? []) {
           if (await existsAtBase(state.worktreePath, state.intake.pinnedHead, entry.path, signal)) {
             return { accepted: false, reason: `cannot write ${entry.path}: the pinned base already has it` };
+          }
+          // Each directory on the way must be one in the checkout: the change's version where it touches it, else the base's.
+          const parts = entry.path.split("/");
+          for (let i = 1; i < parts.length; i += 1) {
+            const parent = parts.slice(0, i).join("/");
+            const kind = changed.has(parent)
+              ? await worktreeKind(state.worktreePath, parent)
+              : await baseKind(state.worktreePath, state.intake.pinnedHead, parent, signal);
+            if (kind !== undefined && kind !== "directory") {
+              return { accepted: false, reason: `cannot write ${entry.path}: ${parent} is not a directory in the checkout` };
+            }
           }
         }
         if (spec.from === "candidate" && spec.revertPatch !== undefined) {

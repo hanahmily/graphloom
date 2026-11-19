@@ -329,5 +329,14 @@ describe("candidate reads and diffs (#119)", () => {
       reason: "cannot write kept.txt: the pinned base already has it",
     });
     expect((await inspection.checkCheckout({ from: "candidate", write: write("../x.go") })).reason).toMatch(/\. or \.\. segment/);
+    // A file or symbolic link on the way, in the base or in the change, is no directory to write into.
+    expect(await inspection.checkCheckout({ from: "candidate", write: write("kept.txt/x_test.go") })).toMatchObject({
+      accepted: false,
+      reason: "cannot write kept.txt/x_test.go: kept.txt is not a directory in the checkout",
+    });
+    expect((await inspection.checkCheckout({ from: "candidate", write: write("new.txt/x_test.go") })).reason).toBe(
+      "cannot write new.txt/x_test.go: new.txt is not a directory in the checkout",
+    );
+    expect(await inspection.checkCheckout({ from: "candidate", write: write("fresh/dir/x_test.go") })).toMatchObject({ accepted: true });
   });
 });

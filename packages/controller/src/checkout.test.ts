@@ -301,6 +301,30 @@ describe("runInCheckout: write (CheckoutSpec.write)", () => {
     expect(result.summary).toBe("checkout failed: cannot write proof_test.go: the revertPatch touches it");
   });
 
+  it("refuses a supplied file a revertPatch without git headers alters, checked on the bytes after the patch", async () => {
+    const { dir, pinnedHead } = await writeRepo();
+    const revertPatch = "--- a/proof_test.go\n+++ b/proof_test.go\n@@ -1 +1 @@\n-old\n+new\n";
+    const { result } = await run(dir, pinnedHead, showJob({ from: "candidate", revertPatch, write: [{ path: "proof_test.go", content: "new\n" }] }, "proof_test.go"));
+    expect(result.status).toBe("failed");
+    expect(result.summary).toBe("checkout failed: cannot write proof_test.go: the revertPatch alters it");
+  });
+
+  it("keeps a supplied file a revertPatch leaves alone", async () => {
+    const { dir, pinnedHead } = await writeRepo();
+    const git = (...args: string[]) => execFileAsync("git", args, { cwd: dir });
+    const withoutFix = 'package calc\n\nfunc Classify(x int, mode string) string {\n\t_ = mode\n\treturn "small"\n}\n';
+    await writeFile(path.join(dir, "calc.go"), withoutFix);
+    await git("commit", "-q", "-am", "throwaway: without the fix");
+    await writeFile(path.join(dir, "calc.go"), CANDIDATE);
+    const revertPatch = (await git("diff", "--no-color", "--", "calc.go")).stdout;
+    const { result } = await run(dir, pinnedHead, showJob({ from: "candidate", revertPatch, write: [{ path: "proof_test.go", content: PROOF }] }, "proof_test.go"));
+    expect(result.status, result.summary).toBe("ok");
+    expect(stdout(result.evidence ?? [])).toBe(PROOF);
+    const record = recordOf(result.evidence ?? []);
+    expect(record?.reverted).toBe(true);
+    expect(record?.written?.map((w) => w.path)).toEqual(["proof_test.go"]);
+  });
+
   it.each([
     ["a path the workspace change touches", "calc.go", /cannot write calc\.go: the workspace change touches it/],
     ["a file the base already has", "README.md", /cannot write README\.md: the checkout already has a file there/],

@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { execFile } from "node:child_process";
-import { chmod, copyFile, lstat, mkdir, readdir, readlink, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, copyFile, lstat, mkdir, readFile, readdir, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -164,6 +164,8 @@ export async function runInCheckout(args: {
           };
         }
         commit = await commitCheckoutState(dir, "GraphLoom candidate, reverted", args.pinnedHead);
+        // However the patch names its files, the checkout must still hold the bytes its record digests.
+        await assertWritten(dir, writes);
         reverted = true;
         revertedPaths = revertPatchPaths(checkout.revertPatch);
       }
@@ -396,6 +398,18 @@ async function commitPaths(worktreePath: string, dir: string, paths: string[], b
   // A supplied file is committed even where the repository's ignore rules would leave it out.
   if (writes.length > 0) await git(dir, ["add", "--force", "--", ...writes.map((w) => `:(literal)${w.path}`)]);
   return commitCheckoutState(dir, "GraphLoom candidate", base);
+}
+
+/** Every supplied file is in the checkout as a regular file with exactly its content. */
+async function assertWritten(dir: string, writes: readonly CheckoutWrite[]): Promise<void> {
+  for (const entry of writes) {
+    const file = path.join(dir, entry.path);
+    const stat = await lstat(file).catch(() => undefined);
+    const bytes = stat?.isFile() === true ? await readFile(file) : undefined;
+    if (bytes === undefined || !bytes.equals(Buffer.from(entry.content, "utf8"))) {
+      throw new Error(`cannot write ${entry.path}: the revertPatch alters it`);
+    }
+  }
 }
 
 /**
