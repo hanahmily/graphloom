@@ -545,35 +545,93 @@ export function commentLink(pull: Pick<PullRequest, "owner" | "repo" | "number">
 /** Round 1's status as the posted review lists and counts it: the latest design head with a recorded outcome, and its open items. */
 export interface Round1Status {
   head: string;
-  open: Array<{ id: string; link?: string }>;
+  /** Each open item: its id, its question (since 1.1.2; absent in a draft an earlier version wrote), and its comment's link. */
+  open: Array<{ id: string; question?: string; link?: string }>;
 }
+
+/** The longest question text a round-1 line carries; a longer one is clipped. */
+export const MAX_ROUND1_QUESTION = 200;
 
 const idNumber = (id: string): number => (id === "N1" ? 0 : Number(id.slice(1)) || 0);
 
+/** The questions of a design head's `qa.json` (`pr-qa-v1`), by id; empty when it is not one. */
+function qaQuestions(qaJson: string | undefined): Map<string, string> {
+  if (qaJson === undefined) return new Map();
+  try {
+    const v: unknown = JSON.parse(qaJson);
+    if (!isObject(v) || !Array.isArray(v.questions)) return new Map();
+    return new Map(v.questions.filter(isObject).flatMap((q) => (typeof q.id === "string" && typeof q.text === "string" && q.text.trim() !== "" ? [[q.id, q.text] as [string, string]] : [])));
+  } catch {
+    return new Map();
+  }
+}
+
+/** N1's question, which every design review asks. */
+const NECESSITY_QUESTION = "Is this change necessary?";
+
+/**
+ * An open item's question from its ledger entry, when the design head's Q&A is not read: the first paragraph of its posted text,
+ * after the `**<label>** (<id>). ` lead-in round 1 opens it with; N1's is the necessity question.
+ */
+function itemQuestion(id: string, text: unknown): string | undefined {
+  if (id === "N1") return NECESSITY_QUESTION;
+  if (typeof text !== "string") return undefined;
+  const first = text.split(/\n\s*\n/)[0] ?? "";
+  const q = oneLine(first.replace(/^\s*\*\*[^*]*\*\*\s*(?:\([^)]*\)\.?\s*)?/, ""));
+  return q === "" ? undefined : q;
+}
+
 /**
  * Round 1 on the pull request (design-pr-review-split §4.5), from the design section Fetch read: the latest design head whose outcome
- * the design review recorded, with the round-1 items (`N1`, `Q<n>`) open on it, each with a link to its comment when that run posted
- * it. Null when the design section records no outcome: round 1 was not run on this pull request.
+ * the design review recorded, with the round-1 items (`N1`, `Q<n>`) open on it, each with its question and a link to its comment when
+ * that run posted it. The question is the one the design head's Q&A record (`qa.json`) holds when `qa` is that head's, else the one
+ * the item's posted text opens with. Null when the design section records no outcome: round 1 was not run on this pull request.
  */
-export function round1Status(design: unknown, pull: Pick<PullRequest, "owner" | "repo" | "number">): Round1Status | null {
+export function round1Status(design: unknown, pull: Pick<PullRequest, "owner" | "repo" | "number">, qa?: { head: string; qaJson: string }): Round1Status | null {
   const head = designHeads(design).filter((h) => h.round1 !== undefined).at(-1);
   if (head === undefined) return null;
+  const questions = qaQuestions(qa !== undefined && qa.head === head.sha ? qa.qaJson : undefined);
   const items = isObject(design) && Array.isArray(design.items) ? design.items.filter(isObject) : [];
   const open = items
     .filter((x) => typeof x.id === "string" && (x.state === "open" || x.state === undefined) && Array.isArray(x.history) && x.history.some((h) => isObject(h) && h.head === head.sha && h.status === "open"))
     .map((x) => {
+      const id = x.id as string;
       const gh = isObject(x.github) ? x.github : {};
       const link = commentLink(pull, { ...(typeof gh.commentId === "number" ? { commentId: gh.commentId } : {}), ...(typeof gh.reviewId === "number" ? { reviewId: gh.reviewId } : {}) });
-      return { id: x.id as string, ...(link !== undefined ? { link } : {}) };
+      const question = questions.get(id) ?? itemQuestion(id, x.text);
+      return { id, ...(question !== undefined ? { question: clip(oneLine(question), MAX_ROUND1_QUESTION) } : {}), ...(link !== undefined ? { link } : {}) };
     })
     .sort((a, b) => idNumber(a.id) - idNumber(b.id));
   return { head: head.sha, open };
 }
 
-/** The body's "Design review (round 1)" section (§4.5): the open items with their links, no open item, or round 1 not run. Nothing of round 1 is posted again. */
+/**
+ * The "Design review (round 1)" section (§4.5) as a lead line and its items, each item without a list marker: a surface nests them
+ * under the lead its own way (`- ` in the posted body and draft.md's section, indented under the lead's bullet in the maintainer's
+ * list, a list in the HTML). Each open item says what it is (its id and question) and its state: open on this head, or open as of an
+ * earlier design head and not re-checked on this one. Nothing of round 1 is posted again.
+ */
+export function round1Section(r: Round1Status | null, head: string): { lead: string; items: string[] } {
+  if (r === null) return { lead: "Round 1 (the design review) was not run on this pull request; the verdict counts this review's findings only.", items: [] };
+  const d = r.head.slice(0, 7);
+  if (r.open.length === 0) return { lead: `Design review at ${d}: no open item.`, items: [] };
+  const same = r.head === head;
+  const at = same ? `Design review at ${d} (this head)` : `Design review as of ${d}; run pr-design-review on this head to re-check them`;
+  const state = same ? "open on this head" : `open as of ${d}, not re-checked on this head`;
+  return {
+    lead: `${at}: ${r.open.length} open item${r.open.length === 1 ? "" : "s"}:`,
+    items: r.open.map((o) => `${o.id} (${state})${o.question !== undefined ? `: ${o.question}` : ""} ${o.link !== undefined ? `[comment](${o.link})` : "(not posted)"}`),
+  };
+}
+
+/** The section as lines: the lead, then each item as a top-level list entry (`- `). */
 export function round1Lines(r: Round1Status | null, head: string): string[] {
-  if (r === null) return ["Round 1 (the design review) was not run on this pull request; the verdict counts this review's findings only."];
-  const at = r.head === head ? `Design review at ${r.head.slice(0, 7)} (this head)` : `Design review as of ${r.head.slice(0, 7)}; run pr-design-review on this head to re-check them`;
-  if (r.open.length === 0) return [`Design review at ${r.head.slice(0, 7)}: no open item.`];
-  return [`${at}: ${r.open.length} open item${r.open.length === 1 ? "" : "s"}:`, ...r.open.map((o) => `- ${o.id}: ${o.link !== undefined ? `[comment](${o.link})` : "not posted"}`)];
+  const s = round1Section(r, head);
+  return [s.lead, ...s.items.map((i) => `- ${i}`)];
+}
+
+/** The section as one entry of a list that renders each entry as `- <entry>`: the lead, with its items nested under it. */
+export function round1Entry(r: Round1Status | null, head: string): string {
+  const s = round1Section(r, head);
+  return [s.lead, ...s.items.map((i) => `  - ${i}`)].join("\n");
 }

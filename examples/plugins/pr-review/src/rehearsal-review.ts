@@ -82,10 +82,11 @@ export interface ScriptedVerdict {
   reason?: string;
   fixes?: boolean;
   test?: { demonstrates: boolean; reason: string };
+  corrections?: Array<{ original: string; corrected: string }>;
 }
 
 export const verifyReply = (verdicts: readonly ScriptedVerdict[]): RehearsalReply => ({
-  output: { verdicts: verdicts.map((v) => ({ verdict: "confirmed", kind: "behavioral", witness: "", quotes: [], reason: "checked against the code", fixes: false, test: { demonstrates: false, reason: "no test" }, ...v })) },
+  output: { verdicts: verdicts.map((v) => ({ verdict: "confirmed", kind: "behavioral", witness: "", quotes: [], reason: "checked against the code", fixes: false, test: { demonstrates: false, reason: "no test" }, corrections: [], ...v })) },
 });
 
 /** What the review replies are about: the scope's size and the file the findings sit in (a Go file of the pull request). */

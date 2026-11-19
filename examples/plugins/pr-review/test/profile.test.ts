@@ -49,7 +49,7 @@ describe("the BanyanDB profile", () => {
     ]);
     expect(d.requirements.map((r) => r.id)).toEqual(d.defaultValidators.map((b) => b.requirementId));
     expect(new Set(d.requirements.map((r) => r.id)).size).toBe(13);
-    expect(d.resultContracts!.map((c) => [c.name, c.evidenceKind])).toEqual([["change-report-v1", "other"], ["change-report-revision-v1", "other"], ["diagrams-v1", "other"], ["claim-check-v1", "review"], ["pr-code-review-v2", "review"], ["pr-finding-verification-v1", "review"]]);
+    expect(d.resultContracts!.map((c) => [c.name, c.evidenceKind])).toEqual([["change-report-v1", "other"], ["change-report-revision-v1", "other"], ["diagrams-v1", "other"], ["claim-check-v1", "review"], ["pr-code-review-v2", "review"], ["pr-finding-verification-v2", "review"]]);
   });
   it("declares pr-review's own roles with their distinctFrom pairs, the supervisor preference and the budgets", () => {
     const d = definitionFor(profileOf());

@@ -56,10 +56,13 @@ export function designState(evidence: readonly EvidenceRecord[], pr: Pick<PullRe
   return designReads(evidence, { ...common, ledger: p.sha, design: p.prior.value.design, dir: p.prior.layout === "v2" ? "design/" : "" });
 }
 
-/** Round 1 on the pull request (§4.5), from the design section Fetch read; null when the ledger records no design outcome. */
-export function round1Of(evidence: readonly EvidenceRecord[], pr: Pick<PullRequest, "owner" | "repo" | "number">): Round1Status | null {
+/**
+ * Round 1 on the pull request (§4.5), from the design section Fetch read; null when the ledger records no design outcome. `records`,
+ * the design head's records the context read, give the open items' questions when they are of round 1's head.
+ */
+export function round1Of(evidence: readonly EvidenceRecord[], pr: Pick<PullRequest, "owner" | "repo" | "number">, records?: Pick<DesignRecords, "head" | "qaJson">): Round1Status | null {
   const p = priorRead(evidence);
-  return p === undefined || p.prior.state !== "read" ? null : round1Status(p.prior.value.design, pr);
+  return p === undefined || p.prior.state !== "read" ? null : round1Status(p.prior.value.design, pr, records !== undefined ? { head: records.head, qaJson: records.qaJson } : undefined);
 }
 
 /** The design head's records, when the context is `design-review` and they read back. */
