@@ -6,6 +6,7 @@ import { ARBITRATE_STAGE, COMMAND, FIX_STAGE, REVIEW_STAGE } from "./constants.j
 import { decisionProblems, outOfScope, parseDecisionRecord, type DecisionRecord } from "./decision-record.js";
 import {
   agentRuns,
+  chronological,
   describeCommand,
   latestCheckoutRun,
   latestFile,
@@ -331,7 +332,7 @@ export const codeReview: Validator = {
     if (!run.producer.readOnly) return failed("the code review must come from a read-only review job");
     if (run.status !== "completed") return failed(`the code reviewer did not finish (${run.status})`);
     // Rulings count only on a design-ruling receipt minted under the binding admitted now.
-    const ledger = findingLedger([...(input.history ?? []), ...input.evidence], { ...(input.receipts !== undefined ? { receipts: input.receipts } : {}), ...(input.validatorBindings !== undefined ? { bindings: input.validatorBindings } : {}) });
+    const ledger = findingLedger(chronological([...(input.history ?? []), ...input.evidence]), { ...(input.receipts !== undefined ? { receipts: input.receipts } : {}), ...(input.validatorBindings !== undefined ? { bindings: input.validatorBindings } : {}) });
     const pass = ledger.passes.find((p) => p.run.record.ref === run.record.ref)!;
     if (pass.report === undefined) return failed(pass.problem!);
     const { report } = pass;
@@ -378,7 +379,7 @@ export const codeReview: Validator = {
  * behave as it claimed.
  */
 export const designRuling: Validator = profiled((input, profile) => {
-  const all = [...(input.history ?? []), ...input.evidence];
+  const all = chronological([...(input.history ?? []), ...input.evidence]);
   const arb = arbitration(all, { profile, ...(input.receipts !== undefined ? { receipts: input.receipts } : {}), ...(input.validatorBindings !== undefined ? { bindings: input.validatorBindings } : {}) });
   // The point the graph pinned for this visit; the ledger a validator sees may lack the review pass that raised it.
   const point = arb.point;

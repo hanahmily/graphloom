@@ -193,6 +193,8 @@ export interface FindingLedger {
   rulings: Ruling[];
   /** The design points the operator declined to rule on. */
   deferred: DeferredPoint[];
+  /** Accepted rulings on findings this evidence has not raised yet (a validator's partial view), by finding id. */
+  unapplied?: Map<string, { ruling: Ruling; ctx: EventContext }>;
 }
 
 const OPEN: ReadonlySet<FindingState> = new Set(["pending", "confirmed", "disputed"]);
@@ -342,10 +344,17 @@ function applyRuling(ledger: FindingLedger, evidence: EvidenceRecord[], at: numb
       ...(record.candidateDigest !== undefined ? { digest: record.candidateDigest } : {}),
     };
   }
-  const f = findingById(ledger, ruling.finding);
-  if (f === undefined) return;
   const r: Ruling = { id: `R${ledger.rulings.length + 1}`, ...ruling };
   ledger.rulings.push(r);
+  const f = findingById(ledger, ruling.finding);
+  // A validator's view keeps only the latest review pass of a candidate, so the pass that raised the finding may be
+  // missing: the ruling waits for the first comment that names the finding, and applies to it then.
+  if (f === undefined) (ledger.unapplied ??= new Map()).set(ruling.finding, { ruling: r, ctx });
+  else rule(ledger, f, r, ctx);
+}
+
+/** A ruling's effect on its finding and the finding's issue. */
+function rule(ledger: FindingLedger, f: Finding, r: Ruling, ctx: EventContext): void {
   const actor: IssueActor = r.decider.kind === "operator" ? "operator" : "arbiter";
   const note = `design ruling ${r.id} (${r.decision}): ${r.summary}`;
   if (r.decision === "implementation-stands") {
@@ -588,6 +597,20 @@ function applyPass(ledger: FindingLedger, run: AgentRun, digest: string, files: 
   for (const c of report.comments.filter(isBlocking)) {
     const known = c.finding !== undefined ? findingById(ledger, c.finding) : undefined;
     if (known !== undefined && (open.includes(known) || pass.raised.includes(known.id))) continue;
+    // A ruled finding this view never saw raised (a validator sees only a candidate's latest pass): the comment
+    // naming it stands for it, with the ruling applied, and is then judged as a ruled finding raised again.
+    const waiting = known === undefined && c.finding !== undefined ? ledger.unapplied?.get(c.finding) : undefined;
+    if (waiting !== undefined) {
+      const f: Finding = { id: c.finding!, comment: c, state: "pending", on: digest, raisedOn: digest, round };
+      ledger.findings.push(f);
+      ledger.unapplied!.delete(f.id);
+      rule(ledger, f, waiting.ruling, waiting.ctx);
+      if (f.state === "dismissed") {
+        recheckDismissal(f, digest, files);
+        pass.raised.push(f.id);
+      }
+      continue;
+    }
     // The operator left the point open: naming it again neither blocks nor makes a new finding.
     if (known?.state === "deferred") continue;
     if (known?.state === "fixed") {
@@ -616,7 +639,8 @@ function applyPass(ledger: FindingLedger, run: AgentRun, digest: string, files: 
       mergeInto(twin, c, { digest, ref: run.record.ref });
       continue;
     }
-    const f: Finding = { id: `F${ledger.findings.length + 1}`, comment: c, state: "pending", on: digest, raisedOn: digest, round };
+    // The next number after every finding the ledger holds (a ruled one recovered from a later comment may skip ahead).
+    const f: Finding = { id: `F${ledger.findings.reduce((n, x) => Math.max(n, Number(x.id.slice(1)) || 0), 0) + 1}`, comment: c, state: "pending", on: digest, raisedOn: digest, round };
     ledger.findings.push(f);
     pass.raised.push(f.id);
   }

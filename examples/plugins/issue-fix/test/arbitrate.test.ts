@@ -17,7 +17,9 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { assertGraphDefinition, type AgentSessionView, type EvidenceRecord, type GraphDecision, type JobSpec, type Receipt, type RunView, type StageAttempt } from "@graphloom/sdk";
 import {
+  acceptedRulingSources,
   applyFixerRead,
+  chronological,
   checkRuling,
   createGraph,
   createIssue,
@@ -722,6 +724,29 @@ describe("rulings in the findings ledger", () => {
     const ledger = findingLedger(again, { receipts });
     expect(ledger.findings[1]).toMatchObject({ id: "F2", state: "dismissed", ruling: "R1" });
     expect(ledger.findings[1]!.refutation!.reason).toContain("(design ruling R1)");
+  });
+
+  it("applies a ruling to the finding a later pass names when the view lacks the pass that raised it (a validator's view)", () => {
+    const { evidence, receipts } = base();
+    // The controller shows a validator only the candidate's latest review pass: the one that raised F1 is gone.
+    const partial = [...evidence.slice(1), agent("review", "review", pass([{ ...FINDING, finding: "I1" }]), D1)];
+    const ledger = findingLedger(partial, { receipts });
+    expect(ledger.findings.map((f) => [f.id, f.state, f.ruling])).toEqual([["F1", "dismissed", "R1"]]);
+    expect(ledger.issues.issues.find((i) => i.id === "I1")).toMatchObject({ status: "dismissed", ruling: "R1" });
+    // A new comment after it is numbered past it.
+    const more = findingLedger([...partial, agent("review", "review", pass([SECOND]), D1)], { receipts });
+    expect(more.findings.map((f) => f.id)).toEqual(["F1", "F2"]);
+  });
+
+  it("orders a validator's history and evidence by the run's record sequence, so an older approval is not taken for the newest decision", () => {
+    const seqRef = (e: EvidenceRecord, seq: number): EvidenceRecord => ({ ...e, ref: `ev-g1-${seq}-abcd` });
+    const old = seqRef({ ...rec("other", { type: "operator-approval", approvalId: "design-ruling", decision: "approve", files: [], inputs: { finding: "F1", ruling: "review-stands", note: "n" }, operator: "op", at: "t", generation: 1 }) }, 5);
+    const later = seqRef(agent("arbitrate", "review", ruling({ finding: "F2" }), D2), 9);
+    // History (another candidate) first, then the live candidate's records and every record without one, as the controller passes them.
+    const given = [later, old];
+    expect(chronological(given).map((e) => e.ref)).toEqual([old.ref, later.ref]);
+    const receipt: Receipt = { ...receiptFor([old, later]), id: "rc-later" };
+    expect([...acceptedRulingSources(chronological(given), { receipts: [receipt] })]).toEqual([[later.ref, "rc-later"]]);
   });
 
   it("reads finding-verification-v2's design fields, and a v1 verdict as not design-level", () => {

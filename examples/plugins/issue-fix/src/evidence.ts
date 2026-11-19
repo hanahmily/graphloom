@@ -77,6 +77,23 @@ export function producer(e: EvidenceRecord): Producer | undefined {
   return p !== undefined && typeof p.operationId === "string" ? (p as unknown as Producer) : undefined;
 }
 
+const SEQUENCED_REF = /^ev-g\d+-(\d+)-/;
+
+/**
+ * A validator's `history` and `evidence` back in the order the run recorded
+ * them. The controller passes the superseded candidates' records first, then
+ * the live candidate's with every record that names no candidate (an
+ * operator's approval among them), so concatenating the two can put an older
+ * record after a newer one. The controller's evidence refs carry the run's
+ * record sequence (`ev-g<generation>-<seq>-…`); when every ref does, the
+ * records are sorted by it, otherwise they are left as given.
+ */
+export function chronological(evidence: EvidenceRecord[]): EvidenceRecord[] {
+  const seqs = evidence.map((e) => SEQUENCED_REF.exec(e.ref)?.[1]);
+  if (seqs.some((s) => s === undefined)) return evidence;
+  return evidence.map((e, i) => ({ e, seq: Number(seqs[i]) })).sort((a, b) => a.seq - b.seq).map(({ e }) => e);
+}
+
 /** Evidence for the given accepted candidate identity, or carrying no candidate identity at all (e.g. environment checks). */
 export function forIdentity(evidence: EvidenceRecord[], identity: string | undefined): EvidenceRecord[] {
   return evidence.filter((e) => e.candidateDigest === undefined || e.candidateDigest === identity);
