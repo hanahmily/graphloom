@@ -405,10 +405,11 @@ export function round1Record(i: Round1Input): Round1Record | undefined {
 /**
  * Round 1's open items as the gate computes them, for the briefing, which is written before the gate runs: the same pure function
  * over the same `qa.json`, `necessity.json` and changed paths, so `review.md`, `review.html` and the posted review count the same
- * items. Undefined when `qa.json` is not a Q&A file.
+ * items. The pinned commits must be the gate's too: citation links are part of an item's text, and how much text fits decides
+ * which `existing` items merge. Undefined when `qa.json` is not a Q&A file.
  */
-export function openItems(i: { qa: string; necessity: string | undefined; files: readonly GateFile[] }): Round1Issue[] | undefined {
-  return round1Record({ head: "", necessity: i.necessity, qa: i.qa, files: i.files.map((f) => ({ path: f.path, previousPath: f.previousPath })), itemCites: {} })?.issues;
+export function openItems(i: { qa: string; necessity: string | undefined; files: readonly GateFile[]; github: GithubPin }): Round1Issue[] | undefined {
+  return round1Record({ head: i.github.head, necessity: i.necessity, qa: i.qa, files: i.files.map((f) => ({ path: f.path, previousPath: f.previousPath })), itemCites: {}, github: i.github })?.issues;
 }
 
 /** How the briefing names round 1's open items, in `review.md` and both HTML files. */

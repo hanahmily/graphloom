@@ -258,7 +258,7 @@ export const itemLabel = (x: Pick<Round1Issue, "kinds">): string => x.kinds.map(
 export function briefingQa(i: QaInput): { verdict: string; open: string } {
   const conclusion = i.necessity !== undefined ? effectiveConclusion(i.necessity.final) : undefined;
   const principles = i.necessity?.final.necessity?.principles ?? [];
-  const items = openItems({ qa: qaJson(i), necessity: i.necessity !== undefined ? necessityJson(i.necessity) : undefined, files: i.files }) ?? [];
+  const items = openItems({ qa: qaJson(i), necessity: i.necessity !== undefined ? necessityJson(i.necessity) : undefined, files: i.files, github: { owner: i.pr.owner, repo: i.pr.repo, head: i.pr.head, base: i.base } }) ?? [];
   const byId = new Map(i.questions.map((q) => [q.id, q] as const));
   const answers = new Map(i.answers.map((a) => [a.question, a] as const));
   const inItems = new Set(items.flatMap(itemIds));

@@ -372,7 +372,7 @@ export interface QuestionTile {
  */
 export function htmlOpenItems(i: HtmlInput): Round1Issue[] | undefined {
   if (i.qa === undefined || i.qa.roundsSkipped !== undefined) return undefined;
-  return openItems({ qa: JSON.stringify(i.qa), necessity: i.necessity !== undefined ? necessityJson(i.necessity) : undefined, files: i.report.files.map((f) => ({ path: f.path, previousPath: f.previousPath ?? null })) });
+  return openItems({ qa: JSON.stringify(i.qa), necessity: i.necessity !== undefined ? necessityJson(i.necessity) : undefined, files: i.report.files.map((f) => ({ path: f.path, previousPath: f.previousPath ?? null })), github: { owner: i.report.pull.owner, repo: i.report.pull.repo, head: i.report.pull.head, base: i.report.pull.base } });
 }
 
 /** Why a status has its colour, for the legend. */
