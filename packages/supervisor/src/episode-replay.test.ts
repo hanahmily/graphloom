@@ -107,6 +107,39 @@ describe("replayEpisodes", () => {
     expect(score.inadmissibleStops).toBe(1);
   });
 
+  it("judges a replayed enter by the recorded canEnter and a leave by the recorded exits, and passes the recorded nodes on", async () => {
+    const nodes = [{ id: "fix", name: "Fix", entry: "graph" as const }, { id: "arb", name: "Arbitrate", entry: "supervisor" as const, maxVisits: 2, visitsLeft: 1 }];
+    const withNodes = (id: string, facts: Parameters<typeof episode>[1] & { canEnter?: string[]; exits?: string[] }): SupervisorEpisodeRecord => {
+      const e = episode(id, facts);
+      return { ...e, input: { ...e.input, nodes } };
+    };
+    const base = { inRecovery: true, canQualify: false, qualifiedArtifactIds: [] as string[] };
+    const seen: unknown[] = [];
+    const score = await replayEpisodes({
+      episodes: [withNodes("ep-enter", { ...base, canEnter: ["arb"] }), withNodes("ep-full", { ...base, canEnter: [] }), withNodes("ep-leave", { ...base, canEnter: [], exits: ["fix"] })],
+      labels: [
+        { episodeId: "ep-enter", acceptable: [{ type: "enter", stageId: "arb" }] },
+        { episodeId: "ep-full", acceptable: [{ type: "stop" }] },
+        { episodeId: "ep-leave", acceptable: [{ type: "reenter", stageId: "fix" }] },
+      ],
+      createSupervisor: () =>
+        createScriptedSupervisor({
+          decisions: [
+            (input) => {
+              seen.push(input.nodes);
+              return input.episodeId === "ep-leave" ? reenter({ stageId: "arb", reason: "stay" }, "stay") : { action: { type: "enter", enter: { stageId: "arb", reason: "rule" } }, reason: "enter" };
+            },
+          ],
+        }),
+    });
+    expect(seen).toEqual([nodes, nodes, nodes]);
+    expect(score.results.map((r) => [r.episodeId, r.correct, r.inadmissible])).toEqual([
+      ["ep-enter", true, 0],
+      ["ep-full", false, 1],
+      ["ep-leave", false, 1],
+    ]);
+  });
+
   it("ends the turn when a refusal spends the recorded run's last decision, as the live controller does", async () => {
     const closed = { inRecovery: true, canQualify: false, qualifiedArtifactIds: [] as string[] };
     // A supervisor that first proposes something the facts refuse, then a labeled-acceptable action.

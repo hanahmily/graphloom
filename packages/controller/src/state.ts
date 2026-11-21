@@ -300,6 +300,37 @@ export interface EnvironmentRepin {
   at: string;
 }
 
+/** How a visit entered its node (docs/design-graph-topology.md §7.4). */
+export type VisitEntry = "start" | "edge" | "carried" | "reenter" | "enter" | "migrated";
+
+/** One entry of a node: kept for good, so the run's history stays acyclic when its walk is not. */
+export interface VisitRecord {
+  /** 1-based, in the order visits were made. */
+  seq: number;
+  stageId: string;
+  /** The attempt the node ran under in this visit. */
+  attempt: number;
+  entered: VisitEntry;
+  /** The visit it came from: the tail when it was entered. Absent for the first visit. */
+  from?: number;
+  /** The generation when it was entered. */
+  generation: number;
+  /** What made it: `intake`, `dispatch`, `validate`, `stop`, `reenter`, `resume`, `activate_repair`, `migration`. */
+  operation: string;
+  /**
+   * How a visit that left the live path ended, e.g. `replaced by reentry of fix`;
+   * for a side visit, `routed to X`, `left without receipt` or `closed by activation`.
+   */
+  ended?: string;
+  /**
+   * A side visit's settlement (docs/design-graph-topology.md §5.2): the
+   * receipts the node's latest validation in this visit minted, one per
+   * requirement, and each requirement's validation reason as the validator
+   * gave it. The visit is settled while those receipts stay valid.
+   */
+  settlement?: { receipts: string[]; reasons: Array<{ requirementId: string; reason: string }> };
+}
+
 export interface DurableRunState {
   /** A controller-owned safe scheduling yield, never a graph reason string. */
   managedContinuation?: {
@@ -350,6 +381,17 @@ export interface DurableRunState {
   activeVersion: string;
   mode: "normal" | "recovery";
   current: StageAttempt;
+  /**
+   * The live path (docs/design-graph-topology.md §4.1): the sequence numbers
+   * of `visits` from a visit of the start node to the tail, no node twice.
+   * Every run written in state format 3 carries it; a state without it reads
+   * as the path traversal.ts derives (the format 2 migrator's rule).
+   */
+  path?: number[];
+  /** Every visit of a node, oldest first; appended, never removed (§7.4). */
+  visits?: VisitRecord[];
+  /** The open side visit of a supervisor-only node, by sequence number; never set before supervisor-only nodes. */
+  sideVisit?: number;
   receipts: Receipt[];
   evidence: EvidenceRecord[];
   outstanding: OutstandingOperation[];
@@ -742,11 +784,13 @@ export async function removeStaleTmp(stateDir: string): Promise<void> {
  * The attempt number a re-opened stage runs under: one past the highest it
  * has run before. A run saved before `stageAttempts` existed falls back to the
  * attempts its agent sessions recorded for the stage, and to the current
- * attempt when the run is still on that stage.
+ * attempt when the run is still on that stage. A node's visits count too: the
+ * start node's first visit runs under attempt 1 before anything records it.
  */
 export function nextStageAttempt(state: DurableRunState, stageId: string): number {
   const recorded = state.stageAttempts?.[stageId] ?? 0;
   const fromSessions = Math.max(0, ...(state.agentSessions ?? []).filter((r) => r.stageId === stageId).map((r) => r.attempt));
   const current = state.current.stageId === stageId ? state.current.attempt : 0;
-  return Math.max(recorded, fromSessions, current) + 1;
+  const visited = Math.max(0, ...(state.visits ?? []).filter((v) => v.stageId === stageId).map((v) => v.attempt));
+  return Math.max(recorded, fromSessions, current, visited) + 1;
 }

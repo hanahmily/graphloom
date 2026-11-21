@@ -2,10 +2,11 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import type { EvidenceRecord, ValidationInput, ValidationResult, Validator } from "@graphloom/sdk";
-import { COMMAND, FIX_STAGE, REVIEW_STAGE } from "./constants.js";
+import { ARBITRATE_STAGE, COMMAND, FIX_STAGE, REVIEW_STAGE } from "./constants.js";
 import { decisionProblems, outOfScope, parseDecisionRecord, type DecisionRecord } from "./decision-record.js";
 import {
   agentRuns,
+  chronological,
   describeCommand,
   latestCheckoutRun,
   latestFile,
@@ -16,7 +17,8 @@ import {
   type CommandRun,
 } from "./evidence.js";
 import { benchGateFailures, benchIncomplete, benchPassedReason, parseBenchReport } from "./bench.js";
-import { describeFinding, findingById, findingLedger } from "./findings.js";
+import { arbitration, judgeArbiterRun } from "./arbitration.js";
+import { describeFinding, findingById, findingLedger, settledAway } from "./findings.js";
 import { isUnsettled, issueIdOf } from "./issues.js";
 import { describeCoverage, isBlocking, reviewComplete } from "./ocr.js";
 import { commandsFor, finalCommands, isTestPath, parseProfile, ProfileError, type Profile, type ProfileCommand } from "./profile.js";
@@ -329,7 +331,8 @@ export const codeReview: Validator = {
     if (run === undefined) return inconclusive("the code has not been reviewed on the current change");
     if (!run.producer.readOnly) return failed("the code review must come from a read-only review job");
     if (run.status !== "completed") return failed(`the code reviewer did not finish (${run.status})`);
-    const ledger = findingLedger([...(input.history ?? []), ...input.evidence]);
+    // Rulings count only on a design-ruling receipt minted under the binding admitted now.
+    const ledger = findingLedger(chronological([...(input.history ?? []), ...input.evidence]), { ...(input.receipts !== undefined ? { receipts: input.receipts } : {}), ...(input.validatorBindings !== undefined ? { bindings: input.validatorBindings } : {}) });
     const pass = ledger.passes.find((p) => p.run.record.ref === run.record.ref)!;
     if (pass.report === undefined) return failed(pass.problem!);
     const { report } = pass;
@@ -344,12 +347,19 @@ export const codeReview: Validator = {
     // The issues file's rule, which the ledger's implies: no P0 or P1 issue open, reopened, or fixed but not verified.
     const unsettled = ledger.issues.issues.filter(isUnsettled);
     if (unsettled.length > 0) return failed(`${unsettled.length} critical or high issue(s) not done: ${unsettled.map((i) => `${i.id} ${i.status}`).join(", ")}`);
-    const survived = pass.raised.filter((id) => findingById(ledger, id)?.state !== "dismissed");
+    // A finding a ruling dismissed counts as dismissed; one the operator deferred no longer blocks.
+    const survived = pass.raised.filter((id) => !settledAway(findingById(ledger, id)));
     if (survived.length > 0) return failed(`the latest pass raised finding(s) ${survived.map(issueIdOf).join(", ")} that verification did not dismiss`);
     const fixed = ledger.findings.filter((f) => f.state === "fixed").length;
     const dismissed = ledger.findings.filter((f) => f.state === "dismissed").length;
+    const deferred = ledger.findings.filter((f) => f.state === "deferred").length;
     const lower = report.comments.filter((c) => !isBlocking(c)).length;
-    const settled = [...(fixed > 0 ? [`${fixed} fixed`] : []), ...(dismissed > 0 ? [`${dismissed} dismissed`] : [])];
+    const settled = [
+      ...(fixed > 0 ? [`${fixed} fixed`] : []),
+      ...(dismissed > 0 ? [`${dismissed} dismissed`] : []),
+      ...(deferred > 0 ? [`${deferred} deferred by the operator as open design questions`] : []),
+      ...(ledger.rulings.length > 0 ? [`${ledger.rulings.length} design ruling(s)`] : []),
+    ];
     // Comments raised after the discovery rounds are follow-ups, not findings: they never block.
     const later = ledger.followUps.length;
     return passed(
@@ -358,7 +368,49 @@ export const codeReview: Validator = {
   },
 };
 
+/**
+ * `design-ruling`: the decision of this Arbitrate visit on the design point
+ * waiting (the first design conflict no ruling holds for). It passes on the
+ * operator's answer to that point (a ruling naming it, or a decline), or on
+ * an arbiter's ruling that is not over the run's cap, came from a fresh
+ * session that never wrote, reviewed or verified the change, rules on that
+ * point with design statements quoted from the pinned texts and code
+ * citations that match the candidate, and whose proof tests' recorded runs
+ * behave as it claimed.
+ */
+export const designRuling: Validator = profiled((input, profile) => {
+  const all = chronological([...(input.history ?? []), ...input.evidence]);
+  const arb = arbitration(all, { profile, ...(input.receipts !== undefined ? { receipts: input.receipts } : {}), ...(input.validatorBindings !== undefined ? { bindings: input.validatorBindings } : {}) });
+  // The point the graph pinned for this visit; the ledger a validator sees may lack the review pass that raised it.
+  const point = arb.point;
+  if (point === undefined) return inconclusive("no design point was recorded for this Arbitrate visit");
+  const id = issueIdOf(point);
+  // The newest decision of this visit: the operator's after the arbiter's, since the operator answers what the arbiter could not decide.
+  const approval = arb.approval;
+  const run = arb.runs.at(-1);
+  if (approval !== undefined && (run === undefined || approval.index > run.index)) {
+    if (approval.decision === "decline") return passed(`the operator declined to rule on ${id}; the design point is deferred and listed as an open design question; leave along ${ARBITRATE_STAGE} → ${REVIEW_STAGE}`);
+    if (approval.finding === undefined || approval.ruling === undefined) return failed("the operator's design-ruling approval names no finding or no ruling");
+    if (approval.finding !== point) return failed(`the operator's ruling names ${issueIdOf(approval.finding)}, but the design point waiting is ${id}`);
+    return passed(`the operator ruled ${approval.ruling} on ${id}${approval.note !== undefined && approval.note.trim() !== "" ? `: ${approval.note.trim()}` : ""}; leave along ${exitFor(approval.ruling)}`);
+  }
+  if (run === undefined) return inconclusive(`neither the arbiter nor the operator has ruled on ${id}`);
+  if (arb.capped) return failed(`the run already holds ${arb.arbiterRulings} arbiter ruling(s), its review.maxRulings; the operator rules on ${id}`);
+  const judged = judgeArbiterRun(arb, run, { profile, evidence: all, digest: input.candidateDigest });
+  if (judged.kind === "observe") return inconclusive(`the candidate files the ruling cites have not been observed: ${judged.paths.join(", ")}`);
+  if (judged.kind === "proofs") return inconclusive(`the ruling's proof test(s) have not run: ${judged.tests.map((t) => t.path).join(", ")}`);
+  if (judged.kind === "problems") return failed(judged.problems.slice(0, 5).join("; "));
+  if (judged.kind === "undecidable") return failed(`the arbiter could not decide ${id}; the operator rules on it`);
+  return passed(
+    `an independent arbiter ruled ${judged.result.ruling} on ${id}, with ${judged.result.design.length} quoted design statement(s), ${judged.result.code.length} code citation(s) that match the change and ${judged.result.proofTests.length} proof test(s) that behaved as claimed; leave along ${exitFor(judged.result.ruling)}: ${judged.result.summary}`,
+  );
+});
+
+/** The out-edge of Arbitrate that fits a ruling: back to Fix to correct the change, or on to Review. */
+export const exitFor = (ruling: string): string => (ruling === "review-stands" ? `${ARBITRATE_STAGE} → ${FIX_STAGE}` : `${ARBITRATE_STAGE} → ${REVIEW_STAGE}`);
+
 const VALIDATORS: Record<string, Validator> = {
+  "design-ruling": designRuling,
   "decisions-recorded": decisionsRecorded,
   "red-reproduces": reproduces,
   "green-passes": passes,

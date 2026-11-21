@@ -34,7 +34,8 @@ snapshot in `.graphloom-watch/` beside the task, so nothing is reported twice.
 returns only when it has a report, each a short message whose first line is
 `[graphloom watch] <kind> · run <id> · <status> · <stage>#<attempt>`:
 
-- `move`: a stage entered (or a new attempt) or accepted, a supervisor
+- `move`: a stage entered (or a new attempt) or accepted, the supervisor
+  entering a supervisor-only node or that node settling, a supervisor
   episode started or ended, a quota pause started or ended, the run resumed.
   Moves within a minute arrive as one report.
 - `heartbeat`: nothing reported for 15 minutes while running; status, stage,

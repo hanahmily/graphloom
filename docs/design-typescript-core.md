@@ -7,6 +7,13 @@ of this design, including durable execution, Pi recovery, executor extensions,
 and qualified repair. Live-provider qualification and full local-release
 verification remain pending.
 [Agent-host mode](design-agent-host.md) is newly designed, not implemented.
+[Graph topology](design-graph-topology.md) is implemented: one traversal
+engine, in which a graph declares nodes (its stages, also called steps here)
+and directed edges, admission follows the live path the run took, and a node
+may be supervisor-only. A definition without edges is normalized to an
+implicit chain on the same engine, forward to the next stage and back to every
+earlier one, which keeps the behaviour of an ordered stage list
+([topology §3.3](design-graph-topology.md#33-definitions-without-edges-the-implicit-chain)).
 
 ## 1. Decisions and scope
 
@@ -29,11 +36,14 @@ supply additional executors using the same public interface. Domain integrations
 do not belong in the controller state machine. See the
 [executor design](design-executors.md) for extension, invocation, and recovery.
 
-The plugin's declared steps (called stages in the SDK) are fixed for a run.
-The supervisor may repair any failing implementation inside the plugin, but cannot
-add, delete, rename, reorder, or bypass a step. Required outcomes remain unchanged.
-The controller applies decisions from either source; the plugin cannot veto an
-otherwise admitted supervisor recovery operation.
+The plugin's declared graph is fixed for a run: its nodes (called stages in the
+SDK), its edges, identities, names, start and terminal nodes, and required
+outcomes ([graph topology §1](design-graph-topology.md#1-decisions)). The
+supervisor may repair any failing implementation inside the plugin, but cannot
+add, delete or rename a node, add, delete or redirect an edge, or bypass a node
+the live path needs. Required outcomes remain unchanged. The controller applies
+decisions from either source; the plugin cannot veto an otherwise admitted
+supervisor recovery operation.
 
 Diagnostic, build, test, review-of-repair, and retry jobs are supporting executions
 attached to an existing step or its recovery episode. They do not become new plugin
@@ -151,7 +161,8 @@ Intake applies budgets in layers, after the plugin first describes itself:
 the controller's defaults, then the graph's declared `defaultBudgets`, then
 the task's own `budgets` ([finite limits](#10-finite-limits)).
 
-Inspect shows the required stages, current attempt, normal/recovery mode, active
+Inspect shows the required stages, the topology with the live path, its tail and
+every visit ([topology §8](design-graph-topology.md#8-operator-surfaces)), current attempt, normal/recovery mode, active
 job and phase, validation evidence, concise decision reasons, correction allowance,
 plugin version history, and the evidence a stop cites. Show build/test/review/activation
 phases during repair. Expose useful explanations and evidence references, not
@@ -347,9 +358,11 @@ export interface Validator {
 statements, evidence schemas, default validator bindings, independence constraints,
 and private-state schema. Required outcomes must be understandable without reading
 the predicate that checks them. The controller freezes this requirement definition
-and the complete ordered step list, including stable IDs and names. Every dispatched
-job references an existing step or a recovery episode associated with one. There
-is no operation for inserting or removing steps during a run.
+and the graph: the nodes with their stable IDs and names, the edges, and the start
+and terminal nodes ([topology §3](design-graph-topology.md#3-the-definition)).
+Every dispatched job references an existing node or a recovery episode associated
+with one. There is no operation for inserting or removing nodes or edges during a
+run.
 
 `advance` is deterministic over a detached view. It constructs job descriptions
 and chooses normal routes; it does not directly call models, launch processes,
@@ -394,7 +407,8 @@ facts after recovery. It cannot be a second authoritative stage cursor.
 | Dispatch | Graph or supervisor | Built-in or plugin executor job (including agent/command jobs) with explicit inputs, schema, and scope |
 | Observe | Graph or supervisor | Immutable controller-observed file/command/workspace evidence |
 | Validate | Graph, supervisor, or controller when a candidate is ready | Run currently admitted checks for a named stage and candidate |
-| Reenter | Graph for known correction; supervisor during recovery | Invalidate affected receipts and revisit a current/earlier required stage |
+| Reenter | Graph for known correction; supervisor during recovery | Revisit a node on the live path: the graph along a declared (or implicit) edge from the tail, the supervisor any node on the path or out of a supervisor-only node along its out-edge; truncates the path and invalidates affected receipts by identity |
+| Enter | Supervisor during recovery | Open a side visit of a supervisor-only node |
 | Supervise | Graph; controller may also trigger recovery | Transfer decision ownership to the run supervisor |
 | QualifyRepair | Supervisor | Build/test/review a candidate plugin or validator version |
 | ActivateRepair | Supervisor requests; controller admits | Recorded, compatible version transition after qualification |
@@ -405,7 +419,11 @@ There is **no agent-controlled Accept operation**. The controller issues a recei
 when all required evidence for the current stage passes its admission rules. A
 plugin schedules ordinary work and validation but has no final completion veto.
 A supervisor can ask for the same validation during recovery; it cannot supply a
-passing receipt itself. Completion is derived from valid required-stage receipts.
+passing receipt itself. Completion is derived from receipts along the graph: the
+live path ends at a terminal node and every node on it is accepted; nodes off the
+path, supervisor-only nodes included, are never required
+([topology §4.6](design-graph-topology.md#46-completion),
+[§6](design-graph-topology.md#6-operations)).
 
 ## 5. Requirements, validators, and acceptance gates
 
@@ -420,7 +438,7 @@ A gate is the admission rule for an outcome. Separate three records:
 
 A gate implementation can be wrong. Replacing it is different from changing what
 the task requires. Plugin repair may change routing, prompts, or validators, but
-cannot change the step set, IDs, names, or order, nor requirement statements,
+cannot change the nodes, edges, IDs, names, start or terminal nodes, nor requirement statements,
 evidence meaning, review independence, or granted authority. A new requirement needs explicit user
 clarification and a new task/run in the MVP.
 
@@ -432,7 +450,10 @@ missing or stale evidence does not count.
 
 The controller checks provenance, candidate/workspace fingerprint, predecessor
 receipts, required check coverage, validator version, and independent reviewer
-identity before accepting. It cannot prove arbitrary predicates or prose correct.
+identity before accepting. Predecessor receipts are those of every node before
+the validated one on the run's live path (on a chain, every earlier stage;
+[topology §4.5](design-graph-topology.md#45-admission)). It cannot prove
+arbitrary predicates or prose correct.
 Separate tests and review provide evidence against weakening the criterion; they
 are not a mathematical guarantee. User ambiguity remains a possible blocker.
 
@@ -593,8 +614,8 @@ authorized remedy while budget and authority remain; Stop only when further prog
 is blocked as above. No plugin-specific repair allowlist is required. This is a
 duty to attempt repairs aggressively within bounds—not a guarantee of success when
 source, capabilities, or budget are unavailable.
-Routing repairs preserve the fixed step set and required order; retry and reentry
-cannot be used to skip an outcome or introduce a new step. When the supervisor
+Routing repairs preserve the fixed nodes and edges; retry and reentry cannot be
+used to skip an outcome the live path needs or introduce a new node. When the supervisor
 retries or reenters a stage, it **generates the job instruction (prompt) itself**
 for that recovery trial—it must not be forced to reuse the plugin's original
 happy-path prompt. The override still preserves the original user task, evidence
@@ -609,12 +630,20 @@ cancellation always takes precedence. Recovery cannot manufacture permission.
 
 ### Reentry and return
 
-Reentry targets a declared current or earlier required stage. Before admission,
-quiesce active children and reconcile ambiguous effects. Under the run lock,
-reserve a correction attempt, move the stage cursor, invalidate the target and
-downstream receipts and dependent checks, cancel dependent pending jobs, and record
+Reentry targets a node on the run's live path: the graph reenters along a
+declared (or implicit) edge from the path's tail, the supervisor any node on the
+path, and a supervisor-only node is entered with Enter and left only by the
+supervisor along one of its out-edges
+([topology §4.4](design-graph-topology.md#44-reentry-over-a-graph),
+[§5](design-graph-topology.md#5-supervisor-only-nodes)); a node ahead of the
+path is reached by moving forward, not by reentry. Before admission, quiesce
+active children and reconcile ambiguous effects. Under the run lock, reserve a
+correction attempt, truncate the live path after the target's earlier visit,
+open the target's next attempt, invalidate receipts whose identity no longer
+holds and dependent checks, cancel dependent pending jobs, and record
 reason/evidence. Retain history and artifacts. Do not reset the worktree or discard
-operator edits. Retries append attempts, so the execution history remains acyclic.
+operator edits. Visits and attempts append, so the execution history remains
+acyclic even when the walk is not.
 
 The active decision source then dispatches the recovery trial using that reservation.
 **In recovery, the supervisor authors the `Dispatch` instruction** (agent prompt or
@@ -686,7 +715,8 @@ A source repair or validator substitution follows the same bounded procedure:
    Agent-host repair uses a durable edit offer and settlement rather than blocking
    a controller callback on the very host that issued it. Preserve the readable
    requirement,
-   complete ordered step list, original test corpus, and original failing result.
+   complete graph (nodes, edges, start and terminal), original test corpus, and
+   original failing result.
    A changed old test needs an explicit defect explanation and independent review;
    deleting negative coverage or loosening expected outcomes is not a repair shortcut.
 4. **Build and test.** The host builds from pinned source/dependencies and runs
@@ -764,7 +794,7 @@ patch, qualification and review receipts, affected stages, state compatibility,
 correction reservation, and activation generation.
 
 The MVP accepts only the same SDK protocol, private-state schema, requirement
-manifest, complete step set/IDs/names/order, and evidence schemas. During
+manifest, nodes, edges and their IDs and names, and evidence schemas. During
 qualification, before independent review, the controller checks the candidate's
 manifest and declared dependencies, rejects any `node_modules` or `.git` entry its
 digest cannot cover, then loads it in a throwaway host. Its
@@ -775,7 +805,10 @@ hook has no way to load the candidate, so only a definition returned by the
 operator's preflight is compared. A mismatch rejects the candidate with a reason
 naming what changed; the run stays in recovery on its old version. Activation
 repeats the `describe()` check on the host it switches to. An independent review
-cannot authorize a structural difference.
+cannot authorize a structural difference. A
+graph's declared edges, start and terminal nodes, and each node's entry and
+visit cap are part of this match and of the candidate's stages pin
+([topology §7.3](design-graph-topology.md#73-repair-qualification-and-activation)).
 Runtime admission also rejects jobs and routes that name undeclared steps.
 Arbitrary state migration is deferred. Moving a run's durable state to a newer
 GraphLoom release, across ordered state-format migrators that change only how
@@ -813,7 +846,9 @@ required stage and cancel its dependent pending jobs/checks. This prevents a run
 at Review from remaining there with its accepted Write prerequisite invalidated.
 The MVP may conservatively invalidate from the earliest affected stage when
 dependencies are uncertain. Reentry and activation share the existing repair
-reservation.
+reservation. Activation restarts the live path at the start node, invalidating
+every graph-entered node's receipts and closing an open side visit
+([topology §7.3](design-graph-topology.md#73-repair-qualification-and-activation)).
 
 A failed candidate does not mutate the original bundle. Before switching, it can
 be rejected with the old version still pinned and the run in recovery. After a
@@ -1890,10 +1925,9 @@ or continuously updating chat messages. Future MCP Apps require host integration
 
 Live terminal input and chat delivery stay outside the controller and scheduler.
 Panels are read-only; rendering failure, viewer exit or notification loss cannot
-change execution. The target includes the directed topology already under
-implementation on `main` (SDK commit `245283c`),
-including cycles, live paths and supervisor-only nodes; the panel design records
-the pinned references. Legacy stage views remain a compatibility fallback.
+change execution. The monitor consumes the [directed topology](design-graph-topology.md),
+including cycles, live paths and supervisor-only nodes, from the owning runtime.
+Legacy stage views remain a compatibility fallback.
 Display code cannot introduce execution dependencies or parallel jobs. A full
 dashboard is optional.
 

@@ -15,9 +15,11 @@ import {
   loadRunState,
   METERED_BUDGET_KEYS,
   resolveStateDir,
+  withPath,
   type BudgetAmounts,
   type DurableRunState,
   type MeteredBudgetKey,
+  type VisitRecord,
 } from "@graphloom/controller";
 import { bindingHarness, MAX_EPISODE_RECORDS, type HarnessUsage, type SupervisorEpisodeRecord } from "@graphloom/supervisor";
 
@@ -28,6 +30,10 @@ export interface StageStats {
   stageId: string;
   /** Highest attempt the stage ran under (reentries and resumes open new ones). */
   attempts: number;
+  /** Times the run entered the node (docs/design-graph-topology.md §8), carried visits included. */
+  visits: number;
+  /** Set for a node only the supervisor enters. */
+  supervisorOnly?: true;
   /** Model calls reserved by jobs dispatched for the stage (`agentInvocationsByStage`). */
   agentInvocations: number;
   /** Jobs with recorded evidence or an agent session, by kind and purpose. */
@@ -59,6 +65,8 @@ export interface RunStats {
   /** Where `budgets[].used` comes from. */
   usageSource: { kind: "ledger"; exactness: "exact" } | { kind: "estimated"; since: string; note: string };
   budgets: BudgetLine[];
+  /** The graph declares edges (docs/design-graph-topology.md §3); a chain's table keeps its columns. */
+  declaresEdges: boolean;
   stages: StageStats[];
   agentInvocations: {
     /** Counted for the stages' jobs (`agentInvocationsByStage`). */
@@ -124,6 +132,18 @@ const MAX_REMEDY_RECORDS = 100;
 
 const isRecord = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
 
+/**
+ * The run's visits (docs/design-graph-topology.md §7.4): recorded, or derived
+ * for a state saved before they were; none for a state too partial to derive them.
+ */
+export function recordedVisits(state: DurableRunState): VisitRecord[] {
+  try {
+    return withPath(state).visits;
+  } catch {
+    return [];
+  }
+}
+
 /** What `state` used, per stage and in total. Pure: reads only the state handed to it. */
 export function runStats(state: DurableRunState): RunStats {
   const stageIds = [
@@ -153,6 +173,7 @@ export function runStats(state: DurableRunState): RunStats {
     if (!jobs.has(s.operationId)) jobs.set(s.operationId, { stageId: s.stageId, kind: "agent", purpose: s.dispatchKey.split(":")[0] ?? "unknown" });
   }
 
+  const visits = recordedVisits(state);
   const stages: StageStats[] = stageIds.map((stageId) => {
     const own = [...jobs.values()].filter((j) => j.stageId === stageId);
     const byPurpose: Record<string, number> = {};
@@ -164,6 +185,8 @@ export function runStats(state: DurableRunState): RunStats {
     return {
       stageId,
       attempts: Math.max(state.stageAttempts?.[stageId] ?? 0, fromSessions, current),
+      visits: visits.filter((v) => v.stageId === stageId).length,
+      ...(state.definition?.stages?.find((s) => s.id === stageId)?.entry === "supervisor" ? { supervisorOnly: true as const } : {}),
       agentInvocations: state.agentInvocationsByStage?.[stageId] ?? 0,
       jobs: {
         total: own.length,
@@ -241,6 +264,7 @@ export function runStats(state: DurableRunState): RunStats {
           note: "the run predates the usage ledger: use is its intake budgets less what remains, unknown where the numbers show a hand edit (an undetectable edit makes the estimate wrong), and agent calls at least what its stages recorded",
         },
     budgets,
+    declaresEdges: state.definition?.edges !== undefined,
     stages,
     agentInvocations,
     jobs: {
@@ -426,11 +450,14 @@ export function formatRunStats(stats: RunStats): string {
       : `budget use: estimated — ${stats.usageSource.note}`,
   );
   lines.push("");
-  const stageRows = [["stage", "attempts", "agent calls", "jobs", "agent", "command", "review jobs", "receipts valid/invalidated"]];
+  // A chain's table stays as it was; a graph that declares edges shows each node's visits.
+  const visits = (cell: string): string[] => (stats.declaresEdges ? [cell] : []);
+  const stageRows = [["stage", "attempts", ...visits("visits"), "agent calls", "jobs", "agent", "command", "review jobs", "receipts valid/invalidated"]];
   for (const s of stats.stages) {
     stageRows.push([
-      s.stageId,
+      s.supervisorOnly === true ? `${s.stageId} (supervisor-only)` : s.stageId,
       String(s.attempts),
+      ...visits(String(s.visits)),
       String(s.agentInvocations),
       String(s.jobs.total),
       String(s.jobs.agent),
@@ -443,6 +470,7 @@ export function formatRunStats(stats: RunStats): string {
   stageRows.push([
     "all stages",
     "",
+    ...visits(""),
     sum((s) => s.agentInvocations),
     sum((s) => s.jobs.total),
     sum((s) => s.jobs.agent),

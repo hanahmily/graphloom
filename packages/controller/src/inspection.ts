@@ -2,6 +2,8 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { execFile } from "node:child_process";
+import { lstat } from "node:fs/promises";
+import path from "node:path";
 import { promisify } from "node:util";
 import type { CheckoutSpec, EvidenceRecord, Receipt } from "@graphloom/sdk";
 import type { EvidenceFilter, ProbeResult, SupervisorInspection } from "@graphloom/supervisor";
@@ -10,7 +12,7 @@ import { HostObservationError } from "./host-validators.js";
 import { hydrateOne } from "./evidence.js";
 import { activateRefusal, checkoutSpecRefusal, describeInadmissible } from "./inadmissible.js";
 import type { DurableRunState, ProbeRecord } from "./state.js";
-import { selectPaths } from "./checkout.js";
+import { selectPaths, writeConflict } from "./checkout.js";
 import { candidateChange, readWorktreeFile, withGitCancellation } from "./worktree.js";
 
 const execFileAsync = promisify(execFile);
@@ -158,6 +160,23 @@ async function deletedByPatch(patch: string, cwd: string, signal: AbortSignal): 
     if (match !== null) deleted.add(match[1]!);
   }
   return deleted;
+}
+
+/** What the pinned base holds at `rel`: a directory, something else (a file or symbolic link), or nothing. */
+async function baseKind(cwd: string, pinnedHead: string, rel: string, signal: AbortSignal): Promise<"directory" | "other" | undefined> {
+  try {
+    const { stdout } = await execFileAsync("git", ["cat-file", "-t", `${pinnedHead}:${rel}`], { cwd, signal, timeout: INSPECTION_TIMEOUT_MS });
+    return stdout.trim() === "tree" ? "directory" : "other";
+  } catch {
+    return undefined;
+  }
+}
+
+/** What the worktree holds at a changed path, without following a symbolic link. */
+async function worktreeKind(worktreePath: string, rel: string): Promise<"directory" | "other" | undefined> {
+  const stat = await lstat(path.join(worktreePath, rel)).catch(() => undefined);
+  if (stat === undefined) return undefined;
+  return stat.isDirectory() ? "directory" : "other";
 }
 
 async function existsAtBase(cwd: string, pinnedHead: string, file: string, signal: AbortSignal): Promise<boolean> {
@@ -357,12 +376,32 @@ export function createSupervisorInspection(hooks: InspectionHooks): SupervisorIn
         if (refusal !== undefined) return { accepted: false, reason: refusal };
         // The paths a real checkout would apply: a base path that is not part of the workspace change fails there.
         let changed: Set<string>;
+        let selected: Set<string>;
         try {
           const change = await withGitCancellation(signal, () => candidateChange(state.worktreePath, state.intake.pinnedHead));
           changed = new Set(change.fingerprints.keys());
-          selectPaths(spec, [...changed]);
+          selected = new Set(selectPaths(spec, [...changed]));
         } catch (err) {
           return { accepted: false, reason: err instanceof Error ? err.message : String(err) };
+        }
+        // A supplied file adds to the checkout: not a changed path, nor one the pinned base already holds.
+        const conflict = writeConflict(spec, changed);
+        if (conflict !== undefined) return { accepted: false, reason: conflict };
+        for (const entry of spec.write ?? []) {
+          if (await existsAtBase(state.worktreePath, state.intake.pinnedHead, entry.path, signal)) {
+            return { accepted: false, reason: `cannot write ${entry.path}: the pinned base already has it` };
+          }
+          // Each directory on the way must be one in the checkout: the change's version where the checkout applies it, else the base's.
+          const parts = entry.path.split("/");
+          for (let i = 1; i < parts.length; i += 1) {
+            const parent = parts.slice(0, i).join("/");
+            const kind = selected.has(parent)
+              ? await worktreeKind(state.worktreePath, parent)
+              : await baseKind(state.worktreePath, state.intake.pinnedHead, parent, signal);
+            if (kind !== undefined && kind !== "directory") {
+              return { accepted: false, reason: `cannot write ${entry.path}: ${parent} is not a directory in the checkout` };
+            }
+          }
         }
         if (spec.from === "candidate" && spec.revertPatch !== undefined) {
           // A real checkout holds the pinned base plus the changed paths only; the live worktree also

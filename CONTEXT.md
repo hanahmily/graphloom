@@ -9,8 +9,8 @@ The host that runs installed graphs and preserves the authority and evidence of
 one execution.
 
 **Graph**:
-A domain harness defining required stages, agent tasks, checks, and transition
-rules for a class of tasks.
+A domain harness defining nodes and the edges between them, agent tasks, checks,
+and transition rules for a class of tasks.
 _Avoid_: Stage list, prompt collection
 
 **Task**:
@@ -42,10 +42,40 @@ A timestamped view of run state, usage and available hub state used together in
 one monitoring report, with the freshness of each source kept explicit.
 It describes progress without establishing new acceptance evidence.
 
-**Stage**:
-A declared step on a graph's happy path whose identity, order, and required outcome
-are fixed for a run. Several attempts and supporting jobs may satisfy that stage.
+**Node**:
+A declared step of a graph, called a stage in the SDK, whose identity, name and
+required outcome are fixed for a run. Several attempts and supporting jobs may
+satisfy it. A node is graph-entered (reached along edges) or supervisor-only.
 _Avoid_: Job
+
+**Stage**:
+The SDK's name for a node (`StageDefinition`, `stageId`).
+
+**Edge**:
+A declared, directed move from one node to another. The edges, the start node
+and the terminal nodes are fixed for a run; cycles are allowed and every way back
+costs a correction. A graph that declares no edges is an implicit chain: forward
+to the next stage and back to every earlier one.
+_Avoid_: Route, transition
+
+**Live path**:
+The walk from the start node to the furthest node the run reached, with every
+closed cycle erased: no node twice. Its last visit is the tail. A node is
+accepted on it when its requirements hold valid receipts and it is not reopened;
+a run completes when the path ends at a terminal node and every node on it is
+accepted.
+
+**Visit**:
+One entry of a node, recorded with its attempt, how it was entered (start, edge,
+carried, reenter, enter), the visit it came from and how it ended. Visits append
+and are never removed, so the run's history stays acyclic when its walk is not.
+
+**Supervisor-only node**:
+A node no edge enters: only the supervisor enters it (Enter, a side visit off the
+live path) and only the supervisor leaves it, along one of its out-edges. It is
+never required for completion; its receipts are evidence other nodes' validators
+read.
+_Avoid_: Optional stage
 
 **Job**:
 One bounded agent or command execution requested during normal operation or recovery.
@@ -85,8 +115,9 @@ A period in which the supervisor directs investigation and repair before returni
 to normal graph execution or stopping with an unresolved blocker.
 
 **Reentry**:
-A return to a required stage that invalidates affected downstream evidence and
-creates new attempts while preserving prior history.
+A return to a node on the live path, along an edge for the graph, that truncates
+the path there, invalidates evidence whose identity no longer holds, and creates
+a new attempt while preserving prior history.
 
 **Retryable stop / final stop**:
 How a stop answers an operator's resume. After a retryable stop the resume runs

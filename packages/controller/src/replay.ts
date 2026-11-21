@@ -11,6 +11,7 @@
  */
 import type {
   EvidenceRecord,
+  GraphAction,
   GraphDefinition,
   GraphDecision,
   Requirement,
@@ -21,7 +22,10 @@ import type { CallContext, PluginHost } from "@graphloom/plugin-host";
 import type { DurableRunState } from "./state.js";
 import { toRunView } from "./loop.js";
 import { hydrateEvidence } from "./evidence.js";
-import { pinnedRequest } from "./admit.js";
+import { validationContext } from "./admit.js";
+import type { Inadmissible } from "./inadmissible.js";
+import { carryToTerminal, completionProblem, forwardRefusal, forwardRoute, livePath, pathIndex, reentryRefusal, sideVisitOf, tailOf, topologyChanges } from "./traversal.js";
+import { enterRefusal, settledSideVisit, sideVisitRefusal } from "./supervisor-node.js";
 
 export interface ReclassifiedRecord {
   ref: string;
@@ -52,8 +56,81 @@ export interface ReplayReport {
   requirements: ReplayRequirementResult[];
   /** What the current `advance()` would do, given the reclassified evidence, or why it could not be asked. */
   nextDecision: { decision: GraphDecision } | { error: string };
+  /** Whether that decision is admissible from the recorded live path (docs/design-graph-topology.md §7.2); absent when no decision was given. */
+  admission?: ReplayAdmission;
   /** Recorded for context, not replayed: a dispatch's reference id sets are not stamped on evidence (§3.3 limitation). */
   notCovered: string[];
+}
+
+/**
+ * How a graph decision would move the recorded run along its graph
+ * (docs/design-graph-topology.md §7.2), judged as the controller judges a
+ * graph decision in normal mode: an action for a node on the live path, a
+ * forward move, a reentry along an edge, an action for the open side visit,
+ * a stop, or an action that names no node; or why it is inadmissible.
+ */
+export type ReplayAdmission =
+  | { admissible: true; move: "path node" | "forward move" | "reentry" | "side visit" | "stop" | "no node"; detail: string }
+  | { admissible: false; precondition: string; detail: string };
+
+function refused(refusal: Inadmissible): ReplayAdmission {
+  return { admissible: false, precondition: refusal.precondition, detail: refusal.detail };
+}
+
+/** The admission of a node-naming dispatch or validation (§4.2, §4.3, §5.2). */
+function nodeAdmission(state: DurableRunState, stageId: string): ReplayAdmission {
+  if (!state.definition.stages.some((s) => s.id === stageId)) {
+    return { admissible: false, precondition: "undeclared stage", detail: `stageId ${stageId} is not in the pinned graph definition` };
+  }
+  const refusal = forwardRefusal(state, stageId);
+  if (refusal !== undefined) return refused(refusal);
+  const side = sideVisitOf(state);
+  if (side !== undefined) {
+    const settled = settledSideVisit(state) !== undefined ? "; it is settled, so the controller would open supervisor_node_settled before asking the graph" : "";
+    return { admissible: true, move: "side visit", detail: `an action for the open side visit of ${side.stageId}${settled}` };
+  }
+  if (pathIndex(state, stageId) >= 0) return { admissible: true, move: "path node", detail: `${stageId} is on the live path` };
+  const route = forwardRoute(state, stageId)!;
+  return { admissible: true, move: "forward move", detail: `from ${tailOf(state).stageId} to ${route.join(" → ")}${route.length > 1 ? `, carrying ${route.slice(0, -1).join(", ")}` : ""}` };
+}
+
+/** §7.2: whether a graph decision is admissible from the recorded live path. */
+export function replayAdmission(recorded: DurableRunState, action: GraphAction): ReplayAdmission {
+  // The decision is the graph's: judged in normal mode, as a resume would ask it.
+  const state: DurableRunState = { ...recorded, mode: "normal" };
+  switch (action.type) {
+    case "dispatch":
+      return nodeAdmission(state, action.job.stageId);
+    case "validate":
+      return nodeAdmission(state, action.validate.stageId);
+    case "reenter": {
+      const stageId = action.reenter.stageId;
+      if (!state.definition.stages.some((s) => s.id === stageId)) {
+        return { admissible: false, precondition: "undeclared stage", detail: `stageId ${stageId} is not in the pinned graph definition` };
+      }
+      const refusal = sideVisitRefusal(state, action) ?? reentryRefusal(state, stageId);
+      if (refusal !== undefined) return refused(refusal);
+      const left = state.budgets.corrections;
+      return {
+        admissible: true,
+        move: "reentry",
+        detail: `${stageId} from ${tailOf(state).stageId}; one correction (${left} left${left <= 0 ? ": the run would stop corrections budget exhausted" : ""})`,
+      };
+    }
+    case "enter":
+      return refused(enterRefusal(state, action.enter.stageId)!);
+    case "stop": {
+      const refusal = sideVisitRefusal(state, action);
+      if (refusal !== undefined) return refused(refusal);
+      if (action.stop.reason !== "complete") return { admissible: true, move: "stop", detail: `stop ${action.stop.reason}` };
+      const carried = carryToTerminal(state);
+      const problem = completionProblem(carried);
+      const path = livePath(carried).map((v) => v.stageId).join(" → ");
+      return { admissible: true, move: "stop", detail: problem === undefined ? `complete on the live path ${path}` : `complete would not succeed: ${problem}` };
+    }
+    default:
+      return { admissible: true, move: "no node", detail: `${action.type} names no node` };
+  }
 }
 
 function codingAgentOf(payload: unknown): Record<string, unknown> | undefined {
@@ -178,6 +255,18 @@ export async function replayRun(recorded: DurableRunState, host: PluginHost): Pr
     };
   }
   const definition = described.value;
+  // The recorded live path is a walk of the pinned topology; another one cannot judge it (§7.2).
+  const changed = topologyChanges(definition, recorded.definition);
+  if (changed.length > 0) {
+    return {
+      activeVersion: host.activeVersion,
+      contracts: { valid: 0, invalid: 0, repaired: 0, byName: {} },
+      reclassified: [],
+      requirements: [],
+      nextDecision: { error: `the run's pinned topology differs from the current plugin's describe(): ${changed.join(", ")}` },
+      notCovered: ["a dispatch's reference id sets are not stamped on evidence; reference replay is shape-only, not membership"],
+    };
+  }
 
   // Replay reads and re-sends agent outputs, so it works on the hydrated records (it only reads; it writes no blobs).
   const hydratedRecorded = hydrateEvidence(recorded.stateDir, recorded.evidence);
@@ -202,7 +291,7 @@ export async function replayRun(recorded: DurableRunState, host: PluginHost): Pr
         statement: requirement.statement,
         evidence: reclassifiedEvidence,
         ...(recorded.candidateDigest !== undefined ? { candidateDigest: recorded.candidateDigest } : {}),
-        ...pinnedRequest(recorded),
+        ...validationContext(recorded),
       });
       requirements.push({
         requirementId: requirement.id,
@@ -222,6 +311,14 @@ export async function replayRun(recorded: DurableRunState, host: PluginHost): Pr
   } catch (err) {
     nextDecision = { error: err instanceof Error ? err.message : String(err) };
   }
+  let admission: ReplayAdmission | undefined;
+  if ("decision" in nextDecision) {
+    try {
+      admission = replayAdmission(replayedState, nextDecision.decision.action);
+    } catch (err) {
+      admission = { admissible: false, precondition: "unreadable live path", detail: err instanceof Error ? err.message : String(err) };
+    }
+  }
 
   return {
     activeVersion: host.activeVersion,
@@ -229,6 +326,7 @@ export async function replayRun(recorded: DurableRunState, host: PluginHost): Pr
     reclassified,
     requirements,
     nextDecision,
+    ...(admission !== undefined ? { admission } : {}),
     notCovered: [
       "a dispatch's reference id sets are not stamped on evidence; reference replay is shape-only, not membership (§3.3)",
       "command and file/workspace evidence is replayed unchanged; only agent results are reclassified",

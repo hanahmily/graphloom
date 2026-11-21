@@ -170,7 +170,7 @@ describe("the draft", () => {
     expect(draftMarkdown(none)).toContain("## Design review (round 1)\nRound 1 (the design review) was not run on this pull request; the verdict counts this review's findings only.");
     const open = composeDraft(input([record("correctness", [])], { round1: { head: "b".repeat(40), open: [{ id: "N1", link: "https://github.com/o/r/pull/7#discussion_r1" }, { id: "Q2" }] } }));
     const md = draftMarkdown(open);
-    expect(md).toContain("Design review as of bbbbbbb; run pr-design-review on this head to re-check them: 2 open items:\n- N1: [comment](https://github.com/o/r/pull/7#discussion_r1)\n- Q2: not posted");
+    expect(md).toContain("Design review as of bbbbbbb; run pr-design-review on this head to re-check them: 2 open items:\n- N1 (open as of bbbbbbb, not re-checked on this head) [comment](https://github.com/o/r/pull/7#discussion_r1)\n- Q2 (open as of bbbbbbb, not re-checked on this head) (not posted)");
     expect(open.comments).toEqual([]);
     expect(open.recommended).toBe("approve");
   });

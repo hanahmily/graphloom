@@ -11,11 +11,11 @@ import {
   MAX_TASK_CONFIG_BYTES,
   parseTaskYaml,
   resolveBundleEntryFromManifest,
+  sdkProtocolProblem,
   resolveUnderBase,
 } from "@graphloom/controller";
 import { createChildPluginHost } from "@graphloom/plugin-host";
 import {
-  PROTOCOL_VERSION,
   isTaskPlanRefusal,
   refFormatProblem,
   substitutePlan,
@@ -173,7 +173,8 @@ async function loadBundle(out: string, graph: string): Promise<Loaded> {
   }
   if (manifest.graphId !== graph) throw new Refused(`manifest graphId ${JSON.stringify(manifest.graphId)} does not match graph ${JSON.stringify(graph)}`);
   if (typeof manifest.version !== "string") throw new Refused("manifest has no version");
-  if (manifest.sdkProtocol !== PROTOCOL_VERSION) throw new Refused(`manifest sdkProtocol ${String(manifest.sdkProtocol)} != host ${PROTOCOL_VERSION}`);
+  const protocolProblem = sdkProtocolProblem(manifest.sdkProtocol);
+  if (protocolProblem !== undefined) throw new Refused(protocolProblem);
   return {
     bundle,
     manifestRaw,

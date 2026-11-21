@@ -7,7 +7,6 @@ import path from "node:path";
 import { beginManagedCommand, finishManagedCommand, managedCommandApplied, authorizeManagedRun, authorizeManagedStop, authorizeManagedResume, assertManagedRunner, assertAutomaticContinuation, releaseManagedRun, type ManagedRunGrant } from "./managed.js";
 import {
   emptyCaseFile,
-  PROTOCOL_VERSION,
   type BudgetRemaining,
   type GraphDefinition,
   type GraphPlugin,
@@ -30,12 +29,13 @@ import {
   type RecreateHostFn,
   type RepairDeps,
 } from "./repair-lifecycle.js";
-import { admitValidation, assertLiveWorkspaceMatchesEvidence, deliveryDrift, invalidateStageAndAfter, liveCandidateDigest, pinnedRequest } from "./admit.js";
+import { admitValidation, assertLiveWorkspaceMatchesEvidence, deliveryDrift, invalidateFromNode, liveCandidateDigest, validationContext } from "./admit.js";
+import { invalidateNodes, livePath, nodeAccepted, nodeChanges, nodeComplete, pathIndex, reenterPath, tailOf, topologyChanges, topologyView, withPath } from "./traversal.js";
 import type { AdmissionValidator } from "./admit.js";
 import { resolveBundleEntry } from "./bundle.js";
 import { createHostValidators } from "./host-validators.js";
 import { applyApproval, approvalRefusal, type ApprovalRequest } from "./approvals.js";
-import { applyGraphDefaultBudgets, intakeTask, taskConfigValue, type IntakePin } from "./intake.js";
+import { applyGraphDefaultBudgets, intakeTask, protocolLevelChange, sdkProtocolProblem, taskConfigValue, topologyLevelProblem, type IntakePin } from "./intake.js";
 import { assertSafeRunId } from "./ids.js";
 import { withDirectoryLock } from "./lock.js";
 import { deleteRun, type DeleteReport } from "./delete-run.js";
@@ -90,6 +90,7 @@ import {
   type SupervisorSelectionRecord,
   type SupervisorTransitionRecord,
   type VersionRecord,
+  type VisitRecord,
 } from "./state.js";
 import { returnToGraphOnResume } from "./resume-recovery.js";
 import {
@@ -207,8 +208,9 @@ export interface RunRequest {
   install?: InstallRecord;
   /**
    * A test hook (`rehearse --stop-at`): stop the run as an operator stop once
-   * every requirement of this stage (by id or name) has a valid receipt,
-   * before the graph is asked for its next step.
+   * every requirement of this node (by id or name) has a valid receipt, the
+   * node is on the live path and not open, before the graph is asked for its
+   * next step (docs/design-graph-topology.md §9). A supervisor-only node is refused.
    */
   stopAfterStage?: string;
 }
@@ -324,12 +326,33 @@ export interface InspectReport {
   runId: string;
   status: RunStatus;
   mode: "normal" | "recovery";
+  /** The nodes in declared order (docs/design-graph-topology.md §8). */
   stages: Array<{
     id: string;
     name: string;
     requirementIds: string[];
+    /** Every requirement has a valid receipt. */
     complete: boolean;
+    /** Complete, on the live path, and not opened by a reentry since its last validation. */
+    accepted: boolean;
+    /** Who enters the node: the graph along edges, or only the supervisor. */
+    entry: "graph" | "supervisor";
+    /** The node's declared visit cap (supervisor-only nodes). */
+    maxVisits?: number;
+    /** How many times the run entered the node, carried visits included. */
+    visits: number;
+    onPath: boolean;
   }>;
+  /** The run's topology: the declared one, or the implicit chain of a definition without edges (`implicit`). */
+  topology: { start: string; terminal: string[]; edges: Array<{ from: string; to: string }>; implicit: boolean };
+  /** The live path from the start node, as `node#attempt`; the last is the tail. */
+  path: string[];
+  /** The live path's last visit, `node#attempt`. */
+  tail: string;
+  /** The open side visit of a supervisor-only node, `node#attempt`. */
+  sideVisit?: string;
+  /** Every visit of the run, oldest first: how each node was entered, from where, and how a visit that left the live path ended. */
+  visits: VisitRecord[];
   current: StageAttempt;
   /** Validation receipts; a stage is complete when each of its requirements has a valid one. */
   receipts: Array<{ stageId: string; requirementId: string; validatorId: string; valid: boolean; evidenceRefs: string[] }>;
@@ -473,7 +496,7 @@ export function createController(): Controller {
           }
           const definition = described.value;
           assertDefinitionMatchesPin(definition, intake);
-          const stopAfter = request.stopAfterStage !== undefined ? stageNamed(definition, request.stopAfterStage) : undefined;
+          const stopAfter = request.stopAfterStage !== undefined ? stopNodeNamed(definition, request.stopAfterStage) : undefined;
           // Controller defaults < the graph's declared defaultBudgets < task budgets.
           const budgeted = applyGraphDefaultBudgets(intake, definition);
           // §7.3: resolved once the plugin described its preference, before any run state; a refusal refuses the run.
@@ -539,7 +562,7 @@ export function createController(): Controller {
             managed: request.managed !== undefined,
             shouldStop: async () =>
               (await sessionStop(session)) ||
-              (stopAfter !== undefined && stageComplete(await loadRunState(session.stateDir), stopAfter)),
+              (stopAfter !== undefined && acceptedOnPath(await loadRunState(session.stateDir), stopAfter)),
             revisionBridge,
             ...(supervisor !== undefined ? { supervisor } : {}),
             ...(repair !== undefined ? { repair } : {}),
@@ -759,6 +782,8 @@ export function createController(): Controller {
             }
             const installed = await readInstalledBundlePin(state.intake.bundle);
             if (installed.manifestDigest !== state.intake.bundle.manifestDigest || installed.entryDigest !== state.intake.bundle.entryDigest) {
+              const levelChange = protocolLevelChange(state.intake.bundle.sdkProtocol, installed.sdkProtocol);
+              if (levelChange !== undefined) throw new Error(levelChange);
               pluginUpdate = installed;
             }
           }
@@ -1137,59 +1162,88 @@ export function createController(): Controller {
   };
 }
 
-/** Accepted evidence survives restart only while its observed inputs still match. */
+/**
+ * Sends the run back to `stageId` on the live path, as a resume does when that
+ * node's accepted evidence no longer holds (docs/design-graph-topology.md
+ * §7.1): its receipts and those of every node after it are invalidated, the
+ * path is truncated there with a new visit of the node under its next attempt,
+ * and `current` becomes that visit. No correction is charged. Routing state
+ * that may assume the invalidated prerequisites is discarded.
+ */
+function sendBackTo(state: DurableRunState, stageId: string): DurableRunState {
+  const attempt = nextStageAttempt(state, stageId);
+  const { privateState: _privateState, ...next } = invalidateFromNode(state, stageId);
+  void _privateState;
+  return reenterPath(
+    { ...next, current: { stageId, attempt }, stageAttempts: { ...state.stageAttempts, [stageId]: attempt } },
+    stageId,
+    attempt,
+    "resume",
+  );
+}
+
+/** The live path's nodes in order, then the graph-entered nodes off it in `stages` order. */
+function resumeWalk(state: DurableRunState): { onPath: string[]; offPath: string[] } {
+  const onPath = livePath(state).map((v) => v.stageId);
+  const on = new Set(onPath);
+  return { onPath, offPath: state.definition.stages.filter((s) => s.entry !== "supervisor" && !on.has(s.id)).map((s) => s.id) };
+}
+
+/**
+ * Accepted evidence survives restart only while its observed inputs still
+ * match. The live path is walked in order: the first node whose accepted
+ * evidence drifted sends the run back to it (`sendBackTo`). A drifted receipt
+ * of a node off the path invalidates its node's receipts and does not move
+ * the run. Delivery drift reads the tail.
+ */
 async function reassessAcceptedWorkspace(state: DurableRunState): Promise<DurableRunState> {
   // The last Observe revision may belong to a later candidate; each receipt is
   // assessed against its own immutable evidence, not that global revision.
   const { workspaceRevision: _revision, ...snapshot } = state;
   void _revision;
-  for (const stage of state.definition.stages) {
-    for (const receipt of state.receipts.filter((r) => r.valid && r.stageId === stage.id)) {
+  const drifted = async (stageId: string): Promise<boolean> => {
+    for (const receipt of state.receipts.filter((r) => r.valid && r.stageId === stageId)) {
       const evidence = receipt.evidenceRefs.map((ref) => state.evidence.find((e) => e.ref === ref));
       const missing = evidence.some((e) => e === undefined);
       const drift = missing || await assertLiveWorkspaceMatchesEvidence(
         snapshot,
         evidence.filter((e) => e !== undefined),
       ).catch(() => "accepted evidence is no longer readable");
-      if (!drift) continue;
-
-      const invalidated = invalidateStageAndAfter(snapshot, stage.id, state.definition);
-      // Discard routing state that may assume the invalidated prerequisites.
-      // Resume's generation fence makes historical observations unavailable to
-      // validation while preserving them for audit.
-      const { privateState: _privateState, ...next } = invalidated;
-      void _privateState;
-      return {
-        ...next,
-        current: { stageId: stage.id, attempt: nextStageAttempt(state, stage.id) },
-        stageAttempts: { ...state.stageAttempts, [stage.id]: nextStageAttempt(state, stage.id) },
-      };
+      if (drift) return true;
     }
+    return false;
+  };
+  const { onPath, offPath } = resumeWalk(state);
+  for (const stageId of onPath) {
+    // Resume's generation fence makes historical observations unavailable to
+    // validation while preserving them for audit.
+    if (await drifted(stageId)) return sendBackTo(snapshot, stageId);
   }
-  const last = state.definition.stages.at(-1);
-  if (last !== undefined && (await deliveryDrift(snapshot)) !== undefined) {
-    const { privateState: _privateState, ...next } = invalidateStageAndAfter(snapshot, last.id, state.definition);
-    void _privateState;
-    return {
-      ...next,
-      current: { stageId: last.id, attempt: nextStageAttempt(state, last.id) },
-      stageAttempts: { ...state.stageAttempts, [last.id]: nextStageAttempt(state, last.id) },
-    };
+  let next: DurableRunState = state;
+  for (const stageId of offPath) {
+    if (await drifted(stageId)) next = invalidateNodes(next, new Set([stageId]));
   }
-  return state;
+  if ((await deliveryDrift(snapshot)) !== undefined) {
+    const { workspaceRevision: _stale, ...fenced } = next;
+    void _stale;
+    return sendBackTo(fenced, tailOf(fenced).stageId);
+  }
+  return next;
 }
 
 /**
- * Rechecks each accepted receipt with the current validators on the evidence it
- * was accepted on; the first one that no longer passes invalidates its stage and
- * every later one, and the run returns to that stage.
+ * Rechecks each accepted receipt with the current validators on the evidence
+ * it was accepted on, walking the live path in order: the first one that no
+ * longer passes sends the run back to its node (`sendBackTo`). A receipt of a
+ * node off the path that no longer passes invalidates its node's receipts
+ * without moving the run.
  */
 async function recheckReceipts(
   state: DurableRunState,
   validators: Record<string, AdmissionValidator>,
 ): Promise<{ state: DurableRunState; note: string }> {
-  for (const stage of state.definition.stages) {
-    for (const receipt of state.receipts.filter((r) => r.valid && r.stageId === stage.id)) {
+  const failing = async (stageId: string): Promise<string | undefined> => {
+    for (const receipt of state.receipts.filter((r) => r.valid && r.stageId === stageId)) {
       const requirement = state.definition.requirements.find((r) => r.id === receipt.requirementId);
       const validator = validators[receipt.validatorBinding.validatorId];
       const evidence = receipt.evidenceRefs.map((ref) => state.evidence.find((e) => e.ref === ref));
@@ -1205,27 +1259,30 @@ async function recheckReceipts(
               evidence: evidence.filter((e) => e !== undefined),
               candidateFingerprint: receipt.candidateFingerprint,
               ...(receipt.candidateDigest !== undefined ? { candidateDigest: receipt.candidateDigest } : {}),
-              ...pinnedRequest(state),
+              ...validationContext(state),
             }),
           ),
         ).catch((err: unknown) => ({ status: "failed" as const, reason: err instanceof Error ? err.message : String(err) }));
         if (result.status !== "passed") failure = `${result.status}: ${result.reason}`;
       }
-      if (failure === undefined) continue;
-      // Discard routing state that may assume the invalidated prerequisites.
-      const { privateState: _privateState, ...next } = invalidateStageAndAfter(state, stage.id, state.definition);
-      void _privateState;
-      return {
-        state: {
-          ...next,
-          current: { stageId: stage.id, attempt: nextStageAttempt(state, stage.id) },
-          stageAttempts: { ...state.stageAttempts, [stage.id]: nextStageAttempt(state, stage.id) },
-        },
-        note: `; invalidated from ${stage.id}: ${receipt.requirementId} ${failure}`,
-      };
+      if (failure !== undefined) return `${receipt.requirementId} ${failure}`;
     }
+    return undefined;
+  };
+  const { onPath, offPath } = resumeWalk(state);
+  for (const stageId of onPath) {
+    const failure = await failing(stageId);
+    if (failure !== undefined) return { state: sendBackTo(state, stageId), note: `; invalidated from ${stageId}: ${failure}` };
   }
-  return { state, note: "" };
+  let next = state;
+  let note = "";
+  for (const stageId of offPath) {
+    const failure = await failing(stageId);
+    if (failure === undefined) continue;
+    next = invalidateNodes(next, new Set([stageId]));
+    note += `; invalidated ${stageId} off the live path: ${failure}`;
+  }
+  return { state: next, note };
 }
 
 function resolveValidators(
@@ -1480,18 +1537,25 @@ async function loadCurrentFormat(stateDir: string, formats: StateFormatRegistry)
   return loadRunState(stateDir);
 }
 
-/** A stage by id, or by name; refused when the definition has neither. */
-function stageNamed(definition: GraphDefinition, ref: string): GraphDefinition["stages"][number] {
+/**
+ * The node `--stop-at` names, by id or by name; refused when the definition
+ * has neither, and for a supervisor-only node, which is never on the live
+ * path (docs/design-graph-topology.md §9).
+ */
+function stopNodeNamed(definition: GraphDefinition, ref: string): GraphDefinition["stages"][number] {
   const stage = definition.stages.find((s) => s.id === ref) ?? definition.stages.find((s) => s.name === ref);
   if (stage === undefined) {
     throw new Error(`no stage ${JSON.stringify(ref)} in graph ${definition.graphId}; its stages are ${definition.stages.map((s) => s.name).join(", ")}`);
   }
+  if (stage.entry === "supervisor") {
+    throw new Error(`stage ${stage.id} is supervisor-only and never on the live path; stop at a graph-entered node`);
+  }
   return stage;
 }
 
-/** Every requirement of `stage` has a valid receipt. */
-function stageComplete(state: DurableRunState, stage: GraphDefinition["stages"][number]): boolean {
-  return stage.requirementIds.every((reqId) => state.receipts.some((r) => r.stageId === stage.id && r.requirementId === reqId && r.valid));
+/** `--stop-at`'s condition: the node is accepted on the live path. */
+function acceptedOnPath(state: DurableRunState, stage: GraphDefinition["stages"][number]): boolean {
+  return pathIndex(state, stage.id) >= 0 && nodeAccepted(state, stage.id);
 }
 
 /**
@@ -1504,9 +1568,10 @@ async function checkPluginUpdate(state: DurableRunState, request: ResumeRequest)
   try {
     const installed = await readInstalledBundlePin(state.intake.bundle);
     const manifest = JSON.parse(installed.manifestRaw) as { sdkProtocol?: unknown };
-    if (manifest.sdkProtocol !== PROTOCOL_VERSION) {
-      return `the installed bundle speaks sdkProtocol ${String(manifest.sdkProtocol)}, not ${PROTOCOL_VERSION}`;
-    }
+    const protocolProblem = sdkProtocolProblem(manifest.sdkProtocol);
+    if (protocolProblem !== undefined) return `the installed bundle: ${protocolProblem}`;
+    const levelChange = protocolLevelChange(state.intake.bundle.sdkProtocol, installed.sdkProtocol);
+    if (levelChange !== undefined) return levelChange;
     const intake: IntakePin = { ...state.intake, bundle: installed };
     host = await openHost({
       intake,
@@ -1530,7 +1595,12 @@ async function checkPluginUpdate(state: DurableRunState, request: ResumeRequest)
   }
 }
 
+const visitLabel = (v: StageAttempt): string => `${v.stageId}#${v.attempt}`;
+
 function toInspect(state: DurableRunState): InspectReport {
+  const topology = topologyView(state);
+  const visits = withPath(state).visits;
+  const onPath = new Set(topology.path.map((v) => v.stageId));
   const report: InspectReport = {
     runId: state.runId,
     status: state.status,
@@ -1539,12 +1609,18 @@ function toInspect(state: DurableRunState): InspectReport {
       id: s.id,
       name: s.name,
       requirementIds: [...s.requirementIds],
-      complete: s.requirementIds.every((reqId) =>
-        state.receipts.some(
-          (r) => r.stageId === s.id && r.requirementId === reqId && r.valid,
-        ),
-      ),
+      complete: nodeComplete(state, s.id),
+      accepted: onPath.has(s.id) && nodeAccepted(state, s.id),
+      entry: s.entry ?? "graph",
+      ...(s.maxVisits !== undefined ? { maxVisits: s.maxVisits } : {}),
+      visits: visits.filter((v) => v.stageId === s.id).length,
+      onPath: onPath.has(s.id),
     })),
+    topology: { start: topology.start, terminal: topology.terminal, edges: topology.edges, implicit: topology.implicit },
+    path: topology.path.map(visitLabel),
+    tail: visitLabel(topology.path.at(-1)!),
+    ...(topology.sideVisit !== undefined ? { sideVisit: visitLabel(topology.sideVisit) } : {}),
+    visits: structuredClone(visits),
     current: structuredClone(state.current),
     receipts: state.receipts.map((r) => ({
       stageId: r.stageId,
@@ -1611,9 +1687,9 @@ function assertDefinitionMatchesPin(definition: GraphDefinition, intake: IntakeP
       `plugin version ${definition.version} != pinned bundle ${intake.bundle.version}`,
     );
   }
-  if (intake.bundle.sdkProtocol !== PROTOCOL_VERSION) {
-    throw new Error(`pinned sdkProtocol ${intake.bundle.sdkProtocol} != ${PROTOCOL_VERSION}`);
-  }
+  // A level-1 bundle that describes a topology is refused on every describe() check (§11.1).
+  const protocolProblem = sdkProtocolProblem(intake.bundle.sdkProtocol) ?? topologyLevelProblem(definition, intake.bundle.sdkProtocol);
+  if (protocolProblem !== undefined) throw new Error(protocolProblem);
   const manifestReqs = (
     JSON.parse(intake.bundle.manifestRaw) as {
       requirements?: Array<{ id: string; statement: string; evidenceSchema: string }>;
@@ -1637,6 +1713,15 @@ function assertDefinitionUnchanged(live: GraphDefinition, pinned: GraphDefinitio
   // (its version is checked against the newly pinned bundle instead).
   if (live.graphId !== pinned.graphId || (!updating && live.version !== pinned.version)) {
     throw new Error("plugin graphId/version changed since run start");
+  }
+  // The nodes, each node's entry and visit cap, the edges, start and terminal are fixed for a run (docs/design-graph-topology.md §7.3).
+  const nodes = nodeChanges(live, pinned);
+  if (nodes.length > 0) {
+    throw new Error(`plugin stages changed since run start: ${nodes.join(", ")}`);
+  }
+  const topology = topologyChanges(live, pinned);
+  if (topology.length > 0) {
+    throw new Error(`plugin topology changed since run start: ${topology.join(", ")}`);
   }
   if (JSON.stringify(live.stages) !== JSON.stringify(pinned.stages)) {
     throw new Error("plugin stages changed since run start");
@@ -1682,7 +1767,7 @@ function toReport(state: DurableRunState, sourceDirtyAfter: string[]): RunReport
   return report;
 }
 
-export { applyGraphDefaultBudgets, CONTROLLER_DEFAULT_BUDGETS, defaultRecoveryReserve, intakeTask, parseTaskYaml, resolveRunBudgets, resolveUnderBase, taskConfigValue, IntakeError, MAX_TASK_CONFIG_BYTES } from "./intake.js";
+export { applyGraphDefaultBudgets, CONTROLLER_DEFAULT_BUDGETS, defaultRecoveryReserve, intakeTask, parseTaskYaml, resolveRunBudgets, resolveUnderBase, taskConfigValue, IntakeError, MAX_TASK_CONFIG_BYTES, SDK_PROTOCOLS, sdkProtocolProblem, TOPOLOGY_SDK_PROTOCOL } from "./intake.js";
 export { admitValidation, freshEvidence } from "./admit.js";
 export { toRunView, bumpGeneration, classifyAgentResult } from "./loop.js";
 export type { ContractOutcome } from "./loop.js";

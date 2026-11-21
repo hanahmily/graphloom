@@ -18,12 +18,14 @@ import { cp, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import path from "node:path";
 import { stableHash } from "@graphloom/sdk";
 import { externalizeEvidenceMigrator, formatTwoProtectedView } from "./externalize-evidence.js";
+import { topologyPathMigrator } from "./topology-path.js";
 
 /**
  * The format this release writes. Format 1 is every run saved before formats were recorded; format 2 keeps the
- * large parts of evidence payloads in the run's `evidence/` store instead of `state.json`.
+ * large parts of evidence payloads in the run's `evidence/` store instead of `state.json`; format 3 records the
+ * run's live path and visits over its graph (docs/design-graph-topology.md §11.3).
  */
-export const CURRENT_STATE_FORMAT = 2;
+export const CURRENT_STATE_FORMAT = 3;
 
 /** The run's durable files a migration reads or writes, by path relative to the state directory, as UTF-8 text. */
 export type StateFiles = Record<string, string>;
@@ -56,8 +58,8 @@ export interface StateFormatRegistry {
 /** This release's formats. Migrators are never removed within a major version. */
 export const STATE_FORMATS: StateFormatRegistry = {
   current: CURRENT_STATE_FORMAT,
-  migrators: [externalizeEvidenceMigrator],
-  protectedViews: { 2: formatTwoProtectedView },
+  migrators: [externalizeEvidenceMigrator, topologyPathMigrator],
+  protectedViews: { 2: formatTwoProtectedView, 3: formatTwoProtectedView },
 };
 
 /** Format 1 keeps everything in `state.json`. */

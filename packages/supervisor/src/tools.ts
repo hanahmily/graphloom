@@ -26,6 +26,7 @@ export const GRAPHLOOM_SUPERVISOR_ACTIONS = [
   "observe",
   "validate",
   "reenter",
+  "enter",
   "qualify_repair",
   "activate_repair",
   "return",
@@ -117,7 +118,14 @@ const ACTION_TOOLS: Record<GraphLoomSupervisorAction, ActionTool> = {
   },
   reenter: {
     specKey: "reenter",
-    description: "Start a new attempt of a stage.",
+    description:
+      "Start a new attempt of a stage on the live path (one correction). While a supervisor-only node's side visit is open, this is how you leave it, along one of its out-edges: to a live-path node it is a reentry, to a node off the live path a forward move from the tail (no correction).",
+    spec: spec({ stageId: STRING, reason: STRING }, { evidenceRefs: EVIDENCE_REFS }),
+  },
+  enter: {
+    specKey: "enter",
+    description:
+      "Open a side visit of a supervisor-only node (one listed in canEnter): the graph never reaches it, only you enter and leave it. No correction. Its work and validation then run for it; leave it with reenter along one of its out-edges.",
     spec: spec({ stageId: STRING, reason: STRING }, { evidenceRefs: EVIDENCE_REFS }),
   },
   qualify_repair: {
@@ -186,6 +194,7 @@ export function offeredActions(facts?: AdmissionFacts): GraphLoomSupervisorActio
     if (action === "activate_repair") return facts.qualifiedArtifactIds.length > 0;
     if (action === "qualify_repair") return facts.canQualify;
     if (action === "return") return facts.inRecovery;
+    if (action === "enter") return (facts.canEnter ?? []).length > 0;
     return true;
   });
 }
@@ -215,6 +224,8 @@ function stageForAction(action: GraphAction): string | undefined {
       return action.validate.stageId;
     case "reenter":
       return action.reenter.stageId;
+    case "enter":
+      return action.enter.stageId;
     default:
       return undefined;
   }
@@ -580,7 +591,7 @@ function createInspectionTools(inspect: SupervisorInspection): ToolDefinition[] 
     ),
     tool(
       "check_checkout",
-      `Would a job's checkout spec ({from:"candidate", revertPatch?} or {from:"base", paths}) apply, and if not why? ${probeNote}`,
+      `Would a job's checkout spec ({from:"candidate", revertPatch?, write?} or {from:"base", paths, write?}; write: [{path, content}] files added before the commit) apply, and if not why? ${probeNote}`,
       { spec: { type: "object", additionalProperties: true } },
       ["spec"],
       (p, signal) => inspect.checkCheckout(p.spec as Parameters<SupervisorInspection["checkCheckout"]>[0], signal),

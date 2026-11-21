@@ -26,11 +26,13 @@ import {
   quoteMatches,
   VERIFICATION_SCHEMA,
   type FileIndex,
+  type ParsedVerdict,
   type Quote,
   type Verdict,
 } from "./review-common.js";
 import {
   applyFixerRead,
+  conflictNote,
   createIssue,
   descriptionOf,
   fixerNote,
@@ -44,8 +46,24 @@ import {
   writtenIssues,
   writtenJson,
   type EventContext,
+  type IssueActor,
   type IssueTable,
 } from "./issues.js";
+import {
+  acceptedRulingSources,
+  arbiterRuns,
+  asQuote,
+  describeRuling,
+  designPointBefore,
+  parseArbiterResult,
+  proofResult,
+  proofRun,
+  rulingApproval,
+  type DeferredPoint,
+  type Ruling,
+  type RulingContext,
+  type RulingDecision,
+} from "./rulings.js";
 
 export {
   MAX_REFUTATION_QUOTES,
@@ -64,7 +82,8 @@ export {
  * decision cannot lose it.
  */
 
-export type FindingState = "pending" | "confirmed" | "disputed" | "fixed" | "dismissed";
+/** `deferred`: the operator declined to rule on the finding's design point; it no longer blocks. */
+export type FindingState = "pending" | "confirmed" | "disputed" | "fixed" | "dismissed" | "deferred";
 
 export interface Finding {
   /** F1, F2, … in the order findings first appear. */
@@ -81,7 +100,15 @@ export interface Finding {
   confirmedOn?: string;
   regressedOn?: string;
   /** The verifier's latest verdict. */
-  verdict?: { verdict: Verdict; reason: string; quotes: Quote[] };
+  verdict?: ParsedVerdict;
+  /**
+   * The design ruling that holds for the finding (`R<n>`): it dismissed it
+   * (implementation-stands, or a refutation citing one), or confirmed it
+   * (review-stands). It lapses when the lines it cites no longer match.
+   */
+  ruling?: string;
+  /** Why the finding turns on the design: the verifier's `designBasis` on a design-level verdict. */
+  designBasis?: string;
   /** Why the finding is disputed. */
   dispute?: string;
   /** The quotes a dismissal rests on, and the candidate they matched. */
@@ -162,21 +189,39 @@ export interface FindingLedger {
   reviewed: string[];
   /** The issues file's content, rebuilt from the same evidence (issues.ts). */
   issues: IssueTable;
+  /** The design rulings an Arbitrate receipt accepted, R1, R2, … in evidence order. */
+  rulings: Ruling[];
+  /** The design points the operator declined to rule on. */
+  deferred: DeferredPoint[];
+  /** Accepted rulings and deferrals on findings this evidence has not raised yet (a validator's partial view), by finding id. */
+  unapplied?: Map<string, { ruling: Ruling; ctx: EventContext } | { defer: string; ctx: EventContext }>;
 }
 
 const OPEN: ReadonlySet<FindingState> = new Set(["pending", "confirmed", "disputed"]);
 export const isOpen = (f: Finding | undefined): f is Finding => f !== undefined && OPEN.has(f.state);
 
-export function findingLedger(evidence: EvidenceRecord[]): FindingLedger {
+/** What the ledger needs beyond evidence to apply rulings: the receipts and admitted bindings, and the profile for proof results and the arbiter's model. */
+export interface LedgerOptions extends RulingContext {
+  profile?: Profile;
+}
+
+export function findingLedger(evidence: EvidenceRecord[], options: LedgerOptions = {}): FindingLedger {
   const files = fileIndex(evidence);
   const entered = reviewedCandidates(evidence);
-  const ledger: FindingLedger = { findings: [], passes: [], verifications: [], followUps: [], reviewed: entered.map((c) => c.digest), issues: emptyIssueTable() };
+  const accepted = acceptedRulingSources(evidence, options);
+  const ledger: FindingLedger = { findings: [], passes: [], verifications: [], followUps: [], reviewed: entered.map((c) => c.digest), issues: emptyIssueTable(), rulings: [], deferred: [] };
+  // The candidate the run was on at each record: an operator's decision carries none of its own.
+  let lastDigest: string | undefined;
   for (const [i, record] of evidence.entries()) {
-    const digest = record.candidateDigest;
+    const digest = record.candidateDigest ?? lastDigest;
     if (digest === undefined) continue;
+    lastDigest = digest;
     const at = position(record, i);
     const round = entered.filter((c) => !after(c.at, at)).length;
     const ctx: EventContext = { round, digest, ref: record.ref };
+    const receipt = accepted.get(record.ref);
+    if (receipt !== undefined) applyRuling(ledger, evidence, i, receipt, ctx, options.profile);
+    if (record.candidateDigest === undefined) continue;
     const pass = agentRuns([record], REVIEW_STAGE, "review")[0];
     if (pass !== undefined) applyPass(ledger, pass, digest, files, round);
     const verification = agentRuns([record], REVIEW_STAGE, "diagnostic")[0];
@@ -190,10 +235,179 @@ export function findingLedger(evidence: EvidenceRecord[]): FindingLedger {
     const read = issueCommand(record, ISSUES_COMMAND.read);
     if (read?.ok === true) {
       const present = read.stdout.trim().split("\n").at(-1)?.trim() === "present";
-      applyFixerRead(ledger.issues, { present, ...(read.report !== undefined ? { text: read.report.text, truncated: read.report.truncated } : {}) }, ctx);
+      applyFixerRead(ledger.issues, { present, ...(read.report !== undefined ? { text: read.report.text, truncated: read.report.truncated } : {}) }, ctx, (id) => findingById(ledger, findingIdOf(id))?.ruling);
     }
   }
+  // Each issue carries the ruling that holds for its finding.
+  for (const issue of ledger.issues.issues) {
+    const ruling = findingById(ledger, findingIdOf(issue.id))?.ruling;
+    if (ruling !== undefined) issue.ruling = ruling;
+    else delete issue.ruling;
+  }
   return ledger;
+}
+
+/**
+ * The design conflicts no ruling holds for, in ledger order: a finding the
+ * verifier could not settle or judged at the design level (disputed), and an
+ * issue the fixer contests (`design-conflict`). The first is the point
+ * Arbitrate settles next.
+ */
+export function designConflicts(ledger: FindingLedger): Finding[] {
+  return ledger.findings.filter((f) => f.ruling === undefined && (f.state === "disputed" || issueById(ledger.issues, issueIdOf(f.id))?.status === "design-conflict"));
+}
+
+/** Whether the fixer, rather than the verifier, raised the conflict on `f`. */
+export function fixerRaised(ledger: FindingLedger, f: Finding): boolean {
+  return issueById(ledger.issues, issueIdOf(f.id))?.status === "design-conflict";
+}
+
+/** A design conflict in one line, for the supervisor: its issue id, location, title and why it is a conflict. */
+export function describeConflict(ledger: FindingLedger, f: Finding): string {
+  const issue = issueById(ledger.issues, issueIdOf(f.id));
+  const where = `${f.comment.path}:${f.comment.start_line}-${f.comment.end_line}`;
+  const title = issue?.title ?? clip(f.comment.content.trim().split("\n")[0] ?? "", 120);
+  const contested = issue !== undefined ? conflictNote(issue) : undefined;
+  const why =
+    contested !== undefined
+      ? `the fixer contests it: ${clip(contested.note, 300)}`
+      : f.designBasis !== undefined && f.designBasis !== ""
+        ? `the verifier judged it at the design level: ${clip(f.designBasis, 300)}`
+        : `the verifier could not settle it: ${clip(f.dispute ?? "", 300)}`;
+  return `${issueIdOf(f.id)} ${where} ${title} (${why})`;
+}
+
+/** The question and both sides' cases for a point the arbiter did not decide (capped, or no ruling after a revision). */
+export function pointCases(ledger: FindingLedger, f: Finding): { question: string; implementation: string; review: string } {
+  const issue = issueById(ledger.issues, issueIdOf(f.id));
+  const contested = issue !== undefined ? conflictNote(issue) : undefined;
+  const verifier = f.designBasis !== undefined && f.designBasis !== "" ? ` The verifier: ${f.designBasis}` : f.dispute !== undefined ? ` The verifier: ${f.dispute}` : "";
+  return {
+    question: `Does ${issueIdOf(f.id)} (${f.comment.path}:${f.comment.start_line}) hold against the project's design, so that the change must address it?`,
+    implementation: contested !== undefined ? `The fixer: ${clip(contested.note, 1_200)}` : "The change as it stands; the implementer has not contested the finding.",
+    review: clip(`${describeComment(f.comment)}${f.comment.evidence !== undefined ? ` ${f.comment.evidence}` : ""}${verifier}`, 1_200),
+  };
+}
+
+/** The ruling that holds for `f`, when one does. */
+export function holdingRuling(ledger: FindingLedger, f: Finding): Ruling | undefined {
+  return f.ruling === undefined ? undefined : ledger.rulings.find((r) => r.id === f.ruling);
+}
+
+/** The rulings that hold, as a review pass, the verifier or the fixer is told them. */
+export function holdingRulings(ledger: FindingLedger): string[] {
+  return ledger.rulings.filter((r) => ledger.findings.some((f) => f.ruling === r.id)).map((r) => describeRuling(r, issueIdOf(r.finding)));
+}
+
+/**
+ * Apply a ruling an Arbitrate receipt accepted, at its decision record:
+ * `implementation-stands` dismisses the finding on the ruling's code
+ * citations (rule 6: it stays dismissed while they match), `review-stands`
+ * confirms it with the ruling as its witness, and the operator's decline
+ * defers the point waiting then.
+ */
+function applyRuling(ledger: FindingLedger, evidence: EvidenceRecord[], at: number, receipt: string, ctx: EventContext, profile: Profile | undefined): void {
+  const record = evidence[at]!;
+  const approval = rulingApproval(record);
+  let ruling: Omit<Ruling, "id">;
+  if (approval !== undefined) {
+    if (approval.decision === "decline") {
+      // The point the visit pinned with its design-point record; the first open conflict when none was pinned.
+      const pinned = designPointBefore(evidence, at);
+      const point = pinned !== undefined ? findingById(ledger, pinned) : designConflicts(ledger)[0];
+      const note = `the operator left the design point open${approval.reason !== undefined ? `: ${approval.reason}` : ""}`;
+      const reason = approval.reason !== undefined ? { reason: approval.reason } : {};
+      if (point === undefined) {
+        // A validator's partial view: the deferral waits, like a ruling, for the first comment naming the point.
+        if (pinned === undefined) return;
+        const cases = undecidedCases(evidence, at, pinned) ?? { question: `Does ${issueIdOf(pinned)} hold against the project's design?`, implementation: "", review: "" };
+        ledger.deferred.push({ finding: pinned, ...cases, ...reason, source: record.ref, receipt });
+        (ledger.unapplied ??= new Map()).set(pinned, { defer: note, ctx });
+        return;
+      }
+      const cases = undecidedCases(evidence, at, point.id) ?? pointCases(ledger, point);
+      ledger.deferred.push({ finding: point.id, ...cases, ...reason, source: record.ref, receipt });
+      defer(ledger, point, note, ctx);
+      return;
+    }
+    if (approval.finding === undefined || approval.ruling === undefined) return;
+    ruling = { finding: approval.finding, decision: approval.ruling, decider: { kind: "operator", operator: approval.operator }, summary: approval.note ?? "", design: [], code: [], proofTests: [], source: record.ref, receipt };
+  } else {
+    const run = arbiterRuns([record])[0];
+    const parsed = run !== undefined && run.status === "completed" ? parseArbiterResult(run.output) : undefined;
+    if (parsed === undefined || "problem" in parsed || parsed.result.ruling === "undecidable") return;
+    const r = parsed.result;
+    const harness = String((record.payload as { codingAgent?: { harness?: unknown } } | undefined)?.codingAgent?.harness ?? profile?.roles.arbiter ?? "codex");
+    const proofTests = r.proofTests.map((t) => ({ ...t, result: profile !== undefined ? proofResult(profile, t, proofRun(evidence, profile, t, record.candidateDigest, at)) : "recorded with the ruling" }));
+    ruling = {
+      finding: r.finding,
+      decision: r.ruling as RulingDecision,
+      decider: { kind: "arbiter", harness, ...(profile !== undefined ? { model: profile.arbiter.model } : {}) },
+      summary: r.summary,
+      design: r.design,
+      code: r.code,
+      proofTests,
+      source: record.ref,
+      receipt,
+      ...(record.candidateDigest !== undefined ? { digest: record.candidateDigest } : {}),
+    };
+  }
+  const r: Ruling = { id: `R${ledger.rulings.length + 1}`, ...ruling };
+  ledger.rulings.push(r);
+  const f = findingById(ledger, ruling.finding);
+  // A validator's view keeps only the latest review pass of a candidate, so the pass that raised the finding may be
+  // missing: the ruling waits for the first comment that names the finding, and applies to it then.
+  if (f === undefined) (ledger.unapplied ??= new Map()).set(ruling.finding, { ruling: r, ctx });
+  else rule(ledger, f, r, ctx);
+}
+
+/** The next finding id: one past every finding the ledger holds and every id a waiting ruling or deferral reserves. */
+function nextFindingId(ledger: FindingLedger): string {
+  const ids = [...ledger.findings.map((f) => f.id), ...(ledger.unapplied?.keys() ?? [])];
+  return `F${ids.reduce((n, id) => Math.max(n, Number(id.slice(1)) || 0), 0) + 1}`;
+}
+
+/** The operator's decline: the point no longer blocks. */
+function defer(ledger: FindingLedger, f: Finding, note: string, ctx: EventContext): void {
+  settle(f, "deferred", ctx.digest);
+  moveOrCreate(ledger, f, "deferred", "operator", note, ctx);
+}
+
+/** A ruling's effect on its finding and the finding's issue. */
+function rule(ledger: FindingLedger, f: Finding, r: Ruling, ctx: EventContext): void {
+  const actor: IssueActor = r.decider.kind === "operator" ? "operator" : "arbiter";
+  const note = `design ruling ${r.id} (${r.decision}): ${r.summary}`;
+  if (r.decision === "implementation-stands") {
+    settle(f, "dismissed", ctx.digest);
+    f.refutation = { reason: note, quotes: r.code.map(asQuote), digest: r.digest ?? ctx.digest };
+    f.ruling = r.id;
+    moveOrCreate(ledger, f, "dismissed", actor, note, ctx);
+  } else {
+    settle(f, "confirmed", ctx.digest);
+    delete f.refutation;
+    f.confirmedOn = ctx.digest;
+    f.verdict = { verdict: "confirmed", reason: note, quotes: r.code.map(asQuote) };
+    f.ruling = r.id;
+    moveOrCreate(ledger, f, "open", actor, note, ctx);
+  }
+}
+
+/** Move the finding's issue to `to`, or create it there: a disputed finding has no issue until a ruling gives it one. */
+function moveOrCreate(ledger: FindingLedger, f: Finding, to: "open" | "dismissed" | "deferred", actor: IssueActor, note: string, ctx: EventContext): void {
+  const issue = issueById(ledger.issues, issueIdOf(f.id));
+  if (issue === undefined) createIssue(ledger.issues, f, { status: to, actor, note, raisedIn: f.round ?? ctx.round, ctx });
+  else if (issue.status !== to) moveIssue(issue, actor, to, note, ctx);
+}
+
+/** The cases of the newest undecidable result on `finding` before the record at `at`. */
+function undecidedCases(evidence: EvidenceRecord[], at: number, finding: string): { question: string; implementation: string; review: string } | undefined {
+  for (let i = at - 1; i >= 0; i -= 1) {
+    const run = arbiterRuns([evidence[i]!])[0];
+    if (run === undefined || run.status !== "completed") continue;
+    const parsed = parseArbiterResult(run.output);
+    if ("result" in parsed && parsed.result.ruling === "undecidable" && parsed.result.finding === finding && parsed.result.undecidable.question !== "") return parsed.result.undecidable;
+  }
+  return undefined;
 }
 
 /** Where a record falls in the run: its generation first, then its place in the list. */
@@ -273,12 +487,16 @@ export function knownFindings(ledger: FindingLedger): KnownFindings {
     const state = f.state === "pending" ? "awaiting verification" : (issue?.status ?? f.state);
     return { id: issueIdOf(f.id), state, description: `${describeComment(f.comment)}${fixer !== undefined ? ` Fixer's note: ${clip(fixer.note, 800)}` : ""}` };
   };
-  return { open: ledger.findings.filter(isOpen).map(known), settled: ledger.findings.filter((f) => !isOpen(f)).map(known) };
+  const rulings = holdingRulings(ledger);
+  return { open: ledger.findings.filter(isOpen).map(known), settled: ledger.findings.filter((f) => !isOpen(f)).map(known), ...(rulings.length > 0 ? { rulings } : {}) };
 }
+
+/** A finding that no longer blocks a pass: dismissed, or deferred by the operator. */
+export const settledAway = (f: Finding | undefined): boolean => f?.state === "dismissed" || f?.state === "deferred";
 
 /** The sweep's last pass raised nothing that survived verification. */
 export function saturated(ledger: FindingLedger, pass: ReviewPass): boolean {
-  return passUsable(pass) && pass.raised.every((id) => findingById(ledger, id)?.state === "dismissed");
+  return passUsable(pass) && pass.raised.every((id) => settledAway(findingById(ledger, id)));
 }
 
 export function findingById(ledger: FindingLedger, id: string): Finding | undefined {
@@ -395,12 +613,37 @@ function applyPass(ledger: FindingLedger, run: AgentRun, digest: string, files: 
     const s = status.get(f.id);
     if (s === undefined) pass.missingStatus.push(f.id);
     else applyStatus(f, s, digest);
+    // Rule 6: a review-stands ruling holds while the lines it cites match; once they are observed changed it lapses.
+    const r = holdingRuling(ledger, f);
+    if (r?.decision === "review-stands" && r.code.length > 0 && r.digest !== digest && checkQuotes(r.code.map(asQuote), digest, files) === "mismatch") delete f.ruling;
   }
   for (const c of report.comments.filter(isBlocking)) {
     const known = c.finding !== undefined ? findingById(ledger, c.finding) : undefined;
     if (known !== undefined && (open.includes(known) || pass.raised.includes(known.id))) continue;
+    // A ruled finding this view never saw raised (a validator sees only a candidate's latest pass): the comment
+    // naming it stands for it, with the ruling applied, and is then judged as a ruled finding raised again.
+    const waiting = known === undefined && c.finding !== undefined ? ledger.unapplied?.get(c.finding) : undefined;
+    if (waiting !== undefined) {
+      const f: Finding = { id: c.finding!, comment: c, state: "pending", on: digest, raisedOn: digest, round };
+      ledger.findings.push(f);
+      ledger.unapplied!.delete(f.id);
+      if ("defer" in waiting) {
+        defer(ledger, f, waiting.defer, waiting.ctx);
+        continue;
+      }
+      rule(ledger, f, waiting.ruling, waiting.ctx);
+      if (f.state === "dismissed") {
+        recheckDismissal(f, digest, files);
+        pass.raised.push(f.id);
+      }
+      continue;
+    }
+    // The operator left the point open: naming it again neither blocks nor makes a new finding.
+    if (known?.state === "deferred") continue;
     if (known?.state === "fixed") {
       reopen(known, digest);
+      // A regression is a new state of the code: a ruling on the old one no longer holds.
+      delete known.ruling;
       known.regressedOn = digest;
       pass.raised.push(known.id);
       continue;
@@ -423,7 +666,8 @@ function applyPass(ledger: FindingLedger, run: AgentRun, digest: string, files: 
       mergeInto(twin, c, { digest, ref: run.record.ref });
       continue;
     }
-    const f: Finding = { id: `F${ledger.findings.length + 1}`, comment: c, state: "pending", on: digest, raisedOn: digest, round };
+    // The next number after every finding the ledger holds or a waiting ruling reserves (a partial view may skip ahead).
+    const f: Finding = { id: nextFindingId(ledger), comment: c, state: "pending", on: digest, raisedOn: digest, round };
     ledger.findings.push(f);
     pass.raised.push(f.id);
   }
@@ -485,7 +729,12 @@ function applyStatus(f: Finding, status: PriorStatus, digest: string): void {
   reopen(f, digest);
 }
 
-/** A dismissal holds while every line its refutation quoted still matches. */
+/**
+ * A dismissal holds while every line its refutation quoted still matches; a
+ * dismissal by ruling rests on the ruling's code citations (an operator's
+ * ruling cites none and holds for the rest of the run). When they no longer
+ * match, the ruling lapses and the finding is verified again.
+ */
 function recheckDismissal(f: Finding, digest: string, files: FileIndex): void {
   const refutation = f.refutation!;
   if (refutation.digest === digest) return;
@@ -495,6 +744,8 @@ function recheckDismissal(f: Finding, digest: string, files: FileIndex): void {
   if (check !== "mismatch") {
     f.refutation = refutation;
     f.awaiting = check;
+  } else {
+    delete f.ruling;
   }
 }
 
@@ -511,28 +762,47 @@ function applyVerification(ledger: FindingLedger, run: AgentRun, digest: string,
     }
     f.verdict = v;
     f.verifiedOn = digest;
+    if (v.designLevel === true) f.designBasis = v.designBasis ?? "";
+    else delete f.designBasis;
+    // A review-stands ruling that holds keeps the finding confirmed, its witness the ruling: only a matching refutation settles it otherwise.
+    const stands = holdingRuling(ledger, f)?.decision === "review-stands";
     if (v.verdict === "uncertain") {
-      dispute(f, digest, v.reason || "the verifier could not decide");
+      if (stands) settleConfirmed(f, digest);
+      else dispute(f, digest, v.reason || "the verifier could not decide");
     } else if (v.verdict === "confirmed") {
-      if (v.quotes.some((q) => q.path !== "" && q.line > 0)) {
-        settle(f, "confirmed", digest);
-        f.confirmedOn = digest;
+      if (v.designLevel === true && !stands) {
+        // A design-level confirmation does not go to Fix: it is disputed until ruled on.
+        dispute(f, digest, `the verifier confirmed it, but at the design level: ${v.designBasis || v.reason}`);
+      } else if (v.quotes.some((q) => q.path !== "" && q.line > 0) || stands) {
+        settleConfirmed(f, digest);
       } else {
         dispute(f, digest, "the verifier confirmed it without a file:line witness");
       }
     } else {
-      const quotes = v.quotes.slice(0, MAX_REFUTATION_QUOTES);
-      const check = quotes.length === 0 ? "mismatch" : checkQuotes(quotes, digest, files);
+      // A refutation citing a ruling rests on the ruling's code citations, matched as usual; an operator's ruling cites none and holds.
+      const cited = v.ruling !== undefined ? ledger.rulings.find((r) => r.id === v.ruling && r.decision === "implementation-stands") : undefined;
+      const quotes = cited !== undefined ? cited.code.map(asQuote) : v.quotes.slice(0, MAX_REFUTATION_QUOTES);
+      const check = cited !== undefined && quotes.length === 0 ? "match" : quotes.length === 0 ? "mismatch" : checkQuotes(quotes, digest, files);
       if (check === "mismatch") {
-        dispute(f, digest, `the verifier refuted it, but ${quotes.length === 0 ? "quoted no line" : "its quotes do not match the change"}: ${v.reason}`);
+        if (stands) {
+          settleConfirmed(f, digest);
+          continue;
+        }
+        dispute(f, digest, `the verifier refuted it, but ${quotes.length === 0 ? "quoted no line" : cited !== undefined ? `the lines ruling ${cited.id} cites no longer match the change` : "its quotes do not match the change"}: ${v.reason}`);
         continue;
       }
-      f.refutation = { reason: v.reason, quotes, digest };
+      f.refutation = { reason: cited !== undefined ? `${v.reason} (design ruling ${cited.id})` : v.reason, quotes, digest };
+      if (cited !== undefined) f.ruling = cited.id;
       if (check === "match") settle(f, "dismissed", digest);
       else f.awaiting = check;
     }
   }
   syncIssuesAfterVerification(ledger, covered, before, ctx);
+}
+
+function settleConfirmed(f: Finding, digest: string): void {
+  settle(f, "confirmed", digest);
+  f.confirmedOn = digest;
 }
 
 /**
@@ -612,7 +882,8 @@ function dispute(f: Finding, digest: string, why: string): void {
 }
 
 /** The verifier's assignment: judge each finding against the current code, with its own evidence. */
-export function verificationInstruction(profile: Profile, args: { findings: Finding[]; background: string; changed: string[]; context?: ContextDocument[] }): string {
+export function verificationInstruction(profile: Profile, args: { findings: Finding[]; background: string; changed: string[]; context?: ContextDocument[]; rulings?: string[] }): string {
+  const rulings = args.rulings ?? [];
   return [
     `You are an independent verifier of code review findings on the uncommitted change in this worktree (${profile.project}). You did not write the change or the review. Do not modify any file. Read the code with your file tools; you cannot run commands.`,
     "",
@@ -633,6 +904,15 @@ export function verificationInstruction(profile: Profile, args: { findings: Find
     `- \`refuted\`: the claim is false. In \`quotes\`, give at most ${MAX_REFUTATION_QUOTES} lines of the current code that disprove it, such as the lock that is held, the caller that does not exist, or the check that covers the path. A refutation counts only if every quote matches the file.`,
     "- `uncertain`: you cannot decide. Give the argument for and against in `reason`.",
     "",
-    "Each quote is one line: `path` relative to the repository root, `line` its line number in the current file, and `text` copied from that line without the line number. Your result: `verdicts`, one for every finding listed, each with `finding` (its name), `verdict`, `reason` and `quotes`.",
+    "Set `designLevel` to true when the claim turns on the project's design rather than on the code: whether it is a defect depends on which reading of the issue, its discussion or the design documents is right (an intended behaviour, an API or format choice, a trade-off the design makes), not on what the code does. Then give in `designBasis` the design statement or decision it turns on, in one or two sentences. A design-level finding does not go to the implementer; an independent arbiter rules on it. Otherwise `designLevel` is false and `designBasis` is \"\".",
+    ...(rulings.length > 0
+      ? [
+          "",
+          "Design rulings that hold in this run. They settle their design points: do not judge a point again against a ruling. A finding that raises the point a ruling dismissed (implementation-stands) is `refuted` with `ruling` set to that ruling's id; its cited lines are then matched against the current code as your quotes would be. Otherwise `ruling` is \"\".",
+          ...rulings.map((r) => `- ${r}`),
+        ]
+      : ["", "No design ruling holds in this run: `ruling` is \"\"."]),
+    "",
+    "Each quote is one line: `path` relative to the repository root, `line` its line number in the current file, and `text` copied from that line without the line number. Your result: `verdicts`, one for every finding listed, each with `finding` (its name), `verdict`, `reason`, `quotes`, `designLevel`, `designBasis` and `ruling`.",
   ].join("\n");
 }

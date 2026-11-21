@@ -70,7 +70,9 @@ controller notions, never plugin ones.
 
 | Event | From |
 |---|---|
-| `stage_entered` | `current` (stage id and attempt) changed |
+| `stage_entered` | `current` (stage id and attempt) changed; for a graph that declares edges, `entered` says how a new visit entered the node (`edge`, `carried`, `reenter`, …) |
+| `node_entered_by_supervisor` | A new visit (sequence number above the mark's) that the supervisor's `enter` opened, with the node, its attempt and the visit it was entered `from` ([graph topology §8](design-graph-topology.md#8-operator-surfaces)); it stands in for that move's `stage_entered` |
+| `node_settled` | A side visit of a supervisor-only node whose settlement the mark has not seen, with its receipts and each requirement's reason |
 | `receipt_accepted` | Valid receipts with a sequence number above the mark (`rcpt-<n>`), grouped per stage, with whether the stage is now complete |
 | `receipts_invalidated` | Invalid receipts the mark had not seen as invalid (by id), with their stages |
 | `episode_started` | `mode: recovery` with a `recoveryEpisodeId` not yet reported, or episode records (`supervisorEpisodes`) of an unreported episode; detail is the recovery trigger |
@@ -82,7 +84,8 @@ controller notions, never plugin ones.
 
 `--json` prints `{ runId, stateDir, outcome, events, summary, cursor }`.
 `summary` is the current status, stop reason and class, mode, stage and
-attempt, stages complete, each budget's use against its budget, episode
+attempt, stages complete, for a graph that declares edges the live path
+(`path`, as `["fix#3", "review#3"]`) and an open `sideVisit`, each budget's use against its budget, episode
 count, and any waiting state (a quota hold or quota retry with its `until`,
 an ordinary executor retry backoff, a reconciliation required). `cursor` is an opaque `p1.` token encoding the mark;
 `wait --since <cursor>` starts from that mark, so no event is reported twice
@@ -127,7 +130,7 @@ only through the same loaders as `wait`, `inspect` and `stats`, and never writes
 
 | Kind | Reported when |
 |---|---|
-| `move` | A stage entered or a new attempt of it; a stage accepted (complete); a supervisor episode started or ended, with its trigger and one-line reason; a quota pause started (with `resetAt`) or ended; the run resumed. Not individual receipts or jobs. Moves within 60 seconds of the first are one report |
+| `move` | A stage entered or a new attempt of it (with how, for a graph that declares edges); the supervisor entering a supervisor-only node, and that node settling; a stage accepted (complete); a supervisor episode started or ended, with its trigger and one-line reason; a quota pause started (with `resetAt`) or ended; the run resumed. Not individual receipts or jobs. Moves within 60 seconds of the first are one report |
 | `heartbeat` | Nothing reported for `--heartbeat` (default 15m) while running: status, stage and attempt, elapsed wall time, `agentInvocations` used of its budget (and any budget that moved), age of the last evidence |
 | `attention` | The run stopped (status, reason, retryable or final, the blocker, and any question it asks quoted); a reconciliation waits for a human; no new evidence for 45 minutes while running and not in a quota wait; a budget over 80% (which, the numbers, the stage spending it); a repeated identical failure (the same stage invalidated again with the same requirements, or consecutive supervisor episodes with the same trigger code and message); the controller died |
 

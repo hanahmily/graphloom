@@ -231,6 +231,11 @@ crashes; filesystem and execution scopes require host enforcement.
   one, and `resume --supervisor` moves it.
 - [Pi supervisor](design-pi-supervisor.md): the Pi harness, and
   choosing a supervisor model on any Pi provider.
+- [Graph topology](design-graph-topology.md) (designed, not implemented):
+  a graph declares nodes and directed edges, cycles included; admission follows
+  the path the run took; a node may be entered and left only by the supervisor.
+  One traversal engine: a definition without edges is normalized to an implicit
+  chain and behaves as today's ordered stage list.
 - [Run convergence design](design-run-convergence.md): candidate-anchored
   freshness, correction escalation with an exit, supervisor repetition detection,
   and adjudicated plan review.

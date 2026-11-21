@@ -12,6 +12,7 @@ import type {
   RepairTarget,
   RunView,
 } from "@graphloom/sdk";
+import { MAX_EPISODE_RECORDS, type SupervisorEpisodeRecord } from "./episode.js";
 import type { HarnessUsage } from "./harness.js";
 import type { InvestigationStep } from "./investigation.js";
 import type { ProviderFailureClass } from "./provider-failure.js";
@@ -30,6 +31,8 @@ export interface RecoveryTrigger {
     | "contract_violation"
     | "quota_partial"
     | "recovery_budget_reached"
+    /** A supervisor-only node's side visit settled (docs/design-graph-topology.md §5.2). */
+    | "supervisor_node_settled"
     | "unhandled";
   message: string;
   /** Recorded evidence the escalation cites, such as the failing validation's inputs. */
@@ -41,6 +44,12 @@ export interface SupervisorInput {
   episodeId: string;
   trigger: RecoveryTrigger;
   view: RunView;
+  /**
+   * The pinned graph's nodes, for a graph that declares edges; with
+   * `view.topology` they are the prompt's topology section. Absent for an
+   * implicit chain, whose nodes are its stages in order.
+   */
+  nodes?: SupervisorNodeView[];
   /** What the controller settled for the supervisor's previous proposal in this run. */
   lastSettlement?: SupervisorSettlement;
   /** Provider calls this turn may spend; a turn beyond it is aborted before its request. */
@@ -143,6 +152,35 @@ export interface AdmissionFacts {
   canQualify: boolean;
   /** Candidates whose status is `qualified`; `activate_repair` needs one. */
   qualifiedArtifactIds: string[];
+  /**
+   * The supervisor-only nodes `enter` would admit now: in recovery, with no
+   * side visit open, each with visits left (docs/design-graph-topology.md
+   * §10). Absent for a graph without supervisor-only nodes; `enter` is
+   * offered only when it lists one.
+   */
+  canEnter?: string[];
+  /**
+   * The out-edge targets of the open side visit's node: the only nodes a
+   * `reenter` may name while it is open (leaving it). Absent when no side
+   * visit is open.
+   */
+  exits?: string[];
+}
+
+/**
+ * A node of the run's pinned graph as the supervisor sees it: the
+ * definition's node with its entry, and for a supervisor-only node its visit
+ * cap and the visits it has left (docs/design-graph-topology.md §10).
+ */
+export interface SupervisorNodeView {
+  id: string;
+  name: string;
+  /** `graph`: reached along edges; `supervisor`: only the supervisor enters it (`enter`). */
+  entry: "graph" | "supervisor";
+  /** Supervisor-only: most visits in a run. */
+  maxVisits?: number;
+  /** Supervisor-only: visits not yet used. */
+  visitsLeft?: number;
 }
 
 /** An inadmissible proposal, as the controller reports it: the failed precondition and the current value. */
@@ -344,6 +382,12 @@ export type ScriptedRecoveryStep =
 
 export interface ScriptedSupervisorOptions {
   decisions: ScriptedRecoveryStep[];
+  /**
+   * The index of the first decision to answer (default 0). A resumed run
+   * passes `scriptedDecisionsConsumed` of its recorded episodes, so it
+   * continues the script where the run left it instead of replaying it.
+   */
+  start?: number;
   /** Stable id reused across every repair round (default: scripted-supervisor). */
   sessionId?: string;
   /** Canned candidate patch; requires an active candidate coding grant. */
@@ -352,11 +396,32 @@ export interface ScriptedSupervisorOptions {
   switchModel?: (request: ModelRef & { reason: string }) => Promise<void>;
 }
 
+/** The start of the error a scripted supervisor throws when its decisions run out (it consumed no decision). */
+export const SCRIPTED_SUPERVISOR_EXHAUSTED = "scripted supervisor exhausted";
+
+/**
+ * How many of a scripted supervisor's decisions a run has consumed, from the
+ * run's recorded episodes: the controller records one episode record per
+ * decide() call, however it ended, and every call consumed one decision
+ * except one that found the script exhausted. Derived from durable state, so
+ * a resumed rehearsal answers from the next unconsumed decision rather than
+ * from the first. Throws when the records are at their cap
+ * (`MAX_EPISODE_RECORDS`): older calls may have been dropped, so the position
+ * cannot be known.
+ */
+export function scriptedDecisionsConsumed(records: readonly SupervisorEpisodeRecord[] | undefined): number {
+  const all = records ?? [];
+  if (all.length >= MAX_EPISODE_RECORDS) {
+    throw new Error(`the run kept only its newest ${MAX_EPISODE_RECORDS} supervisor episode records, so the scripted supervisor's next decision cannot be derived`);
+  }
+  return all.filter((r) => !(r.proposal === undefined && r.error?.startsWith(SCRIPTED_SUPERVISOR_EXHAUSTED) === true)).length;
+}
+
 /** Canned recovery decisions for controller tests (no live LLM). */
 export function createScriptedSupervisor(
   options: ScriptedSupervisorOptions,
 ): Supervisor {
-  let index = 0;
+  let index = options.start ?? 0;
   const { decisions } = options;
   const sessionId = options.sessionId ?? "scripted-supervisor";
   let codingRoot: string | undefined;
@@ -365,7 +430,7 @@ export function createScriptedSupervisor(
     async decide(input: SupervisorInput): Promise<SupervisorProposal> {
       if (index >= decisions.length) {
         throw new Error(
-          `scripted supervisor exhausted: decide called ${index + 1} times, only ${decisions.length} scripted`,
+          `${SCRIPTED_SUPERVISOR_EXHAUSTED}: decide called ${index + 1} times, only ${decisions.length} scripted`,
         );
       }
       const step = decisions[index];

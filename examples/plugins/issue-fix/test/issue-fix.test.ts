@@ -564,7 +564,7 @@ const assignment = (job: JobSpec | undefined) => (job!.input as { assignment: st
 describe("issue-fix graph under the banyandb profile", () => {
   it("declares the contributor checklist the controller checks before any job", () => {
     const definition = createGraph().describe(BANYANDB);
-    expect(definition.stages.map((s) => s.id)).toEqual(["fix", "review"]);
+    expect(definition.stages.map((s) => s.id)).toEqual(["fix", "review", "arbitrate"]);
     expect(definition.environment).toEqual(ENVIRONMENT);
     expect(ENVIRONMENT.checks!.map((c) => c.id)).toEqual(["go", "git", "ocr", "codex", "claude", "make", "check-req", "node"]);
     // `make generate` split per project so each output is cached on its own inputs (#174).
@@ -720,7 +720,7 @@ describe("issue-fix graph under the banyandb profile", () => {
     const review = jobs.filter((j) => j.stageId === "review" && j.kind === "agent");
     expect(review.map((j) => `${j.purpose}:${(j.input as { harness: string }).harness}`)).toEqual(["review:codex", "diagnostic:claude-code", "review:codex"]);
     const verification = review[1]!;
-    expect(verification).toMatchObject({ kind: "agent", readOnly: true, resultSchema: "finding-verification-v1" });
+    expect(verification).toMatchObject({ kind: "agent", readOnly: true, resultSchema: "finding-verification-v2" });
     expect(verification.jobId).toBeUndefined();
     expect(verification.continueFrom).toBeUndefined();
     expect(assignment(verification)).toContain("- F1 pkg/timestamp/scheduler.go:88-95 (high, bug): Close now waits forever");

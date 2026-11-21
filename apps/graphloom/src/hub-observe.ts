@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
-import { loadRunState, managedObservation, type DurableRunState } from "@graphloom/controller";
+import { livePath, loadRunState, managedObservation, nodeAccepted, type DurableRunState } from "@graphloom/controller";
 import type { HubObservation, HubStatus, HubSubmission, MonitorActivity, MonitorJob, MonitorMetric, MonitorSnapshot, MonitorTopology } from "@graphloom/sdk";
-import { stableHash } from "@graphloom/sdk";
-import * as owningSdk from "@graphloom/sdk";
+import { normalizeTopology, stableHash } from "@graphloom/sdk";
 import { runStats } from "./stats.js";
 
 export interface OwnedMonitorResult { observation: HubObservation; snapshot?: MonitorSnapshot; monitoringError?: string; }
@@ -59,7 +58,6 @@ export function snapshotOf(state: DurableRunState, observedAt: string): MonitorS
       metrics.push({ id: `supervisor:${harness.harness}:${key}`, label: `Supervisor ${harness.harness} ${key}`, value, unit: key.toLowerCase().includes("cost") ? "USD" : "tokens", source: "settled supervisor episode records", exactness: "settled" });
     }
   }
-  const valid = new Set(state.receipts.filter((receipt) => receipt.valid).map((receipt) => `${receipt.stageId}\0${receipt.requirementId}`));
   const pathNodes = topology.path === undefined ? undefined : new Set(topology.path.map((visit) => visit.stageId));
   return {
     schemaVersion: 1, frameId: `${state.runId}:${state.stateRevision}:${observedAt}`, observedAt,
@@ -69,15 +67,18 @@ export function snapshotOf(state: DurableRunState, observedAt: string): MonitorS
     },
     sources: [
       { id: "controller", status: "available", observedAt, revision: String(state.stateRevision) },
+      { id: "traversal", status: traversal.path === undefined ? "unavailable" : "available", observedAt, ...(traversal.detail === undefined ? {} : { detail: traversal.detail }) },
       { id: "live-output", status: "unavailable", observedAt: null, detail: "settled session records are available; live harness output is not uniformly reported" },
       { id: "process", status: "unavailable", observedAt: null, detail: "process measurements are supplied by the hub's launch cgroup" },
     ],
     topology,
     stages: state.definition.stages.map((stage) => {
-      const accepted = stage.requirementIds.length > 0 ? stage.requirementIds.every((id) => valid.has(`${stage.id}\0${id}`)) : null;
+      // Match Controller.inspect: receipt validity off the live path is not accepted run progress.
+      const onPath = pathNodes?.has(stage.id);
+      const accepted = onPath === undefined ? null : onPath && nodeAccepted(state, stage.id);
       const active = state.status === "running" && stage.id === state.current.stageId;
       return {
-        id: stage.id, name: stage.name, status: active ? "running" : accepted === true ? "accepted" : "unaccepted", accepted,
+        id: stage.id, name: stage.name, status: active ? "running" : onPath === false ? "off-path" : accepted === null ? "unknown" : accepted ? "accepted" : "unaccepted", accepted,
         attempt: stage.id === state.current.stageId ? state.current.attempt : stats.stages.find((row) => row.stageId === stage.id)?.attempts ?? null,
         requirement: stage.requirementIds.map((id) => state.definition.requirements.find((r) => r.id === id)?.statement ?? id).join("; "),
         path: pathNodes === undefined ? "unknown" : pathNodes.has(stage.id) ? "on-path" : "off-path",
@@ -98,64 +99,60 @@ export function snapshotOf(state: DurableRunState, observedAt: string): MonitorS
   };
 }
 
-/** Older runtimes expose an explicitly labelled stage chain, never invented traversal. */
 interface TraversalProjection {
   path?: MonitorTopology["path"];
   sideVisit?: MonitorTopology["sideVisit"];
   counts?: Map<string, number>;
+  detail?: string;
 }
 
-/** Read the newer runtime's persisted visit sequences without inferring missing traversal. */
+/** Project recorded visits, or explicitly label the owning controller's legacy migration view. */
 function traversalOf(state: DurableRunState): TraversalProjection {
-  const raw = state as unknown as Record<string, unknown>;
-  if (!Array.isArray(raw.visits)) return {};
+  if (state.path === undefined && state.visits === undefined && state.sideVisit === undefined) {
+    return {
+      path: livePath(state).map(visit => ({ stageId: visit.stageId, attempt: visit.attempt })),
+      detail: "Live path derived by the owning controller from legacy state; historical visit IDs, counts and side visits were not recorded.",
+    };
+  }
+  const unknown = { detail: "Persisted traversal is incomplete or inconsistent; path acceptance is unknown." };
+  if (!Array.isArray(state.visits) || !Array.isArray(state.path) || state.path.length === 0) return unknown;
   const knownStages = new Set(state.definition.stages.map(stage => stage.id));
-  const visits = new Map<number, { stageId: string; visit: number; attempt: number }>();
+  const visits = new Map<number, NonNullable<DurableRunState["visits"]>[number]>();
   const counts = new Map<string, number>();
-  for (const record of raw.visits) {
+  for (const record of state.visits) {
     if (typeof record !== "object" || record === null || typeof record.seq !== "number" || !Number.isInteger(record.seq) || record.seq < 1 ||
-      typeof record.stageId !== "string" || !knownStages.has(record.stageId) || typeof record.attempt !== "number" || !Number.isInteger(record.attempt) || record.attempt < 1 || visits.has(record.seq)) return {};
-    visits.set(record.seq, { stageId: record.stageId, visit: record.seq, attempt: record.attempt });
+      typeof record.stageId !== "string" || !knownStages.has(record.stageId) || typeof record.attempt !== "number" || !Number.isInteger(record.attempt) || record.attempt < 1 || visits.has(record.seq)) return unknown;
+    visits.set(record.seq, record);
     counts.set(record.stageId, (counts.get(record.stageId) ?? 0) + 1);
   }
-  const result: TraversalProjection = { counts };
-  if (Array.isArray(raw.path) && raw.path.every(seq => typeof seq === "number" && visits.has(seq))) {
-    const path = raw.path.map(seq => visits.get(seq)!);
-    if (new Set(path.map(visit => visit.stageId)).size === path.length) result.path = path;
-  }
-  if (typeof raw.sideVisit === "number") {
-    const side = visits.get(raw.sideVisit);
-    if (side) result.sideVisit = { stageId: side.stageId, visit: side.visit };
-  } else if (raw.sideVisit === undefined && result.path !== undefined) result.sideVisit = null;
+  if (!state.path.every(seq => typeof seq === "number" && visits.has(seq))) return { ...unknown, counts };
+  const path = livePath(state);
+  const supervisorOnly = new Set(state.definition.stages.filter(stage => stage.entry === "supervisor").map(stage => stage.id));
+  if (new Set(path.map(visit => visit.stageId)).size !== path.length || path.some(visit => visit.ended !== undefined || supervisorOnly.has(visit.stageId))) return { ...unknown, counts };
+  const result: TraversalProjection = { counts, path: path.map(visit => ({ stageId: visit.stageId, visit: visit.seq, attempt: visit.attempt })) };
+  if (state.sideVisit !== undefined) {
+    const side = visits.get(state.sideVisit);
+    if (side === undefined || side.ended !== undefined || !supervisorOnly.has(side.stageId) || state.path.includes(side.seq)) return { ...unknown, counts };
+    result.sideVisit = { stageId: side.stageId, visit: side.seq };
+  } else result.sideVisit = null;
   return result;
 }
 
 function topologyOf(state: DurableRunState, traversal: TraversalProjection): MonitorTopology {
-  const definition = state.definition as unknown as Record<string, unknown>;
-  // The owning SDK defines implicit edges. Never duplicate that engine algorithm in the monitor.
-  const normalize = (owningSdk as unknown as { normalizeTopology?: (definition: unknown) => { edges: unknown[]; start: string; terminal: string[]; implicit: boolean } }).normalizeTopology;
-  const normalized = typeof normalize === "function" ? normalize(state.definition) : undefined;
-  const declared = normalized?.edges ?? (Array.isArray(definition.edges) ? definition.edges : undefined);
-  const source = normalized?.implicit ? "implicit" : declared === undefined ? "legacy" : "declared";
-  const nodes = state.definition.stages.map((stage) => {
-    const raw = stage as unknown as Record<string, unknown>;
-    return { id: stage.id, label: stage.name, entry: raw.entry === "supervisor" ? "supervisor" as const : "normal" as const,
-      ...(typeof raw.maxVisits === "number" ? { maxVisits: raw.maxVisits } : {}) };
-  });
-  const edges: MonitorTopology["edges"] = declared === undefined
-    ? nodes.slice(1).map((node, i) => ({ id: `legacy:${i}`, from: nodes[i]!.id, to: node.id }))
-    : declared.map((edge, i) => {
+  const normalized = normalizeTopology(state.definition);
+  const source = normalized.implicit ? "implicit" : "declared";
+  const nodes = state.definition.stages.map(stage => ({ id: stage.id, label: stage.name,
+    entry: stage.entry === "supervisor" ? "supervisor" as const : "normal" as const,
+    ...(stage.maxVisits === undefined ? {} : { maxVisits: stage.maxVisits }) }));
+  const edges: MonitorTopology["edges"] = normalized.edges.map((edge, i) => {
       if (typeof edge !== "object" || edge === null || !("from" in edge) || !("to" in edge) || typeof edge.from !== "string" || typeof edge.to !== "string") throw new Error("owning runtime returned malformed topology edge");
       return { id: `${source}:${i}`, from: edge.from, to: edge.to };
     });
-  const start = normalized?.start ?? definition.start;
-  const terminal = normalized?.terminal ?? definition.terminal;
   return { revision: stableHash({ nodes, edges }), source, nodes, edges,
     current: state.current.stageId,
     ...(traversal.path === undefined ? {} : { path: traversal.path }),
     ...(traversal.sideVisit === undefined ? {} : { sideVisit: traversal.sideVisit }),
-    ...(typeof start === "string" ? { start } : {}),
-    ...(Array.isArray(terminal) && terminal.every((id) => typeof id === "string") ? { terminal: terminal as string[] } : {}),
+    start: normalized.start, terminal: normalized.terminal,
   };
 }
 

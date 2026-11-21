@@ -31,7 +31,9 @@ import { treeQuotePlan, readTreeQuotes, type TreeQuotePlan } from "./kit/treequo
 import { fixedP0Lead, LEADS_SCHEMA, NOT_GIVEN, parseLeadStatuses, type Lead, type LeadEntry, type LeadKind, type LeadRecord } from "./leads.js";
 
 export const REVIEW_SCHEMA_NAME = "pr-code-review-v2";
-export const VERIFY_SCHEMA_NAME = "pr-finding-verification-v1";
+export const VERIFY_SCHEMA_NAME = "pr-finding-verification-v2";
+/** The verification contract before 1.1.2, without `corrections`: a run recorded under it still reads, as verdicts with none. */
+export const VERIFY_SCHEMA_NAME_V1 = "pr-finding-verification-v1";
 export const REVIEW_REFERENCES = ["comments[].finding", "comments[].principle", "prior[].finding", "leads[].lead"];
 export const VERIFY_REFERENCES = ["verdicts[].finding"];
 /** Passes one aspect may run on the head (issue-fix's `MAX_SWEEP_PASSES`); hitting it is noted unsaturated and does not fail the stage. */
@@ -44,6 +46,9 @@ const DEFAULT_MAX_TEST_BYTES = 16 * 1024;
 const MAX_CONTENT_CHARS = 4_000;
 const MAX_SPAN_LINES = 400;
 const MIN_QUOTE_CHARS = 8;
+/** At most this many factual corrections per verdict, each side at most `MAX_CORRECTION_CHARS` characters. */
+export const MAX_CORRECTIONS = 5;
+export const MAX_CORRECTION_CHARS = 400;
 
 export const SEVERITIES = ["P0", "P1", "P2", "P3"] as const;
 export type Severity = (typeof SEVERITIES)[number];
@@ -126,7 +131,7 @@ export const VERIFY_SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["finding", "verdict", "kind", "witness", "quotes", "reason", "fixes", "test"],
+        required: ["finding", "verdict", "kind", "witness", "quotes", "reason", "fixes", "test", "corrections"],
         properties: {
           finding: { type: "string" },
           verdict: { type: "string", enum: [...REVIEW_VERDICTS] },
@@ -137,6 +142,8 @@ export const VERIFY_SCHEMA = {
           fixes: { type: "boolean" },
           // For a behavioral finding with a test: whether the test, as the graph ran it, demonstrates the claimed bug (design §8.2). false (reason "") when there is no test.
           test: { type: "object", additionalProperties: false, required: ["demonstrates", "reason"], properties: { demonstrates: { type: "boolean" }, reason: { type: "string" } } },
+          // v2: a confirmed finding's factual slips (a count, a name, a line), each a span of its claim and the text that replaces it; [] for none.
+          corrections: { type: "array", items: { type: "object", additionalProperties: false, required: ["original", "corrected"], properties: { original: { type: "string" }, corrected: { type: "string" } } } },
         },
       },
     },
@@ -184,6 +191,60 @@ export interface FindingVerdict {
   fixes: boolean;
   /** Whether the reviewer's test, as run, demonstrates the claimed bug (design §8.2); absent in a record written before tests. */
   test?: { demonstrates: boolean; reason: string };
+  /**
+   * The verifier's factual corrections of a confirmed finding (v2, design §8.1): each `original` is a span of the finding's content
+   * that occurs in it once, and `corrected` the text the draft puts in its place. Absent in a v1 record, and when there is none.
+   */
+  corrections?: Correction[];
+}
+
+/** One factual correction of a finding's text: a span of its content and the text that replaces it. */
+export interface Correction {
+  original: string;
+  corrected: string;
+}
+
+/** A span's occurrences in a text, whitespace runs matching any whitespace (the verifier reads the claim with its newlines folded). */
+export function spanMatches(text: string, span: string): Array<{ start: number; end: number }> {
+  const words = span.trim().split(/\s+/).filter((w) => w !== "");
+  if (words.length === 0) return [];
+  const re = new RegExp(words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("\\s+"), "g");
+  return [...text.matchAll(re)].map((m) => ({ start: m.index, end: m.index + m[0].length }));
+}
+
+/** Why a verdict's corrections cannot be applied to the finding's content mechanically, or undefined when every one can. */
+export function correctionProblem(content: string, corrections: readonly Correction[]): string | undefined {
+  if (corrections.length > MAX_CORRECTIONS) return `at most ${MAX_CORRECTIONS} corrections, it gave ${corrections.length}`;
+  const spans: Array<{ start: number; end: number }> = [];
+  for (const [k, c] of corrections.entries()) {
+    if (c.original.trim() === "") return `corrections[${k}].original is empty`;
+    if (c.original.length > MAX_CORRECTION_CHARS || c.corrected.length > MAX_CORRECTION_CHARS) return `corrections[${k}] is longer than ${MAX_CORRECTION_CHARS} characters`;
+    if (oneLine(c.original) === oneLine(c.corrected)) return `corrections[${k}] changes nothing`;
+    const at = spanMatches(content, c.original);
+    if (at.length !== 1) return `corrections[${k}].original ${JSON.stringify(clip(oneLine(c.original), 60))} occurs ${at.length === 0 ? "nowhere" : `${at.length} times`} in the finding's claim; copy a span that occurs exactly once`;
+    if (spans.some((s) => s.start < at[0]!.end && at[0]!.start < s.end)) return `corrections[${k}] overlaps another correction`;
+    spans.push(at[0]!);
+  }
+  return undefined;
+}
+
+/**
+ * A finding's content with its verifier's corrections applied (design §8.4): only a confirmed finding's, each span replaced where it
+ * occurs once and overlaps no other. A correction that cannot be applied that way (a record written by hand, say) is returned as
+ * `unapplied`, which the draft states on a line of its own instead.
+ */
+export function correctedContent(f: Pick<Finding, "content" | "verdict" | "state">): { text: string; applied: Correction[]; unapplied: Correction[] } {
+  const all = f.state === "confirmed" && f.verdict?.verdict === "confirmed" ? (f.verdict.corrections ?? []) : [];
+  const applied: Array<Correction & { start: number; end: number }> = [];
+  const unapplied: Correction[] = [];
+  for (const c of all) {
+    const at = c.original.trim() === "" ? [] : spanMatches(f.content, c.original);
+    if (at.length !== 1 || applied.some((s) => s.start < at[0]!.end && at[0]!.start < s.end)) unapplied.push(c);
+    else applied.push({ ...c, ...at[0]! });
+  }
+  let text = f.content;
+  for (const c of [...applied].sort((a, b) => b.start - a.start)) text = `${text.slice(0, c.start)}${c.corrected}${text.slice(c.end)}`;
+  return { text, applied: applied.map(({ original, corrected }) => ({ original, corrected })), unapplied };
 }
 
 export interface Finding {
@@ -348,7 +409,7 @@ export function parsePass(output: unknown, ctx: PassContext): ParsedPass | { pro
 }
 
 /** A verifier's result against the pending findings: one verdict each, or every problem at once (a finding left out is judged later, as disputed). */
-export function parseVerification(output: unknown, pending: ReadonlySet<string>): { verdicts: Map<string, FindingVerdict>; ignored: string[] } | { problems: string[] } {
+export function parseVerification(output: unknown, pending: ReadonlySet<string>, contents?: ReadonlyMap<string, string>): { verdicts: Map<string, FindingVerdict>; ignored: string[] } | { problems: string[] } {
   if (!isObj(output) || !Array.isArray(output.verdicts)) return { problems: ["the result is not an object with verdicts"] };
   const problems: string[] = [];
   const verdicts = new Map<string, FindingVerdict>();
@@ -369,6 +430,19 @@ export function parseVerification(output: unknown, pending: ReadonlySet<string>)
     if (typeof v.witness !== "string" || typeof v.reason !== "string" || typeof v.fixes !== "boolean" || !Array.isArray(v.quotes)) problems.push(`${at} needs witness and reason (text), quotes (a list) and fixes (true or false)`);
     const t = (v as { test?: unknown }).test;
     if (t !== undefined && (!isObj(t) || typeof t.demonstrates !== "boolean" || typeof t.reason !== "string")) problems.push(`${at}.test must be { demonstrates: true or false, reason: text }`);
+    // v2's corrections (absent in a v1 result): kept for a confirmation only, each a span of the claim that occurs in it once.
+    const rawCorrections = (v as { corrections?: unknown }).corrections;
+    let corrections: Correction[] = [];
+    if (rawCorrections !== undefined) {
+      if (!Array.isArray(rawCorrections) || rawCorrections.some((c) => !isObj(c) || typeof c.original !== "string" || typeof c.corrected !== "string")) problems.push(`${at}.corrections must be a list of { original: text, corrected: text }`);
+      else corrections = (rawCorrections as Correction[]).map((c) => ({ original: c.original, corrected: c.corrected }));
+    }
+    if (v.verdict !== "confirmed") corrections = [];
+    const content = contents?.get(String(v.finding));
+    if (corrections.length > 0 && content !== undefined) {
+      const bad = correctionProblem(content, corrections);
+      if (bad !== undefined) problems.push(`${at} (${String(v.finding)}): ${bad}`);
+    }
     if (problems.length === 0) {
       verdicts.set(v.finding, {
         verdict: v.verdict as ReviewVerdict,
@@ -378,6 +452,7 @@ export function parseVerification(output: unknown, pending: ReadonlySet<string>)
         reason: oneLine(v.reason as string),
         fixes: v.fixes as boolean,
         ...(isObj(t) ? { test: { demonstrates: t.demonstrates as boolean, reason: oneLine(t.reason as string) } } : {}),
+        ...(corrections.length > 0 ? { corrections } : {}),
       });
     }
   });
@@ -561,7 +636,8 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
   const at = (r: { record: EvidenceRecord }): number => index.get(r.record.ref) ?? 0;
   const events: Array<{ kind: "pass" | "verify"; run: AgentRun }> = [
     ...agentRuns(evidence, REVIEW_SCHEMA_NAME).map((run) => ({ kind: "pass" as const, run })),
-    ...agentRuns(evidence, VERIFY_SCHEMA_NAME).map((run) => ({ kind: "verify" as const, run })),
+    // A verifier's run under v1 (before 1.1.2) reads as v2 with no corrections.
+    ...[VERIFY_SCHEMA_NAME_V1, VERIFY_SCHEMA_NAME].flatMap((name) => agentRuns(evidence, name)).map((run) => ({ kind: "verify" as const, run })),
   ].sort((a, b) => at(a.run) - at(b.run));
   const findings: Finding[] = [];
   const passes: PassRecord[] = [];
@@ -818,7 +894,7 @@ export function aspectFlow(evidence: readonly EvidenceRecord[], spec: AspectSpec
       verifyRetries += 1;
       continue;
     }
-    const read = ev.run.contract?.status === "invalid" ? { problems: ev.run.contract.problems.slice(0, 20) } : parseVerification(ev.run.output, new Set(awaiting));
+    const read = ev.run.contract?.status === "invalid" ? { problems: ev.run.contract.problems.slice(0, 20) } : parseVerification(ev.run.output, new Set(awaiting), new Map([...findings, ...priors].filter((f) => awaiting.includes(f.id)).map((f) => [f.id, f.content] as const)));
     if ("problems" in read) {
       verifyRetries += 1;
       verifyFeedback = read.problems;

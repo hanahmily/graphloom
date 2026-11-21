@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 import type { EvidenceRecord, GraphDefinition, GraphDecision, ValidationInput, ValidationResult } from "@graphloom/sdk";
 import type { CallContext, HostResult, PluginHost } from "@graphloom/plugin-host";
-import { replayRun } from "./replay.js";
+import { replayAdmission, replayRun } from "./replay.js";
 import type { DurableRunState } from "./state.js";
 import type { IntakePin } from "./intake.js";
 
@@ -119,6 +119,23 @@ describe("replayRun", () => {
     });
     const report = await replayRun(state, host);
     expect(report.requirements).toEqual([{ requirementId: "req", hadReceipt: false, now: { status: "passed", reason: "found by stage" } }]);
+  });
+
+  it("gives each validator the recorded run's receipts and admitted bindings (§5.4)", async () => {
+    const recorded: DurableRunState["receipts"][number] = {
+      id: "rcpt-1",
+      stageId: "review",
+      requirementId: "req",
+      validatorBinding: { requirementId: "req", validatorId: "v", version: "1" },
+      candidateFingerprint: "fp",
+      evidenceRefs: ["ev-1"],
+      valid: false,
+    };
+    const seen: ValidationInput[] = [];
+    const host = fakeHost({ definition, evaluateImpl: (input) => (seen.push(input), { status: "passed", reason: "ok" }) });
+    await replayRun(recordedState([misclassifiedReview], [recorded]), host);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ receipts: [recorded], validatorBindings: definition.defaultValidators });
   });
 
   it("leaves a record with an unrecognized or missing contract untouched", async () => {
@@ -239,5 +256,118 @@ describe("replayRun", () => {
     const report = await replayRun(state, host);
     expect(report.nextDecision).toMatchObject({ error: expect.stringContaining("boom") });
     expect(report.requirements).toEqual([]);
+  });
+});
+
+describe("replay over the graph (docs/design-graph-topology.md §7.2, §12 item 10)", () => {
+  /** Fix ⇄ Review with a supervisor-only Arbitrate that leaves to either. */
+  const topology: GraphDefinition = {
+    graphId: "test",
+    version: "0.2.0",
+    stages: [
+      { id: "fix", name: "Fix", requirementIds: ["req-fix"] },
+      { id: "review", name: "Review", requirementIds: ["req-review"] },
+      { id: "arb", name: "Arbitrate", requirementIds: ["req-arb"], entry: "supervisor", maxVisits: 2 },
+    ],
+    edges: [
+      { from: "fix", to: "review" },
+      { from: "review", to: "fix" },
+      { from: "arb", to: "fix" },
+      { from: "arb", to: "review" },
+    ],
+    start: "fix",
+    terminal: ["review"],
+    requirements: ["fix", "review", "arb"].map((id) => ({ id: `req-${id}`, statement: `${id} done`, evidenceSchema: "node-v1" })),
+    defaultValidators: ["fix", "review", "arb"].map((id) => ({ requirementId: `req-${id}`, validatorId: "v", version: "1" })),
+  };
+  /** The same two graph nodes as a chain (no edges). */
+  const chain: GraphDefinition = {
+    graphId: "test",
+    version: "0.2.0",
+    stages: topology.stages.slice(0, 2).map(({ id, name, requirementIds }) => ({ id, name, requirementIds })),
+    requirements: topology.requirements.slice(0, 2),
+    defaultValidators: topology.defaultValidators.slice(0, 2),
+  };
+
+  const accepted = (stageId: string, n: number): DurableRunState["receipts"][number] => ({
+    id: `rcpt-${n}`,
+    stageId,
+    requirementId: `req-${stageId}`,
+    validatorBinding: { requirementId: `req-${stageId}`, validatorId: "v", version: "1" },
+    candidateFingerprint: "fp",
+    evidenceRefs: [],
+    valid: true,
+    acceptedIdentity: {},
+  });
+
+  /** A recorded run on `pinned` whose live path is Fix → Review (both accepted), with Arbitrate's side visit open when `side`. */
+  function onPath(pinned: GraphDefinition, side = false): DurableRunState {
+    const visits: NonNullable<DurableRunState["visits"]> = [
+      { seq: 1, stageId: "fix", attempt: 1, entered: "start", generation: 1, operation: "intake" },
+      { seq: 2, stageId: "review", attempt: 1, entered: "edge", from: 1, generation: 1, operation: "dispatch" },
+      ...(side ? [{ seq: 3, stageId: "arb", attempt: 1, entered: "enter" as const, from: 2, generation: 1, operation: "enter" }] : []),
+    ];
+    return {
+      ...recordedState([], [accepted("fix", 1), accepted("review", 2)]),
+      definition: pinned,
+      current: side ? { stageId: "arb", attempt: 1 } : { stageId: "review", attempt: 1 },
+      path: [1, 2],
+      visits,
+      ...(side ? { sideVisit: 3, openAttempt: { arb: true } } : {}),
+    };
+  }
+
+  const act = (action: GraphDecision["action"]): GraphDecision => ({ reason: "next", action });
+  const dispatchFor = (stageId: string): GraphDecision["action"] => ({ type: "dispatch", job: { stageId, kind: "command", purpose: "diagnostic", readOnly: true, instruction: "work" } });
+
+  it("refuses a run whose pinned topology differs from the current describe(), naming the change", async () => {
+    const added: GraphDefinition = {
+      ...topology,
+      stages: [...topology.stages, { id: "fix2", name: "Fix 2", requirementIds: [] }],
+      edges: [...topology.edges!, { from: "fix", to: "fix2" }],
+    };
+    let asked = false;
+    const report = await replayRun(onPath(topology), fakeHost({ definition: added, advanceImpl: () => ((asked = true), act({ type: "observe", observe: {} })) }));
+    expect(report.nextDecision).toEqual({ error: "the run's pinned topology differs from the current plugin's describe(): node fix2 added, edge fix → fix2 added" });
+    expect(report.admission).toBeUndefined();
+    expect(asked).toBe(false);
+    const chained = await replayRun(onPath(chain), fakeHost({ definition: { ...chain, edges: [{ from: "fix", to: "review" }] } }));
+    expect(chained.nextDecision).toMatchObject({ error: expect.stringContaining("edges declared (the run walks an implicit chain)") });
+  });
+
+  it("judges a next decision from the recorded live path: a path node, a reentry along an edge, a complete stop", async () => {
+    const report = await replayRun(onPath(topology), fakeHost({ definition: topology, advanceImpl: () => act(dispatchFor("fix")) }));
+    expect(report.admission).toEqual({ admissible: true, move: "path node", detail: "fix is on the live path" });
+    expect(replayAdmission(onPath(topology), { type: "reenter", reenter: { stageId: "fix", reason: "again" } })).toMatchObject({
+      admissible: true,
+      move: "reentry",
+      detail: expect.stringContaining("fix from review; one correction"),
+    });
+    expect(replayAdmission(onPath(topology), { type: "stop", stop: { reason: "complete", blocker: "none" } })).toEqual({ admissible: true, move: "stop", detail: "complete on the live path fix → review" });
+    expect(replayAdmission(onPath(topology), { type: "enter", enter: { stageId: "arb", reason: "r" } })).toMatchObject({ admissible: false, precondition: "enter is the supervisor's" });
+  });
+
+  it("judges a forward move, and refuses a node no forward move reaches", () => {
+    // Only Fix is on the path: Review is a forward move along fix → review.
+    const atFix: DurableRunState = { ...onPath(topology), path: [1], visits: onPath(topology).visits!.slice(0, 1), current: { stageId: "fix", attempt: 1 } };
+    expect(replayAdmission(atFix, dispatchFor("review"))).toEqual({ admissible: true, move: "forward move", detail: "from fix to review" });
+    // A chain of three whose path holds only its first: the third is ahead of an unaccepted second.
+    const three: GraphDefinition = { ...chain, stages: [...chain.stages, { id: "ship", name: "Ship", requirementIds: [] }] };
+    const early: DurableRunState = { ...atFix, definition: three, receipts: [accepted("fix", 1)] };
+    expect(replayAdmission(early, dispatchFor("ship"))).toMatchObject({ admissible: false, precondition: "undeclared edge", detail: expect.stringContaining("tail fix, node ship") });
+    expect(replayAdmission({ ...early, receipts: [accepted("fix", 1), accepted("review", 2)] }, dispatchFor("ship"))).toEqual({
+      admissible: true,
+      move: "forward move",
+      detail: "from fix to review → ship, carrying review",
+    });
+  });
+
+  it("judges an open side visit: the node's own work is admitted; another node, a reentry and a complete stop are not", () => {
+    const open = onPath(topology, true);
+    expect(replayAdmission(open, dispatchFor("arb"))).toEqual({ admissible: true, move: "side visit", detail: "an action for the open side visit of arb" });
+    expect(replayAdmission(open, dispatchFor("fix"))).toMatchObject({ admissible: false, precondition: "supervisor-only node" });
+    expect(replayAdmission(open, { type: "reenter", reenter: { stageId: "fix", reason: "back" } })).toMatchObject({ admissible: false, precondition: "supervisor-only node" });
+    expect(replayAdmission(open, { type: "stop", stop: { reason: "complete", blocker: "none" } })).toMatchObject({ admissible: false, precondition: "supervisor-only node" });
+    expect(replayAdmission(open, { type: "stop", stop: { reason: "waiting for a ruling", blocker: "approval" } })).toEqual({ admissible: true, move: "stop", detail: "stop waiting for a ruling" });
   });
 });

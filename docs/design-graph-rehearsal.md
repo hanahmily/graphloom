@@ -725,6 +725,8 @@ interface RehearsalScenario {
   expect: {
     status: "succeeded" | "stopped";
     receipts?: string[];
+    /** The live path's node ids when the run ends, compared exactly (graph topology §9). */
+    path?: string[];
     maxAgentDispatches?: number;
     stopReason?: string;
     /** Recovery triggers this scenario means to reach, in order; any other recovery entry is a finding. */
@@ -868,10 +870,35 @@ boundary it exercises, not against B2/B3:
 | B2 | the seam guard resolved every harness to a stand-in; the capability probe found every adapter flag; no fidelity failure (§4.3) | a binary's `--help` could not be read |
 | B3 | every unscripted-failure agent job has `codingAgent.status: "completed"` with an `output`; every stand-in reply landed under the job that asked (§4.1) | — |
 | B4 | every record with `contract` is `valid` or `repaired`, and its `kind` equals the declared `evidenceKind` | — |
-| B5 | every stage that received a contract-valid result minted its receipt on the next validate | the stage's validators also need command or file evidence that was stubbed |
+| B5 | every stage that received a contract-valid result minted its receipt on the next validate, except a stage whose validation a wait for an operator approval holds back (below) | the stage's validators also need command or file evidence that was stubbed |
 | B6 | no `contract.problems` on a reference path; repairs are listed, not failed | — |
 | B7–B9 | recovery entered only with the triggers `expect.recovery` names, in order; no `plugin_*` trigger; the scripted supervisor was never asked for a decision it did not have | — |
 | B10 | max `dispatchesSinceReceipt[*].agent` ≤ `maxAgentDispatches`; `budgets.agentInvocations ≥ recoveryReserve` at the end unless the scenario drove the budget down on purpose; no unexpected `stalled` | — |
+
+A run that waits for an operator approval has not reached the validate that
+would mint the receipt, so B5 does not count what it holds back as stuck. The
+run waits for one when all of these hold, read from durable state with no
+plugin vocabulary:
+
+- the run is `stopped`, and the graph or supervisor classified the stop as
+  final (`stopClass.retryable: false`, for the current stop reason);
+- the graph declares an approval (`GraphDefinition.approvals`, core design
+  §17) whose `stageId` is the node the run stopped in (`current`) and that is
+  not `unavailable`;
+- the stop's reason or blocker names that approval's id as a whole token (the
+  `graphloom resume <run> --approve <id>` it tells the operator to run).
+
+The stages it holds back are the waiting node and, when the run waits inside
+the open side visit of a supervisor-only node
+([topology §5.2](design-graph-topology.md#52-operations): "a final stop that
+waits for an operator approval is how a node waits"), the node that visit was
+entered from, whose own validation follows the side visit. Their contract-valid
+results without a receipt pass B5 with a note naming the approval
+(`stage review: a contract-valid result awaits the operator's approval
+design-ruling (the run waits in arbitrate)`); any other stage's still fails it.
+A scenario that expects the wait (`expect.status: "stopped"` with the stop's
+reason) can therefore be `ready`, and `resume <run> --rehearsal --approve <id>`
+continues it.
 
 Verdict rules, in precedence order:
 
@@ -1134,6 +1161,24 @@ Decided 2026-10-04 (reverting an earlier decision from the same day):
     are invoked explicitly, by an operator or CI, against the fixture they
     were built and recorded for, which is precisely what §2's goals describe
     and what §6's verification items test. Nothing about them changes.
+
+Decided 2026-11-19, after issue-fix 0.17.0's `arbitrate-operator` scenario
+(a run that waits inside the supervisor-only Arbitrate node for the
+`design-ruling` approval) met its expectation and still got `not-ready`:
+
+- B5 no longer counts the results an operator-approval wait holds back as
+  results that never minted a receipt (§4.7). The rule is generic: a final
+  stop, an available approval the graph declares for the node the run stopped
+  in, and a stop reason or blocker that names it. Any other stage's
+  unreceipted result still fails B5. Regression tests: `evaluateRehearsal`'s
+  B5 cases in `packages/controller/src/rehearsal.test.ts`, and the testkit
+  topology fixture's `operator` scenario in
+  `apps/graphloom/test/topology-e2e.test.ts`.
+- `resume --rehearsal` continues the scripted supervisor at the scenario's
+  next unconsumed decision, counted from the run's recorded supervisor
+  episodes ([release §5.6](design-release.md#56-r3-as-implemented-ownership-and-moving-runs)), instead of from its first. The
+  resumed `arbitrate-operator` run used to replay its `enter` and pass only
+  because the controller rejected it; it now continues with the leave.
 
 Not borrowed from that earlier orchestrator, on purpose: its edge-coverage generation builds one
 case per branch from a workflow's declarative predicates and gates on 100%.

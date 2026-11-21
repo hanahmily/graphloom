@@ -255,7 +255,8 @@ export function issueFixAgents(options: Omit<ScriptedAgentsOptions, "reply" | "e
           { path: "pkg/timestamp/scheduler.go", line: 7, text: "if running {" },
           { path: "pkg/timestamp/scheduler.go", line: 8, text: 'return "running"' },
         ];
-        return done(job, { verdicts: [{ finding: "F1", verdict: "refuted", reason: "Status returns running before it checks the limit.", quotes }] });
+        // finding-verification-v2 (issue-fix 0.17.0): the claim turns on the code, not the design.
+        return done(job, { verdicts: [{ finding: "F1", verdict: "refuted", reason: "Status returns running before it checks the limit.", quotes, designLevel: false, designBasis: "", ruling: "" }] });
       }
       if (job.purpose === "work") {
         const at = (p: string) => path.join(ctx.worktreePath, p);

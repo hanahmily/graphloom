@@ -692,7 +692,7 @@ function flagValue(args: string[], name: string): string | undefined {
 }
 
 function printHelp(): void {
-  console.log(HUB_USAGE);
+  console.log(HUB_USAGE.join("\n"));
   console.log(`graphloom — TypeScript harness
 
 Usage:
@@ -844,9 +844,11 @@ state directory. --force also discards uncommitted changes and branch commits.
 Resume --update-plugin pins the installed plugin bundle when its bytes changed
 since the run started, including a new version of the same graph (the run's
 active version moves with it). It is refused unless the graph keeps its id, stages,
-requirements, validator bindings and private-state schema. Each accepted receipt
-is rechecked with the updated validators on the evidence it was accepted on; the
-first that no longer passes sends the run back to its stage.
+topology (nodes, edges, start, terminal, each node's entry and visit cap),
+sdkProtocol level, requirements, validator bindings and private-state schema.
+Each accepted receipt is rechecked with the updated validators on the evidence it
+was accepted on, along the live path; the first that no longer passes sends the
+run back to its node, and one off the live path is invalidated in place.
 
 Resume --update-executors pins the installed executors whose bytes changed since
 the run started (a GraphLoom upgrade that touches a built-in executor, say),
@@ -873,10 +875,18 @@ included), an unknown state format, a missing migrator, an unsettled repair, a
 run that is not stopped, a plugin protocol change without --update-plugin, and
 an executor re-pin --update-executors would refuse.
 
-Rehearse --stop-at <stage> keeps the rehearsal's run stopped once that stage is
-complete and prints how to continue it; resume <stateDir> --rehearsal continues
-a kept rehearsal run on its own stand-ins (with --upgrade, on this version).
-Both are hooks for the release upgrade matrix (docs/design-release.md §6).
+Rehearse --stop-at <stage> keeps the rehearsal's run stopped once that stage (a
+node, by id or name) is accepted on the live path and prints how to continue it;
+a supervisor-only node is refused. Resume <stateDir> --rehearsal continues a kept
+rehearsal run on its own stand-ins (with --upgrade, on this version). Both are
+hooks for the release upgrade matrix (docs/design-release.md §6).
+
+For a graph that declares nodes and edges (docs/design-graph-topology.md §8),
+inspect shows the topology, the live path and its tail, every visit and an open
+side visit of a supervisor-only node; stats adds each node's visits; wait
+--until progress and watch add the path and two moves, the supervisor entering
+a supervisor-only node (node_entered_by_supervisor) and that node settling
+(node_settled). A graph without edges is a chain and reads as before.
 
 Resume --reconciled acknowledges a job a harness usage limit cut off after possible
 effects whose agent session could not be continued. With a supervisor, a plain

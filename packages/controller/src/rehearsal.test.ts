@@ -192,6 +192,125 @@ describe("evaluateRehearsal", () => {
     expect(report.blocker?.boundary).toBe("B2");
   });
 
+  it("checks expect.path against the live path's node ids, exactly (docs/design-graph-topology.md §9)", () => {
+    const twoNodes: GraphDefinition = {
+      ...definition,
+      stages: [
+        { id: "fix", name: "Fix", requirementIds: [] },
+        { id: "review", name: "Review", requirementIds: ["req"] },
+      ],
+      edges: [
+        { from: "fix", to: "review" },
+        { from: "review", to: "fix" },
+      ],
+    };
+    const visits = [
+      { seq: 1, stageId: "fix", attempt: 2, entered: "reenter" as const, generation: 2, operation: "reenter" },
+      { seq: 2, stageId: "review", attempt: 2, entered: "edge" as const, from: 1, generation: 2, operation: "dispatch" },
+    ];
+    const state = baseState({ status: "succeeded", definition: twoNodes, path: [1, 2], visits });
+    const at = (path: string[]) => evaluateRehearsal(state, { ...scenario, expect: { status: "succeeded", path } }, { B2: { status: "passed", notes: [] } }).convergence;
+    expect(at(["fix", "review"])).toMatchObject({ met: true, actual: { path: ["fix", "review"] } });
+    expect(at(["fix"]).met).toBe(false);
+    expect(at(["review", "fix"]).met).toBe(false);
+    // Without expect.path, the path is reported and not judged.
+    expect(evaluateRehearsal(state, scenario, {}).convergence.actual.path).toEqual(["fix", "review"]);
+  });
+
+  describe("B5 for a run that waits for an operator approval (core design §17)", () => {
+    // Check ⇄ build with a supervisor-only arbitrate, whose declared approval the run waits for inside the side visit.
+    const waitingGraph: GraphDefinition = {
+      ...definition,
+      stages: [
+        { id: "build", name: "Build", requirementIds: [] },
+        { id: "review", name: "Review", requirementIds: ["req"] },
+        { id: "arbitrate", name: "Arbitrate", requirementIds: ["ruled"], entry: "supervisor", maxVisits: 2 },
+      ],
+      requirements: [...definition.requirements, { id: "ruled", statement: "ruled", evidenceSchema: "ruling-v1" }],
+      defaultValidators: [...definition.defaultValidators, { requirementId: "ruled", validatorId: "ruled", version: "1" }],
+      edges: [
+        { from: "build", to: "review" },
+        { from: "review", to: "build" },
+        { from: "arbitrate", to: "review" },
+      ],
+      approvals: [{ id: "ruling", stageId: "arbitrate", inputs: [{ name: "ruling" }] }],
+    };
+    const visits = [
+      { seq: 1, stageId: "build", attempt: 1, entered: "start" as const, generation: 1, operation: "intake" },
+      { seq: 2, stageId: "review", attempt: 1, entered: "edge" as const, from: 1, generation: 1, operation: "dispatch" },
+      { seq: 3, stageId: "arbitrate", attempt: 1, entered: "enter" as const, from: 2, generation: 1, operation: "enter" },
+    ];
+    const rulingEvidence: EvidenceRecord = {
+      ref: "ev-2",
+      kind: "review",
+      generation: 1,
+      resultSchema: "ruling-v1",
+      contract: { name: "ruling-v1", status: "valid", problems: [] },
+      payload: { ruling: "undecidable", producer: { stageId: "arbitrate", purpose: "review", executorId: "graphloom.agent/run" } },
+    };
+    const waiting = (overrides: Partial<DurableRunState> = {}, omit: Array<keyof DurableRunState> = []) => {
+      const state = baseState({
+        status: "stopped",
+        definition: waitingGraph,
+        validatorBindings: waitingGraph.defaultValidators,
+        current: { stageId: "arbitrate", attempt: 1 },
+        path: [1, 2],
+        visits,
+        sideVisit: 3,
+        evidence: [reviewEvidence("valid"), rulingEvidence],
+        receipts: [],
+        stopReason: "ruling needs the operator",
+        blocker: "The arbiter could not decide.\nRule on it: graphloom resume r1 --approve ruling --input ruling=…",
+        stopClass: { by: "graph", retryable: false, reason: "ruling needs the operator" },
+        recoveryTrigger: { code: "supervise", message: "disputed" },
+        ...overrides,
+      });
+      for (const key of omit) delete state[key];
+      return state;
+    };
+    const expected: RehearsalScenario = { results: scenario.results, expect: { status: "stopped", stopReason: "ruling needs the operator", path: ["build", "review"], recovery: ["supervise"] } };
+    const passedB2 = { B2: { status: "passed" as const, notes: [] } };
+
+    it("counts the waiting node's results, and those of the node its side visit was entered from, as pending, so the scenario is ready", () => {
+      const report = evaluateRehearsal(waiting(), expected, passedB2);
+      expect(report.boundaries.B5).toEqual({
+        status: "passed",
+        notes: [
+          "stage review: a contract-valid result awaits the operator's approval ruling (the run waits in arbitrate)",
+          "stage arbitrate: a contract-valid result awaits the operator's approval ruling (the run waits in arbitrate)",
+        ],
+      });
+      expect(report.convergence.met).toBe(true);
+      expect(report.verdict).toBe("ready");
+    });
+
+    it("still fails B5 for a result of a node the wait does not hold back", () => {
+      const built: EvidenceRecord = { ...rulingEvidence, ref: "ev-3", resultSchema: "review-verdict-v1", contract: { name: "review-verdict-v1", status: "valid", problems: [] }, payload: { verdict: "approved", summary: "ok", producer: { stageId: "build", purpose: "work", executorId: "graphloom.agent/run" } } };
+      const report = evaluateRehearsal(waiting({ evidence: [reviewEvidence("valid"), rulingEvidence, built] }), expected, passedB2);
+      expect(report.boundaries.B5).toMatchObject({ status: "failed", notes: ["stage build: a contract-valid result never minted a receipt"] });
+      expect(report.verdict).toBe("not-ready");
+    });
+
+    it("is not a wait when the stop is retryable, names no declared approval, names one for another node, or one that is unavailable", () => {
+      const failedB5 = (state: DurableRunState) => evaluateRehearsal(state, expected, passedB2).boundaries.B5.status;
+      expect(failedB5(waiting())).toBe("passed");
+      expect(failedB5(waiting({ stopClass: { by: "graph", retryable: true, reason: "ruling needs the operator" } }))).toBe("failed");
+      expect(failedB5(waiting({}, ["stopClass"]))).toBe("failed");
+      // A classification of an earlier stop reason does not classify this one.
+      expect(failedB5(waiting({ stopClass: { by: "graph", retryable: false, reason: "an earlier stop" } }))).toBe("failed");
+      expect(failedB5(waiting({ stopReason: "stuck", blocker: "the arbiter could not decide; graphloom resume r1 --approve rulings" }))).toBe("failed");
+      expect(failedB5(waiting({ definition: { ...waitingGraph, approvals: [{ id: "ruling", stageId: "review" }] } }))).toBe("failed");
+      expect(failedB5(waiting({ definition: { ...waitingGraph, approvals: [{ id: "ruling", stageId: "arbitrate", unavailable: "not in this version" }] } }))).toBe("failed");
+      expect(failedB5(waiting({ definition: { ...waitingGraph, approvals: [] } }))).toBe("failed");
+    });
+
+    it("holds back only the waiting node when it waits on the live path, not in a side visit", () => {
+      const onPath = waiting({ current: { stageId: "review", attempt: 1 }, definition: { ...waitingGraph, approvals: [{ id: "ruling", stageId: "review" }] } }, ["sideVisit"]);
+      const B5 = evaluateRehearsal(onPath, expected, passedB2).boundaries.B5;
+      expect(B5).toMatchObject({ status: "failed", notes: ["stage arbitrate: a contract-valid result never minted a receipt"] });
+    });
+  });
+
   it("always lists what no rehearsal checks, alongside what the caller substituted", () => {
     const state = baseState({ status: "succeeded" });
     const report = evaluateRehearsal(state, scenario, {}, { substituted: ["pi: rehearsal stand-in"] });

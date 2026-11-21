@@ -520,11 +520,11 @@ Live path: Fix #3 -> Review #3
 Current work: Review #3 · side visit: none · hub occupied: 2/3
 ```
 
-The example uses the issue-fix topology designed in the ongoing topology work.
+The example uses the issue-fix topology described in the graph topology design.
 Production consumes the pinned definition and the SDK's normalized topology,
 including directed cycles, live path and supervisor-only nodes. The reference
-SDK work is on `main` at `245283c`, ahead of this monitor worktree; see the
-[panel design](design-monitor-panels.md) for pinned source links. An absent newer
+contracts are in the [topology design](design-graph-topology.md) and
+[panel design](design-monitor-panels.md). An absent newer
 runtime observation is unknown, not an invented visit. Keep declared edges,
 observed traversal and active jobs distinct. Rendering must retain multiple
 incoming edges and return directions. A labelled legacy stage view is only a

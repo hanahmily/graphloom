@@ -68,9 +68,12 @@ export type {
   BwrapBind,
   BwrapConfinement,
   CheckoutSpec,
+  CheckoutWrite,
   ConfinementSpec,
   CorrectionHandoff,
   DockerConfinement,
+  EdgeDefinition,
+  EnterSpec,
   EnvironmentCommand,
   EnvironmentDeclaration,
   EvidenceRecord,
@@ -85,6 +88,7 @@ export type {
   SupervisorPreference,
   GraphDefinition,
   GraphPlugin,
+  GraphTopology,
   JobId,
   JobKind,
   JobPurpose,
@@ -109,6 +113,7 @@ export type {
   SuperviseSpec,
   SupervisorRepeatEntry,
   TaskInputs,
+  TopologyView,
   ValidateSpec,
   ValidationInput,
   ValidationResult,
@@ -170,6 +175,7 @@ export { assertConfinement, confinementProblem, READONLY_SANDBOX_ENV, SCRATCH_MO
 export {
   activateRepair,
   dispatch,
+  enter,
   observe,
   qualifyRepair,
   reenter,
@@ -218,9 +224,24 @@ export { executorFailureOf, failuresSinceResume, isStaleFailure, type ExecutorFa
 
 export { createScriptedGraph, type ScriptedAdvance, type ScriptedGraphOptions } from "./scripted.js";
 
+export { checkoutWriteDigest, checkoutWritePathProblem, checkoutWriteProblem, MAX_CHECKOUT_WRITE_BYTES, MAX_CHECKOUT_WRITE_FILES } from "./checkout-write.js";
+
 export { writeScopeAllows, writeScopeExceptions, writeScopeExcludes, writeScopeIncludes, writeScopeProblem } from "./scope.js";
 
 export { stableHash, stableJson } from "./stable-hash.js";
+
+export {
+  isSupervisorOnly,
+  MAX_GRAPH_EDGES,
+  MAX_GRAPH_NODES,
+  MAX_NODE_VISITS,
+  normalizeTopology,
+  reachableFrom,
+  reachingTo,
+  successors,
+  topologyProblem,
+  type TopologySource,
+} from "./topology.js";
 
 export {
   DEFAULT_EXTERNALIZE_THRESHOLD,

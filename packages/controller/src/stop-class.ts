@@ -14,6 +14,8 @@
  */
 import type { ResumeView } from "@graphloom/sdk";
 import { NO_PROGRESS_STOP_REASON, STEP_LIMIT_STOP_REASON, type DurableRunState, type StopMark } from "./state.js";
+import { SUPERVISOR_ONLY_NODE, UNDECLARED_EDGE } from "./traversal.js";
+import { ENTER_IS_SUPERVISORS } from "./supervisor-node.js";
 
 export type StopSource = "graph" | "supervisor" | "controller";
 
@@ -43,6 +45,11 @@ export const CONTROLLER_STOP_CLASSES: readonly ControllerStopClass[] = [
     kind: "budget exhausted",
   },
   { reason: /^unsupported action in /, retryable: false, kind: "plugin defect" },
+  // A graph that acts for a node no declared edge reaches (docs/design-graph-topology.md §4.3, §4.4).
+  { reason: UNDECLARED_EDGE, retryable: false, kind: "plugin defect" },
+  // A graph that acts for another node, reenters or completes inside a side visit, or decides `enter` (§5.2).
+  { reason: SUPERVISOR_ONLY_NODE, retryable: false, kind: "plugin defect" },
+  { reason: ENTER_IS_SUPERVISORS, retryable: false, kind: "plugin defect" },
   // Retryable.
   { reason: /^harness quota (?:exhausted until |hit after possible effects)/, retryable: true, kind: "harness quota" },
   { reason: /^job failed: /, retryable: true, kind: "job/executor failure" },

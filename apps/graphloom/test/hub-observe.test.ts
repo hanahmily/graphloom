@@ -6,7 +6,7 @@ import os from "node:os";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { loadRunState, type DurableRunState } from "@graphloom/controller";
+import { livePath, loadRunState, nodeAccepted, type DurableRunState, type VisitRecord } from "@graphloom/controller";
 import type { HubStatus, HubSubmission } from "@graphloom/sdk";
 import { observeOwnedRun, snapshotOf, withHubSnapshot } from "../src/hub-observe.js";
 
@@ -24,6 +24,9 @@ function submission(): HubSubmission {
   };
 }
 function hub(item: HubSubmission): HubStatus { return { hubId: "hub-1", maxConcurrentRuns: 3, occupiedSlots: 2, submissions: [item] }; }
+function visit(seq: number, stageId: string, attempt: number, entered: VisitRecord["entered"] = "edge"): VisitRecord {
+  return { seq, stageId, attempt, entered, generation: 0, operation: "test-fixture" };
+}
 
 describe("owning-runtime monitoring projection", () => {
   it("keeps a terminal execution observation when newer topology presentation cannot be projected", async () => {
@@ -84,40 +87,65 @@ describe("owning-runtime monitoring projection", () => {
     expect(snapshot.sources).toContainEqual(expect.objectContaining({ id: "live-output", status: "unavailable", observedAt: null }));
   });
 
-  it("keeps old topology traversal unknown and unavailable legacy session references absent", async () => {
+  it("labels the owning controller's derived legacy path without inventing recorded visit history", async () => {
     const run = await state();
     const snapshot = snapshotOf(run, observedAt);
-    expect(snapshot.topology).toMatchObject({ source: "legacy" });
-    expect(snapshot.topology?.path).toBeUndefined();
+    expect(snapshot.topology).toMatchObject({ source: "implicit" });
+    expect(snapshot.topology?.edges.map(edge => [edge.from, edge.to])).toEqual([["fix", "review"], ["review", "fix"]]);
+    expect(snapshot.topology?.path).toEqual(livePath(run).map(({ stageId, attempt }) => ({ stageId, attempt })));
     expect(snapshot.topology?.sideVisit).toBeUndefined();
-    expect(snapshot.stages?.every(stage => stage.path === "unknown")).toBe(true);
+    expect(snapshot.stages?.every(stage => stage.visits === undefined)).toBe(true);
+    expect(snapshot.sources.find(source => source.id === "traversal")).toMatchObject({ status: "available", detail: expect.stringContaining("derived by the owning controller") });
     expect(snapshot.jobs?.every(job => job.sessions?.every(ref => typeof ref === "string" && ref.length > 0) ?? true)).toBe(true);
   });
 
-  it("projects newer structural path/visits without confusing supporting current work with the tail", async () => {
+  it("projects recorded path/visits without confusing supporting current work with the tail", async () => {
     const run = await state();
-    Object.assign(run.definition, { edges: [{ from: "fix", to: "review" }, { from: "review", to: "fix" }], start: "fix", terminal: ["review"] });
-    Object.assign(run, {
-      current: { stageId: "fix", attempt: 4 },
-      visits: [{ seq: 1, stageId: "fix", attempt: 3 }, { seq: 2, stageId: "review", attempt: 3 }, { seq: 3, stageId: "fix", attempt: 4 }, { seq: 4, stageId: "review", attempt: 4 }],
-      path: [3, 4],
-    });
+    run.definition = { ...run.definition, edges: [{ from: "fix", to: "review" }, { from: "review", to: "fix" }], start: "fix", terminal: ["review"] };
+    run.current = { stageId: "fix", attempt: 4 };
+    run.visits = [{ ...visit(1, "fix", 3, "start"), ended: "replaced by reentry of fix" }, { ...visit(2, "review", 3), ended: "replaced by reentry of fix" }, visit(3, "fix", 4, "reenter"), visit(4, "review", 4)];
+    run.path = [3, 4];
     const snapshot = snapshotOf(run, observedAt);
     expect(snapshot.topology).toMatchObject({ source: "declared", current: "fix", path: [{ stageId: "fix", visit: 3, attempt: 4 }, { stageId: "review", visit: 4, attempt: 4 }], sideVisit: null });
     expect(snapshot.stages?.find(stage => stage.id === "fix")).toMatchObject({ visits: 2, path: "on-path" });
-    Object.assign(run, { path: [3], sideVisit: 4 });
-    const side = snapshotOf(run, observedAt);
-    expect(side.topology?.path).toEqual([{ stageId: "fix", visit: 3, attempt: 4 }]);
-    expect(side.topology?.sideVisit).toMatchObject({ stageId: "review", visit: 4 });
-    expect(side.stages?.find(stage => stage.id === "review")?.path).toBe("off-path");
+    expect(snapshot.stages?.find(stage => stage.id === "review")).toMatchObject({ accepted: true, path: "on-path" });
+  });
+
+  it("matches path acceptance after reentry and keeps supervisor side visits separate from graph branches", async () => {
+    const run = await state();
+    const requirement = run.definition.requirements[0]!;
+    run.definition = { ...run.definition,
+      stages: [...run.definition.stages, { id: "branch", name: "Unused branch", requirementIds: ["branch-check"] }, { id: "repair", name: "Repair", entry: "supervisor", maxVisits: 3, requirementIds: ["repair-check"] }],
+      requirements: [...run.definition.requirements, { ...requirement, id: "branch-check" }, { ...requirement, id: "repair-check" }],
+      edges: [{ from: "fix", to: "review" }, { from: "fix", to: "branch" }, { from: "branch", to: "review" }, { from: "review", to: "fix" }, { from: "repair", to: "fix" }],
+      start: "fix", terminal: ["review"],
+    };
+    const receipt = run.receipts.find(item => item.valid)!;
+    run.receipts.push({ ...receipt, id: "branch-receipt", stageId: "branch", requirementId: "branch-check" }, { ...receipt, id: "repair-receipt", stageId: "repair", requirementId: "repair-check" });
+    run.status = "running";
+    run.current = { stageId: "repair", attempt: 1 };
+    run.visits = [{ ...visit(1, "fix", 1, "start"), ended: "replaced by reentry of fix" }, { ...visit(2, "review", 1), ended: "replaced by reentry of fix" }, visit(3, "fix", 2, "reenter"), { ...visit(4, "repair", 1, "enter"), from: 3 }];
+    run.path = [3]; run.sideVisit = 4; run.openAttempt = { fix: true };
+    const snapshot = snapshotOf(run, observedAt);
+    expect(snapshot.topology).toMatchObject({ source: "declared", path: [{ stageId: "fix", visit: 3, attempt: 2 }], sideVisit: { stageId: "repair", visit: 4 }, current: "repair" });
+    expect(snapshot.topology?.edges.map(edge => ({ from: edge.from, to: edge.to }))).toEqual(run.definition.edges);
+    expect(snapshot.topology?.edges.some(edge => edge.to === "repair")).toBe(false);
+    expect(snapshot.stages?.find(stage => stage.id === "fix")).toMatchObject({ accepted: false, status: "unaccepted", path: "on-path", visits: 2 });
+    expect(nodeAccepted(run, "branch")).toBe(true);
+    expect(snapshot.stages?.find(stage => stage.id === "branch")).toMatchObject({ accepted: false, status: "off-path", path: "off-path", visits: 0 });
+    expect(snapshot.stages?.find(stage => stage.id === "review")).toMatchObject({ accepted: false, status: "off-path", path: "off-path" });
+    expect(snapshot.stages?.find(stage => stage.id === "repair")).toMatchObject({ accepted: false, status: "running", path: "off-path", entry: "supervisor", visits: 1, maxVisits: 3 });
+    run.openAttempt = {};
+    expect(snapshotOf(run, observedAt).stages?.find(stage => stage.id === "fix")?.accepted).toBe(true);
   });
 
   it("leaves malformed newer traversal unknown instead of filtering away missing visits", async () => {
     const run = await state();
-    Object.assign(run, { path: [1, 99], visits: [{ seq: 1, stageId: "fix", attempt: 1 }] });
+    run.path = [1, 99]; run.visits = [visit(1, "fix", 1, "start")];
     const snapshot = snapshotOf(run, observedAt);
     expect(snapshot.topology?.path).toBeUndefined();
-    expect(snapshot.stages?.every(stage => stage.path === "unknown")).toBe(true);
+    expect(snapshot.stages?.every(stage => stage.path === "unknown" && stage.accepted === null)).toBe(true);
+    expect(snapshot.sources.find(source => source.id === "traversal")?.status).toBe("unavailable");
   });
 });
 

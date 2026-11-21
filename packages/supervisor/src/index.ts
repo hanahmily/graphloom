@@ -163,9 +163,12 @@ export {
 
 export {
   createScriptedSupervisor,
+  scriptedDecisionsConsumed,
+  SCRIPTED_SUPERVISOR_EXHAUSTED,
   isModelSwitchRequest,
   type AdmissionCheck,
   type AdmissionFacts,
+  type SupervisorNodeView,
   type SupervisorAdmission,
   type SupervisorRejection,
   type CandidatePatchRequest,

@@ -22,6 +22,9 @@ export {
   MAX_TASK_CONFIG_BYTES,
   resolveUnderBase,
   IntakeError,
+  SDK_PROTOCOLS,
+  sdkProtocolProblem,
+  TOPOLOGY_SDK_PROTOCOL,
   admitValidation,
   freshEvidence,
   toRunView,
@@ -82,7 +85,8 @@ export { harnessOfSessionRef } from "./agent-sessions.js";
 export { readManagedBinding, managedObservation, observeContinuation, reconcileManagedRun, assertManagedRunner, releaseManagedRun, type ManagedRunBinding, type ManagedRunGrant } from "./managed.js";
 export type { AgentSessionRecord } from "./state.js";
 export { TIMEOUT_CONTINUATION_NOTE } from "./agent-sessions.js";
-export type { InstallRecord, InstallTransitionRecord, StateMigrationRecord } from "./state.js";
+export type { InstallRecord, InstallTransitionRecord, StateMigrationRecord, VisitEntry, VisitRecord } from "./state.js";
+export { livePath, nodeAccepted, nodeComplete, runTopology, topologyView, withPath } from "./traversal.js";
 export {
   CURRENT_STATE_FORMAT,
   STATE_FORMATS,

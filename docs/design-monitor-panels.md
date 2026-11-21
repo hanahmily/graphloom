@@ -11,12 +11,10 @@ text/ANSI/JSON/Markdown rendering, KaTeX parsing with trust disabled, quantitati
 charts, complex ELK routing and adjacency fallback. Actual HAPI assistant/tool/
 notification surfaces must be qualified separately; `auto` is plain by default.
 
-The topology target is the work already under implementation on `main`, not the
-older SDK in this monitor worktree. Reviewed at `245283cd7f91dae44379a8f4747e2ca5ae1af1fb`:
-[topology design](https://github.com/hanahmily/graphloom/blob/245283cd7f91dae44379a8f4747e2ca5ae1af1fb/docs/design-graph-topology.md)
-and [SDK contracts](https://github.com/hanahmily/graphloom/blob/245283cd7f91dae44379a8f4747e2ca5ae1af1fb/packages/sdk/src/types.ts).
-SDK types and normalization are present there; traversal integration is separate
-ongoing work. This document does not claim that the full engine has shipped.
+The monitor consumes the SDK normalization and controller traversal described in
+the [topology design](design-graph-topology.md). Declared edges, the live path,
+supervisor-only side visits and path acceptance come from the owning runtime.
+Older observations retain explicit capability and history limits.
 
 ## 1. Outcome
 
@@ -81,7 +79,7 @@ selected role's context label. It must not become a task-completion percentage.
 Similarly, its scope check mark is not something GraphLoom should infer merely
 from a successful process exit or an agent's statement.
 
-The monitor targets the complex topology under implementation. A branching graph
+The monitor supports the runtime's directed topology. A branching graph
 does not by itself mean simultaneous execution: node relationships and actual
 running jobs are separate facts. The hub's limit still controls parallel runs;
 within-run activity comes from the owning runtime rather than the diagram shape.
@@ -438,7 +436,7 @@ still exists.
 
 ## 7. Implementation and verification order
 
-1. Build the common frame against the topology SDK already under implementation,
+1. Build the common frame against the topology SDK,
    plus overview, stages and usage projections. Implement JSON and plain
    text/Markdown, with explicit capability gaps for older owning runtimes. This
    baseline must work independently of a TUI, KaTeX or MCP host.
@@ -483,7 +481,7 @@ Current evidence is deliberately limited:
 | Item | Status |
 | --- | --- |
 | Hub, managed execution contract and production panel module | Implemented with behavior tests; deployment qualification outstanding |
-| Complex topology SDK | Reviewed pinned work on `main`; traversal integration remains ongoing |
+| Complex topology SDK | Integrated owning SDK normalization and controller path acceptance; recorded visits and supervisor side visits projected, legacy-derived paths labelled |
 | Eight-panel prototype | Fictional fixtures, four run states, hand-placed graph; HTML/plain/ANSI review artifact |
 | KaTeX renderer | Eight-panel summaries with complete plain details; trust-disabled parser tests and bounded fallback |
 | Deployed HAPI profile and live notifications | Not end-to-end qualified |

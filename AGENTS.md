@@ -98,9 +98,10 @@ smoke tests with no `node` on `PATH`); it publishes nothing.
   run can finish or a hard blocker/budget remains. Do not stop early for a single
   failure. The controller can invoke it without a plugin repair branch and admits
   its decisions without veto.
-- The supervisor may repair any failing plugin implementation, but the complete
-  step set, identities, names, order, and required outcomes are fixed for a run.
-  Repair jobs and retries are executions within existing steps, not new steps.
+- The supervisor may repair any failing plugin implementation, but the graph's
+  nodes, edges, identities, names, start and terminal nodes, and required
+  outcomes are fixed for a run ([graph topology](docs/design-graph-topology.md)).
+  Repair jobs and retries are executions within existing nodes, not new nodes.
   Code and validator changes use the qualified repair procedure in the core design.
   Each qualification forks an immutable snapshot of the base plugin version into
   its own candidate tree so concurrent repairs cannot clobber each other or the

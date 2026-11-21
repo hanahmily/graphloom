@@ -2,6 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import type { GraphRehearsal, RehearsalExpectation, RehearsalReply, RehearsalScenario } from "./rehearsal.js";
+import { topologyProblem } from "./topology.js";
 import { GRAPH_BUDGET_KEYS, PROTOCOL_VERSION, SUPERVISOR_HARNESSES, type GraphAction, type GraphDecision, type GraphDefinition, type RunView, type ValidationInput, type ValidationResult, type WireRequest, type WireResponse } from "./types.js";
 
 /**
@@ -132,7 +133,33 @@ export function assertValidationInput(value: unknown): ValidationInput {
   if (obj["request"] !== undefined && typeof obj["request"] !== "string") {
     throw new WireValidationError("malformed", "request must be a string");
   }
+  if (obj["receipts"] !== undefined) {
+    requireArray(obj, "receipts").forEach((raw, i) => assertReceipt(raw, `receipts[${i}]`));
+  }
+  if (obj["validatorBindings"] !== undefined) {
+    requireArray(obj, "validatorBindings").forEach((raw, i) => assertValidatorBinding(raw, `validatorBindings[${i}]`));
+  }
   return obj as unknown as ValidationInput;
+}
+
+/** A receipt as a validator reads it: its node, requirement, binding, evidence and validity. */
+function assertReceipt(value: unknown, label: string): void {
+  const r = asObject(value, label);
+  for (const key of ["id", "stageId", "requirementId", "candidateFingerprint"]) {
+    if (typeof r[key] !== "string") throw new WireValidationError("malformed", `${label}.${key} must be a string`);
+  }
+  assertValidatorBinding(r["validatorBinding"], `${label}.validatorBinding`);
+  if (!Array.isArray(r["evidenceRefs"]) || r["evidenceRefs"].some((ref) => typeof ref !== "string")) {
+    throw new WireValidationError("malformed", `${label}.evidenceRefs must be an array of strings`);
+  }
+  if (typeof r["valid"] !== "boolean") throw new WireValidationError("malformed", `${label}.valid must be boolean`);
+}
+
+function assertValidatorBinding(value: unknown, label: string): void {
+  const b = asObject(value, label);
+  for (const key of ["requirementId", "validatorId", "version"]) {
+    if (typeof b[key] !== "string" || b[key] === "") throw new WireValidationError("malformed", `${label}.${key} must be a non-empty string`);
+  }
 }
 
 export function assertValidationResult(value: unknown): ValidationResult {
@@ -219,6 +246,9 @@ function assertRehearsalExpectation(value: unknown, label: string): RehearsalExp
   if (!REHEARSAL_STATUSES.has(status)) throw new WireValidationError("malformed", `${label}.status must be one of ${[...REHEARSAL_STATUSES].join(", ")}`);
   if (obj["receipts"] !== undefined) requireArray(obj, "receipts");
   if (obj["recovery"] !== undefined) requireArray(obj, "recovery");
+  if (obj["path"] !== undefined && !requireArray(obj, "path").every((id) => typeof id === "string" && id !== "")) {
+    throw new WireValidationError("malformed", `${label}.path must list node ids`);
+  }
   return obj as unknown as RehearsalExpectation;
 }
 
@@ -232,18 +262,27 @@ export function assertGraphDefinition(value: unknown): GraphDefinition {
   if (stages.length === 0) {
     throw new WireValidationError("malformed", "definition.stages must be non-empty");
   }
-  for (const stage of stages) {
+  stages.forEach((stage, i) => {
     const s = asObject(stage, "stage");
     requireString(s, "id");
     requireString(s, "name");
     requireArray(s, "requirementIds");
-  }
+    if (s["entry"] !== undefined && s["entry"] !== "graph" && s["entry"] !== "supervisor") {
+      throw new WireValidationError("malformed", `definition.stages[${i}].entry must be graph or supervisor`);
+    }
+    if (s["maxVisits"] !== undefined && typeof s["maxVisits"] !== "number") {
+      throw new WireValidationError("malformed", `definition.stages[${i}].maxVisits must be a number`);
+    }
+  });
   for (const req of requirements) {
     const r = asObject(req, "requirement");
     requireString(r, "id");
     requireString(r, "statement");
     requireString(r, "evidenceSchema");
   }
+  assertTopologyShape(obj);
+  const problem = topologyProblem(obj as unknown as GraphDefinition);
+  if (problem !== undefined) throw new WireValidationError("malformed", problem);
   if (obj["environment"] !== undefined) assertEnvironment(obj["environment"]);
   if (obj["resultContracts"] !== undefined) assertResultContracts(obj["resultContracts"]);
   if (obj["defaultBudgets"] !== undefined) assertDefaultBudgets(obj["defaultBudgets"]);
@@ -251,6 +290,39 @@ export function assertGraphDefinition(value: unknown): GraphDefinition {
   if (obj["supervisor"] !== undefined) assertSupervisorPreference(obj["supervisor"]);
   if (obj["approvals"] !== undefined) assertApprovals(obj["approvals"]);
   return obj as unknown as GraphDefinition;
+}
+
+/** The shapes of `edges`, `start` and `terminal`; their meaning is `topologyProblem`'s (docs/design-graph-topology.md §3.2). */
+function assertTopologyShape(obj: Record<string, unknown>): void {
+  if (obj["edges"] !== undefined) {
+    if (!Array.isArray(obj["edges"])) throw new WireValidationError("malformed", "definition.edges must be an array");
+    obj["edges"].forEach((raw, i) => assertEdge(raw, `definition.edges[${i}]`));
+  }
+  if (obj["start"] !== undefined && (typeof obj["start"] !== "string" || obj["start"] === "")) {
+    throw new WireValidationError("malformed", "definition.start must be a non-empty string");
+  }
+  if (obj["terminal"] !== undefined) assertStageIds(obj["terminal"], "definition.terminal");
+}
+
+function assertEdge(value: unknown, label: string): void {
+  const e = asObject(value, label);
+  for (const key of ["from", "to"]) {
+    if (typeof e[key] !== "string" || e[key] === "") throw new WireValidationError("malformed", `${label}.${key} must be a non-empty string`);
+  }
+}
+
+function assertStageIds(value: unknown, label: string): void {
+  if (!Array.isArray(value) || value.some((id) => typeof id !== "string" || id === "")) {
+    throw new WireValidationError("malformed", `${label} must be an array of non-empty strings`);
+  }
+}
+
+function assertStageAttempt(value: unknown, label: string): void {
+  const a = asObject(value, label);
+  if (typeof a["stageId"] !== "string" || a["stageId"] === "") throw new WireValidationError("malformed", `${label}.stageId must be a non-empty string`);
+  if (typeof a["attempt"] !== "number" || !Number.isSafeInteger(a["attempt"]) || a["attempt"] < 1) {
+    throw new WireValidationError("malformed", `${label}.attempt must be a positive integer`);
+  }
 }
 
 const APPROVAL_KEYS: ReadonlySet<string> = new Set(["id", "stageId", "description", "files", "unavailable", "inputs"]);
@@ -511,6 +583,7 @@ export function assertGraphAction(value: unknown): GraphAction {
     "observe",
     "validate",
     "reenter",
+    "enter",
     "supervise",
     "qualify_repair",
     "activate_repair",
@@ -532,7 +605,21 @@ export function assertGraphAction(value: unknown): GraphAction {
   if (type === "stop" && retryable !== undefined && typeof retryable !== "boolean") {
     throw new WireValidationError("malformed", "stop.retryable must be boolean");
   }
+  if (type === "enter") assertEnterSpec(spec as Record<string, unknown>);
   return obj as unknown as GraphAction;
+}
+
+/** `enter` names the supervisor-only node and says why; whether it may be entered is the controller's to admit. */
+function assertEnterSpec(spec: Record<string, unknown>): void {
+  for (const key of ["stageId", "reason"]) {
+    if (typeof spec[key] !== "string" || (spec[key] as string).trim() === "") {
+      throw new WireValidationError("malformed", `enter.${key} must be a non-empty string`);
+    }
+  }
+  const refs = spec["evidenceRefs"];
+  if (refs !== undefined && (!Array.isArray(refs) || refs.some((r) => typeof r !== "string" || r === ""))) {
+    throw new WireValidationError("malformed", "enter.evidenceRefs must be an array of non-empty strings");
+  }
 }
 
 /** The property that holds each action type's spec. */
@@ -541,6 +628,7 @@ export const ACTION_SPEC_KEYS: Record<string, string> = {
   observe: "observe",
   validate: "validate",
   reenter: "reenter",
+  enter: "enter",
   supervise: "supervise",
   qualify_repair: "qualify",
   activate_repair: "activate",
@@ -569,7 +657,21 @@ export function assertRunView(value: unknown): RunView {
     requireString(resume, "at");
     if (typeof resume["pluginUpdated"] !== "boolean") throw new WireValidationError("malformed", "resume.pluginUpdated must be boolean");
   }
+  if (obj["topology"] !== undefined) assertTopologyView(obj["topology"]);
   return obj as unknown as RunView;
+}
+
+/** A graph routes from `topology.path`, so its shape must hold (docs/design-graph-topology.md §4.1). */
+function assertTopologyView(value: unknown): void {
+  const t = asObject(value, "topology");
+  if (typeof t["start"] !== "string" || t["start"] === "") throw new WireValidationError("malformed", "topology.start must be a non-empty string");
+  assertStageIds(t["terminal"], "topology.terminal");
+  if (!Array.isArray(t["edges"])) throw new WireValidationError("malformed", "topology.edges must be an array");
+  t["edges"].forEach((raw, i) => assertEdge(raw, `topology.edges[${i}]`));
+  if (typeof t["implicit"] !== "boolean") throw new WireValidationError("malformed", "topology.implicit must be boolean");
+  if (!Array.isArray(t["path"])) throw new WireValidationError("malformed", "topology.path must be an array");
+  t["path"].forEach((raw, i) => assertStageAttempt(raw, `topology.path[${i}]`));
+  if (t["sideVisit"] !== undefined) assertStageAttempt(t["sideVisit"], "topology.sideVisit");
 }
 
 function assertRepairAuthority(value: unknown): void {

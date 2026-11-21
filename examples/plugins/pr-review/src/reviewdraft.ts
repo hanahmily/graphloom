@@ -111,7 +111,7 @@ export function draftWrites(evidence: readonly EvidenceRecord[], analysis: Analy
     scope: scope.value,
     records,
     context: { source: context.source, ...(context.head !== undefined ? { head: context.head } : {}) },
-    round1: round1Of(evidence, pr),
+    round1: round1Of(evidence, pr, report.records),
   });
   const dj = draftJson(draft);
   const dm = draftMarkdown(draft);

@@ -11,11 +11,11 @@
  */
 import type { FinalAnswer } from "./answers.js";
 import type { Groundwork } from "./kit/groundwork.js";
-import { brokenNote, effectiveConclusion, NECESSITY_ID, SKIPPED_NOTE, supportedBreaks, type NecessityRecord } from "./necessity.js";
+import { brokenNote, effectiveConclusion, NECESSITY_ID, necessityJson, SKIPPED_NOTE, supportedBreaks, type NecessityRecord } from "./necessity.js";
 import { incrementalLine, type IncrementalNote } from "./incremental.js";
 import { describeReasons, type ReviewMode } from "./kit/mode.js";
 import type { PurposeRecord, Question } from "./questions.js";
-import { needAuthor, openQuestions } from "./kit/scope.js";
+import { itemIds, NO_OPEN_ITEMS, OPEN_ITEMS_LABEL, openItems, ROUND1_LABEL, type GateFile, type Round1Issue } from "./round1.js";
 import { searchLine, withMeasure } from "./searchview.js";
 import { questionItems, type ReportView } from "./kit/reportview.js";
 import type { PullRequest } from "./kit/request.js";
@@ -30,6 +30,8 @@ export interface QaInput {
   base: string | undefined;
   view: ReportView;
   groundwork: Groundwork;
+  /** The pull request's changed files: what the gate counts as the change when it judges an `existing` item (design §8). */
+  files: readonly GateFile[];
   purposes: PurposeRecord[];
   questions: Question[];
   answers: FinalAnswer[];
@@ -243,29 +245,38 @@ export function renderNecessity(r: NecessityRecord): string {
   return lines.join("\n");
 }
 
+/** The label of an open item in the briefing: what its posted comment says it is (`ROUND1_LABEL`). */
+export const itemLabel = (x: Pick<Round1Issue, "kinds">): string => x.kinds.map((k) => ROUND1_LABEL[k]).join("; ");
+
 /**
- * What the briefing of `review.md` says of the Q&A (design §6.1, §7): the verdict (N1's conclusion, the principles it
- * touched with their verdicts, how many questions need the author) and the open questions (the ones that need a person;
- * the answered ones are a count, their text is in the appendix).
+ * What the briefing of `review.md` says of the Q&A (design §5.5): the verdict (N1's conclusion, the principles it touched
+ * with their verdicts, how many open items round 1 has for the author) and those open items (the questions not among them
+ * are a count, their text is in the appendix). The open items are the gate's own (`openItems`, the function the Round 1 stage
+ * records `round1.json` with), computed from the `qa.json` and `necessity.json` this stage writes, so the briefing, the
+ * gate and the posted review always name the same items.
  */
 export function briefingQa(i: QaInput): { verdict: string; open: string } {
-  const answers = new Map(i.answers.map((a) => [a.question, a] as const));
-  const like = i.questions.map((q) => {
-    const a = answers.get(q.id);
-    return { id: q.id, type: q.type, text: q.text, answer: a === undefined ? undefined : { status: a.status, answer: a.answer } };
-  });
   const conclusion = i.necessity !== undefined ? effectiveConclusion(i.necessity.final) : undefined;
   const principles = i.necessity?.final.necessity?.principles ?? [];
-  const sel = openQuestions(like, { id: NECESSITY_ID, conclusion });
+  const items = openItems({ qa: qaJson(i), necessity: i.necessity !== undefined ? necessityJson(i.necessity) : undefined, files: i.files, github: { owner: i.pr.owner, repo: i.pr.repo, head: i.pr.head, base: i.base } }) ?? [];
+  const byId = new Map(i.questions.map((q) => [q.id, q] as const));
+  const answers = new Map(i.answers.map((a) => [a.question, a] as const));
+  const inItems = new Set(items.flatMap(itemIds));
   const verdict = [
     `- N1, is it necessary: ${conclusion ?? "pending"}${i.necessity !== undefined ? ` — ${short(oneLine(i.necessity.final.necessity?.rationale ?? ""), 200)}` : ""}`,
     `- Principles touched: ${i.necessity === undefined ? "pending" : principles.length === 0 ? "none" : principles.map((p) => `${p.id} ${p.verdict}`).join("; ")}`,
-    `- Questions that need the author: ${needAuthor(like.filter((q) => q.id !== NECESSITY_ID))}`,
+    `- ${OPEN_ITEMS_LABEL}: ${items.length}`,
     "",
   ].join("\n");
+  const line = (x: Round1Issue): string => {
+    const q = byId.get(x.id);
+    const said = x.id === NECESSITY_ID ? (i.necessity?.final.necessity?.rationale ?? "") : (answers.get(x.id)?.answer ?? "");
+    return `- **${x.id} [${q?.type ?? "necessity"}] ${itemLabel(x)}${x.id === NECESSITY_ID ? `: ${conclusion ?? "needs author"}` : ""}**${(x.covers ?? []).length > 0 ? ` (also ${x.covers!.join(", ")})` : ""} ${short(oneLine(q?.text ?? ""), 200)}${said !== "" ? ` — ${short(oneLine(said), 240)}` : ""}`;
+  };
+  const rest = i.questions.filter((q) => !inItems.has(q.id)).length;
   const open = [
-    ...(sel.open.length === 0 ? ["No question needs a person."] : sel.open.map((q) => `- **${q.id} [${q.type}]${q.answer === undefined ? " not answered" : ` ${q.answer.status}`}** ${short(oneLine(q.text), 200)}${q.answer !== undefined ? ` — ${short(oneLine(q.answer.answer), 240)}` : ""}`)),
-    `${sel.answered} answered — see the appendix.`,
+    ...(items.length === 0 ? [NO_OPEN_ITEMS] : items.map(line)),
+    `${rest} other question${rest === 1 ? "" : "s"} answered — see the appendix.`,
     "",
   ].join("\n");
   return { verdict, open };

@@ -9,7 +9,7 @@
  * See docs/design-issue-fix-graph.md for the schema.
  */
 import { GRAPH_BUDGET_KEYS, MAX_JOB_TIMEOUT_MS, MAX_TIMEOUT_CONTINUATIONS, SUPERVISOR_HARNESSES, type EnvironmentCommand, type EnvironmentDeclaration, type GraphBudgetDefaults, type SupervisorPreference } from "@graphloom/sdk";
-import { COMMAND } from "./constants.js";
+import { COMMAND, DEFAULT_ARBITER, DEFAULT_MAX_RULINGS } from "./constants.js";
 import { runnerById, RUNNERS, type RegressionRunner, type RunnerId } from "./runners/index.js";
 
 /**
@@ -138,6 +138,16 @@ export interface ProfileData {
     rules: string[];
     /** How many times the graph itself sends a converging review failure back to Fix before the supervisor decides; default 4. */
     maxReentries?: number;
+    /** The arbiter's model and reasoning effort, passed as the job's `harnessOptions`; default gpt-6-astra at high effort. */
+    arbiter?: { model: string; effort?: string };
+    /** Arbiter rulings per run before every further design conflict goes to the operator; 0 sends each to the operator; default 3. */
+    maxRulings?: number;
+    /**
+     * The project's design principles file, which the arbiter reads beside the
+     * context documents: a path in the target repository, read at the pinned
+     * base, or with `ref` read from the repository `project` names at that ref.
+     */
+    principles?: { path: string; ref?: string };
   };
   pullRequest: {
     /** Lines after the title, such as the template's checklist. */
@@ -158,8 +168,8 @@ export interface ProfileData {
     /** The test plan's line when the record says `needsE2E`. */
     e2eNote?: string;
   };
-  /** Harnesses for each role; defaults: Claude Code implements and verifies, Codex reviews. */
-  harnesses?: { implementer?: string; reviewer?: string; verifier?: string };
+  /** Harnesses for each role; defaults: Claude Code implements and verifies, Codex reviews and arbitrates. */
+  harnesses?: { implementer?: string; reviewer?: string; verifier?: string; arbiter?: string };
   /**
    * Which supervisor harness this repository's runs prefer for recovery, in
    * order (the graph's `GraphDefinition.supervisor`; the operator's enabled
@@ -190,7 +200,11 @@ export interface ProfileData {
 export interface Profile extends ProfileData {
   runner: RegressionRunner;
   regressionTimeoutMs: number;
-  roles: { implementer: string; reviewer: string; verifier: string };
+  roles: { implementer: string; reviewer: string; verifier: string; arbiter: string };
+  /** `review.arbiter`, defaulted. */
+  arbiter: { model: string; effort?: string };
+  /** `review.maxRulings`, defaulted. */
+  maxRulings: number;
   /** `agent.timeoutContinuations`, defaulted. */
   timeoutContinuations: number;
   /** `supervisor`, defaulted. */
@@ -380,6 +394,14 @@ export function parseProfile(config: unknown): Profile {
   need(isObject(p.review) && isString(p.review.language) && isString(p.review.testFiles) && isStrings(p.review.rules), "review needs language, testFiles and rules");
   const maxReentries = (p.review as Record<string, unknown>).maxReentries;
   need(maxReentries === undefined || (typeof maxReentries === "number" && Number.isInteger(maxReentries) && maxReentries >= 0), "review.maxReentries must be a whole number, 0 or more");
+  const arbiter = checkArbiter((p.review as Record<string, unknown>).arbiter);
+  const maxRulings = (p.review as Record<string, unknown>).maxRulings;
+  // Arbitrate's maxVisits is maxRulings + 3, and a node may be visited at most 64 times.
+  need(
+    maxRulings === undefined || (typeof maxRulings === "number" && Number.isInteger(maxRulings) && maxRulings >= 0 && maxRulings <= 61),
+    "review.maxRulings must be a whole number from 0 to 61",
+  );
+  checkPrinciples((p.review as Record<string, unknown>).principles, p.project as string);
   need(isObject(p.pullRequest) && isStrings(p.pullRequest.checklist) && isStrings(p.pullRequest.footer), "pullRequest needs checklist and footer lists");
   const e2eNote = (p.pullRequest as Record<string, unknown>).e2eNote;
   need(e2eNote === undefined || isString(e2eNote), "pullRequest.e2eNote must be text");
@@ -397,6 +419,7 @@ export function parseProfile(config: unknown): Profile {
     implementer: (harnesses as Record<string, unknown>).implementer ?? "claude-code",
     reviewer: (harnesses as Record<string, unknown>).reviewer ?? "codex",
     verifier: (harnesses as Record<string, unknown>).verifier ?? "claude-code",
+    arbiter: (harnesses as Record<string, unknown>).arbiter ?? "codex",
   };
   for (const [role, harness] of Object.entries(roles)) {
     need(typeof harness === "string" && HARNESSES[harness] !== undefined, `harnesses.${role} must be one of ${Object.keys(HARNESSES).join(", ")}`);
@@ -423,9 +446,52 @@ export function parseProfile(config: unknown): Profile {
     runner: runner!,
     regressionTimeoutMs: (regression.timeoutMs as number | undefined) ?? DEFAULT_REGRESSION_TIMEOUT_MS,
     roles: roles as Profile["roles"],
+    arbiter,
+    maxRulings: (maxRulings as number | undefined) ?? DEFAULT_MAX_RULINGS,
     timeoutContinuations: (a.timeoutContinuations as number | undefined) ?? DEFAULT_TIMEOUT_CONTINUATIONS,
     supervisorPreference,
   };
+}
+
+/** `review.arbiter`, checked, or the default model and effort. */
+function checkArbiter(raw: unknown): { model: string; effort?: string } {
+  if (raw === undefined) return { ...DEFAULT_ARBITER };
+  need(isObject(raw), 'review.arbiter must be { "model": "<name>", "effort": "<level>" }');
+  const a = raw as Record<string, unknown>;
+  for (const key of Object.keys(a)) need(key === "model" || key === "effort", `review.arbiter.${key} is not an arbiter setting; they are model and effort`);
+  need(isString(a.model), "review.arbiter.model is required");
+  need(a.effort === undefined || isString(a.effort), "review.arbiter.effort must be text");
+  return { model: a.model as string, ...(a.effort !== undefined ? { effort: a.effort as string } : {}) };
+}
+
+/** `review.principles`: a repository-relative path, and a ref only where `project` names a repository to read it from. */
+function checkPrinciples(raw: unknown, project: string): void {
+  if (raw === undefined) return;
+  need(isObject(raw), 'review.principles must be { "path": "<file>", "ref": "<branch, tag or commit>" }');
+  const d = raw as Record<string, unknown>;
+  for (const key of Object.keys(d)) need(key === "path" || key === "ref", `review.principles.${key} is not a principles field; they are path and ref`);
+  need(isString(d.path), "review.principles.path is required");
+  const path = d.path as string;
+  need(
+    path.length <= 1_000 && !path.includes("\u0000") && path.split("/").every((part) => part !== "" && part !== "." && part !== ".."),
+    `review.principles.path "${path}" must be repository-relative, without "..", "." or empty segments`,
+  );
+  need(d.ref === undefined || (typeof d.ref === "string" && REF_NAME.test(d.ref)), "review.principles.ref must be a branch, tag or commit name");
+  need(d.ref === undefined || REPO_NAME.test(project), 'review.principles.ref reads the file from the repository project names, which must then be "owner/name"');
+}
+
+/** The principles file as a document the run reads like a context document: in the worktree at the base, or from `project` at `ref`. */
+export function principlesRef(profile: Pick<ProfileData, "project" | "review">): ContextDocumentRef | undefined {
+  const p = profile.review.principles;
+  if (p === undefined) return undefined;
+  return { path: p.path, ...(p.ref !== undefined ? { repo: profile.project, ref: p.ref } : {}) };
+}
+
+/** Every document the run pins: the context documents, then the principles file. */
+export function pinnedRefs(profile: Pick<ProfileData, "project" | "review" | "issues">): ContextDocumentRef[] {
+  const principles = principlesRef(profile);
+  const refs = contextRefs(profile);
+  return principles !== undefined && !refs.some((r) => contextName(r) === contextName(principles)) ? [...refs, principles] : refs;
 }
 
 /** The profile's `supervisor` preference, checked, or the default order. */

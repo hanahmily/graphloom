@@ -95,6 +95,54 @@ describe("moves", () => {
     expect(Date.parse(report.at) - T0).toBe(70_000);
   });
 
+  it("over a graph that declares edges: the supervisor's enter and the settle are moves, a reentry names how, and the path follows the count", async () => {
+    const b = await bed();
+    // The recorded run's Fix and Review with Fix ⇄ Review edges and a supervisor-only Arbitrate, on the path fix#4 → review#4.
+    await b.mutate((s) => ({
+      ...s,
+      definition: {
+        ...s.definition,
+        stages: [...s.definition.stages, { id: "arb", name: "Arbitrate", requirementIds: ["ruled"], entry: "supervisor", maxVisits: 2 }],
+        requirements: [...s.definition.requirements, { id: "ruled", statement: "ruled", evidenceSchema: "ruling-v1" }],
+        edges: [
+          { from: "fix", to: "review" },
+          { from: "review", to: "fix" },
+          { from: "arb", to: "fix" },
+          { from: "arb", to: "review" },
+        ],
+        terminal: ["review"],
+      },
+      path: [1, 2],
+      visits: [
+        { seq: 1, stageId: "fix", attempt: 4, entered: "start", generation: 1, operation: "intake" },
+        { seq: 2, stageId: "review", attempt: 4, entered: "edge", from: 1, generation: 1, operation: "dispatch" },
+      ],
+    }));
+    const r = await b.watch({}, async (at) => {
+      if (at === 10_000) await b.mutate((s) => ({ ...s, current: { stageId: "arb", attempt: 1 }, sideVisit: 3, visits: [...s.visits!, { seq: 3, stageId: "arb", attempt: 1, entered: "enter", from: 2, generation: 1, operation: "enter" }] }));
+      if (at === 20_000) {
+        await b.mutate((s) => ({ ...s, visits: s.visits!.map((v) => (v.seq === 3 ? { ...v, settlement: { receipts: ["rcpt-30"], reasons: [{ requirementId: "ruled", reason: "the build stands" }] } } : v)) }));
+      }
+      if (at === 30_000) {
+        await b.mutate(({ sideVisit: _s, ...s }) => ({
+          ...s,
+          current: { stageId: "review", attempt: 5 },
+          path: [1, 4],
+          visits: [...s.visits!.map((v) => (v.seq === 3 ? { ...v, ended: "routed to review" } : v.seq === 2 ? { ...v, ended: "replaced by reentry of review" } : v)), { seq: 4, stageId: "review", attempt: 5, entered: "reenter", from: 3, generation: 2, operation: "reenter" }],
+        }));
+      }
+    });
+    const lines = body(only(r));
+    expect(lines).toEqual(
+      expect.arrayContaining([
+        "- supervisor entered node arb, attempt 1, from review#4",
+        "- node arb, attempt 1, settled (ruled: the build stands)",
+        "- entered stage review, attempt 5, by reenter",
+        "2/3 stages complete · path fix#4 → review#5",
+      ]),
+    );
+  });
+
   it("batches moves within 60 seconds into one report: a stage accepted, an episode, a quota pause and its end, a resume", async () => {
     const b = await bed();
     const until = "2026-10-27T14:05:30.000Z";

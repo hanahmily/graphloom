@@ -6,12 +6,14 @@ import { isEvidenceUnavailable, stableHash as stableDigest } from "@graphloom/sd
 import { HostObservationError } from "./host-validators.js";
 import type {
   EvidenceRecord,
-  GraphDefinition,
   Receipt,
   ValidateSpec,
+  ValidationInput,
   ValidatorBinding,
 } from "@graphloom/sdk";
 import type { DurableRunState } from "./state.js";
+import { describeInadmissible, type Inadmissible } from "./inadmissible.js";
+import { invalidateNodes, livePath, moveTo, nodeAccepted, nodeComplete, nodesFrom, sideVisitOf, tailOf } from "./traversal.js";
 import { hydrateOne, validatorInput } from "./evidence.js";
 import { candidateChange, readWorktreeFile, workspaceChangeManifest } from "./worktree.js";
 
@@ -109,14 +111,6 @@ export function stageRequirementsMet(
   );
 }
 
-export function earliestIncompleteStage(
-  state: DurableRunState,
-): GraphDefinition["stages"][number] | undefined {
-  return state.definition.stages.find(
-    (s) => !stageRequirementsMet(state, s.id, s.requirementIds),
-  );
-}
-
 /** Digest of the live workspace change, or undefined when the worktree is not a Git checkout of the pinned base. */
 export async function liveCandidateDigest(state: DurableRunState): Promise<string | undefined> {
   try {
@@ -127,18 +121,18 @@ export async function liveCandidateDigest(state: DurableRunState): Promise<strin
 }
 
 /**
- * Why the final stage's receipts no longer describe the workspace: they
- * accepted a different change than the one the run would deliver.
+ * Why the tail's receipts no longer describe the workspace: they accepted a
+ * different change than the one the run would deliver
+ * (docs/design-graph-topology.md §4.6). Reads the live path's tail.
  */
 export async function deliveryDrift(state: DurableRunState): Promise<string | undefined> {
-  const last = state.definition.stages.at(-1);
-  if (last === undefined) return undefined;
-  const bound = state.receipts.filter((r) => r.valid && r.stageId === last.id && r.candidateDigest !== undefined);
+  const tail = tailOf(state).stageId;
+  const bound = state.receipts.filter((r) => r.valid && r.stageId === tail && r.candidateDigest !== undefined);
   if (bound.length === 0) return undefined;
   const live = await liveCandidateDigest(state);
   const stale = bound.filter((r) => r.candidateDigest !== live);
   if (stale.length === 0) return undefined;
-  return `the workspace changed after ${last.id} accepted it (${stale.map((r) => r.requirementId).join(", ")})`;
+  return `the workspace changed after ${tail} accepted it (${stale.map((r) => r.requirementId).join(", ")})`;
 }
 
 /** Re-read worktree and ensure Observe fingerprints still match. */
@@ -181,9 +175,24 @@ export async function assertLiveWorkspaceMatchesEvidence(
  * read from the run's state (never the task file, which may have changed since).
  * Opaque here; empty only for a state with no request at all.
  */
-export function pinnedRequest(state: DurableRunState): { request?: string } {
+export function pinnedRequest(state: Pick<DurableRunState, "intake">): { request?: string } {
   const request = (state.intake as { task?: { request?: unknown } } | undefined)?.task?.request;
   return typeof request === "string" ? { request } : {};
+}
+
+/**
+ * What every validator call of a run carries besides the requirement and
+ * its evidence (docs/design-graph-topology.md §5.4): the pinned request,
+ * every receipt of the run (valid and replaced) and the currently admitted
+ * validator bindings, as `RunView.receipts` and `RunView.validatorBindings`
+ * show them, from the run's state at the call.
+ */
+export function validationContext(state: Pick<DurableRunState, "intake" | "receipts" | "validatorBindings">): Pick<ValidationInput, "request" | "receipts" | "validatorBindings"> {
+  return {
+    ...pinnedRequest(state),
+    receipts: structuredClone(state.receipts),
+    validatorBindings: structuredClone(state.validatorBindings),
+  };
 }
 
 export async function admitValidation(
@@ -199,26 +208,40 @@ export async function admitValidation(
   evaluated: boolean;
   /** What each requirement the validators actually evaluated reported, in order; admission stops at the first that does not pass. */
   requirements?: Array<{ requirementId: string; status: string; reason: string }>;
+  /** Set when the validation names a node no forward move reaches (§4.3): inadmissible, not a rejection. */
+  refusal?: Inadmissible;
 }> {
   const stage = state.definition.stages.find((s) => s.id === spec.stageId);
   if (!stage) {
     throw new AdmissionError(`unknown stage ${spec.stageId}`);
   }
 
+  // A node off the live path is reached by a forward move first (§4.5),
+  // judged on the receipts as recorded: what the graph saw when it chose the
+  // node. The move stands whatever the validation then finds.
+  const moved = moveTo(state, spec.stageId, state.current.attempt, "validate");
+  if ("refusal" in moved) {
+    return { state, accepted: false, reason: describeInadmissible(moved.refusal), evaluated: false, refusal: moved.refusal };
+  }
+  state = moved.state;
+
   // Invalidate whatever the live candidate/prerequisite state actually
-  // affects before reading any receipt validity below. Otherwise a receipt
-  // that is stale but not yet marked invalid can make earliestIncompleteStage
-  // see a stage as still complete, rejecting the very validation that would
-  // have invalidated it.
+  // affects before reading any receipt validity below, so a receipt that is
+  // stale but not yet marked invalid never counts for a predecessor.
   const liveDigest = await liveCandidateDigest(state);
   state = await invalidateFromStage(state);
 
-  const needed = earliestIncompleteStage(state);
-  if (!needed || needed.id !== spec.stageId) {
+  // A node whose requirements all hold valid receipts has nothing to accept:
+  // its receipts stand and are not minted again (a reentry that kept the
+  // candidate's identity counts on them, §4.7). The caller still clears an
+  // open attempt, accepted or not. The open side visit's node is the
+  // exception (§5.2): each visit is judged afresh, and its validation mints
+  // receipts that replace an earlier visit's.
+  if (nodeComplete(state, spec.stageId) && sideVisitOf(state)?.stageId !== spec.stageId) {
     return {
       state: bumpRevision(state),
       accepted: false,
-      reason: `stage ${spec.stageId} is not the next incomplete stage`,
+      reason: `stage ${spec.stageId} is already accepted: every requirement holds a valid receipt`,
       evaluated: false,
     };
   }
@@ -267,15 +290,22 @@ export async function admitValidation(
   }
   const history = supersededEvidence(state, liveDigest);
 
-  // Predecessor receipts: every requirement on earlier stages must be valid.
-  const stageIndex = state.definition.stages.findIndex((s) => s.id === spec.stageId);
-  for (let i = 0; i < stageIndex; i += 1) {
-    const pred = state.definition.stages[i]!;
-    if (!stageRequirementsMet(state, pred.id, pred.requirementIds)) {
+  // Predecessors (§4.5): every node before this one on the live path is accepted.
+  const path = livePath(state);
+  for (const pred of path.slice(0, Math.max(0, path.findIndex((v) => v.stageId === spec.stageId)))) {
+    if (!nodeComplete(state, pred.stageId)) {
       return {
         state: bumpRevision(state),
         accepted: false,
-        reason: `missing valid predecessor receipts for ${pred.id}`,
+        reason: `missing valid predecessor receipts for ${pred.stageId}`,
+        evaluated: false,
+      };
+    }
+    if (!nodeAccepted(state, pred.stageId)) {
+      return {
+        state: bumpRevision(state),
+        accepted: false,
+        reason: `predecessor ${pred.stageId} is open: it was reentered and has not validated since`,
         evaluated: false,
       };
     }
@@ -323,7 +353,7 @@ export async function admitValidation(
         history,
         candidateFingerprint: fingerprint,
         ...(liveDigest !== undefined ? { candidateDigest: liveDigest } : {}),
-        ...pinnedRequest(state),
+        ...validationContext(working),
       }),
     );
     const resolved = await Promise.resolve(result);
@@ -410,29 +440,19 @@ export async function admitValidation(
 }
 
 /**
- * Blanket invalidation: every receipt from `stageId` onward, regardless of
- * whether anything about it actually changed. Used for repair activation and
- * resume-recheck, where arbitrary code can change under an identity this
- * module has no way to detect (a validator's own logic, not its evidence).
- * `reenter` and `admitValidation`'s own invalidation use the identity-aware
- * `invalidateFromStage` below instead.
+ * Blanket invalidation: every receipt of `stageId`, of every node after it
+ * on the live path and of every graph-entered node off the path
+ * (`nodesFrom`), regardless of whether anything about it actually changed.
+ * Used for executor-repair activation and the resume checks, where arbitrary
+ * code can change under an identity this module has no way to detect (a
+ * validator's own logic, not its evidence). `reenter` and `admitValidation`'s
+ * own invalidation use the identity-aware `invalidateFromStage` below instead.
  */
-export function invalidateStageAndAfter(
-  state: DurableRunState,
-  stageId: string,
-  definition: GraphDefinition,
-): DurableRunState {
-  const idx = definition.stages.findIndex((s) => s.id === stageId);
-  if (idx < 0) {
-    throw new AdmissionError(`reenter unknown stage ${stageId}`);
+export function invalidateFromNode(state: DurableRunState, stageId: string): DurableRunState {
+  if (!state.definition.stages.some((s) => s.id === stageId)) {
+    throw new AdmissionError(`invalidation of unknown stage ${stageId}`);
   }
-  const doomed = new Set(definition.stages.slice(idx).map((s) => s.id));
-  return bumpRevision({
-    ...state,
-    receipts: state.receipts.map((r) =>
-      doomed.has(r.stageId) ? { ...r, valid: false } : r,
-    ),
-  });
+  return invalidateNodes(state, nodesFrom(state, stageId));
 }
 
 /**
@@ -577,6 +597,12 @@ function bindingFor(
 export interface EvidenceProducer {
   operationId: string;
   stageId: string;
+  /**
+   * The attempt of its node the job ran under (docs/design-graph-topology.md
+   * §7.4), so the evidence of every lap stays attributable after the live
+   * path forgets it. Absent on evidence recorded before it existed.
+   */
+  attempt?: number;
   purpose: string;
   readOnly: boolean;
   kind: string;

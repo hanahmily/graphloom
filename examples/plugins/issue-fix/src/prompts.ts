@@ -157,12 +157,31 @@ function coverageNote(plan: DecisionRecord): string[] {
 export function issuesProtocol(): string {
   return (
     `- Code review issues are tracked in ${ISSUES_FILE} (readable copy ${ISSUES_MARKDOWN}), which the graph owns. When you fix an \`open\` or \`reopened\` issue, set its \`status\` to \`fixed\` and append to its \`history\` one entry ` +
-    `{"actor": "fixer", "from": "<its old status>", "to": "fixed", "note": "<what you changed, with file:line>"}. Change nothing else in that file: do not mark an issue done or dismissed, and do not add, delete or reword issues. ` +
+    `{"actor": "fixer", "from": "<its old status>", "to": "fixed", "note": "<what you changed, with file:line>"}. ` +
+    `If you are sure an \`open\` or \`reopened\` issue contradicts the project's design (the issue, its maintainers' comments or the design documents say otherwise), you may contest it instead of fixing it: set its \`status\` to \`design-conflict\` and append one entry {"actor": "fixer", "from": "<its old status>", "to": "design-conflict", "note": "<the design statement or decision it contradicts, quoted, and where; at most 2000 characters>"}. ` +
+    "Your other work is checked as usual; then an independent arbiter rules on the point, and you fix the issue if the ruling goes against you. You may not contest an issue a design ruling holds for. " +
+    "Change nothing else in that file: do not mark an issue done, dismissed or deferred, and do not add, delete or reword issues. " +
     "The code reviewer verifies every fixed issue against the code and either marks it done or reopens it with a note; the graph rejects any other edit and restores the file. Git ignores the file, so it is never part of your change."
   );
 }
 
-export function implementInstruction(profile: Profile, args: { issue: number; plan: DecisionRecord; feedback?: string[]; issues?: boolean; context?: ContextDocument[] }): string {
+/** The design rulings the fixer is held to: a review-stands ruling confirms its finding; an implementation-stands one names code it must not change for that point. */
+function rulingsNote(rulings: Array<{ text: string; decision: string }> | undefined): string[] {
+  if (rulings === undefined || rulings.length === 0) return [];
+  return [
+    "- Design rulings hold in this run. Follow them:",
+    ...rulings.map((r) =>
+      r.decision === "review-stands"
+        ? `  - ${r.text} The finding stands: fix it; it cannot be contested again.`
+        : `  - ${r.text} The finding was dismissed: do not change the lines it cites for that point.`,
+    ),
+  ];
+}
+
+export function implementInstruction(
+  profile: Profile,
+  args: { issue: number; plan: DecisionRecord; feedback?: string[]; issues?: boolean; context?: ContextDocument[]; rulings?: Array<{ text: string; decision: string }> },
+): string {
   const { plan } = args;
   const scope = writeScopeFor(plan, profile);
   const excluded = writeScopeExcludes(scope);
@@ -184,6 +203,7 @@ export function implementInstruction(profile: Profile, args: { issue: number; pl
     ...selfCheckNote(profile, plan),
     ...coverageNote(plan),
     ...(args.issues === true ? [issuesProtocol()] : []),
+    ...rulingsNote(args.rulings),
     ...notes(profile),
     "",
     UNCLEAR_POLICY,
@@ -366,6 +386,10 @@ export function pullRequestDescription(
     issues?: string[];
     /** What the final tier's commands reported, one section each (final.ts finalSections). */
     sections?: Array<{ heading: string; lines: string[] }>;
+    /** The design rulings of the run, as their "Design rulings" entries (rulings.ts rulingSectionLines). */
+    rulings?: string[];
+    /** The design points the operator left open, with both cases (rulings.ts deferredSectionLines). */
+    openDesignQuestions?: string[];
   },
 ): string {
   const { record } = args;
@@ -409,6 +433,12 @@ export function pullRequestDescription(
     ...(args.sections ?? []).flatMap((s) => ["", `## ${s.heading}`, ...s.lines]),
     ...((args.issues ?? []).length > 0
       ? ["", "## Review issues", "Critical and high code review findings, as the run tracked them: done ones the reviewer verified fixed, dismissed ones an independent verifier refuted.", "", ...args.issues!]
+      : []),
+    ...((args.rulings ?? []).length > 0
+      ? ["", "## Design rulings", "Design points an independent arbiter, or the operator, ruled on during review, each with the design statements it quotes, the code it cites and its proof tests; overrule any that is wrong:", ...args.rulings!]
+      : []),
+    ...((args.openDesignQuestions ?? []).length > 0
+      ? ["", "## Open design questions", "Design points the operator left open: the change does not settle them, and they did not block it.", ...args.openDesignQuestions!]
       : []),
     ...(profile.pullRequest.footer.length > 0 ? ["", ...profile.pullRequest.footer.map((l) => l.replaceAll("{issue}", ref))] : []),
   ];

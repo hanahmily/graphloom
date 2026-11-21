@@ -11,6 +11,7 @@
  */
 import type { EvidenceRecord, RehearsalScenario, Receipt } from "@graphloom/sdk";
 import type { DurableRunState } from "./state.js";
+import { livePath, sideVisitOf, tailOf } from "./traversal.js";
 
 export type Boundary = "B1" | "B2" | "B3" | "B4" | "B5" | "B6" | "B7" | "B8" | "B9" | "B10";
 
@@ -26,6 +27,8 @@ export interface RehearsalConvergence {
   actual: {
     status: DurableRunState["status"];
     receipts: string[];
+    /** The live path's node ids, start first (docs/design-graph-topology.md §9). */
+    path: string[];
     stopReason?: string;
     recovery: string[];
   };
@@ -165,7 +168,15 @@ function checkB4(state: DurableRunState): BoundaryResult {
   return { status: "passed", notes: repaired.map((e) => `${e.ref}: contract ${e.contract?.name} repaired — ${(e.contract?.repairs ?? []).join("; ")}`) };
 }
 
-/** B5: a stage that received a contract-valid or repaired result minted a receipt; a validation failure against valid evidence is a parser/validator mismatch. */
+/**
+ * B5: a stage that received a contract-valid or repaired result minted a
+ * receipt; a validation failure against valid evidence is a parser/validator
+ * mismatch. A run in a final stop that waits for an operator approval the
+ * graph declared for the node it stopped in (`awaitedApproval`) has not yet
+ * reached the validate that would mint it: the waiting node's results, and
+ * for a side visit those of the node it was entered from, are pending on the
+ * operator, not stuck (docs/design-graph-rehearsal.md §4.7).
+ */
 function checkB5(state: DurableRunState): BoundaryResult {
   const validByStage = new Map<string, number>();
   for (const record of state.evidence) {
@@ -176,11 +187,53 @@ function checkB5(state: DurableRunState): BoundaryResult {
   }
   if (validByStage.size === 0) return { status: "unexercised", notes: ["no agent result named a declared contract"] };
   const accepted = new Set(validReceiptStages(state.receipts));
-  const stuck = [...validByStage.keys()].filter((stageId) => !accepted.has(stageId));
-  if (stuck.length > 0 && state.status !== "running") {
+  const unminted = [...validByStage.keys()].filter((stageId) => !accepted.has(stageId));
+  if (unminted.length === 0 || state.status === "running") return { status: "passed", notes: [] };
+  const waiting = awaitedApproval(state);
+  const pending = waiting === undefined ? [] : unminted.filter((stageId) => waiting.pending.has(stageId));
+  const stuck = unminted.filter((stageId) => !pending.includes(stageId));
+  if (stuck.length > 0) {
     return { status: "failed", notes: stuck.map((s) => `stage ${s}: a contract-valid result never minted a receipt`) };
   }
-  return { status: "passed", notes: [] };
+  return {
+    status: "passed",
+    notes: pending.map((s) => `stage ${s}: a contract-valid result awaits the operator's approval ${waiting!.approvalId} (the run waits in ${waiting!.stageId})`),
+  };
+}
+
+/**
+ * The approval a stopped run waits for, when it waits for one: the stop is
+ * final (the graph or supervisor classified it `retryable: false`), the graph
+ * declares an available approval whose `stageId` is the node the run stopped
+ * in (`current`), and the stop's reason or blocker names that approval's id.
+ * Such a stop is how a node waits for the operator (core design §17,
+ * docs/design-graph-topology.md §5.2), and `resume --approve`/`--decline`
+ * lifts it. `pending` holds the nodes whose validation the wait holds back:
+ * the waiting node and, when it is an open side visit, the node it was
+ * entered from. Reads only generic state; what the approval means stays the
+ * plugin's.
+ */
+function awaitedApproval(state: DurableRunState): { approvalId: string; stageId: string; pending: Set<string> } | undefined {
+  if (state.status !== "stopped" || state.stopReason === undefined) return undefined;
+  const stopClass = state.stopClass;
+  if (stopClass === undefined || stopClass.retryable || (stopClass.reason !== undefined && stopClass.reason !== state.stopReason)) return undefined;
+  const stageId = state.current.stageId;
+  const stopText = `${state.stopReason}\n${state.blocker ?? ""}`;
+  const approval = (state.definition.approvals ?? []).find((a) => a.stageId === stageId && a.unavailable === undefined && namesId(stopText, a.id));
+  if (approval === undefined) return undefined;
+  const pending = new Set([stageId]);
+  const side = sideVisitOf(state);
+  if (side !== undefined && side.stageId === stageId) pending.add(tailOf(state).stageId);
+  return { approvalId: approval.id, stageId, pending };
+}
+
+/** `text` names `id` as a whole token: an approval id is `[a-z][a-z0-9-]*`, so a longer id that contains it does not count. */
+function namesId(text: string, id: string): boolean {
+  const at = (i: number) => i < 0 || i >= text.length || !/[a-z0-9-]/.test(text[i]!);
+  for (let i = text.indexOf(id); i >= 0; i = text.indexOf(id, i + 1)) {
+    if (at(i - 1) && at(i + id.length)) return true;
+  }
+  return false;
 }
 
 /** B6: no reference stayed an unreconciled problem; a repair is listed, not a failure. */
@@ -226,16 +279,21 @@ function checkB10(state: DurableRunState, scenario: RehearsalScenario): Boundary
 function checkConvergence(state: DurableRunState, scenario: RehearsalScenario): RehearsalConvergence {
   const expected = scenario.expect;
   const actualReceipts = validReceiptStages(state.receipts);
+  const actualPath = livePath(state).map((v) => v.stageId);
   const recovery = state.recoveryTrigger !== undefined ? [state.recoveryTrigger.code] : [];
   const actual = {
     status: state.status,
     receipts: actualReceipts,
+    path: actualPath,
     ...(state.stopReason !== undefined ? { stopReason: state.stopReason } : {}),
     recovery,
   };
   let met = statusMatches(expected.status, state.status);
   if (met && expected.receipts !== undefined) {
     met = expected.receipts.every((stageId) => actualReceipts.includes(stageId));
+  }
+  if (met && expected.path !== undefined) {
+    met = expected.path.length === actualPath.length && expected.path.every((id, i) => actualPath[i] === id);
   }
   if (met && expected.stopReason !== undefined) {
     met = state.stopReason === expected.stopReason;

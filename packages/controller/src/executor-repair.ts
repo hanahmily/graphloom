@@ -5,7 +5,7 @@ import { cp, mkdir, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { boundedInputShape, type ExecutorInputShape, type QualifyRepairSpec } from "@graphloom/sdk";
 import { describeExecutorModule, digestExecutorSource, type DescribedExecutor } from "@graphloom/runner";
-import { invalidateStageAndAfter } from "./admit.js";
+import { invalidateFromNode } from "./admit.js";
 import { catalogEntry } from "./executor-catalog.js";
 import { bumpGeneration } from "./generation.js";
 import { inadmissible } from "./inadmissible.js";
@@ -188,7 +188,7 @@ export async function activateExecutorRepair(
     activationIntent: { ...intent, status: "committed" },
   };
   // Work already accepted stays; the stage that hit the failure is checked again.
-  next = invalidateStageAndAfter(next, next.current.stageId, next.definition);
+  next = invalidateFromNode(next, next.current.stageId);
   return bumpGeneration(next, `activate_repair:${artifact.artifactId}`);
 }
 

@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
-import { writeScopeProblem, type ActivateRepairSpec, type GraphDecision, type QualifyRepairSpec } from "@graphloom/sdk";
+import { checkoutWriteProblem, writeScopeProblem, type ActivateRepairSpec, type GraphDecision, type QualifyRepairSpec } from "@graphloom/sdk";
 import type { AdmissionFacts } from "@graphloom/supervisor";
 import { supervisorProposalKey, progressMark } from "./escalation.js";
 import { manifestRepairContract } from "./intake.js";
 import { noteOutcome } from "./settlement.js";
 import type { DurableRunState, SupervisorOutcomeRecord } from "./state.js";
+import { topologyFacts } from "./supervisor-node.js";
 
 /**
  * Inadmissible supervisor proposals one decide() turn may make before the
@@ -73,6 +74,7 @@ export function admissionFacts(state: DurableRunState, hasRepairHooks: boolean):
       state.mode === "recovery" &&
       ((hasRepairHooks && state.budgets.corrections > 0 && repairGranted(state)) || environmentRepinnable(state)),
     qualifiedArtifactIds: (state.repairCandidates ?? []).filter((c) => c.status === "qualified").map((c) => c.artifactId),
+    ...topologyFacts(state),
   };
 }
 
@@ -233,6 +235,8 @@ const RETURN_REPRODUCES_TRIGGER = new Set([
   "correction_limit",
   "stalled",
   "recovery_budget_reached",
+  // A settled side visit opens the trigger again at the graph's next step; only leaving it ends it.
+  "supervisor_node_settled",
 ]);
 
 /**
@@ -252,11 +256,17 @@ export function safeDefault(state: DurableRunState, triggerCode: string): "retur
 /** Why a checkout spec is malformed, or undefined. The job-level rules (read-only command, no tools) are the caller's. */
 export function checkoutSpecRefusal(checkout: unknown): string | undefined {
   if (typeof checkout !== "object" || checkout === null) return "checkout must be an object";
-  const spec = checkout as { from?: unknown; paths?: unknown };
+  const spec = checkout as { from?: unknown; paths?: unknown; write?: unknown };
+  const writeProblem = spec.write === undefined ? undefined : checkoutWriteProblem(spec.write);
+  if (writeProblem !== undefined) return writeProblem;
   if (spec.from === "candidate") return spec.paths === undefined ? undefined : "a candidate checkout takes no paths";
   if (spec.from !== "base") return `checkout.from must be "candidate" or "base"`;
-  if (!Array.isArray(spec.paths) || spec.paths.length === 0 || !spec.paths.every((p) => typeof p === "string")) {
+  if (!Array.isArray(spec.paths) || !spec.paths.every((p) => typeof p === "string")) {
     return "a base checkout must list the changed paths to apply";
+  }
+  // A base checkout may take no changed path when it adds files: the base plus a supplied test, and nothing else.
+  if (spec.paths.length === 0) {
+    return Array.isArray(spec.write) && spec.write.length > 0 ? undefined : "a base checkout must list the changed paths to apply or add files with write";
   }
   const problem = writeScopeProblem(spec.paths as string[]);
   return problem === undefined ? undefined : `checkout paths: ${problem}`;
@@ -294,7 +304,9 @@ export function groundingRefusal(
       ? action.stop.evidenceRefs
       : action.type === "reenter"
         ? action.reenter.evidenceRefs
-        : action.type === "qualify_repair"
+        : action.type === "enter"
+          ? action.enter.evidenceRefs
+          : action.type === "qualify_repair"
           ? action.qualify.evidenceRefs
           : undefined;
   // A citation list that is not an array of strings is returned for correction, not thrown at the loop.

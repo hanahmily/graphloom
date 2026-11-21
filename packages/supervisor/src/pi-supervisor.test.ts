@@ -596,12 +596,109 @@ describe("buildRecoveryPrompt", () => {
   });
 });
 
+describe("buildRecoveryPrompt: the graph topology (docs/design-graph-topology.md §10)", () => {
+  const topologyView = {
+    start: "fix",
+    terminal: ["review"],
+    edges: [
+      { from: "fix", to: "review" },
+      { from: "review", to: "fix" },
+      { from: "arb", to: "fix" },
+      { from: "arb", to: "review" },
+    ],
+    implicit: false,
+    path: [
+      { stageId: "fix", attempt: 2 },
+      { stageId: "review", attempt: 1 },
+    ],
+  };
+  const nodes: NonNullable<SupervisorInput["nodes"]> = [
+    { id: "fix", name: "Fix", entry: "graph" },
+    { id: "review", name: "Review", entry: "graph" },
+    { id: "arb", name: "Arbitrate", entry: "supervisor", maxVisits: 3, visitsLeft: 2 },
+  ];
+  const facts = { inRecovery: true, canQualify: false, qualifiedArtifactIds: [] as string[] };
+  const withTopology = (over: { sideVisit?: { stageId: string; attempt: number }; canEnter?: string[]; exits?: string[]; trigger?: SupervisorInput["trigger"] } = {}): SupervisorInput => {
+    const input = sampleInput();
+    return {
+      ...input,
+      ...(over.trigger !== undefined ? { trigger: over.trigger } : {}),
+      view: { ...input.view, topology: { ...topologyView, ...(over.sideVisit !== undefined ? { sideVisit: over.sideVisit } : {}) } },
+      nodes,
+      admission: {
+        facts: { ...facts, ...(over.canEnter !== undefined ? { canEnter: over.canEnter } : {}), ...(over.exits !== undefined ? { exits: over.exits } : {}) },
+        check: async () => undefined,
+        refuse: async (action, reason) => ({ action, reason, remaining: 2 }),
+      },
+    };
+  };
+
+  it("renders the nodes with their entry, the edges, start and terminal, the live path and tail, and a supervisor-only node's out-edges and visits left", () => {
+    const prompt = buildRecoveryPrompt(withTopology({ canEnter: ["arb"] }));
+    expect(prompt).toContain("Graph topology (fixed for the run):");
+    expect(prompt).toContain("- live path: fix#2 → review#1; tail review#1");
+    expect(prompt).toContain("- nodes: fix (Fix), review (Review), arb (Arbitrate, supervisor-only)");
+    expect(prompt).toContain("- edges: fix → review, review → fix, arb → fix, arb → review");
+    expect(prompt).toContain("- start fix; terminal review");
+    expect(prompt).toContain("- supervisor-only node arb: out-edges arb → fix, arb → review; 2 of 3 visits left");
+    expect(prompt).toContain("- no side visit is open; enter admits now: arb");
+    expect(prompt).toContain("only you enter one, with enter {stageId, reason}");
+    expect(prompt).toContain("Propose exactly one action by calling one GraphLoom tool: dispatch, observe, validate, reenter, enter, return, or stop.");
+    expect(prompt).toContain("or change the graph's edges, start or terminal nodes: the topology is fixed for the run.");
+  });
+
+  it("renders an open side visit with the out-edges that leave it, and offers no enter", () => {
+    const prompt = buildRecoveryPrompt(withTopology({ sideVisit: { stageId: "arb", attempt: 1 }, canEnter: [], exits: ["fix", "review"] }));
+    expect(prompt).toContain("- open side visit: arb#1, entered from the tail. Only you leave it, with reenter along one of its out-edges: arb → fix, arb → review. Until then, dispatch and validate name only arb.");
+    expect(prompt).not.toContain("- no side visit is open");
+    expect(prompt).not.toMatch(/GraphLoom tool: [^.]*\benter\b/);
+  });
+
+  it("guides the supervisor_node_settled trigger: read the receipts and reasons, leave along the out-edge that fits, and names its safe default", () => {
+    const prompt = buildRecoveryPrompt(
+      withTopology({
+        sideVisit: { stageId: "arb", attempt: 1 },
+        canEnter: [],
+        exits: ["fix", "review"],
+        trigger: { code: "supervisor_node_settled", message: "supervisor-only node arb settled in visit 3 (attempt 1): rcpt-9 (req-arb, validator node v1): ruled. Leave it with reenter along an out-edge (arb → fix, arb → review).", evidenceRefs: ["ev-9"] },
+      }),
+    );
+    expect(prompt).toContain("This episode's trigger is supervisor_node_settled");
+    expect(prompt).toContain("leave the node with reenter along the out-edge whose target fits the result");
+    expect(prompt).toContain("without relying on the receipt");
+    expect(prompt).toContain("return does not leave the node");
+    expect(prompt).toContain("its safe default is a retryable stop naming the node");
+    expect(prompt).toContain('"code": "supervisor_node_settled"');
+  });
+
+  it("shows only the live path for an implicit chain, and no supervisor-only guidance", () => {
+    const input = sampleInput();
+    const prompt = buildRecoveryPrompt({
+      ...input,
+      view: { ...input.view, topology: { start: "write", terminal: ["review"], edges: [{ from: "write", to: "review" }, { from: "review", to: "write" }], implicit: true, path: [{ stageId: "write", attempt: 1 }] } },
+    });
+    expect(prompt).toContain("- live path: write#1; tail write#1");
+    expect(prompt).toContain("the graph is a chain of its stages in order");
+    expect(prompt).not.toContain("- edges:");
+    expect(prompt).not.toContain("supervisor-only");
+  });
+
+  it("has no topology section for a view without one", () => {
+    expect(buildRecoveryPrompt(sampleInput())).not.toContain("Graph topology");
+  });
+});
+
 describe("buildRepairPrompt", () => {
   const request = {
     candidateRoot: "/repairs/r1/candidate",
     target: "executor" as const,
     reason: "the executor writes outside its write scope on review-purpose jobs",
   };
+
+  it("says the topology is fixed for a run: nodes, edges, start, terminal, entry and visit caps", () => {
+    const prompt = buildRepairPrompt(request);
+    expect(prompt).toContain("Do not add, remove, rename, or reorder graph steps (nodes); do not add, remove or reorder edges, or change the start node, the terminal nodes, or any node's entry or visit cap (maxVisits)");
+  });
 
   it("asks for a first patch with no reviewer feedback", () => {
     const prompt = buildRepairPrompt(request);
