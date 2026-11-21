@@ -5,6 +5,7 @@ import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
+import { readStopRequest } from "./stop-request.js";
 import { promisify } from "node:util";
 import type {
   CaseFinding,
@@ -155,6 +156,10 @@ function chargeableRemaining(budgets: DurableRunState["budgets"]): number {
 }
 
 export interface LoopDeps {
+  managed?: boolean;
+  managedInterruptionId?: string;
+  managedDisconnect?: boolean;
+  managedStateDir?: string;
   /** Plugin decisions go through the host seam (in-process scripted or child). */
   host: PluginHost;
   runner: Runner;
@@ -182,7 +187,15 @@ export interface LoopDeps {
 }
 
 async function stopRequested(deps: LoopDeps): Promise<boolean> {
-  return activeTimeExhausted(deps) || Boolean(await Promise.resolve(deps.shouldStop?.() ?? false));
+  const stopped = activeTimeExhausted(deps) || Boolean(await Promise.resolve(deps.shouldStop?.() ?? false));
+  if (stopped && deps.managed === true && deps.managedStateDir !== undefined) {
+    const request = await readStopRequest(deps.managedStateDir);
+    const id = request === undefined ? undefined : (JSON.parse(request) as { interruptionCommandId?: string }).interruptionCommandId;
+    deps.managedDisconnect = request !== undefined && (JSON.parse(request) as { managedDisconnect?: boolean }).managedDisconnect === true;
+    if (typeof id === "string") deps.managedInterruptionId = id;
+    else delete deps.managedInterruptionId;
+  }
+  return stopped;
 }
 
 function syncRevision(deps: LoopDeps, state: DurableRunState): void {
@@ -195,6 +208,7 @@ export async function runNormalLoop(
   state: DurableRunState,
   deps: LoopDeps,
 ): Promise<DurableRunState> {
+  deps = { ...deps, managedStateDir: state.stateDir };
   // Per-step lock so Stop can coordinate during long runner jobs.
   // Durable run.owner.json serializes which controller owns the loop.
   const timing: { clock?: ActiveClock } = {};
@@ -270,10 +284,14 @@ function activeTimeExhausted(deps: LoopDeps): boolean {
 }
 
 /** Why a run that was asked to stop, or ran out of time, stopped. */
-function stopCause(deps: LoopDeps): { stopReason: string; blocker: string } {
+function stopCause(deps: LoopDeps): { stopReason: string; blocker: string; managedContinuation?: NonNullable<DurableRunState["managedContinuation"]> } {
   return activeTimeExhausted(deps)
     ? { stopReason: "active time budget exhausted", blocker: "no active execution time remains" }
-    : { stopReason: "operator stop", blocker: "stop requested" };
+    : deps.managedInterruptionId !== undefined
+      ? { stopReason: "managed scheduling yield", blocker: "hub service interruption", managedContinuation: { cause: "service-interruption", interruptionCommandId: deps.managedInterruptionId } }
+      : deps.managedDisconnect === true
+        ? { stopReason: "managed scheduling yield", blocker: "hub control channel disconnected", managedContinuation: { cause: "controller-crash" } }
+        : { stopReason: "operator stop", blocker: "stop requested" };
 }
 
 async function withRunLock<T>(
@@ -367,6 +385,17 @@ async function runNormalLoopSteps(
     }
     let holdElapsed = false;
     if (state.status === "running" && state.quotaHold !== undefined) {
+      if (deps.managed === true && Date.parse(state.quotaHold.until) > Date.now()) {
+        return withRunLock(state.stateDir, async () => {
+          state = chargeActiveTime(await reloadRunState(state), deps);
+          if (state.status !== "running") return state;
+          state = await stopRequested(deps)
+            ? { ...state, status: "stopped", ...stopCause(deps) }
+            : { ...state, status: "stopped", stopReason: "managed scheduling yield", blocker: `waiting until ${state.quotaHold!.until}`, managedContinuation: { cause: "provider-cooldown", notBefore: state.quotaHold!.until }, stateRevision: state.stateRevision + 1 };
+          await saveRunState(state);
+          return state;
+        });
+      }
       // A recovery episode held for a harness quota reset: wait it out (stop interrupts), then open it.
       lastAction = "quota hold";
       const abort = new AbortController();
@@ -1101,6 +1130,11 @@ async function runNormalLoopSteps(
 
       if (decision.action.type === "dispatch") {
         const prepared = await prepareDispatch(state, decision, deps, retryFlags);
+        if (deps.managed === true && prepared.pending?.notBefore !== undefined && Date.parse(prepared.pending.notBefore) > Date.now()) {
+          prepared.state = await stopRequested(deps)
+            ? { ...prepared.state, status: "stopped", ...stopCause(deps) }
+            : { ...prepared.state, status: "stopped", stopReason: "managed scheduling yield", blocker: `waiting until ${prepared.pending.notBefore}`, managedContinuation: { cause: "executor-retry", notBefore: prepared.pending.notBefore }, stateRevision: prepared.state.stateRevision + 1 };
+        }
         await saveRunState(prepared.state);
         syncRevision(deps, prepared.state);
         if (prepared.state.status !== "running") {

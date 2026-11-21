@@ -4,7 +4,7 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, lstatSync, realpathSync, statSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile, open, access } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -198,6 +198,22 @@ export async function removeRunContainers(runId: string): Promise<void> {
   }
 }
 
+/** Verified cleanup never converts daemon errors into evidence of an empty run. */
+export async function drainRunContainers(runId: string): Promise<{ drained: boolean; resources: string[] }> {
+  const list = async () => {
+    const { stdout } = await execFileAsync("docker", ["ps", "-aq", "--filter", `label=${RUN_LABEL}=${runId}`], { timeout: DOCKER_TIMEOUT_MS });
+    return stdout.split("\n").map((id) => id.trim()).filter(Boolean);
+  };
+  try {
+    const ids = await list();
+    if (ids.length > 0) await execFileAsync("docker", ["rm", "-f", ...ids], { timeout: DOCKER_TIMEOUT_MS });
+    const remaining = await list();
+    return { drained: remaining.length === 0, resources: remaining.map((id) => `docker:${id}`) };
+  } catch (error) {
+    return { drained: false, resources: [`docker: ${error instanceof Error ? error.message : String(error)}`] };
+  }
+}
+
 /** The first component of `rel` below `root` that is a symbolic link, if any. */
 function linkBelow(root: string, rel: string): string | undefined {
   let current = root;
@@ -359,6 +375,7 @@ function restoreEvidence(evidence: JobEvidenceItem[] | undefined, spec: DockerCo
  * with another executor, or no docker confinement, passes through untouched.
  */
 export function withDockerConfinement(inner: Runner): Runner {
+  const managedStateDirs = new Set<string>();
   const applies = (job: JobSpec): { pinned: JobSpec; spec: DockerConfinement } | undefined => {
     const pinned = pinJobExecutor(job);
     return pinned.confinement?.kind === "docker" && pinned.executor?.id === BUILTIN_COMMAND_EXECUTOR_ID
@@ -367,6 +384,25 @@ export function withDockerConfinement(inner: Runner): Runner {
   };
   return {
     ...inner,
+    managed: {
+      async check(stateDir) {
+        if (stateDir === undefined) return "managed Docker inventory requires a state directory";
+        managedStateDirs.add(path.resolve(stateDir));
+        if (inner.managed === undefined) return "inner runner has no managed cleanup contract";
+        return inner.managed.check(stateDir);
+      },
+      async drain(runId, stateDir) {
+        if (stateDir === undefined || inner.managed === undefined) return { drained: false, resources: ["managed Docker inventory unavailable"] };
+        const innerResult = await inner.managed.drain(runId, stateDir);
+        try { await access(path.join(stateDir, "managed-docker.used")); }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return innerResult;
+          return { drained: false, resources: [...innerResult.resources, "Docker inventory unreadable"] };
+        }
+        const docker = await drainRunContainers(runId);
+        return { drained: innerResult.drained && docker.drained, resources: [...innerResult.resources, ...docker.resources] };
+      },
+    },
     async checkJob(job, ctx) {
       const found = applies(job);
       if (found === undefined) return inner.checkJob?.(job, ctx);
@@ -381,6 +417,13 @@ export function withDockerConfinement(inner: Runner): Runner {
       const failed = (summary: string): JobResult => ({ status: "failed", summary, runId: ctx.runId, operationId: ctx.operationId, generation: ctx.generation });
       let prepared: PreparedDockerJob | { refusal: string };
       try {
+        const managedStateDir = [...managedStateDirs].find((directory) => path.resolve(ctx.artifactDir).startsWith(`${directory}${path.sep}`));
+        if (managedStateDir !== undefined) {
+          const marker = await open(path.join(managedStateDir, "managed-docker.used"), "w", 0o600);
+          try { await marker.writeFile(ctx.runId); await marker.sync(); } finally { await marker.close(); }
+          const directory = await open(managedStateDir, "r");
+          try { await directory.sync(); } finally { await directory.close(); }
+        }
         prepared = await prepareDockerJob(found.pinned, found.spec, ctx);
       } catch (err) {
         return failed(`docker confinement could not be prepared, so the job was not run: ${err instanceof Error ? err.message : String(err)}`);

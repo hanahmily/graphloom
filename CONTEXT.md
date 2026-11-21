@@ -25,6 +25,23 @@ the task) that the CLI validates and executes. It never runs a command.
 One execution of a task, with pinned inputs, an isolated workspace, evidence,
 and finite resources.
 
+**Hub**:
+The operator's coordinator for admitting queued runs to a shared concurrency
+limit, observing them, and scheduling their continuation.
+
+**Submission**:
+A request accepted by a hub to carry one task through one run, including any
+later resumptions of that same run.
+
+**Run slot**:
+One unit of a hub's concurrency allowance, held while a submission starts,
+executes, or still has execution to drain.
+
+**Monitor frame**:
+A timestamped view of run state, usage and available hub state used together in
+one monitoring report, with the freshness of each source kept explicit.
+It describes progress without establishing new acceptance evidence.
+
 **Stage**:
 A declared step on a graph's happy path whose identity, order, and required outcome
 are fixed for a run. Several attempts and supporting jobs may satisfy that stage.

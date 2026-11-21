@@ -52,6 +52,7 @@ export async function createRunWorktree(
   runId: string,
   pinnedHead: string,
   stateDir: string,
+  reconcile = false,
 ): Promise<WorktreeResult> {
   const safeId = assertSafeRunId(runId);
   const graphloomRoot = path.join(repoPath, "graphloom");
@@ -59,6 +60,25 @@ export async function createRunWorktree(
   const branchName = `graphloom/${safeId}`;
   await withDirectoryLock(repoPath, ".graphloom-repo.lock", async () => {
     await assertNoSymlinkComponent(repoPath, "graphloom");
+    if (reconcile) {
+      const recorded = await execFileAsync("git", ["config", "--get", runStateDirKey(branchName)], { cwd: repoPath }).then((r) => r.stdout.trim()).catch(() => undefined);
+      const tip = await execFileAsync("git", ["rev-parse", "--verify", `refs/heads/${branchName}`], { cwd: repoPath }).then((r) => r.stdout.trim()).catch(() => undefined);
+      const present = await lstat(worktreePath).then(() => true).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return false; throw error; });
+      if (recorded !== undefined && path.resolve(recorded) !== path.resolve(stateDir)) throw new Error("managed intake worktree belongs to another run");
+      if ((tip !== undefined || present) && recorded === undefined) throw new Error("managed intake found an unowned worktree or branch");
+      if (tip !== undefined && tip !== pinnedHead) throw new Error("partial managed intake branch changed; operator reconciliation required");
+      if (present) {
+        await assertWorktreeMatches(repoPath, worktreePath, branchName, pinnedHead);
+        if ((await listDirtyPaths(worktreePath)).length > 0) throw new Error("partial managed intake worktree changed; operator reconciliation required");
+        return;
+      }
+      // Intent is durable in the controller binding before this owner mark.
+      await execFileAsync("git", ["config", runStateDirKey(branchName), path.resolve(stateDir)], { cwd: repoPath });
+      if (tip !== undefined) {
+        await execFileAsync("git", ["worktree", "add", worktreePath, branchName], { cwd: repoPath });
+        return;
+      }
+    }
     await mkdir(graphloomRoot, { recursive: true });
     await assertNoSymlinkComponent(repoPath, "graphloom");
     await execFileAsync(

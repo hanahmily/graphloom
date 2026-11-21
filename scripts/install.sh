@@ -485,9 +485,23 @@ offer_setup() { # version
 
 # ---------------------------------------------------------------- self
 
+# Queued runs have no run owner yet. A hub registers before durable acceptance.
+# Never interpret a missing/corrupt queue as permission to delete its pinned inputs.
+# Any record (including an interrupted write) conservatively retains every version.
+hub_retention_present() {
+  [ -e "$home/hub-retention" ] || [ -L "$home/hub-retention" ] || return 1
+  [ -d "$home/hub-retention" ] && [ ! -L "$home/hub-retention" ] || return 0
+  hub_retention_entries=$(ls -A "$home/hub-retention" 2>/dev/null) || return 0
+  [ -n "$hub_retention_entries" ]
+}
+
 # Removes versions that nothing keeps. keep_newest > 0 also keeps that many newest (auto-prune).
 prune_versions() { # keep_newest
   keep_newest=$1
+  if hub_retention_present; then
+    say "hub retention records keep all installed versions; retire the hub and reconcile its records before pruning"
+    return 0
+  fi
   cur=$(current_version)
   prev=$(previous_version)
   kept=" $cur $prev "

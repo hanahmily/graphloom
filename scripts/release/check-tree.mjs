@@ -17,10 +17,11 @@ import { readFile, readlink, realpath } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs, runMain, walk } from "./lib.mjs";
+import { CORE_PACKAGES } from "./assemble.mjs";
 import { foreignPackages, parseTarget } from "./prune-tree.mjs";
 
 /** Core packages ship only `package.json` and `dist/` (§2.3). */
-export const DIST_ONLY = ["packages/sdk", "packages/agent-harness", "packages/controller", "packages/plugin-host", "packages/supervisor", "packages/runner", "apps/graphloom"];
+export const DIST_ONLY = CORE_PACKAGES;
 
 /** Paths §2.3 excludes, relative to the tree root. */
 export const EXCLUDED = ["packages/testkit", "docs", ".github", "examples/skywalking-banyandb", "graphloom", "examples/graphloom", "release-out"];

@@ -143,6 +143,11 @@ export interface ExecutorDescriptor {
 }
 
 export interface Runner {
+  /** Explicit external-execution accounting for daemon-managed runs. No contract means unknown. */
+  managed?: {
+    check(stateDir?: string): Promise<string | undefined>;
+    drain(runId: string, stateDir?: string): Promise<{ drained: boolean; resources: string[] }>;
+  };
   runJob(job: JobSpec, ctx: JobContext): Promise<JobResult>;
   /** Executors this runner (and its fallbacks) serve, for pinning at intake and checking on resume. */
   describeExecutors?(): Promise<ExecutorDescriptor[]>;
