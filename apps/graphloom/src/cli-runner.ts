@@ -54,6 +54,10 @@ export function createCliRunner(
   githubModule?: string,
 ): Runner {
   const fallback: Runner = {
+    managed: {
+      async check() { return undefined; },
+      async drain() { return { drained: true, resources: [] }; },
+    },
     async runJob(job, ctx) {
       return failure(
         ctx,
@@ -69,6 +73,7 @@ export function createCliRunner(
     enabledHarnesses(config).map((harness) => [
       harness,
       createBuiltinExecutorRunner({
+        managedProcessOnly: true,
         packages: [{
           manifest: {
             ...codingAgentExecutorPackage,
@@ -120,10 +125,10 @@ export function createCliRunner(
   });
   const others =
     commandModule === undefined
-      ? createBuiltinExecutorRunner({ packages: [commandPackage(commandExecutorPackage.entryModule), ...githubPackages], fallback })
+      ? createBuiltinExecutorRunner({ managedProcessOnly: true, packages: [commandPackage(commandExecutorPackage.entryModule), ...githubPackages], fallback })
       : routeEnvironmentChecks(
-          createBuiltinExecutorRunner({ packages: [commandPackage(commandExecutorPackage.entryModule), ...githubPackages], fallback }),
-          createBuiltinExecutorRunner({ packages: [commandPackage(commandModule), ...githubPackages], fallback }),
+          createBuiltinExecutorRunner({ managedProcessOnly: true, packages: [commandPackage(commandExecutorPackage.entryModule), ...githubPackages], fallback }),
+          createBuiltinExecutorRunner({ managedProcessOnly: true, packages: [commandPackage(commandModule), ...githubPackages], fallback }),
           environmentCommands ?? new Map(),
         );
   const defaultAgent = agents.get(config.harness)!;
@@ -150,6 +155,7 @@ export function createCliRunner(
     return { runner: agent, job: { ...pinned, input: finalInput } };
   };
   return {
+    managed: combinedManaged([...agents.values(), others]),
     async describeExecutors() {
       // The shape shown for the coding agent is what a job's input must carry; route() takes
       // the harness choice out of it before the executor sees it, so it is added here.
@@ -213,6 +219,7 @@ export function isEnvironmentDispatch(job: { input?: unknown }, environmentComma
 /** Routes a job dispatching exactly the environment's own declared commands to `real`; everything else to `standIn`. */
 function routeEnvironmentChecks(real: Runner, standIn: Runner, environmentCommands: ReadonlyMap<string, readonly string[]>): Runner {
   return {
+    managed: combinedManaged([real, standIn]),
     async describeExecutors() {
       return standIn.describeExecutors!();
     },
@@ -224,6 +231,26 @@ function routeEnvironmentChecks(real: Runner, standIn: Runner, environmentComman
     },
     async releaseRun(runId) {
       await Promise.all([real.releaseRun?.(runId), standIn.releaseRun?.(runId)]);
+    },
+  };
+}
+
+/** Every routed executor must explicitly account for execution outside its process tree. */
+function combinedManaged(runners: Runner[]): NonNullable<Runner["managed"]> {
+  return {
+    async check(stateDir) {
+      for (const runner of runners) {
+        if (runner.managed === undefined) return "a routed executor has no managed cleanup contract";
+        const problem = await runner.managed.check(stateDir);
+        if (problem !== undefined) return problem;
+      }
+      return undefined;
+    },
+    async drain(runId, stateDir) {
+      const results = await Promise.all(runners.map(async (runner) => runner.managed === undefined
+        ? { drained: false, resources: ["a routed executor has no managed cleanup contract"] }
+        : runner.managed.drain(runId, stateDir)));
+      return { drained: results.every((result) => result.drained), resources: [...new Set(results.flatMap((result) => result.resources))] };
     },
   };
 }

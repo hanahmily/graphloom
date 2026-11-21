@@ -211,6 +211,13 @@ crashes; filesystem and execution scopes require host enforcement.
 
 ## Documentation
 
+- [Run hub](design-run-hub.md): a local daemon with a durable task
+  queue, a configurable concurrent-run limit, progress and usage observations,
+  and bounded automatic resume of eligible runs.
+- [Monitoring panels](design-monitor-panels.md): independently
+  renderable topology, progress, usage and execution details for terminals and
+  coding-agent chats; ANSI terminal views and optional native static HAPI colors
+  through existing KaTeX support, with plain fallbacks and no required dashboard.
 - [Current core design](design-typescript-core.md): all decisions, contracts,
   repair lifecycle, minimal example, verification, and implementation milestones.
 - [Architecture](architecture.md): runtime interaction overview.

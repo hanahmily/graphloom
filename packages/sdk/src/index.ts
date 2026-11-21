@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
+export type * from "./hub.js";
+export type * from "./monitor.js";
+
 export type {
   ContractCheck,
   ReferenceSet,

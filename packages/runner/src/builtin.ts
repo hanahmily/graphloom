@@ -11,6 +11,8 @@ export interface BuiltinExecutorPackage extends ExecutorBinding {
 }
 
 export interface BuiltinExecutorRunnerOptions {
+  /** Explicitly audited packages whose execution stays in the launch process tree. */
+  managedProcessOnly?: boolean;
   /** Built-in packages to serve, each with the operator's grants. */
   packages: readonly BuiltinExecutorPackage[];
   /** Runner for every job no listed package serves. */
@@ -73,6 +75,7 @@ export function createBuiltinExecutorRunner(options: BuiltinExecutorRunnerOption
       entryModule: pkg.manifest.entryModule,
       executorIds: [...pkg.manifest.executorIds],
       builtin: true,
+      ...(options.managedProcessOnly === true ? { managedProcessOnly: true } : {}),
       sandbox: !unrestricted,
       sourceRoot: packageRootOf(pkg.manifest.entryModule),
       ...(pkg.manifest.ownState !== undefined ? { ownState: pkg.manifest.ownState } : {}),

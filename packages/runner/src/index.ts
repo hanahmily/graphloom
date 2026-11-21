@@ -40,6 +40,7 @@ export {
   dockerRunArgs,
   killContainers,
   removeRunContainers,
+  drainRunContainers,
   withDockerConfinement,
   type DockerRunOptions,
   type DockerRunSpec,

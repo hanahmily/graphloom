@@ -1,0 +1,93 @@
+<!-- Throwaway panel review: Canvas, Compact, and Chat share the same sample observation and character renderer. -->
+<style>
+#graphloom-panel-prototype { --gl-paper:light-dark(#f4f6fa,#18212c); --gl-ink:light-dark(#243145,#dce7f3); --gl-muted:light-dark(#526177,#9baec3); --gl-line:light-dark(#bdcadd,#3e536d); --gl-accent:light-dark(#255db0,#87b6ff); --gl-good:light-dark(#28734c,#9dd2a4); --gl-warn:light-dark(#986016,#e9bd76); --gl-raised:light-dark(#e9eef6,#202d3b); --gl-font:13px; color:var(--gl-ink); font-family:ui-monospace,"Cascadia Code","DejaVu Sans Mono",monospace; }
+#graphloom-panel-prototype * { box-sizing:border-box; }
+#graphloom-panel-prototype .gl-product { background:var(--gl-paper); border:1px solid var(--gl-line); border-radius:8px; padding:18px; min-width:0; }
+#graphloom-panel-prototype .gl-top { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px 16px; padding-right:70px; }
+#graphloom-panel-prototype .gl-name { font-size:15px; font-weight:500; letter-spacing:.02em; }
+#graphloom-panel-prototype .gl-kicker { font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--gl-muted); }
+#graphloom-panel-prototype .gl-meta { margin:8px 0 16px; color:var(--gl-muted); font-size:12px; line-height:1.6; }
+#graphloom-panel-prototype .gl-toolbar { display:flex; flex-wrap:wrap; align-items:flex-end; gap:12px; margin:14px 0; }
+#graphloom-panel-prototype .gl-field { display:flex; flex-direction:column; gap:5px; color:var(--gl-muted); font-size:12px; max-width:100%; }
+#graphloom-panel-prototype select { font:inherit; font-size:12px; color:var(--gl-ink); border:1px solid var(--gl-line); border-radius:4px; background:var(--gl-paper); padding:6px 8px; min-height:34px; max-width:100%; }
+#graphloom-panel-prototype .gl-tabs { display:flex; flex-wrap:wrap; gap:3px 10px; border-bottom:1px solid var(--gl-line); padding:0 0 9px; margin:0 0 16px; }
+#graphloom-panel-prototype button { font:inherit; font-size:12px; background:transparent; border:0; color:var(--gl-muted); padding:6px 0; border-bottom:2px solid transparent; min-height:32px; }
+#graphloom-panel-prototype button[aria-pressed="true"] { color:var(--gl-accent); border-bottom-color:var(--gl-accent); }
+#graphloom-panel-prototype button:focus-visible, #graphloom-panel-prototype select:focus-visible { outline:2px solid var(--gl-accent); outline-offset:3px; }
+#graphloom-panel-prototype .gl-panel-label { display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; font-size:12px; color:var(--gl-muted); margin-bottom:10px; }
+#graphloom-panel-prototype pre { margin:0; padding:0; border:0; border-radius:0; background:transparent; color:var(--gl-ink); font-family:inherit; font-size:var(--gl-font); font-weight:400; line-height:1.16; white-space:pre; overflow:visible; width:100%; }
+#graphloom-panel-prototype .gl-frame { min-width:0; }
+#graphloom-panel-prototype .gl-tone-muted { color:var(--gl-muted); }
+#graphloom-panel-prototype .gl-tone-edge { color:var(--gl-line); }
+#graphloom-panel-prototype .gl-tone-good { color:var(--gl-good); }
+#graphloom-panel-prototype .gl-tone-active { color:var(--gl-accent); }
+#graphloom-panel-prototype .gl-tone-warn { color:var(--gl-warn); }
+#graphloom-panel-prototype .gl-foot { margin-top:14px; padding-top:12px; border-top:1px solid var(--gl-line); display:flex; gap:8px 20px; flex-wrap:wrap; color:var(--gl-muted); font-size:11px; line-height:1.6; }
+#graphloom-panel-prototype .gl-compact { border-radius:0; border-width:0 0 1px; padding:16px 8px; }
+#graphloom-panel-prototype .gl-compact .gl-toolbar { margin:16px 0; }
+#graphloom-panel-prototype .gl-compact .gl-frame { border-left:2px solid var(--gl-accent); padding-left:12px; }
+#graphloom-panel-prototype .gl-chat { background:light-dark(#fff,#141b24); padding:18px; border-radius:12px; }
+#graphloom-panel-prototype .gl-chat-turn { border-left:2px solid var(--gl-line); margin:16px 0; padding-left:12px; font-size:12px; line-height:1.7; }
+#graphloom-panel-prototype .gl-chat .gl-frame { background:var(--gl-paper); padding:12px; border-radius:5px; }
+#graphloom-panel-prototype .gl-chat pre { color:var(--gl-ink); }
+#graphloom-panel-prototype .gl-chat pre span { color:inherit; }
+#graphloom-panel-prototype .gl-chat .gl-tabs { margin-top:16px; }
+@media (max-width:460px) {
+  #graphloom-panel-prototype .gl-product { padding:12px 8px; }
+  #graphloom-panel-prototype .gl-top { padding-right:0; }
+  #graphloom-panel-prototype .gl-chat .gl-frame { padding:8px; }
+  #graphloom-panel-prototype .gl-tabs { gap:3px 12px; }
+}
+@media (pointer:coarse) {
+  #graphloom-panel-prototype button, #graphloom-panel-prototype select { min-height:44px; }
+}
+</style>
+<div id="graphloom-panel-prototype">
+  <div class="viz-carousel" aria-label="GraphLoom panel designs">
+    <section data-variant="Canvas" aria-label="Canvas panel design">
+      <div class="gl-product" data-layout="canvas">
+        <header class="gl-top"><span class="gl-name">graphloom / monitor</span><span class="gl-kicker">Prototype · sample data</span></header>
+        <p class="gl-meta" data-summary></p>
+        <nav class="gl-tabs" data-panels aria-label="Monitoring panels"></nav>
+        <div class="gl-toolbar">
+          <label class="gl-field">Run state<select data-scenario><option value="running">Running</option><option value="recovery">Supervisor visit</option><option value="waiting">Provider cooldown</option><option value="complete">Completed</option></select></label>
+          <label class="gl-field">Inspect node<select data-node></select></label>
+        </div>
+        <div class="gl-panel-label"><span data-panel-title></span><span data-observed></span></div>
+        <div class="gl-frame"><pre data-frame role="img" aria-label="Sample monitoring panel"></pre></div>
+        <footer class="gl-foot"><span data-frame-caption></span><span>Read only · no live runs</span></footer>
+      </div>
+    </section>
+    <section data-variant="Compact" aria-label="Compact panel design" hidden>
+      <div class="gl-product gl-compact" data-layout="compact">
+        <header class="gl-top"><span class="gl-name">graphloom</span><span class="gl-kicker">Compact · sample data</span></header>
+        <p class="gl-meta" data-summary></p>
+        <div class="gl-toolbar">
+          <label class="gl-field">Panel<select data-panel-select></select></label>
+          <label class="gl-field">Run state<select data-scenario><option value="running">Running</option><option value="recovery">Supervisor visit</option><option value="waiting">Provider cooldown</option><option value="complete">Completed</option></select></label>
+          <label class="gl-field">Inspect node<select data-node></select></label>
+        </div>
+        <div class="gl-frame"><pre data-frame role="img" aria-label="Compact monitoring panel"></pre></div>
+        <footer class="gl-foot"><span data-observed></span><span data-frame-caption></span></footer>
+      </div>
+    </section>
+    <section data-variant="Chat" aria-label="Chat panel design" hidden>
+      <div class="gl-product gl-chat" data-layout="chat">
+        <header class="gl-top"><span class="gl-name">GraphLoom · agent reply</span><span class="gl-kicker">Sample message</span></header>
+        <div class="gl-chat-turn">Show the <span data-requested-panel>topology</span> panel for this run.</div>
+        <p class="gl-meta" data-summary></p>
+        <div class="gl-frame"><pre data-frame role="img" aria-label="Plain chat monitoring panel"></pre></div>
+        <nav class="gl-tabs" data-panels aria-label="Choose a panel for this message"></nav>
+        <div class="gl-toolbar">
+          <label class="gl-field">Run state<select data-scenario><option value="running">Running</option><option value="recovery">Supervisor visit</option><option value="waiting">Provider cooldown</option><option value="complete">Completed</option></select></label>
+          <label class="gl-field">Inspect node<select data-node></select></label>
+        </div>
+        <footer class="gl-foot"><span data-observed></span><span>Snapshot · no terminal controls</span></footer>
+      </div>
+    </section>
+  </div>
+</div>
+<script>
+// __PANEL_RENDERER__
+// __PREVIEW_ADAPTER__
+</script>

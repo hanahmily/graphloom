@@ -1896,3 +1896,41 @@ graphloom resume <run> --approve review-layer --input areas=A3,A17,A18
   wins, so the operator corrects an input by approving again.
 - `graphloom --help` names `--input`; the `graphloom-run` skill tells an agent to
   ask the user for the values.
+
+## 18. Run hub
+
+The [run hub design](design-run-hub.md) extends local standalone execution with
+a daemon that queues tasks, launches CLI child processes, observes their progress
+and usage, and schedules bounded automatic continuation. Its central control is
+an operator-set maximum number of concurrent runs, including startup and cleanup.
+New runs and resumptions share that allowance. The controller retains ownership
+of run state, acceptance, reconciliation, budgets and recovery authority.
+
+This single-machine extension is implemented by `packages/hub` and the CLI.
+It uses managed launch/ownership, crash-safe intake,
+structured continuation eligibility, and verified process drainage before slots
+can be reused. Standalone runs outside the hub keep their existing behavior.
+
+The [monitoring panels](design-monitor-panels.md) render topology,
+progress, usage and execution details independently in terminals and coding-agent
+chats. Shared value contracts belong in the SDK; `packages/monitor`
+module owns pure semantic panel projection and rendering. Terminal adapters use
+character cells with ANSI or plain output; chat adapters use Markdown, with an
+optional bounded KaTeX serializer for native static colors through HAPI's existing
+math renderer. These share facts and identities, not identical geometry. Unknown
+hosts use plain Markdown; complex graphs retain complete paginated adjacency and
+charts retain numeric values, units and gaps when rich rendering is unavailable.
+This route requires no HAPI change or screenshot, and does not promise interactive
+or continuously updating chat messages. Future MCP Apps require host integration.
+
+Live terminal input and chat delivery stay outside the controller and scheduler.
+Panels are read-only; rendering failure, viewer exit or notification loss cannot
+change execution. The monitor consumes the [directed topology](design-graph-topology.md),
+including cycles, live paths and supervisor-only nodes, from the owning runtime.
+Legacy stage views remain a compatibility fallback.
+Display code cannot introduce execution dependencies or parallel jobs. A full
+dashboard is optional.
+
+Managed execution is qualified with scripted runs and cgroup filesystem fixtures.
+Real systemd/cgroup/container deployment and each HAPI rich message surface need
+separate operational qualification; unknown chat surfaces use plain reports.

@@ -5,6 +5,7 @@ import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readdir, realpath, rm } from "node:fs/promises";
 import path from "node:path";
+import { readManagedBinding } from "./managed.js";
 import { promisify } from "node:util";
 import { assertSafeRunId } from "./ids.js";
 import { withDirectoryLock } from "./lock.js";
@@ -29,6 +30,7 @@ export interface DeleteReport {
  */
 export async function deleteRun(stateDir: string, options: { force?: boolean } = {}): Promise<DeleteReport> {
   const report = await withDirectoryLock(stateDir, "run.exec.lock", async () => {
+    if (await readManagedBinding(stateDir) !== undefined) throw new Error("cannot delete a hub-managed run; archive it through the hub");
     const state = await loadRunState(stateDir);
     const refuse = (why: string) => new Error(`cannot delete run ${state.runId}: ${why}`);
     const owner = await readOwnerClaim(stateDir);

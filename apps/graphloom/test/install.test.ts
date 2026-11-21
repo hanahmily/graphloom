@@ -12,6 +12,7 @@ import { appendFile, cp, mkdir, readFile, rm, symlink, writeFile } from "node:fs
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ttyRun } from "./doctor-env.js";
+import { hubRetentionFile, registerHubRetention } from "../src/hub-retention.js";
 import { makeSandbox, realCli, removeTree, repoRoot, startDetached, tempBase, waitUntil, type Sandbox } from "./install-env.js";
 
 let base: string;
@@ -207,6 +208,26 @@ describe("switching current", () => {
 });
 
 describe("self prune", () => {
+  it("keeps queued hub inputs despite force, missing hub state, and corrupt retention records", async () => {
+    const sb = await makeSandbox(base);
+    await installed(sb, "0.1.0", "0.1.1", "0.1.2", "0.1.3");
+    const hub = path.join(sb.root, "hub-not-created-yet");
+    await registerHubRetention(sb.ghome, hub, [path.join(sb.ghome, "versions", "0.1.0")]);
+    for (const args of [["--dry-run"], ["--force"]]) {
+      const result = sb.graphloom(["self", "prune", ...args], quiet);
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain("hub retention records keep all installed versions");
+      expect(sb.installed()).toHaveLength(4);
+    }
+    await writeFile(hubRetentionFile(sb.ghome, hub), "truncated registry");
+    expect(sb.graphloom(["self", "prune", "--force"], quiet).status).toBe(0);
+    expect(sb.installed()).toHaveLength(4);
+    // Only explicit removal after retiring/reconciling the hub permits pruning.
+    await rm(hubRetentionFile(sb.ghome, hub));
+    expect(sb.graphloom(["self", "prune", "--force"], quiet).status).toBe(0);
+    expect(sb.installed()).toEqual(["0.1.2", "0.1.3"]);
+  });
+
   it("keeps current, previous, owners of runs whose state exists, and versions a run's plugin links into", async () => {
     const sb = await makeSandbox(base);
     await installed(sb, "0.1.0", "0.1.1", "0.1.2", "0.1.3", "0.1.4");

@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, rename, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -31,6 +31,17 @@ function runChild(script: string) {
 }
 
 describe("directory locks", () => {
+  it("locks absent intake directories without creating them and preserves exclusion after creation", async () => {
+    const root = await directory();
+    const absent = path.join(root, "state", "run");
+    await withDirectoryLock(absent, "intake.lock", async () => {
+      await expect(access(path.join(root, "state"))).rejects.toMatchObject({ code: "ENOENT" });
+      await mkdir(absent, { recursive: true });
+      await expect(withDirectoryLock(absent, "intake.lock", async () => undefined, { retries: 1, delayMs: 1 })).rejects.toThrow("timed out acquiring lock");
+    }, { createDirectory: false });
+    await expect(withDirectoryLock(absent, "intake.lock", async () => "released")).resolves.toBe("released");
+  });
+
   it("serializes separate processes even when an old lock file is empty", async () => {
     const dir = await directory();
     await writeFile(path.join(dir, "test.lock"), "");

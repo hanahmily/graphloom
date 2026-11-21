@@ -1,0 +1,10 @@
+{
+  "name": "@graphloom/hub",
+  "version": "0.2.0",
+  "description": "Durable local run admission, process containment, and continuation",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "scripts": { "build": "tsc -p tsconfig.json", "typecheck": "tsc -p tsconfig.test.json", "test": "vitest run" },
+  "dependencies": { "@graphloom/sdk": "0.2.0" }
+}

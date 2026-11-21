@@ -82,6 +82,7 @@ export {
   type SessionSelector,
 } from "./conversations.js";
 export { harnessOfSessionRef } from "./agent-sessions.js";
+export { readManagedBinding, managedObservation, observeContinuation, reconcileManagedRun, assertManagedRunner, releaseManagedRun, type ManagedRunBinding, type ManagedRunGrant } from "./managed.js";
 export type { AgentSessionRecord } from "./state.js";
 export { TIMEOUT_CONTINUATION_NOTE } from "./agent-sessions.js";
 export type { InstallRecord, InstallTransitionRecord, StateMigrationRecord, VisitEntry, VisitRecord } from "./state.js";

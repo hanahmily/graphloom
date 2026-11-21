@@ -332,6 +332,12 @@ export interface VisitRecord {
 }
 
 export interface DurableRunState {
+  /** A controller-owned safe scheduling yield, never a graph reason string. */
+  managedContinuation?: {
+    cause: "provider-cooldown" | "executor-retry" | "transient-provider" | "service-interruption" | "controller-crash";
+    notBefore?: string;
+    interruptionCommandId?: string;
+  };
   runId: string;
   status: RunStatus;
   /**

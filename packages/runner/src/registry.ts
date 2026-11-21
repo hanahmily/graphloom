@@ -88,6 +88,8 @@ export interface TrustedInProcessRunnerOptions {
 export type RegistryRunnerOptions = TrustedInProcessRunnerOptions;
 
 export interface ChildExecutorRunnerOptions {
+  /** Trusted composition root assertion: this package uses only contained processes or registered Docker jobs. */
+  managedProcessOnly?: boolean;
   /** Absolute path to a module exporting `executors: ExecutorDefinition[]`. */
   entryModule: string;
   /** Ids served by the child; others fall through to `fallback`. */
@@ -577,6 +579,17 @@ export function createChildExecutorRunner(
   const ownStateDirs = (): string[] => resolveOwnStateDirs(options.ownState, options.env ?? process.env);
 
   const runner: Runner = {
+    managed: {
+      async check(stateDir) {
+        if (options.managedProcessOnly !== true) return `executor package ${entryModule} has no managed external cleanup contract`;
+        if (options.fallback.managed === undefined) return "fallback runner has no managed cleanup contract";
+        return options.fallback.managed.check(stateDir);
+      },
+      async drain(runId, stateDir) {
+        if (options.managedProcessOnly !== true || options.fallback.managed === undefined) return { drained: false, resources: [entryModule] };
+        return options.fallback.managed.drain(runId, stateDir);
+      },
+    },
     async releaseRun(runId) {
       await options.fallback.releaseRun?.(runId);
     },
