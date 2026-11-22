@@ -48,11 +48,11 @@ import {
 async function main(args = process.argv.slice(2), managed?: ManagedExecution): Promise<void> {
   const cmd = args[0];
   if (cmd === "hub") { process.exitCode = await hubCommand(args.slice(1)); return; }
-  if (cmd === "__hub-capabilities") { console.log(JSON.stringify({ managedProtocol: 1, monitorSchema: 1, runtime: selfInstall().record })); return; }
+  if (cmd === "__hub-capabilities") { console.log(JSON.stringify({ managedProtocol: 1, executionObservation: 1, monitorSchema: 1, runtime: selfInstall().record })); return; }
   if (cmd === "__hub-managed") { await managedMain(args.slice(1), main); return; }
   if (cmd === "__hub-observe") {
-    if (args.length !== 2 || !path.isAbsolute(args[1]!)) throw new Error("invalid owning-runtime observation request");
-    console.log(JSON.stringify(await observeOwnedRun(args[1]!))); return;
+    if ((args.length !== 2 && !(args.length === 3 && args[2] === "--execution-only")) || !path.isAbsolute(args[1]!)) throw new Error("invalid owning-runtime observation request");
+    console.log(JSON.stringify(await observeOwnedRun(args[1]!, args[2] === "--execution-only"))); return;
   }
   if (cmd === "__hub-cleanup") {
     if (args.length !== 4 || !path.isAbsolute(args[1]!)) throw new Error("invalid owning-runtime cleanup request");

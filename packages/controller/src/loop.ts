@@ -191,8 +191,8 @@ async function stopRequested(deps: LoopDeps): Promise<boolean> {
   const stopped = activeTimeExhausted(deps) || Boolean(await Promise.resolve(deps.shouldStop?.() ?? false));
   if (stopped && deps.managed === true && deps.managedStateDir !== undefined) {
     const request = await readStopRequest(deps.managedStateDir);
-    const id = request === undefined ? undefined : (JSON.parse(request) as { interruptionCommandId?: string }).interruptionCommandId;
-    deps.managedDisconnect = request !== undefined && (JSON.parse(request) as { managedDisconnect?: boolean }).managedDisconnect === true;
+    const id = request?.interruptionCommandId;
+    deps.managedDisconnect = request?.managedDisconnect === true;
     if (typeof id === "string") deps.managedInterruptionId = id;
     else delete deps.managedInterruptionId;
   }
@@ -387,15 +387,21 @@ async function runNormalLoopSteps(
     let holdElapsed = false;
     if (state.status === "running" && state.quotaHold !== undefined) {
       if (deps.managed === true && Date.parse(state.quotaHold.until) > Date.now()) {
-        return withRunLock(state.stateDir, async () => {
+        state = await withRunLock(state.stateDir, async () => {
           state = chargeActiveTime(await reloadRunState(state), deps);
           if (state.status !== "running") return state;
-          state = await stopRequested(deps)
-            ? { ...state, status: "stopped", ...stopCause(deps) }
-            : { ...state, status: "stopped", stopReason: "managed scheduling yield", blocker: `waiting until ${state.quotaHold!.until}`, managedContinuation: { cause: "provider-cooldown", notBefore: state.quotaHold!.until }, stateRevision: state.stateRevision + 1 };
+          if (await stopRequested(deps)) state = { ...state, status: "stopped", ...stopCause(deps) };
+          else {
+            const hold = state.quotaHold;
+            // The persisted hold can have been cleared, shortened or replaced while acquiring the lock.
+            if (hold === undefined || !(Date.parse(hold.until) > Date.now())) return state;
+            state = { ...state, status: "stopped", stopReason: "managed scheduling yield", blocker: `waiting until ${hold.until}`, managedContinuation: { cause: "provider-cooldown", notBefore: hold.until }, stateRevision: state.stateRevision + 1 };
+          }
           await saveRunState(state);
           return state;
         });
+        if (state.status !== "running") return state;
+        continue;
       }
       // A recovery episode held for a harness quota reset: wait it out (stop interrupts), then open it.
       lastAction = "quota hold";

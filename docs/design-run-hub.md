@@ -271,14 +271,30 @@ inherit the control descriptor. After a grant, control-channel loss requests a
 cooperative scheduling stop at the next safe point; the reservation remains held
 while any work drains.
 
+If preparation fails after spawning a bootstrap, persist the failure on the launch
+record. Live process observations, cleanup messages and daemon restart cannot
+clear that failure. Keep the reservation until drainage is verified, then block
+the submission; an unsuccessful preparation is never silently requeued.
+
 The controller must reserve initialization exclusively by run ID and persist an
 intake journal before worktree side effects. Repeating the same initial request
 with the same submission binding reconciles partial intake or reports the existing
 run; it cannot overwrite state or create a second worktree. A different binding
 for that run ID is refused. A new launch generation cannot work while an earlier
-launch remains live or unaccounted for. This is an implementation prerequisite:
-today `RunRequest.runId` exists, but the CLI does not expose it, and worktree
-creation precedes the first `state.json` write.
+launch remains live or unaccounted for.
+
+New controller bindings declare `initializationProtocol: 1`. After the first state
+save, and before reporting creation or admitting supervisor/graph execution, the
+controller syncs `managed-execution-started.json`; resume also establishes this
+marker before admitting work. Missing state is eligible for initial replay only
+with verified pre-execution provenance: an untouched pre-intake directory, or a
+matching protocol-bound intake without the execution marker or unexpected
+artifacts. Legacy bindings and missing state after the marker require recovery.
+The automatic `initialization-failed` observation schedules the same initial
+intake under the normal retry allowance and backoff, preserving the run ID,
+captured inputs and owned worktree. Every attempt needs a fresh slot and grant
+after complete drainage. A plain manual retry is allowed; resume remedies require
+initialized run state and are rejected before initialization.
 
 For the supported Linux daemon deployment, require a delegated cgroup v2 subtree
 and create one cgroup per launch. Put the hub itself in a separate leaf. Ordinary
@@ -308,7 +324,8 @@ before admitting anything. For each launch:
 | Child alive with matching identity | Keep its slot; observe it, or stop/drain it before replacement |
 | Controller gone, descendants/container still active | Drain and verify; retain slot |
 | State exists, execution drained | Read terminal result or evaluate continuation of the same run |
-| Partial intake with matching journal | Reconcile initialization through the owning CLI inside its slot |
+| Partial intake with matching protocol-bound journal and no execution marker | Retry initial intake with bounded backoff through the owning CLI inside a new slot |
+| Failed launch preparation, now drained | Preserve its recorded failure and block until an explicit retry |
 | Conflicting identity, unreadable state, unknown external work | Block admission for that reservation and report the uncertainty |
 
 The same rules apply after reboot; old PIDs are not identities. A missing startup
@@ -355,6 +372,7 @@ rechecks eligibility under the run lock when a queued resume actually starts.
 | Owning controller reports succeeded/complete after final acceptance and delivery checks | Mark succeeded after execution drains |
 | Safe provider cooldown with structured reset time | Wait until reset plus margin and jitter, then queue the same run |
 | Known transient launch/provider failure with no ambiguous effects | Bounded exponential backoff |
+| Verified incomplete initialization | Retry the same initial intake under the automatic allowance; never resume absent state |
 | Controller crash | Drain; request controller reconciliation, then continue only if safe |
 | Hub service shutdown interrupted execution | Reconcile and requeue only when the recorded desired action is still execute |
 | Explicit reconciliation debt or ambiguous external effect | Block for operator; never add `--reconciled` automatically |
@@ -571,6 +589,14 @@ retain pending reports and show that delivery is pending. A delivery acknowledge
 means accepted by the host, not read by the user. No adapter is started by this
 design change.
 
+Delivery failures known to precede acceptance retry at most five times using the
+same report ID. An ambiguous result is never blindly resent. Later reports may
+still be delivered; up to eight uncertain report identities are retained. Use
+`graphloom hub subscriptions` to inspect them, check the destination, then run
+`graphloom hub resolve-report <subscription-id> --report <report-id> --outcome accepted|failed`
+to record the observed outcome and free history capacity. The command does not
+resend the report or change graph execution.
+
 Chat reports use plain Markdown/text or the explicitly supported static KaTeX
 profile. Ordinary chat messages never receive raw ANSI escape sequences.
 Screenshots and image attachments are exports only when requested; they are not
@@ -589,6 +615,14 @@ existing standalone watch skill keeps its current watch-only rules.
 For example: `fix-14169 accepted Plan and entered Build #2. Calls 12/40; last
 accepted progress 2m ago. Hub occupancy 2/3.` Reports carry enough context for the
 agent to relay them without loading the entire run or polling a model every tick.
+Execution polling caches the owning runtime's small continuation observation while
+`state.json` retains the same file identity. Owner and cgroup liveness are checked
+every poll, and cleanup reuses that observation. A changed state invalidates the
+cache. Full topology, jobs and usage projections are requested only for panel
+reads or subscribed reports, with a short refresh interval; cgroup counter sampling
+continues independently. Older owning runtimes without the execution-only capability
+still use their versioned observer, with the same cache.
+
 The canonical report can be printed even when no language model is available;
 agent prose is optional presentation, never scheduling evidence. Rendering and
 notification batching run as ordinary code; metric samples do not invoke an LLM.
@@ -638,7 +672,8 @@ its authentication remain a separately designed feature.
 | `GET /v1/status` | Health and aggregate scheduling state |
 | `GET /v1/events?since=<cursor>` | Bounded NDJSON observation/report stream; reconnect cursor and explicit retention gaps |
 | `POST /v1/subscriptions` | Register an explicitly chosen chat destination, submission filter, panel selection and renderer/capability profile |
-| `GET /v1/subscriptions/:id` and `DELETE /v1/subscriptions/:id` | Inspect delivery/cursor state or stop notification delivery |
+| `GET /v1/subscriptions` and `DELETE /v1/subscriptions/:id` | Inspect delivery/cursor state or stop notification delivery |
+| `POST /v1/subscriptions/:id/reports/:reportId` | Resolve an uncertain delivery as accepted or failed after inspecting the destination |
 | `GET /v1/submissions/:id/logs` | Bounded log read/follow with offset |
 
 All mutations support command idempotency. Resume remedies use a command ID
@@ -685,13 +720,26 @@ owning version. Installation must preserve versions referenced by queued tasks
 as well as active runs. An unhealthy scheduler store or failed reconciliation
 prevents new admissions and appears in health output.
 
-Installed hubs register a durable `hub-retention` record under the installer's
-short-lived lock before accepting references to installed runtimes or bundles.
-The initial pruning policy conservatively retains all versions in that install
-home while any hub record exists, including missing or corrupt hub stores;
-`self prune --force` does not override it. Retention survives daemon shutdown.
-Removing a retired hub's registry record is an explicit administrative action
-only after its queued and recoverable runs no longer need those installations.
+Installed hubs register durable per-version markers at
+`hub-retention/<version>/<hub-directory-hash>.json` under the installer's short-lived lock
+before accepting references to installed runtimes or bundles. Pruning protects
+only those versions, including with `self prune --force`. The version lives in
+the marker's path, so missing hub state or corrupt marker contents cannot expose
+its inputs or retain unrelated future installations. Legacy global records are
+migrated under the same lock to a finite snapshot of currently installed versions.
+
+Acceptance and retention refresh are serialized: add and sync new pins before
+acknowledging a submission, then release references only from an authoritative
+queue/owner snapshot. A launch retains its inputs until drainage, even when its
+scheduling label is terminal. Queued, waiting, paused, blocked and failed runs
+remain resumable and retain their captured inputs, current owning runtime, plugin
+and executor pins across daemon shutdown. Drained succeeded/canceled submissions
+and archived submissions release their hub pins; normal run ownership records
+continue to protect retained run artifacts. Shutdown releases the daemon's own
+runtime reference when no remaining submission needs it. Missing or unreadable
+run state prevents release and reports a retention error; it never pins versions
+installed later. A private list of known install homes lets a restarted hub
+remove stale markers after its last submission in a home is archived.
 
 ## 10. Implementation and verification
 

@@ -5,11 +5,11 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { digestExecutorSource } from "@graphloom/runner";
 import type { HubSubmission } from "@graphloom/sdk";
 import { runtimeDigest } from "../src/hub-input.js";
-import { verifyHubExecutionInput } from "../src/hub-runtime.js";
+import { createExecutionObservationReader, verifyHubExecutionInput } from "../src/hub-runtime.js";
 import { selfInstall } from "../src/ownership.js";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -96,5 +96,32 @@ describe("managed runtime selection across upgrades", () => {
     await expect(verifyHubExecutionInput(f.submission, { initial: false, upgrade: true }, f.next)).rejects.toThrow("run identity");
     await f.owner(); f.submission.input.runtimePath = path.join(f.original.record.root, "other.js");
     await expect(verifyHubExecutionInput(f.submission, { initial: true }, f.original)).rejects.toThrow("executable does not match");
+  });
+});
+
+
+describe("execution observation polling", () => {
+  it("reads each unchanged state once, refreshes changes, and never caches failures", async () => {
+    const f = await environment();
+    const observation = { protocolVersion: 1 as const, observedAt: new Date().toISOString(), stateRevision: 1, progressRevision: 0, status: "running", continuation: { kind: "complete" as const } };
+    const read = vi.fn(async () => observation);
+    const observe = createExecutionObservationReader(read);
+    for (let i = 0; i < 20; i++) expect(await observe(f.submission)).toEqual(observation);
+    expect(read).toHaveBeenCalledTimes(1);
+    await f.owner(f.next.record);
+    read.mockRejectedValueOnce(new Error("temporarily unreadable"));
+    await expect(observe(f.submission)).rejects.toThrow("temporarily unreadable");
+    expect(await observe(f.submission)).toEqual(observation);
+    expect(read).toHaveBeenCalledTimes(3);
+  });
+  it("does not cache a state changed while the owning runtime was observing it", async () => {
+    const f = await environment();
+    const read = vi.fn(async () => {
+      await f.owner(f.next.record);
+      return { protocolVersion: 1 as const, observedAt: new Date().toISOString(), stateRevision: 1, progressRevision: 0, status: "running", continuation: { kind: "complete" as const } };
+    });
+    const observe = createExecutionObservationReader(read);
+    await observe(f.submission); await observe(f.submission);
+    expect(read).toHaveBeenCalledTimes(2);
   });
 });

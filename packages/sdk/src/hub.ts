@@ -15,7 +15,7 @@ export interface HubConfig {
   pollIntervalMs: number;
   shutdownGraceMs: number;
 }
-export type HubAutomaticCause = "provider-cooldown" | "executor-retry" | "transient-provider" | "transient-launch" | "controller-crash" | "service-interruption";
+export type HubAutomaticCause = "provider-cooldown" | "executor-retry" | "transient-provider" | "transient-launch" | "controller-crash" | "service-interruption" | "initialization-failed";
 export type HubOperatorCause = "approval" | "authority" | "budget" | "pin-drift" | "reconciliation" | "unknown" | "operator-stop";
 export type HubContinuation =
   | { kind: "complete" }
@@ -82,6 +82,8 @@ export interface HubLaunch {
   command?: HubCommand;
   automatic: boolean;
   continuationFingerprint?: string;
+  /** A failed launch stays authoritative through polling until its reservation drains. */
+  failure?: { occurredAt: string; message: string };
   stopRequestedAt?: string;
   stopReason?: "pause" | "cancel" | "service-interruption";
   stopCommandId?: string;

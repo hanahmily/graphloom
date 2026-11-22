@@ -2,32 +2,35 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { execFile } from "node:child_process";
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { isClaimStale, readOwnerClaim, releaseManagedRun } from "@graphloom/controller";
 import { createLinuxHubDriver, launchCgroupPath, type HubDriver } from "@graphloom/hub";
-import type { HubLaunch, HubSubmission, MonitorSnapshot, MonitorSeries } from "@graphloom/sdk";
+import type { HubLaunch, HubSubmission, HubObservation, MonitorSnapshot, MonitorSeries } from "@graphloom/sdk";
 import type { HubServiceConfig } from "./hub-config.js";
 import { boundedText, verifyHubInput, verifyHubTaskInput } from "./hub-input.js";
 import { createCliRunner } from "./cli-runner.js";
 import { loadRunnerConfig } from "./runner-config.js";
 import type { OwnedMonitorResult } from "./hub-observe.js";
+import { observeInitialization } from "./hub-initialization.js";
 import { selfInstall, type SelfInstall } from "./ownership.js";
 
 const exec = promisify(execFile);
-export interface HubMonitorCache { snapshot?: MonitorSnapshot; error?: string; }
+export interface HubMonitorCache { snapshot?: MonitorSnapshot; error?: string; refreshedAt?: number; }
 
 /** Disposable observations have a global bound as well as per-frame byte limits. */
 export function cacheMonitor(cache: Map<string, HubMonitorCache>, id: string, value: HubMonitorCache): void {
-  cache.delete(id); cache.set(id, value);
+  cache.delete(id); cache.set(id, { ...value, refreshedAt: Date.now() });
   while (cache.size > 64) cache.delete(cache.keys().next().value!);
 }
 
-export function createHubRuntime(config: HubServiceConfig, wake: () => void): { driver: HubDriver; cache: Map<string, HubMonitorCache> } {
+export function createHubRuntime(config: HubServiceConfig, wake: () => void): { driver: HubDriver; cache: Map<string, HubMonitorCache>; monitor(submission: HubSubmission): Promise<OwnedMonitorResult> } {
   const cache = new Map<string, HubMonitorCache>();
   const samples = new Map<string, { launch: string; cpu?: number; at?: number; memory: MonitorSeries["samples"]; cpuSeries: MonitorSeries["samples"] }>();
   const capabilities = new Set<string>();
+  const readObservation = createExecutionObservationReader();
+  const processFrames = new Map<string, MonitorSnapshot>();
   const stateDir = (submission: HubSubmission) => path.join(config.directory, "runs", submission.runId);
   const observe = async (launch: HubLaunch, submission: HubSubmission) => {
     const directory = stateDir(submission);
@@ -35,29 +38,25 @@ export function createHubRuntime(config: HubServiceConfig, wake: () => void): { 
     const ownerGone = owner === undefined || isClaimStale(owner);
     let observation;
     try {
-      await access(path.join(directory, "state.json"));
-      const result = await runtimeJson<OwnedMonitorResult>(submission, "__hub-observe", [directory]);
-      if (result.observation.protocolVersion !== 1) throw new Error("owning runtime returned an incompatible execution observation");
-      observation = result.observation;
-      // Optional presentation data cannot invalidate the execution observation used to drain/settle a launch.
-      try {
-        const snapshot = monitoredSnapshot(result, submission);
-        await addProcessMetrics(snapshot, launch, samples, config.cgroupRoot);
-        cacheMonitor(cache, submission.id, { snapshot });
-      } catch (error) { cacheMonitor(cache, submission.id, { ...cache.get(submission.id), error: error instanceof Error ? error.message : String(error) }); }
+      observation = await readObservation(submission);
     } catch (error) {
-      const absent = (error as NodeJS.ErrnoException).code === "ENOENT";
-      if (!absent) cacheMonitor(cache, submission.id, { ...cache.get(submission.id), error: error instanceof Error ? error.message : String(error) });
-      if (!absent) return { ownerGone, externalStopped: false, reason: `owning runtime observation failed: ${String(error)}` };
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        try { observation = await observeInitialization(directory, submission, launch); }
+        catch (failure) { return { ownerGone, externalStopped: false, reason: `initialization observation failed: ${String(failure)}` }; }
+      } else return { ownerGone, externalStopped: false, reason: `owning runtime observation failed: ${String(error)}` };
     }
+    // Resource samples use tiny cgroup counters; panel projection is only on demand.
+    const frame: MonitorSnapshot = { schemaVersion: 1, frameId: launch.id, observedAt: new Date().toISOString(), run: { id: submission.runId, status: "unknown" }, sources: [] };
+    await addProcessMetrics(frame, launch, samples, config.cgroupRoot);
+    processFrames.set(submission.id, frame);
     return { ownerGone, externalStopped: false, ...(observation !== undefined ? { observation } : {}) };
   };
-  const cleanup = async (launch: HubLaunch, submission: HubSubmission) => {
-    const result = await observe(launch, submission);
+  const cleanup = async (launch: HubLaunch, submission: HubSubmission, observed?: Awaited<ReturnType<typeof observe>>) => {
+    const result = observed ?? await observe(launch, submission);
     if (!result.ownerGone) return result;
     try {
       const cleanupResult = await runtimeJson<{ drained: boolean; resources: string[] }>(submission, "__hub-cleanup", [stateDir(submission), submission.runId, submission.input.runtimeConfig?.runner?.path ?? ""]);
-      if (cleanupResult.drained) samples.delete(submission.runId);
+      if (cleanupResult.drained) { samples.delete(submission.runId); processFrames.delete(submission.id); }
       return { ...result, externalStopped: cleanupResult.drained, ...(cleanupResult.drained ? {} : { reason: cleanupResult.resources.join("; ").slice(0, 1024) }) };
     } catch (error) { return { ...result, externalStopped: false, reason: `external cleanup remains unverified: ${String(error).slice(0, 900)}` }; }
   };
@@ -76,7 +75,57 @@ export function createHubRuntime(config: HubServiceConfig, wake: () => void): { 
       return { ...command, args: [...command.args, "__hub-managed", config.directory, submission.id], cwd: config.directory, env: { ...process.env } };
     },
   });
-  return { driver, cache };
+  return { driver, cache, async monitor(submission) {
+    const result = await readSubmissionMonitor(submission);
+    const frame = processFrames.get(submission.id);
+    if (result.snapshot && frame) {
+      result.snapshot.sources.push(...frame.sources);
+      result.snapshot.usage ??= { metrics: [] };
+      result.snapshot.usage.metrics.push(...frame.usage!.metrics);
+      if (frame.usage?.series) result.snapshot.usage.series = frame.usage.series;
+    }
+    return result;
+  } };
+}
+
+/** A controller save atomically replaces state.json. Cache only an unchanged file
+ * identity; owner liveness and containment are still checked on every poll. */
+export function createExecutionObservationReader(read: (submission: HubSubmission) => Promise<HubObservation> = readExecutionObservation) {
+  const values = new Map<string, { revision: string; observation: HubObservation }>();
+  const revision = async (file: string) => {
+    const value = await stat(file, { bigint: true });
+    return [value.dev, value.ino, value.size, value.mtimeNs, value.ctimeNs].join(":");
+  };
+  return async (submission: HubSubmission): Promise<HubObservation> => {
+    const file = path.join(path.dirname(path.dirname(path.dirname(submission.input.taskFile))), "runs", submission.runId, "state.json");
+    const before = await revision(file);
+    const cached = values.get(file);
+    if (cached?.revision === before) return structuredClone(cached.observation);
+    values.delete(file);
+    const observation = await read(submission);
+    if (observation.protocolVersion !== 1) throw new Error("owning runtime returned an incompatible execution observation");
+    if (await revision(file) === before) {
+      values.set(file, { revision: before, observation });
+      while (values.size > 64) values.delete(values.keys().next().value!);
+    }
+    return structuredClone(observation);
+  };
+}
+
+const observationCapabilities = new Map<string, boolean>();
+async function readExecutionObservation(submission: HubSubmission): Promise<HubObservation> {
+  const runtime = await runtimeCommand(submission);
+  const key = JSON.stringify(runtime);
+  let supported = observationCapabilities.get(key);
+  if (supported === undefined) {
+    const { stdout } = await exec(runtime.executable, [...runtime.args, "__hub-capabilities"], { timeout: 15000, maxBuffer: 4096 });
+    supported = (JSON.parse(stdout) as { executionObservation?: number }).executionObservation === 1;
+    observationCapabilities.set(key, supported);
+    while (observationCapabilities.size > 64) observationCapabilities.delete(observationCapabilities.keys().next().value!);
+  }
+  const directory = path.join(path.dirname(path.dirname(path.dirname(submission.input.taskFile))), "runs", submission.runId);
+  const { stdout } = await exec(runtime.executable, [...runtime.args, "__hub-observe", directory, ...(supported ? ["--execution-only"] : [])], { timeout: 20000, maxBuffer: 8 * 1024 * 1024 });
+  return (JSON.parse(stdout) as OwnedMonitorResult).observation;
 }
 
 interface RuntimeCommand { executable: string; args: string[]; root: string; version: string; }

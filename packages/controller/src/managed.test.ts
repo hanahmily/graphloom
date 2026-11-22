@@ -2,17 +2,22 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createScriptedRunner, type Runner, type ScriptedJobHandler } from "@graphloom/runner";
+import { createScriptedGraph, stop } from "@graphloom/sdk";
+import { createInProcessPluginHost } from "@graphloom/plugin-host";
+import { runNormalLoop } from "./loop.js";
+import { hasStopRequest, writeStopRequest } from "./stop-request.js";
 import { createController, intakeTask, loadRunState, saveRunState } from "./controller.js";
 import { assertAutomaticContinuation, authorizeManagedRun, beginManagedCommand, finishManagedCommand, observeContinuation, readManagedBinding, reconcileManagedRun, releaseManagedRun, type ManagedRunGrant } from "./managed.js";
 import { createRunWorktree } from "./worktree.js";
 import { withDirectoryLock } from "./lock.js";
+import * as durableState from "./state.js";
 
 const exec = promisify(execFile);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -44,6 +49,171 @@ function runner(jobs: ScriptedJobHandler[]): Runner {
 const failure: ScriptedJobHandler = async () => ({ status: "failed", summary: "fixture failure" });
 
 describe("managed controller", () => {
+  async function stoppedRun() {
+    const env = await environment();
+    const controller = createController();
+    await controller.run({ taskPath: env.taskPath, stateRoot: env.stateRoot, runId: "managed", managed: env.grant, runner: runner([failure]) });
+    const { stopClass: _class, stopMark: _mark, ...state } = await loadRunState(env.stateDir);
+    const stopped = { ...state, stopReason: "operator stop", definition: { ...state.definition, approvals: [{ id: "publish" }] } };
+    await saveRunState(stopped);
+    const plugin = () => createScriptedGraph({ definition: stopped.definition, advances: [stop({ reason: "fixture pause", blocker: "test" }, "pause")] });
+    const managed = { ...env.grant, generation: 2, launchId: "resume-2", commandId: "remedy-1" };
+    const commandFiles = async () => (await readdir(env.stateDir)).filter((file) => file.startsWith("managed-command-"));
+    return { ...env, controller, state: stopped, plugin, managed, commandFiles };
+  }
+
+  it("keeps invalid approval preflight retryable under the same command ID", async () => {
+    const env = await stoppedRun();
+    const request = { runRef: env.stateDir, managed: env.managed, runner: runner([]), approval: { approvalId: "missing", decision: "approve" as const } };
+    await expect(env.controller.resume(request)).rejects.toThrow("declares no approval");
+    await expect(env.controller.resume(request)).rejects.toThrow("declares no approval");
+    expect(await env.commandFiles()).toEqual([]);
+  });
+
+  it.each([false, true])("keeps undrained cleanup preflight retryable under the same command ID (upgrade: %s)", async (upgrade) => {
+    const env = await stoppedRun();
+    const execution = runner([]);
+    execution.managed!.drain = async () => ({ drained: false, resources: ["fixture-container"] });
+    const request = { runRef: env.stateDir, managed: env.managed, runner: execution, approval: { approvalId: "publish", decision: "approve" as const }, ...(upgrade ? { upgrade: { install: { version: "0.2.0", root: env.dir } } } : {}) };
+    await expect(env.controller.resume(request)).rejects.toThrow("external cleanup pending");
+    await expect(env.controller.resume(request)).rejects.toThrow("external cleanup pending");
+    expect(await env.commandFiles()).toEqual([]);
+  });
+
+  it("rechecks a grant revoked during preflight before journaling or applying a remedy", async () => {
+    const env = await stoppedRun();
+    let revoked = false;
+    const managed = { ...env.managed, async verify() { if (revoked) throw new Error("grant stopped during preflight"); } };
+    const execution = runner([]);
+    execution.managed!.drain = async () => { revoked = true; return { drained: true, resources: [] }; };
+    await expect(env.controller.resume({ runRef: env.stateDir, managed, runner: execution, plugin: env.plugin(), validators: {}, approval: { approvalId: "publish", decision: "approve" } })).rejects.toThrow("grant stopped during preflight");
+    expect(await env.commandFiles()).toEqual([]);
+    expect((await loadRunState(env.stateDir)).generation).toBe(env.state.generation);
+    revoked = false;
+    await env.controller.resume({ runRef: env.stateDir, managed, runner: runner([]), plugin: env.plugin(), validators: {}, approval: { approvalId: "publish", decision: "approve" } });
+    expect(await env.commandFiles()).toHaveLength(1);
+  });
+
+  it("does not journal a refused upgrade or an unreadable approval file", async () => {
+    const env = await stoppedRun();
+    const request = { runRef: env.stateDir, managed: env.managed, runner: runner([]), upgrade: { install: { version: "invalid", root: env.dir } } };
+    await expect(env.controller.resume(request)).rejects.toThrow("is not a GraphLoom version");
+    await expect(env.controller.resume(request)).rejects.toThrow("is not a GraphLoom version");
+    expect(await env.commandFiles()).toEqual([]);
+
+    const unavailable = await stoppedRun();
+    await saveRunState({ ...unavailable.state, definition: { ...unavailable.state.definition, approvals: [{ id: "publish", files: ["missing.txt"] }] } });
+    const approval = { runRef: unavailable.stateDir, managed: unavailable.managed, runner: runner([]), approval: { approvalId: "publish", decision: "approve" as const } };
+    await expect(unavailable.controller.resume(approval)).rejects.toThrow("does not exist");
+    await expect(unavailable.controller.resume(approval)).rejects.toThrow("does not exist");
+    expect(await unavailable.commandFiles()).toEqual([]);
+  });
+
+  it.each(["updatePlugin", "updateExecutors"] as const)("does not journal %s before the host accepts the pinned definition", async (remedy) => {
+    const env = await stoppedRun();
+    const refusedHost = () => {
+      const host = createInProcessPluginHost(env.plugin(), { activeVersion: env.state.activeVersion, generation: env.state.generation + 1 });
+      vi.spyOn(host, "describe").mockResolvedValue({ ok: false, observation: { kind: "child_observation", code: "crash", message: "fixture describe refusal" } });
+      return host;
+    };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const report = await env.controller.resume({ runRef: env.stateDir, managed: env.managed, runner: runner([]), host: refusedHost(), validators: {}, [remedy]: true });
+      expect(report.stopReason).toBe("pin mismatch");
+    }
+    expect(await env.commandFiles()).toEqual([]);
+  });
+
+  it("deduplicates an applied approval and still refuses replay after an ambiguous commit", async () => {
+    const env = await stoppedRun();
+    const approval = { approvalId: "publish", decision: "approve" as const };
+    await env.controller.resume({ runRef: env.stateDir, managed: env.managed, runner: runner([]), plugin: env.plugin(), validators: {}, approval });
+    const approvals = async () => (await loadRunState(env.stateDir)).evidence.filter((evidence) => evidence.payload !== null && typeof evidence.payload === "object" && "type" in evidence.payload && evidence.payload.type === "operator-approval");
+    expect(await approvals()).toHaveLength(1);
+    await env.controller.resume({ runRef: env.stateDir, managed: { ...env.managed, generation: 3, launchId: "resume-3" }, runner: runner([]), plugin: env.plugin(), validators: {}, approval });
+    expect(await approvals()).toHaveLength(1);
+
+    const interrupted = await stoppedRun();
+    const host = createInProcessPluginHost(interrupted.plugin(), { activeVersion: interrupted.state.activeVersion, generation: interrupted.state.generation + 1 });
+    vi.spyOn(host, "describe").mockRejectedValue(new Error("fixture crash after approval commit"));
+    await expect(interrupted.controller.resume({ runRef: interrupted.stateDir, managed: interrupted.managed, runner: runner([]), host, approval })).rejects.toThrow("fixture crash");
+    await expect(interrupted.controller.resume({ runRef: interrupted.stateDir, managed: interrupted.managed, runner: runner([]), plugin: interrupted.plugin(), validators: {}, approval })).rejects.toThrow("application is unsettled");
+  });
+
+  it("rechecks a cleared quota hold after reloading under the run lock", async () => {
+    const env = await stoppedRun();
+    const running = { ...env.state, status: "running" as const };
+    await saveRunState(running);
+    const stale = { ...running, quotaHold: { until: new Date(Date.now() + 60_000).toISOString() } };
+    const host = createInProcessPluginHost(env.plugin(), { activeVersion: running.activeVersion, generation: running.generation });
+    try {
+      const result = await runNormalLoop(stale, { host, runner: runner([]), validators: {}, managed: true });
+      expect(result.status).toBe("stopped");
+      expect(result.stopReason).toBe("fixture pause");
+      expect(result.managedContinuation).toBeUndefined();
+    } finally { await host.close(); }
+  });
+
+  it("honors a malformed managed stop record as an explicit stop", async () => {
+    const env = await stoppedRun();
+    const running = { ...env.state, status: "running" as const };
+    await saveRunState(running);
+    await writeFile(path.join(env.stateDir, "stop.request"), "{truncated");
+    const host = createInProcessPluginHost(env.plugin(), { activeVersion: running.activeVersion, generation: running.generation });
+    try {
+      const result = await runNormalLoop(running, { host, runner: runner([]), validators: {}, managed: true, shouldStop: () => hasStopRequest(env.stateDir) });
+      expect(result.stopReason).toBe("operator stop");
+      expect(result.managedContinuation).toBeUndefined();
+    } finally { await host.close(); }
+  });
+
+  it("retains planned interruption over disconnect but keeps explicit operator stop strongest", async () => {
+    const env = await environment();
+    await mkdir(env.stateDir, { recursive: true });
+    const planned = { interruptionCommandId: "service-stop-1" };
+    await writeStopRequest(env.stateDir, planned);
+    expect(await writeStopRequest(env.stateDir, { managedDisconnect: true })).toEqual(planned);
+    expect(JSON.parse(await readFile(path.join(env.stateDir, "stop.request"), "utf8"))).toMatchObject(planned);
+    await writeStopRequest(env.stateDir);
+    expect(await writeStopRequest(env.stateDir, planned)).toEqual({});
+    expect(await writeStopRequest(env.stateDir, { managedDisconnect: true })).toEqual({});
+  });
+
+  it("distinguishes failed initialization from missing state after managed execution started", async () => {
+    const env = await environment();
+    const controller = createController();
+    const save = vi.spyOn(durableState, "saveRunState").mockRejectedValueOnce(new Error("fixture first-state save failure"));
+    try {
+      await expect(controller.run({ taskPath: env.taskPath, stateRoot: env.stateRoot, runId: "managed", managed: env.grant, runner: runner([]) })).rejects.toThrow("fixture first-state save failure");
+    } finally { save.mockRestore(); }
+    expect(await readManagedBinding(env.stateDir)).toMatchObject({ initializationProtocol: 1 });
+    const marker = path.join(env.stateDir, "managed-execution-started.json");
+    await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(path.join(env.stateDir, "state.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    let dispatched = false;
+    await controller.run({ taskPath: env.taskPath, stateRoot: env.stateRoot, runId: "managed", managed: { ...env.grant, generation: 2, launchId: "initial-2" },
+      async onRunCreated() { await readFile(marker); },
+      runner: runner([async () => { await readFile(marker); dispatched = true; return { status: "failed", summary: "fixture" }; }]) });
+    expect(dispatched).toBe(true);
+    await rm(path.join(env.stateDir, "state.json"));
+    await expect(controller.run({ taskPath: env.taskPath, stateRoot: env.stateRoot, runId: "managed", managed: { ...env.grant, generation: 3, launchId: "initial-3" }, runner: runner([]) })).rejects.toThrow("managed execution already started");
+  });
+
+  it("marks a saved initialization before resume execution and refuses legacy missing-state replay", async () => {
+    const env = await stoppedRun();
+    const marker = path.join(env.stateDir, "managed-execution-started.json");
+    await rm(marker, { force: true });
+    const host = createInProcessPluginHost(env.plugin(), { activeVersion: env.state.activeVersion, generation: env.state.generation + 1 });
+    const describe = host.describe.bind(host);
+    host.describe = async (context) => { await readFile(marker); return describe(context); };
+    await env.controller.resume({ runRef: env.stateDir, managed: env.managed, runner: runner([]), host, validators: {} });
+    await rm(marker);
+    await rm(path.join(env.stateDir, "state.json"));
+    const binding = JSON.parse(await readFile(path.join(env.stateDir, "managed-run.json"), "utf8"));
+    delete binding.initializationProtocol;
+    await writeFile(path.join(env.stateDir, "managed-run.json"), JSON.stringify(binding));
+    await expect(env.controller.run({ taskPath: env.taskPath, stateRoot: env.stateRoot, runId: "managed", managed: { ...env.managed, generation: 3, launchId: "initial-3" }, runner: runner([]) })).rejects.toThrow("initialization provenance");
+  });
+
   it("fences direct controls and idempotently reports an existing initial run", async () => {
     const env = await environment();
     const controller = createController();

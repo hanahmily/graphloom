@@ -4,7 +4,7 @@
 import { createHash } from "node:crypto";
 import { spawn, execFile } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -18,6 +18,7 @@ import { digestExecutorSource } from "@graphloom/runner";
 import { runtimeDigest } from "../src/hub-input.js";
 import { selfInstall } from "../src/ownership.js";
 import { parseRemedy, remedyArgs } from "../src/hub-managed.js";
+import { observeInitialization } from "../src/hub-initialization.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const exec = promisify(execFile);
@@ -30,7 +31,7 @@ afterEach(async () => {
   await new Promise((resolve) => setTimeout(resolve, 20));
   await Promise.all(folders.splice(0).map((folder) => rm(folder, { recursive: true, force: true })));
 });
-async function fixture(mode: HubLaunch["mode"] = "initial", actualRun = false, actualMain = false) {
+async function fixture(mode: HubLaunch["mode"] = "initial", actualRun = false, actualMain = false, failInitialStateWrite = false) {
   const directory = await mkdtemp(path.join(tmpdir(), "graphloom-bootstrap-")); folders.push(directory);
   const repo = path.join(directory, "repo"); await mkdir(repo);
   for (const args of [["init", "-q"], ["config", "user.name", "Test"], ["config", "user.email", "test@example.com"], ["config", "commit.gpgsign", "false"]]) await exec("git", args, { cwd: repo });
@@ -42,7 +43,7 @@ async function fixture(mode: HubLaunch["mode"] = "initial", actualRun = false, a
     async inspect() { return { execution: "live", ownerGone: false, externalStopped: false }; }, async stop() {}, async kill() {},
   };
   const hubDirectory = path.join(directory, "hub");
-  const hub = await openHub({ directory: hubDirectory, driver, autoPoll: false, config: { maxConcurrentRuns: 1, shutdownGraceMs: 0 } }); hubs.push(hub);
+  const hub = await openHub({ directory: hubDirectory, driver, autoPoll: false, config: { maxConcurrentRuns: 1, shutdownGraceMs: 0, ...(failInitialStateWrite ? { retry: { baseDelayMs: 0, maxDelayMs: 0 } } : {}) } }); hubs.push(hub);
   const bundle = actualMain ? path.join(directory, "noop") : path.join(root, "examples/plugins/hello");
   if (actualMain) {
     await mkdir(bundle);
@@ -66,15 +67,31 @@ async function fixture(mode: HubLaunch["mode"] = "initial", actualRun = false, a
   const marker = path.join(directory, "callback.json"); const active = path.join(directory, "active");
   const script = path.join(directory, "bootstrap.mjs");
   await writeFile(script, `import { writeFile } from 'node:fs/promises';\nimport { managedMain } from ${JSON.stringify(pathToFileURL(path.join(root, "apps/graphloom/dist/hub-managed.js")).href)};\nimport { createController } from ${JSON.stringify(pathToFileURL(path.join(root, "packages/controller/dist/index.js")).href)};\nimport { createScriptedRunner } from ${JSON.stringify(pathToFileURL(path.join(root, "packages/runner/dist/index.js")).href)};\nprocess.stdout.write('ready\\n');\ntry { await managedMain(${JSON.stringify([hubDirectory, submission.id])}, async (argv, context) => {\nawait writeFile(${JSON.stringify(marker)}, JSON.stringify({argv, grant:context.grant}));\n${actualRun ? `const runner = {...createScriptedRunner({jobs:[async (_job, ctx) => { await writeFile(${JSON.stringify(active)}, 'active'); await new Promise(resolve => { if(ctx.signal?.aborted) resolve(); else ctx.signal?.addEventListener('abort',()=>resolve(),{once:true}); }); return {status:'failed',summary:'fixture interrupted'}; }]}), managed:{async check(){},async drain(){return {drained:true,resources:[]};}}};\nawait createController().run({taskPath:argv[1],stateRoot:${JSON.stringify(path.join(hubDirectory, "runs"))},runId:context.grant.runId,managed:context.grant,onRunCreated:context.created,runner});` : "await context.grant.verify();"}\n}); } catch(error) { process.stderr.write(error.message+'\\n'); process.exitCode=1; }`);
-  const child = spawn(process.execPath, actualMain ? [path.join(root, "apps/graphloom/dist/main.js"), "__hub-managed", hubDirectory, submission.id] : [script], { stdio: ["ignore", "pipe", "pipe", "pipe"], env: { ...process.env, HOME: directory } }); children.push(child);
+  const argv = actualMain ? [path.join(root, "apps/graphloom/dist/main.js"), "__hub-managed", hubDirectory, submission.id] : [script];
+  const failpoint = path.join(directory, "fail-initial-state.mjs");
+  if (failInitialStateWrite) await writeFile(failpoint, String.raw`
+import fs from 'node:fs';
+import path from 'node:path';
+import {syncBuiltinESMExports} from 'node:module';
+const original = fs.promises.open;
+fs.promises.open = (file, ...args) => /^state\.\d+\.[a-f0-9-]{36}\.tmp$/.test(path.basename(String(file)))
+  ? Promise.reject(new Error('fixture initial state persistence failure')) : original(file, ...args);
+syncBuiltinESMExports();
+`);
+  const env = { ...process.env, HOME: directory };
+  const processFixture = await startBootstrap(failInitialStateWrite ? ["--import", failpoint, ...argv] : argv, env, actualMain);
+  const grant: HubGrantMessage = { protocolVersion: 1, type: "grant", hubId: submission.hubId, submissionId: submission.id, runId: submission.runId, launchId: submission.launch!.id, generation: submission.generation, automatic: false };
+  return { ...processFixture, driver, directory, grant, marker, active, hub, hubDirectory, submission, snapshotFile, startAgain: () => startBootstrap(argv, env, actualMain) };
+}
+async function startBootstrap(argv: string[], env: NodeJS.ProcessEnv, actualMain: boolean) {
+  const child = spawn(process.execPath, argv, { stdio: ["ignore", "pipe", "pipe", "pipe"], env }); children.push(child);
   let stdout = ""; let stderr = "";
   child.stdout!.on("data", (chunk: Buffer) => { stdout += chunk.toString(); }); child.stderr!.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
   const control = child.stdio[3] as Duplex; control.on("error", () => undefined); control.resume();
   const done = new Promise<{ code: number | null; stderr: string }>((resolve) => child.once("close", (code) => resolve({ code, stderr })));
   if (actualMain) await new Promise<void>((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
   else await eventually(async () => expect(stdout, stderr).toContain("ready"));
-  const grant: HubGrantMessage = { protocolVersion: 1, type: "grant", hubId: submission.hubId, submissionId: submission.id, runId: submission.runId, launchId: submission.launch!.id, generation: submission.generation, automatic: false };
-  return { child, control, done, grant, marker, active, hub, hubDirectory, submission, snapshotFile, send: (value: unknown) => control.write(`${JSON.stringify(value)}\n`) };
+  return { child, control, done, send: (value: unknown) => control.write(`${JSON.stringify(value)}\n`) };
 }
 async function eventually(fn: () => Promise<void>): Promise<void> {
   let failure: unknown;
@@ -101,6 +118,29 @@ describe("managed CLI fd3 bootstrap", () => {
     expect(state.receipts).toEqual([]);
     const binding = JSON.parse(await readFile(path.join(f.hubDirectory, "runs", f.submission.runId, "managed-run.json"), "utf8"));
     expect(binding).toMatchObject({ submissionId: f.submission.id, runId: f.submission.runId, generation: f.submission.generation });
+  });
+  it("retries a failed initial state write through compiled main while retaining the run and worktree", async () => {
+    const f = await fixture("initial", false, true, true); f.send(f.grant);
+    const first = await f.done; expect(first).toMatchObject({ code: 1, stderr: expect.stringContaining("fixture initial state persistence failure") });
+    const stateDir = path.join(f.hubDirectory, "runs", f.submission.runId);
+    await expect(readFile(path.join(stateDir, "state.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    const worktree = path.join(f.submission.input.repoPath, "graphloom", f.submission.runId);
+    const before = await lstat(worktree);
+    const observed = await observeInitialization(stateDir, f.submission, f.submission.launch!);
+    expect(observed).toMatchObject({ continuation: { kind: "automatic", cause: "initialization-failed" } });
+    f.driver.inspect = async () => ({ execution: "drained", ownerGone: true, externalStopped: true, observation: observed });
+    await f.hub.tick();
+    const next = f.hub.inspect(f.submission.id);
+    expect(next).toMatchObject({ runId: f.submission.runId, automaticResumes: 1, launch: { mode: "initial", generation: 2, automatic: true } });
+    const child = await f.startAgain(); child.send({ ...f.grant, launchId: next.launch!.id, generation: next.generation, automatic: true });
+    const second = await child.done; expect(second.code, second.stderr).toBe(0);
+    const state = JSON.parse(await readFile(path.join(stateDir, "state.json"), "utf8"));
+    expect(state).toMatchObject({ runId: f.submission.runId, status: "succeeded", worktreePath: worktree });
+    expect((await lstat(worktree)).ino).toBe(before.ino);
+    expect(JSON.parse(await readFile(path.join(stateDir, "managed-run.json"), "utf8"))).toMatchObject({ generation: 2, launchId: next.launch!.id });
+    await expect(readFile(path.join(stateDir, "managed-execution-started.json"))).resolves.toBeDefined();
+    f.driver.inspect = async () => ({ execution: "drained", ownerGone: true, externalStopped: true, observation: { protocolVersion: 1, observedAt: new Date().toISOString(), stateRevision: state.stateRevision, progressRevision: 0, status: "succeeded", continuation: { kind: "complete" } } });
+    await f.hub.tick(); expect(f.hub.inspect(next.id).state).toBe("succeeded");
   });
   it("rejects a mismatched generation without invoking execution", async () => {
     const f = await fixture(); f.send({ ...f.grant, generation: 2 });

@@ -16,11 +16,12 @@ export const DEFAULT_HUB_CONFIG: HubConfig = {
   pollIntervalMs: 5000,
   shutdownGraceMs: 60000,
 };
-const automaticCauses = new Set(["provider-cooldown", "executor-retry", "transient-provider", "transient-launch", "controller-crash", "service-interruption"]);
+const automaticCauses = new Set(["provider-cooldown", "executor-retry", "transient-provider", "transient-launch", "controller-crash", "service-interruption", "initialization-failed"]);
 const operatorCauses = new Set(["approval", "authority", "budget", "pin-drift", "reconciliation", "unknown", "operator-stop"]);
 const copy = <T>(value: T): T => structuredClone(value);
 const message = (error: unknown): string => String(error instanceof Error ? error.message : error).slice(0, 1024);
 const terminal = (s: HubSubmission): boolean => ["succeeded", "failed", "canceled"].includes(s.state);
+const incompleteInitialization = (s: HubSubmission): boolean => s.observation?.continuation?.kind === "automatic" && s.observation.continuation.cause === "initialization-failed";
 const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
 export async function openHub(options: OpenHubOptions): Promise<Hub> {
@@ -176,6 +177,7 @@ export class Hub {
       }
       if (submission.desiredAction === "cancel") throw new Error("canceled submissions cannot be resumed or changed");
       if (submission.state === "succeeded") throw new Error("completed submissions cannot be restarted");
+      if (kind === "resume" && remedy && incompleteInitialization(submission)) throw new Error("resume remedies cannot be applied before initialization; retry without a remedy");
       if (kind === "resume" && remedy && (submission.launch || submission.pendingCommand)) throw new Error("a remedy needs a drained submission with no pending command");
       const command = { id: commandId, kind, acceptedAt: this.stamp(), ...(remedy ? { remedy: copy(remedy) } : {}) };
       const cursor = await this.store.journal(submission, { commandId, digest: requestDigest, acceptedAt: command.acceptedAt });
@@ -283,7 +285,10 @@ export class Hub {
         await this.commit((next) => {
           const current = next.submissions[s.id]!;
           if (observation && observation.stateRevision >= (current.observation?.stateRevision ?? 0)) current.observation = observation;
-          if (result.execution === "uncertain" || !result.externalStopped && result.execution === "drained") {
+          if (current.launch?.failure) {
+            current.state = "blocked";
+            current.blocker = current.launch.failure.message;
+          } else if (result.execution === "uncertain" || !result.externalStopped && result.execution === "drained") {
             current.blocker = (result.reason ?? "execution drainage is not verified").slice(0, 1024);
           } else if (!current.launch?.stopRequestedAt) {
             current.state = current.launch?.phase === "granted" ? "running" : "starting";
@@ -342,7 +347,7 @@ export class Hub {
     await this.commit((next) => {
       const s = next.submissions[id]!;
       const launch = s.launch!;
-      const launchFailure = s.blocker?.startsWith("launch failed;") ? s.blocker : undefined;
+      const launchFailure = launch.failure?.message;
       s.journalBytes = cursor;
       delete s.launch;
       delete s.blocker;
@@ -405,7 +410,7 @@ export class Hub {
       const automatic = failureDriven || s.pendingCommand?.kind === "service-interruption";
       // An explicit resume must carry its one-use remedy to normal controller admission.
       // The controller still reconciles existing effects before applying that remedy.
-      const mode = s.reconciliationPending ? s.pendingCommand?.kind === "resume" ? "resume" : "reconcile" : s.observation ? "resume" : "initial";
+      const mode = incompleteInitialization(s) ? "initial" : s.reconciliationPending ? s.pendingCommand?.kind === "resume" ? "resume" : "reconcile" : s.observation ? "resume" : "initial";
       s.generation++;
       s.launch = {
         id: `l-${randomUUID()}`, generation: s.generation, mode,
@@ -429,7 +434,13 @@ export class Hub {
       await this.commit((next) => { next.submissions[id]!.state = "running"; });
     } catch (error) {
       // No speculative replacement: even a rejected spawn can have created descendants.
-      if (!this.fault) await this.blockLaunch(id, `launch failed; containment must be reconciled: ${message(error)}`);
+      if (!this.fault) await this.commit((next) => {
+        const s = next.submissions[id]!;
+        const reason = `launch failed; containment must be reconciled: ${message(error)}`.slice(0, 1024);
+        s.launch!.failure = { occurredAt: this.stamp(), message: reason };
+        s.state = "blocked";
+        s.blocker = reason;
+      });
     }
   }
   async close(options: { graceMs?: number } = {}): Promise<void> {
@@ -499,6 +510,7 @@ function validObservation(observation: HubObservation): boolean {
   if (c.kind === "complete") return observation.status === "succeeded";
   if (c.kind === "terminal") return ["failed", "initialization-failed"].includes(c.cause);
   if (c.kind === "operator") return operatorCauses.has(c.cause) && Array.isArray(c.evidenceRefs) && c.evidenceRefs.every((e) => typeof e === "string");
+  if (c.kind === "automatic" && c.cause === "initialization-failed" && (observation.status !== "initialization-failed" || observation.stateRevision !== 0 || observation.progressRevision !== 0)) return false;
   return c.kind === "automatic" && automaticCauses.has(c.cause) && typeof c.fingerprint === "string" && c.fingerprint.length > 0 && c.fingerprint.length <= 512 && c.stateRevision === observation.stateRevision && (!c.notBefore || Number.isFinite(Date.parse(c.notBefore)));
 }
 

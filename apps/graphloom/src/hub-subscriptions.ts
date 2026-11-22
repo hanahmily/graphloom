@@ -114,6 +114,20 @@ export class HubSubscriptions {
       const next = structuredClone(this.state); next.subscriptions = next.subscriptions.filter((s) => s.id !== id); await this.save(next);
     });
   }
+  /** Operator reconciliation never blindly resends an ambiguously accepted report. */
+  resolve(id: string, reportId: string, outcome: "accepted" | "failed"): Promise<void> {
+    return this.enqueue(async () => {
+      if (!["accepted", "failed"].includes(outcome)) throw new Error("report outcome must be accepted or failed");
+      const next = structuredClone(this.state);
+      const report = next.subscriptions.find((s) => s.id === id)?.reports.find((r) => r.id === reportId);
+      if (!report) throw new Error("unknown subscription report");
+      if (report.state === outcome) return;
+      if (report.state !== "uncertain") throw new Error("only an uncertain report needs reconciliation");
+      report.state = outcome;
+      report.error = `operator resolved delivery as ${outcome}`;
+      await this.save(next);
+    });
+  }
   /** Concurrent polling replaces one pending frame instead of accumulating a delivery backlog. */
   tick(events: HubEventPage, status: HubStatus): Promise<void> {
     this.latest = { events: structuredClone(events), status: structuredClone(status) };
@@ -172,8 +186,8 @@ export class HubSubscriptions {
     await this.save(next);
     // At most one send per subscription per tick, independent from graph execution.
     for (const current of this.state.subscriptions) {
-      // An unconfirmed accepted message is inspected by the operator before any later delivery.
-      if (current.reports.some((report) => report.state === "uncertain")) continue;
+      // Uncertain reports keep their IDs and are never resent; later distinct
+      // snapshots can still be delivered while the operator reconciles them.
       const report = current.reports.find((r) => r.state === "queued" && Date.parse(r.nextAttemptAt) <= now);
       if (!report) continue;
       const sending = structuredClone(this.state);

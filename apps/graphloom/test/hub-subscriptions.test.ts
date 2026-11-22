@@ -98,7 +98,8 @@ describe("explicit durable HAPI subscriptions", () => {
     await manager.add({ sessionId: "session" }); await manager.tick(empty, status);
     const reopened = await openSubscriptions(f.directory, f.options);
     f.advance(1000000); await reopened.tick(page(1, "blocked"), status);
-    expect(f.deliveries).toHaveLength(0);
+    expect(f.deliveries).toHaveLength(1);
+    expect(f.deliveries[0]!.reportId).not.toBe(reopened.list()[0]!.reports[0]!.id);
     expect(reopened.list()[0]!.reports[0]!.state).toBe("uncertain");
   });
   it("treats a restart during delivery as uncertain and bounds queued reports during outages", async () => {
@@ -112,7 +113,21 @@ describe("explicit durable HAPI subscriptions", () => {
     expect(next.list()[0]!.reports).toHaveLength(8);
     expect(next.list()[0]!.reports[0]!.state).toBe("uncertain");
     expect(next.list()[0]!.droppedReports).toBeGreaterThan(0);
-    expect(f.deliveries).toHaveLength(1);
+    expect(f.deliveries).toHaveLength(8);
+  });
+  it("reconciles uncertain reports explicitly to free bounded history without resending them", async () => {
+    const f = await fixture(); f.result({ state: "uncertain", reason: "response lost" });
+    const subscription = await f.subscriptions.add({ sessionId: "session" });
+    for (let i = 1; i <= 8; i++) await f.subscriptions.tick(page(i, "blocked"), status);
+    const report = f.subscriptions.list()[0]!.reports[0]!;
+    await f.subscriptions.resolve(subscription.id, report.id, "failed");
+    const reopened = await openSubscriptions(f.directory, f.options);
+    expect(reopened.list()[0]!.reports[0]!.state).toBe("failed");
+    f.result({ state: "accepted" }); await reopened.tick(page(9, "blocked"), status);
+    expect(f.deliveries).toHaveLength(9);
+    expect(f.deliveries.filter((d) => d.reportId === report.id)).toHaveLength(1);
+    expect(reopened.list()[0]!.reports.at(-1)!.state).toBe("accepted");
+    await expect(reopened.resolve(subscription.id, "missing", "failed")).rejects.toThrow("unknown");
   });
   it("refuses malformed durable subscription data", async () => {
     const f = await fixture(); await writeFile(path.join(f.directory, "subscriptions.json"), '{"version":9}');

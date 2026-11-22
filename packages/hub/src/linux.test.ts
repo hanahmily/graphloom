@@ -94,6 +94,18 @@ describe("Linux managed launch adapter with an emulated cgroup filesystem", () =
     await eventually(async () => expect((await f.driver.inspect(f.launch, f.submission)).execution).toBe("drained"));
     await expect(readFile(path.join(launchCgroupPath(cgroups.root, f.launch.id), "cgroup.procs"))).rejects.toMatchObject({ code: "ENOENT" });
   });
+  it("passes the existing execution observation to cleanup without a second observation", async () => {
+    const f = await fixture();
+    const observation = { ownerGone: true, externalStopped: false };
+    const observe = vi.fn(async () => observation);
+    const cleanup = vi.fn(async (_launch: HubLaunch, _submission: HubSubmission, observed?: { ownerGone: boolean; externalStopped: boolean }) => ({ ownerGone: observed?.ownerGone ?? false, externalStopped: true }));
+    const driver = createLinuxHubDriver({ cgroupRoot: cgroups.root, directory: f.directory,
+      command: async () => { throw new Error("unused"); }, observe, cleanup });
+    drivers.push(driver); f.launch.phase = "granted";
+    expect(await driver.inspect(f.launch, f.submission)).toMatchObject({ execution: "drained", ownerGone: true, externalStopped: true });
+    expect(observe).toHaveBeenCalledTimes(1);
+    expect(cleanup).toHaveBeenCalledWith(f.launch, f.submission, observation);
+  });
   it("EOF after grant stops the child, while external work keeps drainage uncertain", async () => {
     const f = await fixture(); await f.driver.probe();
     f.launch.identity = await f.driver.prepare(f.launch, f.submission);

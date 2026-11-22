@@ -148,6 +148,7 @@ function validateSnapshot(value: unknown): asserts value is HubSnapshot {
     if (item.launch !== undefined) {
       const launch = item.launch;
       if (!object(launch) || typeof launch.id !== "string" || !/^l-[a-f0-9-]{36}$/.test(launch.id) || launch.generation !== item.generation || !["reserved", "prepared", "granted"].includes(String(launch.phase)) || !["initial", "resume", "reconcile"].includes(String(launch.mode))) throw new Error("invalid hub launch reservation");
+      if (launch.failure !== undefined && (!object(launch.failure) || typeof launch.failure.occurredAt !== "string" || !Number.isFinite(Date.parse(launch.failure.occurredAt)) || typeof launch.failure.message !== "string" || launch.failure.message.length === 0 || launch.failure.message.length > 1024)) throw new Error("invalid hub launch failure");
     }
   }
   for (const tombstone of value.tombstones) if (!object(tombstone) || tombstone.archived !== true || typeof tombstone.id !== "string" || typeof tombstone.runId !== "string" || typeof tombstone.requestDigest !== "string") throw new Error("invalid hub archive tombstone");

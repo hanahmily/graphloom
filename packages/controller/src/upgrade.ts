@@ -84,6 +84,8 @@ export interface UpgradeDeps {
   checkPluginUpdate?: (state: DurableRunState) => Promise<string | undefined>;
   /** Throws why the resume that follows the move would refuse the (migrated) run, such as a supervisor binding with no restore. */
   assertResumable?: (state: DurableRunState) => void;
+  /** Fence and journal a managed remedy after all refusal checks, before writing any upgrade files. */
+  beforeCommit?: () => Promise<void>;
 }
 
 /**
@@ -205,6 +207,7 @@ export async function upgradeRun(stateDir: string, request: UpgradeRequest, deps
   };
   if (executors !== undefined && executors.repins.length > 0) state = applyExecutorRepin(state, executors.catalog, executors.repins);
 
+  await deps.beforeCommit?.();
   await writeMigrationBackups(stateDir, migrated);
   await writeMigratedSideFiles(stateDir, migrated);
   await saveRunState(state);

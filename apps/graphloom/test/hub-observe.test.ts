@@ -41,6 +41,18 @@ describe("owning-runtime monitoring projection", () => {
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
+  it("omits panel projection for execution polling even when presentation is invalid", async () => {
+    const run = await state(); run.status = "succeeded";
+    Object.assign(run.definition, { edges: [{ from: "fix", to: null }] });
+    const directory = await mkdtemp(path.join(os.tmpdir(), "gl-execution-observation-"));
+    try {
+      await writeFile(path.join(directory, "state.json"), JSON.stringify(run));
+      const result = await observeOwnedRun(directory, true);
+      expect(result.observation.continuation).toEqual({ kind: "complete" });
+      expect(Object.keys(result)).toEqual(["observation"]);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
   it("keeps authoritative completion below the child transport cap for a large settled job history", async () => {
     const run = await state(); run.status = "succeeded";
     const session = run.agentSessions![0]!;

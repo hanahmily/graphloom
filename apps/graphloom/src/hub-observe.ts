@@ -9,9 +9,10 @@ import { runStats } from "./stats.js";
 export interface OwnedMonitorResult { observation: HubObservation; snapshot?: MonitorSnapshot; monitoringError?: string; }
 
 /** This command runs on the owning runtime; the hub consumes only versioned values. */
-export async function observeOwnedRun(stateDir: string): Promise<OwnedMonitorResult> {
+export async function observeOwnedRun(stateDir: string, executionOnly = false): Promise<OwnedMonitorResult> {
   const state = await loadRunState(stateDir);
   const observation = managedObservation(state);
+  if (executionOnly) return { observation };
   try {
     const snapshot = snapshotOf(state, observation.observedAt);
     // Leave room for the authoritative observation below the runtime transport's 8 MiB cap.

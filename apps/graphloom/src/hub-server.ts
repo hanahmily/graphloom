@@ -14,7 +14,7 @@ import { createHubRuntime, readSubmissionMonitor, cacheMonitor, type HubMonitorC
 import { withHubSnapshot } from "./hub-observe.js";
 import { projectPanels, renderPanels } from "@graphloom/monitor";
 import { openSubscriptions, type HubSubscriptions, type HubSubscriptionsOptions } from "./hub-subscriptions.js";
-import { retainHubInstallations } from "./hub-retention.js";
+import { HubInstallationRetention, inputReferences } from "./hub-retention.js";
 import { selfInstall } from "./ownership.js";
 import { HubEvents } from "./hub-events.js";
 
@@ -40,11 +40,15 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
   await privateDirectory(path.dirname(config.socket));
   // Retention is a production process effect, like the real driver. Synthetic drivers
   // exercise queue/transport behavior without touching an operator installation.
-  if (options.driver === undefined) await retainHubInstallations(config.directory, [selfInstall().record.root, process.execPath]);
   let hub: Hub | undefined;
+  const retention = options.driver === undefined
+    ? await HubInstallationRetention.open(config.directory, [selfInstall().record.root, process.execPath], () => hub?.list().submissions)
+    : undefined;
+  let retentionError: string | undefined;
   const runtime = options.driver === undefined ? createHubRuntime(config, () => { void hub?.tick().catch(() => undefined); }) : undefined;
   const cache = options.cache ?? runtime?.cache ?? new Map<string, HubMonitorCache>();
-  hub = await openHub({ directory: config.directory, config, driver: options.driver ?? runtime!.driver });
+  try { hub = await openHub({ directory: config.directory, config, driver: options.driver ?? runtime!.driver }); }
+  catch (error) { await retention?.close().catch(() => undefined); throw error; }
   const scheduler = hub;
   let events: HubEvents;
   let monitoringError: string | undefined;
@@ -58,6 +62,8 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
     if (capturing) return;
     capturing = true;
     try {
+      try { await retention?.refresh(); retentionError = undefined; }
+      catch (error) { retentionError = String(error); }
       await events.capture(scheduler.list()); monitoringError = undefined;
       if (subscriptions) void subscriptions.tick(events.read(subscriptions.cursor()), scheduler.list()).then(
         () => { subscriptionsError = undefined; }, (error: unknown) => { subscriptionsError = String(error); });
@@ -71,14 +77,14 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
   const refreshes = new Map<string, Promise<void>>();
   const monitor = async (submission: HubSubmission): Promise<MonitorSnapshot> => {
     const cached = cache.get(submission.id);
-    if (submission.generation > 0 && (!cached?.snapshot || !submission.launch)) {
+    if (submission.generation > 0 && (!cached?.snapshot || !submission.launch || Date.now() - (cached.refreshedAt ?? 0) >= config.pollIntervalMs)) {
       let pending = refreshes.get(submission.id);
       if (!pending) {
         pending = (async () => {
           try {
             if (options.observe) cacheMonitor(cache, submission.id, { snapshot: await options.observe(submission) });
             else {
-              const result = await readSubmissionMonitor(submission);
+              const result = await (runtime?.monitor(submission) ?? readSubmissionMonitor(submission));
               if (result.snapshot) cacheMonitor(cache, submission.id, { snapshot: result.snapshot });
               else cacheMonitor(cache, submission.id, { ...cache.get(submission.id), error: result.monitoringError ?? "owning runtime did not provide a monitoring snapshot" });
             }
@@ -107,7 +113,7 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
   const server = createServer((request, response) => {
     void (async () => {
       const url = new URL(request.url ?? "/", "http://hub.local");
-      if (request.method === "GET" && url.pathname === "/v1/health") return respond(response, 200, { ...scheduler.list(), ...((monitoringError || historyError) ? { monitoringError: monitoringError ?? historyError } : {}), ...(subscriptionsError ? { subscriptionsError } : {}), closing });
+      if (request.method === "GET" && url.pathname === "/v1/health") return respond(response, 200, { ...scheduler.list(), ...((monitoringError || historyError) ? { monitoringError: monitoringError ?? historyError } : {}), ...(subscriptionsError ? { subscriptionsError } : {}), ...(retentionError ? { retentionError } : {}), closing });
       if (closing) throw new HubHttpError("hub is shutting down", 503);
       if (url.pathname === "/v1/submissions") {
         if (request.method === "GET") return respond(response, 200, scheduler.list());
@@ -117,9 +123,8 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
           if (!path.isAbsolute(file)) throw new HubHttpError("taskPath must be absolute on the hub's machine", 400);
           const key = body.key === undefined ? undefined : text(body.key, "key", 256);
           const input = await (options.captureInput?.(file) ?? captureHubInput(file, config));
-          if (options.driver === undefined) await retainHubInstallations(config.directory,
-            [input.runtimePath, ...(input.runtimeNode ? [input.runtimeNode] : []), input.bundlePath]);
-          const result = await scheduler.submit({ input, requestDigest: inputDigest(input), ...(key !== undefined ? { key } : {}) });
+          const submit = () => scheduler.submit({ input, requestDigest: inputDigest(input), ...(key !== undefined ? { key } : {}) });
+          const result = retention ? await retention.protect(inputReferences({ input }), submit) : await submit();
           await capture();
           return respond(response, 202, result);
         }
@@ -148,6 +153,14 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
           });
           void capture(); return respond(response, 201, result);
         }
+      }
+      const reportMatch = /^\/v1\/subscriptions\/([^/]+)\/reports\/([^/]+)$/.exec(url.pathname);
+      if (reportMatch && request.method === "POST") {
+        if (!subscriptions) throw new HubHttpError("subscriptions unavailable", 503);
+        const body = await payload(request, ["outcome"]);
+        if (body.outcome !== "accepted" && body.outcome !== "failed") throw new HubHttpError("outcome must be accepted or failed", 400);
+        await subscriptions.resolve(decodeURIComponent(reportMatch[1]!), decodeURIComponent(reportMatch[2]!), body.outcome);
+        return respond(response, 200, { resolved: true });
       }
       const subscriptionMatch = /^\/v1\/subscriptions\/([^/]+)$/.exec(url.pathname);
       if (subscriptionMatch && request.method === "DELETE") {
@@ -202,7 +215,7 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
     await chmod(config.socket, 0o600);
     await writePrivateJsonOrText(path.join(config.directory, "endpoint.json"), JSON.stringify({ protocolVersion: 1, hubId: scheduler.list().hubId, socket: config.socket }));
   } catch (error) {
-    clearInterval(timer); server.close(); await scheduler.close({ graceMs: 0 }); throw error;
+    clearInterval(timer); server.close(); await scheduler.close({ graceMs: 0 }); await retention?.close().catch(() => undefined); throw error;
   }
   return {
     hub: scheduler, socket: config.socket,
@@ -211,9 +224,12 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
       closing = true; clearInterval(timer);
       const stopped = new Promise<void>((resolve) => server.close(() => resolve()));
       server.closeIdleConnections();
-      await scheduler.close();
+      let failure: unknown;
+      try { await scheduler.close(); } catch (error) { failure = error; }
+      try { await retention?.close(); } catch (error) { failure ??= error; }
       await stopped;
       await unlink(config.socket).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
+      if (failure !== undefined) throw failure;
     },
   };
 }

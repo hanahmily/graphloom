@@ -1911,6 +1911,28 @@ It uses managed launch/ownership, crash-safe intake,
 structured continuation eligibility, and verified process drainage before slots
 can be reused. Standalone runs outside the hub keep their existing behavior.
 
+New managed bindings record `initializationProtocol: 1`. After the first state
+save, the controller durably writes `managed-execution-started.json` before
+calling `onRunCreated`, creating a supervisor, or admitting graph execution.
+Resume ensures the same marker before an upgrade or other execution mutation.
+With verified drainage and matching intake provenance, an absent marker on a
+new-protocol binding permits retrying failed initialization under the same run ID.
+Missing state after the marker, or a legacy binding without this protocol, requires
+operator reconciliation; absence of `state.json` alone never authorizes replay.
+
+Managed remedy commands are inspected without writing intent during preflight.
+Verified cleanup precedes upgrades, and the controller rechecks the launch grant
+immediately before journaling the first durable remedy mutation. An approval,
+cleanup, or upgrade refusal that applied nothing leaves the command ID retryable.
+An applied receipt prevents duplicate remedies; an interrupted mutation keeps its
+unsettled intent and requires reconciliation.
+
+Stop intent preserves this order: explicit operator stop, planned service
+interruption, then control-channel disconnect. A later disconnect retains the
+planned interruption's command ID. Stop metadata is parsed once when read;
+malformed or unreadable metadata still requests an explicit operator stop. Managed
+quota yields recheck the persisted hold under the run lock before stopping.
+
 The [monitoring panels](design-monitor-panels.md) render topology,
 progress, usage and execution details independently in terminals and coding-agent
 chats. Shared value contracts belong in the SDK; `packages/monitor`

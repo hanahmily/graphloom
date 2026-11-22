@@ -4,7 +4,7 @@
 import { randomUUID } from "node:crypto";
 import { access, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { beginManagedCommand, finishManagedCommand, managedCommandApplied, authorizeManagedRun, authorizeManagedStop, authorizeManagedResume, assertManagedRunner, assertAutomaticContinuation, releaseManagedRun, type ManagedRunGrant } from "./managed.js";
+import { beginManagedCommand, checkManagedCommand, finishManagedCommand, markManagedExecutionStarted, managedCommandApplied, authorizeManagedRun, authorizeManagedStop, authorizeManagedResume, assertManagedRunner, assertAutomaticContinuation, releaseManagedRun, type ManagedRunGrant } from "./managed.js";
 import {
   emptyCaseFile,
   type BudgetRemaining,
@@ -550,6 +550,7 @@ export function createController(): Controller {
           // a running run without a live owner claim, however slow startup is.
           await claimRunOwner(state.stateDir);
           await saveRunState(state);
+          if (request.managed !== undefined) await markManagedExecutionStarted(state.stateDir);
           await request.onRunCreated?.({ runId, stateDir: state.stateDir });
           if (supervisor === undefined && supervisorFactory !== undefined) {
             supervisor = await supervisorFactory({ runId, stateDir: state.stateDir });
@@ -692,6 +693,20 @@ export function createController(): Controller {
       let pluginUpdate: IntakePin["bundle"] | undefined;
       // Whether `--upgrade` re-pinned executors (they then count as updated for the final-stop decision).
       let upgradeRepinned = false;
+      let managedCommandStarted = false;
+      let reconciliationAcknowledged = false;
+      const verifyManagedExecution = async () => {
+        // Preflight may await slow cleanup or filesystem reads while the hub revokes the grant.
+        await request.managed?.verify();
+        if (request.managed !== undefined) await markManagedExecutionStarted(stateDir);
+      };
+      const beforeManagedMutation = async () => {
+        await verifyManagedExecution();
+        if (!managedCommandStarted && request.managed?.commandId !== undefined) {
+          await beginManagedCommand(stateDir, request.managed.commandId);
+          managedCommandStarted = true;
+        }
+      };
       await withDirectoryLock(stateDir, "run.exec.lock", async () => {
         if (getSession(stateDir) || getSession(request.runRef)) {
           throw new Error("cannot resume: run has an active controller session; stop first");
@@ -705,11 +720,16 @@ export function createController(): Controller {
         await authorizeManagedRun(stateDir, request.managed);
         if (request.managed !== undefined) await assertManagedRunner(request.runner, stateDir);
         if (request.managed?.commandId !== undefined) {
-          const command = await beginManagedCommand(stateDir, request.managed.commandId);
+          const command = await checkManagedCommand(stateDir, request.managed.commandId);
           if (command === "applied") {
             const { approval: _approval, reconciled: _reconciled, upgrade: _upgrade, updatePlugin: _plugin, updateExecutors: _executors, supervisorPin: _supervisor, ...withoutRemedy } = request;
             request = withoutRemedy;
           }
+        }
+        // Verified drainage is preflight for every managed remedy, including an upgrade.
+        if (request.managed !== undefined) {
+          const cleanup = await releaseManagedRun(request.runner, request.managed.runId, stateDir);
+          if (!cleanup.drained) throw new Error(`managed external cleanup pending: ${cleanup.resources.join(", ")}`);
         }
         if (request.upgrade !== undefined) {
           upgradeRepinned = await upgradeRun(stateDir, request.upgrade, {
@@ -718,6 +738,7 @@ export function createController(): Controller {
             stateFormats,
             checkPluginUpdate: (current) => checkPluginUpdate(current, request),
             assertResumable: (current) => assertSupervisorRestorable(request, current),
+            beforeCommit: beforeManagedMutation,
           });
         }
         state = await loadCurrentFormat(stateDir, stateFormats);
@@ -731,10 +752,7 @@ export function createController(): Controller {
         const approvalProblem = request.approval !== undefined ? approvalRefusal(state, request.approval) : undefined;
         if (approvalProblem !== undefined) throw new Error(approvalProblem);
         // No controller owns the run now: whatever sandbox a stopped job left behind is stale.
-        if (request.managed !== undefined) {
-          const cleanup = await releaseManagedRun(request.runner, state.runId, stateDir);
-          if (!cleanup.drained) throw new Error(`managed external cleanup pending: ${cleanup.resources.join(", ")}`);
-        } else await request.runner.releaseRun?.(state.runId).catch(() => undefined);
+        if (request.managed === undefined) await request.runner.releaseRun?.(state.runId).catch(() => undefined);
         // Evidence belongs to the stop being resumed; any stop from here on is a new one.
         // A pre-#120 run may carry `resumedSinceLastDecision`; nothing reads it
         // now, since the supervisor's first episode after resume starts a fresh
@@ -826,7 +844,9 @@ export function createController(): Controller {
         state = reconcileRepairJournal(state);
         state = await reconcileSwitchJournal(state);
         // After the switch journal settled on the old harness: a transition moves a settled binding.
+        const beforeSupervisorPin = state;
         state = applySupervisorPin(state, request.supervisorPin);
+        const supervisorPinChanged = state !== beforeSupervisorPin;
         state = await reassessAcceptedWorkspace(state);
         // §8: a retryable stop runs again; a final one surfaces the same
         // blocker until something it depends on changed.
@@ -865,6 +885,7 @@ export function createController(): Controller {
               ...(state.blocker !== undefined ? { detail: state.blocker.slice(0, 500) } : {}),
             },
           );
+          if (supervisorPinChanged) await beforeManagedMutation();
           await saveRunState(state);
           return;
         }
@@ -879,6 +900,7 @@ export function createController(): Controller {
         if (state.reconciliationRequired !== undefined) {
           const owed = state.reconciliationRequired;
           if (request.reconciled === true) {
+            reconciliationAcknowledged = true;
             const { reconciliationRequired: _owed, ...rest } = state;
             void _owed;
             state = recordRemedy(rest, {
@@ -892,6 +914,7 @@ export function createController(): Controller {
               stopReason: QUOTA_RECONCILE_STOP_REASON,
               blocker: boundText(`job ${owed.operationId} (stage ${owed.stageId}) may have had effects before the usage limit; reconcile it, then \`graphloom resume --reconciled\`: ${owed.reason}`),
             };
+            if (supervisorPinChanged) await beforeManagedMutation();
             await saveRunState(state);
             return;
           }
@@ -929,6 +952,8 @@ export function createController(): Controller {
         };
         // At the new generation: the decision is current evidence for this run of the graph.
         if (request.approval !== undefined) state = await applyApproval(state, request.approval);
+        if (request.approval !== undefined || supervisorPinChanged || reconciliationAcknowledged) await beforeManagedMutation();
+        else await verifyManagedExecution();
         await clearStopRequest(stateDir);
         // Own the run before durable state says `running` again (see `run`).
         await claimRunOwner(stateDir);
@@ -1064,12 +1089,14 @@ export function createController(): Controller {
             versionHistory: [...(state.versionHistory ?? []), { activeVersion: state.activeVersion, generation: state.generation, reason, at: new Date().toISOString() }],
           });
           revisionBridge.current = state.stateRevision;
+          await beforeManagedMutation();
           await saveRunState(state);
         }
 
         if (executorUpdate !== undefined && executorUpdate.repins.length > 0) {
           state = applyExecutorRepin(state, executorUpdate.catalog, executorUpdate.repins);
           revisionBridge.current = state.stateRevision;
+          await beforeManagedMutation();
           await saveRunState(state);
         }
 

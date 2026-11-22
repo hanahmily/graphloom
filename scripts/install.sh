@@ -485,26 +485,53 @@ offer_setup() { # version
 
 # ---------------------------------------------------------------- self
 
-# Queued runs have no run owner yet. A hub registers before durable acceptance.
-# Never interpret a missing/corrupt queue as permission to delete its pinned inputs.
-# Any record (including an interrupted write) conservatively retains every version.
-hub_retention_present() {
-  [ -e "$home/hub-retention" ] || [ -L "$home/hub-retention" ] || return 1
-  [ -d "$home/hub-retention" ] && [ ! -L "$home/hub-retention" ] || return 0
-  hub_retention_entries=$(ls -A "$home/hub-retention" 2>/dev/null) || return 0
-  [ -n "$hub_retention_entries" ]
+# Version-named directories retain queued/managed inputs even when hub state or
+# marker contents are unavailable. --force never overrides an active hub pin.
+# Old global records become a finite snapshot of installations present now;
+# future upgrades remain prunable. The caller already holds install.lock.
+hub_retained_versions() {
+  retention="$home/hub-retention"
+  [ -e "$retention" ] || [ -L "$retention" ] || return 0
+  [ -d "$retention" ] && [ ! -L "$retention" ] || die "invalid hub retention directory: $retention"
+  for record in "$retention"/*; do
+    [ -e "$record" ] || [ -L "$record" ] || continue
+    name=$(basename "$record")
+    is_version "$name" && continue
+    [ "$name" = legacy ] && continue
+    if [ "$dry_run" = 1 ]; then installed_versions; continue; fi
+    # Migration only renames the old record after all finite pins exist. An
+    # interrupted migration conservatively repeats for the same installations.
+    for retained in $(installed_versions); do
+      mkdir -p "$retention/$retained"
+      [ -e "$retention/$retained/$name" ] || : >"$retention/$retained/$name"
+    done
+    mkdir -p "$retention/legacy"
+    sync -f "$retention"
+    mv -fT "$record" "$retention/legacy/$name"
+    sync -f "$retention"
+  done
+  for record in "$retention"/*; do
+    [ -e "$record" ] || [ -L "$record" ] || continue
+    retained=$(basename "$record")
+    is_version "$retained" || continue
+    # A damaged directory itself also protects only its named version.
+    if [ ! -d "$record" ] || [ -L "$record" ]; then
+      printf '%s\n' "$retained"
+      continue
+    fi
+    entries=$(ls -A "$record" 2>/dev/null) || { printf '%s\n' "$retained"; continue; }
+    [ -z "$entries" ] || printf '%s\n' "$retained"
+  done
 }
 
 # Removes versions that nothing keeps. keep_newest > 0 also keeps that many newest (auto-prune).
 prune_versions() { # keep_newest
   keep_newest=$1
-  if hub_retention_present; then
-    say "hub retention records keep all installed versions; retire the hub and reconcile its records before pruning"
-    return 0
-  fi
+  hub_kept=$(hub_retained_versions) || return 1
+  hub_kept=$(printf '%s\n' "$hub_kept" | tr '\n' ' ')
   cur=$(current_version)
   prev=$(previous_version)
-  kept=" $cur $prev "
+  kept=" $cur $prev $hub_kept "
   if [ "$force" = 0 ]; then
     kept="$kept $(live_owners | cut -d' ' -f2 | tr '\n' ' ') $(plugin_link_versions | tr '\n' ' ') "
   fi

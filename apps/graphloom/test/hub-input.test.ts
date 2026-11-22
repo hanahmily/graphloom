@@ -72,6 +72,19 @@ describe("hub immutable input capture", () => {
     await expect(materializeHubTask(f.input)).rejects.toThrow("captured launch task changed");
   });
 
+  it.each([
+    'request: |\n      npm test fails\n  then inspect the output\n',
+    'request: "\t\tkeep leading tabs"\n',
+    'request: |\n\n    indented line\n  next line\n\n',
+  ])("preserves the captured request when rewriting pinned references: %j", async (request) => {
+    const f = await captured();
+    const text = `graph: hello\nrepo: source\n${request}budgets:\n  jobs: 10\n`;
+    await writeFile(f.input.taskFile, text);
+    f.input.taskDigest = digest(text);
+    const launch = await materializeHubTask(f.input);
+    expect(parseTaskYaml(await readFile(launch, "utf8")).request).toBe(parseTaskYaml(text).request);
+  });
+
   it("bounds UTF-8 reads and uses independent private atomic temporary files", async () => {
     const f = await captured(); const file = path.join(f.directory, "atomic.json");
     const oldTemp = `${file}.${process.pid}.tmp`; await writeFile(oldTemp, "unrelated file");

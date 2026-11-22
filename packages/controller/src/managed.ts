@@ -24,6 +24,8 @@ export interface ManagedRunBinding {
   generation: number;
   launchId: string;
   intakeDigest?: string;
+  /** Marker protocol: graph effects cannot start before managed-execution-started.json is durable. */
+  initializationProtocol?: 1;
 }
 
 /** Only the trusted CLI bootstrap constructs a grant, after the hub grants fd 3. */
@@ -51,7 +53,7 @@ export async function readManagedBinding(stateDir: string): Promise<ManagedRunBi
 function validateBinding(binding: ManagedRunBinding): void {
   if (binding === null || binding.protocolVersion !== 1 || !Number.isSafeInteger(binding.generation) || binding.generation < 1 ||
     [binding.hubId, binding.hubStateDir, binding.submissionId, binding.runId, binding.launchId].some((value) => typeof value !== "string" || value.length === 0 || value.length > 4096) ||
-    !path.isAbsolute(binding.hubStateDir)) throw new Error("invalid managed run binding");
+    !path.isAbsolute(binding.hubStateDir) || (binding.initializationProtocol !== undefined && binding.initializationProtocol !== 1)) throw new Error("invalid managed run binding");
 }
 
 function sameBinding(a: ManagedRunBinding, b: ManagedRunBinding): boolean {
@@ -68,9 +70,11 @@ export async function authorizeManagedRun(stateDir: string, grant?: ManagedRunGr
   validateBinding(grant);
   if (path.basename(stateDir) !== grant.runId) throw new Error("managed grant run ID does not match state directory");
   if (binding !== undefined && !sameBinding(binding, grant)) throw new Error("managed run belongs to a different hub submission");
-  if (binding === undefined) {
-    const stateExists = await access(path.join(stateDir, "state.json")).then(() => true).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return false; throw error; });
-    if (stateExists) throw new Error("cannot bind an existing standalone run");
+  const stateExists = await access(path.join(stateDir, "state.json")).then(() => true).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return false; throw error; });
+  if (binding === undefined && stateExists) throw new Error("cannot bind an existing standalone run");
+  if (intake !== undefined && !stateExists) {
+    if (await managedExecutionStarted(stateDir)) throw new Error("managed execution already started but run state is missing; operator reconciliation required");
+    if (binding !== undefined && binding.initializationProtocol !== 1) throw new Error("managed initialization provenance is unknown; operator reconciliation required");
   }
   if (binding !== undefined && (grant.generation < binding.generation || (grant.generation === binding.generation && grant.launchId !== binding.launchId))) {
     throw new Error("stale managed launch generation");
@@ -86,9 +90,22 @@ export async function authorizeManagedRun(stateDir: string, grant?: ManagedRunGr
   const next: ManagedRunBinding = {
     protocolVersion: 1, hubId: grant.hubId, hubStateDir: grant.hubStateDir, submissionId: grant.submissionId,
     runId: grant.runId, generation: grant.generation, launchId: grant.launchId,
+    ...((binding === undefined || binding.initializationProtocol === 1) ? { initializationProtocol: 1 as const } : {}),
     ...((digest ?? binding?.intakeDigest) !== undefined ? { intakeDigest: digest ?? binding!.intakeDigest! } : {}),
   };
   await atomicManagedFile(stateDir, BINDING_FILE, next);
+}
+
+const EXECUTION_STARTED = "managed-execution-started.json";
+
+async function managedExecutionStarted(stateDir: string): Promise<boolean> {
+  try { await access(path.join(stateDir, EXECUTION_STARTED)); return true; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
+}
+
+/** Monotonic barrier after the first state save, before any callback or graph execution. */
+export async function markManagedExecutionStarted(stateDir: string): Promise<void> {
+  if (!await managedExecutionStarted(stateDir)) await atomicManagedFile(stateDir, EXECUTION_STARTED, { protocolVersion: 1, at: new Date().toISOString() });
 }
 
 /** Stop is allowed only to the current launch; it must not advance its fence. */
@@ -213,8 +230,8 @@ export function assertAutomaticContinuation(state: DurableRunState, grant?: Mana
   if (continuation.notBefore !== undefined && Date.now() < Date.parse(continuation.notBefore)) throw new Error("automatic resume before controller notBefore");
 }
 
-/** Reserve a remedy before applying it. An interrupted application requires reconciliation, never replay. */
-export async function beginManagedCommand(stateDir: string, id: string): Promise<"new" | "applied"> {
+/** Inspect a remedy without creating intent during preflight. Existing ambiguous effects remain blocked. */
+export async function checkManagedCommand(stateDir: string, id: string): Promise<"new" | "applied"> {
   if (id.length === 0 || id.length > 256) throw new Error("invalid managed command ID");
   const name = `managed-command-${createHash("sha256").update(id).digest("hex")}.json`;
   const existing = await readFile(path.join(stateDir, name), "utf8").then((raw) => JSON.parse(raw) as { id: string; applied: boolean }).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return undefined; throw error; });
@@ -222,8 +239,17 @@ export async function beginManagedCommand(stateDir: string, id: string): Promise
     if (existing.id !== id || existing.applied !== true) throw new Error("managed remedy application is unsettled; operator reconciliation required");
     return "applied";
   }
-  await atomicManagedFile(stateDir, name, { id, applied: false });
   return "new";
+}
+
+/** Reserve immediately before durable mutation, after harmless refusal checks. */
+export async function beginManagedCommand(stateDir: string, id: string): Promise<"new" | "applied"> {
+  const status = await checkManagedCommand(stateDir, id);
+  if (status === "new") {
+    const name = `managed-command-${createHash("sha256").update(id).digest("hex")}.json`;
+    await atomicManagedFile(stateDir, name, { id, applied: false });
+  }
+  return status;
 }
 
 export async function managedCommandApplied(stateDir: string, id: string): Promise<boolean> {

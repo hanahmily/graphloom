@@ -224,9 +224,108 @@ describe("input and command durability", () => {
     expect(hub.inspect(s.id).state).toBe("blocked");
     expect(driver.launches).toHaveLength(1);
   });
+  it("retains a failed preparation through live polling and restart until verified drainage", async () => {
+    const f = await fixture();
+    const prepare = f.driver.prepare.bind(f.driver);
+    f.driver.prepare = async (launch, submission) => {
+      await prepare(launch, submission);
+      throw new Error("bootstrap containment setup failed");
+    };
+    const s = await accepted(f.hub); await f.hub.tick();
+    const launchId = f.hub.inspect(s.id).launch!.id;
+    await f.hub.tick(); await f.hub.tick();
+    expect(f.hub.inspect(s.id)).toMatchObject({ state: "blocked", blocker: expect.stringContaining("bootstrap containment setup failed") });
+    expect(f.hub.list().occupiedSlots).toBe(1);
+    f.driver.unknownCleanup = true;
+    await f.hub.close({ graceMs: 0 });
+    const next = await openHub(f.options); hubs.push(next);
+    expect(next.inspect(s.id).launch?.id).toBe(launchId);
+    f.driver.executions.set(launchId, { execution: "drained", ownerGone: true, externalStopped: true });
+    await next.tick(); await next.tick();
+    expect(next.inspect(s.id)).toMatchObject({ state: "blocked", blocker: expect.stringContaining("bootstrap containment setup failed"), automaticResumes: 0 });
+    expect(next.inspect(s.id).launch).toBeUndefined();
+    expect(f.driver.launches).toHaveLength(1);
+    expect(f.driver.grants).toHaveLength(0);
+  });
+  it("refuses corrupt durable launch failures instead of treating them as a retryable reservation", async () => {
+    const f = await fixture(0); const s = await accepted(f.hub); await f.hub.close({ graceMs: 0 });
+    const file = path.join(f.directory, "scheduler.json");
+    const snapshot = JSON.parse(await readFile(file, "utf8"));
+    snapshot.submissions[s.id].generation = 1;
+    snapshot.submissions[s.id].launch = { id: "l-00000000-0000-0000-0000-000000000000", generation: 1, mode: "initial", phase: "reserved", reservedAt: s.acceptedAt, automatic: false, failure: { occurredAt: "invalid", message: "setup failed" } };
+    await writeFile(file, JSON.stringify(snapshot));
+    await expect(openHub(f.options).then((opened) => { hubs.push(opened); })).rejects.toThrow(/launch failure/);
+  });
+  it("preserves bounded non-ASCII launch failures across restart without faulting the hub", async () => {
+    const f = await fixture(); const prepare = f.driver.prepare.bind(f.driver);
+    f.driver.prepare = async (launch, submission) => {
+      await prepare(launch, submission);
+      throw new Error("启动失败".repeat(1024));
+    };
+    const s = await accepted(f.hub); await f.hub.tick();
+    const reason = f.hub.inspect(s.id).blocker!;
+    expect(reason.length).toBe(1024);
+    expect(Buffer.byteLength(reason)).toBeGreaterThan(1024);
+    expect(f.hub.list().fault).toBeUndefined();
+    f.driver.unknownCleanup = true;
+    await f.hub.close({ graceMs: 0 });
+    const next = await openHub(f.options); hubs.push(next);
+    expect(next.inspect(s.id)).toMatchObject({ state: "blocked", blocker: reason });
+    expect(next.list().fault).toBeUndefined();
+    expect(f.driver.launches).toHaveLength(1);
+  });
 });
 
 describe("bounded continuation and fairness", () => {
+  it("replays verified incomplete initialization after drainage and restart using the same run", async () => {
+    const f = await fixture(); const a = await accepted(f.hub); await f.hub.tick();
+    const initial = f.hub.inspect(a.id);
+    const failedIntake: HubObservation = {
+      protocolVersion: 1, observedAt: new Date(0).toISOString(), stateRevision: 0, progressRevision: 0, status: "initialization-failed",
+      continuation: { kind: "automatic", cause: "initialization-failed", fingerprint: "verified-incomplete-intake", stateRevision: 0 },
+    };
+    f.driver.executions.set(initial.launch!.id, { execution: "drained", ownerGone: true, externalStopped: false, observation: failedIntake });
+    await f.hub.tick();
+    expect(f.hub.list().occupiedSlots).toBe(1);
+    expect(f.driver.grants).toHaveLength(1);
+    f.driver.executions.set(initial.launch!.id, { execution: "drained", ownerGone: true, externalStopped: true, observation: failedIntake });
+    await f.hub.tick();
+    expect(f.hub.inspect(a.id)).toMatchObject({ state: "waiting", automaticResumes: 0 });
+    await f.hub.close({ graceMs: 0 });
+    const next = await openHub(f.options); hubs.push(next);
+    expect(next.inspect(a.id).state).toBe("waiting");
+    f.advance(10); await next.tick();
+    expect(next.inspect(a.id)).toMatchObject({ runId: a.runId, input: a.input, state: "running", automaticResumes: 1, launch: { mode: "initial", automatic: true, generation: 2 } });
+    f.driver.finish(next.inspect(a.id)); await next.tick();
+    expect(next.inspect(a.id).state).toBe("succeeded");
+    expect(f.driver.launches.map((entry) => entry.submission.runId)).toEqual([a.runId, a.runId]);
+  });
+  it("keeps repeated initialization failures within the automatic retry allowance", async () => {
+    const { hub, driver, advance } = await fixture(); const a = await accepted(hub);
+    await hub.updatePolicy(a.id, { ...a.retry, maxAutomaticResumes: 1 });
+    await hub.tick();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      driver.executions.set(hub.inspect(a.id).launch!.id, {
+        execution: "drained", ownerGone: true, externalStopped: true,
+        observation: { protocolVersion: 1, observedAt: new Date(0).toISOString(), stateRevision: 0, progressRevision: 0, status: "initialization-failed", continuation: { kind: "automatic", cause: "initialization-failed", fingerprint: "same-intake-failure", stateRevision: 0 } },
+      });
+      await hub.tick(); advance(100); await hub.tick();
+    }
+    expect(hub.inspect(a.id)).toMatchObject({ state: "blocked", automaticResumes: 1 });
+    expect(driver.launches.map((entry) => entry.launch.mode)).toEqual(["initial", "initial"]);
+    expect(hub.list().occupiedSlots).toBe(0);
+  });
+  it("rejects remedies before initialization while allowing a plain manual retry", async () => {
+    const { hub, driver } = await fixture(); const a = await accepted(hub); await hub.tick();
+    driver.executions.set(hub.inspect(a.id).launch!.id, {
+      execution: "drained", ownerGone: true, externalStopped: true,
+      observation: { protocolVersion: 1, observedAt: new Date(0).toISOString(), stateRevision: 0, progressRevision: 0, status: "initialization-failed", continuation: { kind: "automatic", cause: "initialization-failed", fingerprint: "intake", stateRevision: 0 } },
+    });
+    await hub.tick();
+    await expect(hub.resume(a.id, { remedy: { reconciled: true } })).rejects.toThrow(/before initialization/);
+    await hub.resume(a.id); await hub.tick();
+    expect(hub.inspect(a.id)).toMatchObject({ state: "running", automaticResumes: 0, launch: { mode: "initial", automatic: false } });
+  });
   it("puts a ready retry behind already queued work without blocking it while waiting", async () => {
     const { hub, driver, advance } = await fixture();
     const a = await accepted(hub); const b = await accepted(hub); const c = await accepted(hub);
@@ -304,6 +403,13 @@ describe("bounded continuation and fairness", () => {
     driver.executions.set(launch.id, { execution: "drained", ownerGone: true, externalStopped: true, observation: { ...observation({ kind: "complete" }), status: "stopped" } });
     await hub.tick();
     expect(hub.inspect(a.id)).toMatchObject({ state: "blocked" });
+    expect(hub.list().occupiedSlots).toBe(1);
+  });
+  it("refuses initial replay observations that claim existing controller progress", async () => {
+    const { hub, driver } = await fixture(); const a = await accepted(hub); await hub.tick();
+    driver.finish(hub.inspect(a.id), { kind: "automatic", cause: "initialization-failed", fingerprint: "contradiction", stateRevision: 1 }, 1);
+    await hub.tick();
+    expect(hub.inspect(a.id)).toMatchObject({ state: "blocked", blocker: expect.stringContaining("invalid continuation") });
     expect(hub.list().occupiedSlots).toBe(1);
   });
 });

@@ -58,19 +58,25 @@ export async function verifyHubTaskInput(input: HubStoredInput, initial: boolean
 /** Private links make the controller's ordinary relative-path intake rules apply unchanged. */
 export async function materializeHubTask(input: HubStoredInput): Promise<string> {
   const directory = path.dirname(input.taskFile);
-  const task = parseTaskYaml(await boundedText(input.taskFile, MAX_TASK_BYTES));
+  const captured = await boundedText(input.taskFile, MAX_TASK_BYTES);
+  const task = parseTaskYaml(captured);
   await mkdir(path.join(directory, "plugins"), { recursive: true, mode: 0o700 });
   await checkedLink(input.repoPath, path.join(directory, "repo"));
   await checkedLink(input.bundlePath, path.join(directory, "plugins", task.graph));
-  const lines = [
-    `graph: ${task.graph}`, "repo: repo", `base: ${input.baseCommit}`,
-    ...(input.configFile !== undefined ? [`config: ${path.basename(input.configFile)}`] : []),
-    "request: |", ...task.request.split("\n").map((line) => `  ${line}`),
-    ...(task.grants !== undefined ? ["grants:", ...Object.entries(task.grants).map(([key, value]) => `  ${key}: ${value}`)] : []),
-    ...(task.budgets !== undefined ? ["budgets:", ...Object.entries(task.budgets).map(([key, value]) => `  ${key}: ${value}`)] : []),
-  ];
+  // Preserve the request's original representation, including indentation and tabs.
+  // Intake accepts a deliberately small YAML subset; serializing its strings again
+  // can change their meaning even when a general YAML serializer would round-trip.
+  let text = captured.replace(/^repo:.*$/gm, "repo: repo");
+  const pin = (key: string, value: string) => {
+    const field = new RegExp(`^${key}:.*$`, "gm");
+    if (field.test(text)) text = text.replace(field, `${key}: ${value}`);
+    else text = `${text.replace(/\n?$/, "\n")}${key}: ${value}\n`;
+  };
+  pin("base", input.baseCommit);
+  if (input.configFile !== undefined) pin("config", path.basename(input.configFile));
+  const rewritten = parseTaskYaml(text);
+  if (rewritten.request !== task.request) throw new Error("captured request changed during materialization");
   const target = path.join(directory, "launch-task.yaml");
-  const text = `${lines.join("\n")}\n`;
   try {
     if (await readFile(target, "utf8") !== text) throw new Error("captured launch task changed");
   } catch (error) {

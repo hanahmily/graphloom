@@ -208,24 +208,45 @@ describe("switching current", () => {
 });
 
 describe("self prune", () => {
-  it("keeps queued hub inputs despite force, missing hub state, and corrupt retention records", async () => {
+  it("keeps only queued hub versions when state or record contents are unavailable", async () => {
     const sb = await makeSandbox(base);
     await installed(sb, "0.1.0", "0.1.1", "0.1.2", "0.1.3");
     const hub = path.join(sb.root, "hub-not-created-yet");
     await registerHubRetention(sb.ghome, hub, [path.join(sb.ghome, "versions", "0.1.0")]);
-    for (const args of [["--dry-run"], ["--force"]]) {
-      const result = sb.graphloom(["self", "prune", ...args], quiet);
-      expect(result.status, result.stderr).toBe(0);
-      expect(result.stdout).toContain("hub retention records keep all installed versions");
-      expect(sb.installed()).toHaveLength(4);
-    }
-    await writeFile(hubRetentionFile(sb.ghome, hub), "truncated registry");
-    expect(sb.graphloom(["self", "prune", "--force"], quiet).status).toBe(0);
+    const dry = sb.graphloom(["self", "prune", "--dry-run"], quiet);
+    expect(dry.status, dry.stderr).toBe(0);
+    expect(dry.stdout).toContain("would remove 0.1.1");
+    expect(dry.stdout).not.toContain("would remove 0.1.0");
     expect(sb.installed()).toHaveLength(4);
-    // Only explicit removal after retiring/reconciling the hub permits pruning.
-    await rm(hubRetentionFile(sb.ghome, hub));
+    // Retention identity lives in the path, so damaged record bytes still protect only that version.
+    await writeFile(hubRetentionFile(sb.ghome, hub, "0.1.0"), "truncated registry");
+    const prune = sb.graphloom(["self", "prune", "--force"], quiet);
+    expect(prune.status, prune.stderr).toBe(0);
+    expect(sb.installed()).toEqual(["0.1.0", "0.1.2", "0.1.3"]);
+    await registerHubRetention(sb.ghome, hub, []);
     expect(sb.graphloom(["self", "prune", "--force"], quiet).status).toBe(0);
     expect(sb.installed()).toEqual(["0.1.2", "0.1.3"]);
+  });
+
+  it("bounds legacy or corrupt global records to existing versions instead of all future upgrades", async () => {
+    const sb = await makeSandbox(base);
+    await installed(sb, "0.1.0", "0.1.1", "0.1.2", "0.1.3");
+    const hub = path.join(sb.root, "missing-legacy-hub");
+    const registry = path.join(sb.ghome, "hub-retention");
+    await mkdir(registry);
+    const legacy = path.basename(hubRetentionFile(sb.ghome, hub, "0.1.0"));
+    await writeFile(path.join(registry, legacy), "corrupt old global record");
+    expect(sb.graphloom(["self", "prune", "--force"], quiet).status).toBe(0);
+    expect(sb.installed()).toHaveLength(4);
+    await installed(sb, "0.1.4", "0.1.5", "0.1.6");
+    const prune = sb.graphloom(["self", "prune", "--force"], quiet);
+    expect(prune.status, prune.stderr).toBe(0);
+    expect(prune.stdout).toContain("removed 0.1.4");
+    expect(sb.installed()).toEqual(["0.1.0", "0.1.1", "0.1.2", "0.1.3", "0.1.5", "0.1.6"]);
+    // A recovered hub narrows the conservative migration to its actual queue.
+    await registerHubRetention(sb.ghome, hub, [path.join(sb.ghome, "versions", "0.1.0")]);
+    expect(sb.graphloom(["self", "prune", "--force"], quiet).status).toBe(0);
+    expect(sb.installed()).toEqual(["0.1.0", "0.1.5", "0.1.6"]);
   });
 
   it("keeps current, previous, owners of runs whose state exists, and versions a run's plugin links into", async () => {

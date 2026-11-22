@@ -32,7 +32,7 @@ export interface LinuxHubDriverOptions {
   command(launch: HubLaunch, submission: HubSubmission): Promise<HubCommandSpec>;
   observe(launch: HubLaunch, submission: HubSubmission): Promise<RuntimeObservation>;
   /** Verify run-labelled containers/external executors, not merely a controller PID. */
-  cleanup(launch: HubLaunch, submission: HubSubmission): Promise<RuntimeObservation>;
+  cleanup(launch: HubLaunch, submission: HubSubmission, observed?: RuntimeObservation): Promise<RuntimeObservation>;
   maxLogBytes?: number;
   onWake?(): void;
 }
@@ -100,7 +100,7 @@ export function createLinuxHubDriver(options: LinuxHubDriverOptions): HubDriver 
         await writeFile(path.join(cgroup(launch), "cgroup.kill"), "1");
         active = await populated(launch);
       }
-      if (!active && state.ownerGone) state = await options.cleanup(launch, submission);
+      if (!active && state.ownerGone) state = await options.cleanup(launch, submission, state);
       const error = children.get(launch.id)?.error;
       if (error && (active || identityAlive)) return { ...state, execution: "uncertain", reason: error };
       if (active || identityAlive) return { ...state, execution: "live" };
