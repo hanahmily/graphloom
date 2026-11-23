@@ -157,17 +157,33 @@ function topologyOf(state: DurableRunState, traversal: TraversalProjection): Mon
   };
 }
 
+/** An owning-runtime observation that failed only because the run's state.json does not exist yet. */
+export function stateNotWritten(error: string | undefined): boolean {
+  return error !== undefined && /ENOENT/.test(error) && /state\.json/.test(error);
+}
+
 export function withHubSnapshot(snapshot: MonitorSnapshot | undefined, submission: HubSubmission, status: HubStatus, now = new Date().toISOString(), unavailable?: string): MonitorSnapshot {
+  // While a launch is active the hub's scheduling state is current; the controller's last
+  // record may predate the launch (a resumed run still reads "stopped" until its first save).
+  const launching = submission.launch !== undefined && (submission.state === "starting" || submission.state === "running");
+  const starting = snapshot === undefined && launching && (unavailable === undefined || stateNotWritten(unavailable));
   const base: MonitorSnapshot = snapshot ?? {
     schemaVersion: 1, frameId: `${submission.id}:${now}`, observedAt: now,
-    run: { id: submission.runId, status: submission.generation === 0 && submission.launch === undefined ? "not-created" : "unknown" }, sources: [],
+    run: { id: submission.runId, status: submission.generation === 0 && submission.launch === undefined ? "not-created" : starting ? "starting" : "unknown" }, sources: [],
   };
+  const superseded = snapshot !== undefined && launching && snapshot.run.status !== "running" ? snapshot.run.status : undefined;
+  const controllerDetail = starting ? "starting: run state not written yet" : unavailable ?? (submission.generation === 0 ? "run has not started" : "owning-runtime observation unavailable");
   return {
     ...base, frameId: `${base.frameId}:hub:${submission.updatedAt}`, observedAt: now,
-    run: { ...base.run, submissionId: submission.id, nextEligibleAt: submission.eligibleAt ?? null, blocker: submission.blocker ?? base.run.blocker ?? null },
+    run: { ...base.run, ...(superseded !== undefined ? { status: submission.state } : {}), submissionId: submission.id, nextEligibleAt: submission.eligibleAt ?? null, blocker: submission.blocker ?? (superseded !== undefined ? null : base.run.blocker ?? null) },
     sources: [
-      ...base.sources.map((source) => unavailable !== undefined && source.status === "available" ? { ...source, status: "stale" as const, detail: unavailable } : source),
-      ...(snapshot === undefined ? [{ id: "controller", status: "unavailable" as const, observedAt: null, detail: unavailable ?? (submission.generation === 0 ? "run has not started" : "owning-runtime observation unavailable") }] : []),
+      ...base.sources.map((source) => {
+        const marked = unavailable !== undefined && source.status === "available" ? { ...source, status: "stale" as const, detail: unavailable } : source;
+        return superseded !== undefined && source.id === "controller"
+          ? { ...marked, detail: `${marked.detail ? `${marked.detail}; ` : ""}last recorded ${superseded}; the hub's launch is ${submission.state}` }
+          : marked;
+      }),
+      ...(snapshot === undefined ? [{ id: "controller", status: "unavailable" as const, observedAt: null, detail: controllerDetail }] : []),
       { id: "hub", status: "available", observedAt: now, revision: submission.updatedAt },
     ],
     hub: { occupied: status.occupiedSlots, limit: status.maxConcurrentRuns, queued: status.submissions.filter((item) => item.state === "queued").length, state: submission.state, observationId: submission.updatedAt },

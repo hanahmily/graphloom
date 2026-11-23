@@ -288,8 +288,11 @@ graphloom skills remove [<name>...] [--agent <a>] [--dir <dir>] [--force]
 - **Never clobber.** `install` writes `missing` and `outdated` copies and
   skips `current` ones; it replaces an `edited` copy only with `--force`, and
   never touches a `foreign` directory. `update` refreshes only `outdated`
-  copies GraphLoom installed, skipping `edited` ones with a notice, and never
-  installs a missing one. `remove` removes unedited GraphLoom copies; an edited
+  copies GraphLoom installed, skipping `edited` ones with a notice; in a
+  directory that holds any GraphLoom copy (with a marker) it also installs
+  this version's skills missing there, so a release's new skill reaches every
+  agent that already has GraphLoom's, and it installs none in a directory
+  that holds no GraphLoom copy. `remove` removes unedited GraphLoom copies; an edited
   one only with `--force`; never a foreign directory. Each write goes to a
   temporary sibling directory renamed into place.
 - **Setup** offers, after it writes the configs, to install the skills for each
@@ -303,7 +306,8 @@ graphloom skills remove [<name>...] [--agent <a>] [--dir <dir>] [--force]
   (manual install, `graphloom upgrade`, or `--auto`), it runs the new
   version's `graphloom skills update --quiet` when that version ships
   `skills/`. Only copies GraphLoom installed are refreshed; edited ones are
-  skipped with a notice (in `update/log` for automatic updates).
+  skipped with a notice (in `update/log` for automatic updates); a skill new
+  in that version is installed for each agent with GraphLoom's skills.
   `self use` and `self rollback` do not refresh; `graphloom skills update`
   does.
 - **Uninstall.** `self uninstall` runs `current`'s `graphloom skills remove`
@@ -344,4 +348,6 @@ opencode was a target are GraphLoom's own copies there and `update`,
   `--since`, timeout, stop, a foreign cursor; and an end-to-end scripted run of
   the hello graph watched with `wait --until progress` that reports deltas.
 - `install.test.ts`: upgrade refreshes installed copies (Claude Code's and
-  opencode's) and skips edited ones; uninstall removes them.
+  opencode's), installs a skill new in the release beside them (and for no
+  agent without GraphLoom's skills), and skips edited ones; uninstall removes
+  them.

@@ -312,8 +312,15 @@ $dirty"
     [ "$(node -e 'const [a,b]=process.argv.slice(1).map((v)=>v.split(".").map(Number));console.log(a[0]-b[0]||a[1]-b[1]||a[2]-b[2])' "$version" "$latest")" -gt 0 ] ||
       die "$version is not greater than the latest release $latest"
     if [ -z "$previous_json" ]; then previous_json=$(fetch_previous "$version" "$work/previous"); fi
+  fi
+  # Name the release the component bump rule compares against: --previous's, when given.
+  if [ -n "$previous_json" ]; then
+    compared=$(node -p 'require(process.argv[1]).version' "$previous_json")
+    if [ "$compared" = "$latest" ]; then echo "previous release: $compared"
+    else echo "previous release: $compared (--previous $previous_json${latest:+; the latest published release is $latest})"; fi
+  elif [ -n "$latest" ]; then
     echo "previous release: $latest"
-  elif [ -z "$previous_json" ]; then
+  else
     echo "previous release: none; $version is the first release"
   fi
 

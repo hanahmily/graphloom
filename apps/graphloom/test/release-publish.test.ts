@@ -674,8 +674,13 @@ describe("release.sh prepare (§6 steps 1-2)", () => {
       executors: [{ package: "@graphloom/executor-command", version: "0.1.2", digest: "f".repeat(64) }],
       plugins: [{ graphId: "hello", version: "0.1.4", manifestSha256: "e".repeat(64), sourceTree: "d".repeat(64) }],
     });
+    // An older release is published; prepare names the release it compares against, --previous's, not the latest tag.
+    await mkdir(path.join(fx.releases, "v0.0.5"));
+    await writeJson(path.join(fx.releases, "v0.0.5", "release.json"), { version: "0.0.5" });
     const r = fx.releaseSh(["prepare", "0.1.0", "--no-pr", "--previous", snapshot, "--node-dir", fx.nodeDir]);
     expect(r.status, r.stderr + r.stdout).toBe(0);
+    expect(r.stdout).toContain(`previous release: 0.0.9 (--previous ${snapshot}; the latest published release is 0.0.5)`);
+    expect(r.stdout).not.toContain("previous release: 0.0.5");
     expect(r.stdout).toContain("component bump: executor @graphloom/executor-command 0.1.0 -> 0.1.3");
     expect(r.stdout).toContain("component bump: plugin hello 0.1.0 -> 0.1.5");
     expect(r.stdout).toContain("components: the bump rule holds against 0.0.9");

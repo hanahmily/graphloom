@@ -406,7 +406,10 @@ export async function installSkills(options: SkillsActionOptions = {}): Promise<
 /**
  * Refreshes copies GraphLoom installed to this version: outdated ones are
  * rewritten, edited ones skipped with a notice, retired ones (no longer
- * shipped, unedited) removed. Never installs a missing one.
+ * shipped, unedited) removed. In a directory that holds any GraphLoom copy,
+ * the skills this version ships that are missing there are installed (a
+ * release's new skill reaches every agent that already has GraphLoom's); a
+ * directory with none stays without.
  */
 export async function updateSkills(options: SkillsActionOptions & { quiet?: boolean } = {}): Promise<SkillsActionResult> {
   const root = options.root ?? installRoot();
@@ -417,8 +420,12 @@ export async function updateSkills(options: SkillsActionOptions & { quiet?: bool
   const result: SkillsActionResult = { changed: [], skipped: [] };
   for (const t of skillTargets(options)) {
     const status = await targetStatus(t, bundle);
+    const hasGraphLoom = status.skills.some((copy) => copy.state !== "missing" && copy.state !== "foreign");
     for (const copy of status.skills) {
-      if (copy.state === "edited") {
+      if (copy.state === "missing" && hasGraphLoom) {
+        await writeCopy(t.dir, bundle.find((b) => b.name === copy.name)!, version, now);
+        result.changed.push({ dir: t.dir, name: copy.name, action: "installed" });
+      } else if (copy.state === "edited") {
         say(`graphloom skills: kept ${copy.path} (you edited it); graphloom skills install ${copy.name} --force replaces it with ${version}'s`);
         result.skipped.push({ dir: t.dir, name: copy.name, reason: "edited" });
       } else if (copy.state === "outdated") {
@@ -433,7 +440,8 @@ export async function updateSkills(options: SkillsActionOptions & { quiet?: bool
   if (result.changed.length > 0 || options.quiet !== true) {
     const updated = result.changed.filter((c) => c.action === "updated").length;
     const removed = result.changed.filter((c) => c.action === "removed").length;
-    say(`graphloom skills: ${updated} updated to ${version}${removed > 0 ? `, ${removed} no longer shipped removed` : ""}`);
+    const installed = result.changed.filter((c) => c.action === "installed");
+    say(`graphloom skills: ${updated} updated to ${version}${installed.length > 0 ? `, ${installed.length} new installed (${[...new Set(installed.map((c) => c.name))].join(", ")})` : ""}${removed > 0 ? `, ${removed} no longer shipped removed` : ""}`);
   }
   return result;
 }

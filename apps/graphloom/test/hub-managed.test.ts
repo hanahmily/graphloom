@@ -17,7 +17,7 @@ import type { HubLaunch, HubSubmission } from "@graphloom/sdk";
 import { digestExecutorSource } from "@graphloom/runner";
 import { runtimeDigest } from "../src/hub-input.js";
 import { selfInstall } from "../src/ownership.js";
-import { parseRemedy, remedyArgs } from "../src/hub-managed.js";
+import { launchEndLine, parseRemedy, remedyArgs } from "../src/hub-managed.js";
 import { observeInitialization } from "../src/hub-initialization.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -113,6 +113,8 @@ describe("managed CLI fd3 bootstrap", () => {
     await expect(readFile(path.join(f.hubDirectory, "runs", f.submission.runId, "state.json"))).rejects.toMatchObject({ code: "ENOENT" });
     f.send(f.grant);
     const result = await f.done; expect(result.code, result.stderr).toBe(0);
+    // The launch's stderr (hub logs) ends with how the run ended.
+    expect(result.stderr.trim().split("\n").at(-1)).toBe(`graphloom: run ${f.submission.runId} succeeded`);
     const state = JSON.parse(await readFile(path.join(f.hubDirectory, "runs", f.submission.runId, "state.json"), "utf8"));
     expect(state).toMatchObject({ runId: f.submission.runId, status: "succeeded", definition: { graphId: "noop" } });
     expect(state.receipts).toEqual([]);
@@ -201,5 +203,14 @@ describe("managed operator remedy argv", () => {
     const remedy = { approve: "decision", inputs: { command: "$(literal) `text`" } };
     expect(parseRemedy(["resume", "run", ...remedyArgs(remedy)])).toEqual(remedy);
     expect(remedyArgs(undefined)).toEqual([]);
+  });
+});
+
+describe("the launch's last log line", () => {
+  it("names the run's stop reason, the blocker when it says more, and whether a resume runs the graph again", () => {
+    expect(launchEndLine({ runId: "r-1", status: "stopped", stopReason: "environment check go-version failed:\n  go: not found", blocker: "Fetch cannot build without go", stopRetryable: false }))
+      .toBe("graphloom: run r-1 stopped: environment check go-version failed: go: not found; blocker: Fetch cannot build without go (final)");
+    expect(launchEndLine({ runId: "r-1", status: "stopped", stopReason: "quota", blocker: "quota", stopRetryable: true })).toBe("graphloom: run r-1 stopped: quota (retryable)");
+    expect(launchEndLine({ runId: "r-1", status: "succeeded" })).toBe("graphloom: run r-1 succeeded");
   });
 });

@@ -77,7 +77,9 @@ The CLI provides:
 
 ```sh
 graphloom hub serve --config ~/.config/graphloom/hub.json
+graphloom hub service --capture-env --token-env-file ~/.config/graphloom/hub-tokens.env --write
 graphloom hub status
+graphloom hub doctor --task ./tasks/fix/task.yaml
 graphloom hub submit ./tasks/fix/task.yaml --key fix-14169
 graphloom hub list
 graphloom hub list --state blocked --state failed --since 3d
@@ -163,6 +165,31 @@ archive-index error is printed but keeps exit 0; admission still works. `--json`
 prints the health object with `reachable` and `healthy` booleans and the
 submission count in place of the records; unreachable prints
 `{"reachable": false, "healthy": false, "socket", "error"}`.
+
+Status also reports the hub process's **environment**, which its runs inherit
+(§9): the first five `PATH` entries and how many follow, where `claude`,
+`codex`, `git`, `gh`, `docker` and `bwrap` resolve on that `PATH` (the
+runner config's `claude.command`/`codex.command` or `GRAPHLOOM_CLAUDE_BIN`/
+`GRAPHLOOM_CODEX_BIN` when set), and whether the runner config's
+`github.tokenEnv` and `github.writeTokenEnv` variables and `CLAUDE_CONFIG_DIR`
+and `CODEX_HOME` are set: names and `set`/`unset` only, never a value but
+`PATH`. A `Warning:` line names each CLI a configured harness needs (the runner
+config's or the supervisor config's enabled harnesses; `git` for every run)
+that the hub cannot find; it does not change the exit code. `--json` carries
+the same summary as `environment`.
+
+`graphloom hub doctor [--task <task.yaml>] [--json]` runs `graphloom doctor`'s
+checks (platform, git and flock, the harness CLIs and their logins, docker,
+confinement, the runner and supervisor configs and the token variables they
+name, and with `--task` the plugin's environment checks, supervisor selection
+and agent roles) **inside the hub**: `POST /v1/doctor` makes the hub run its
+own installation's `graphloom doctor --json` as a child with the hub's
+environment and the hub config's runner/supervisor paths, exactly what a run
+it launches would find, not what the caller's shell has. The CLI resolves the
+task path; the hub accepts only an absolute one and runs one doctor at a time.
+Exit codes are doctor's: 0 when no check failed, 1 when one did, and 1 when no
+hub answers. `graphloom doctor` in a shell and `graphloom hub doctor` can
+disagree; the second is what hub runs see.
 
 `graphloom hub list` without flags lists the retained queue in queue order. Any
 search flag turns it into a history search over the same records, newest
@@ -329,6 +356,9 @@ run capacity does not make those writes safe to overlap.
 
 Use direct child processes with fixed executable and argv, no shell expansion,
 noninteractive stdin, and separate bounded logs and machine control descriptors.
+A launch inherits the hub process's environment, which under systemd is the
+unit's, not the operator's shell profile ([§9.1](#91-the-services-environment));
+`hub status` summarizes it and `hub doctor` checks it.
 Pin the executable for initial launch. Resume resolves the owning installed
 version, retaining its existing dispatch rules. A missing version or an unsupported
 managed-launch protocol blocks the submission; it never silently upgrades a run.
@@ -537,6 +567,17 @@ cost measurement is unknown, not zero. Cost is shown only when a harness supplie
 it or an explicit pricing source is configured; no billing accuracy is implied.
 Recorded calls may arrive only when jobs settle, so reported rates can lag work.
 
+A launch's state wins over a controller record that predates it. Before an
+initial launch's first state save the owning runtime has no `state.json`; the
+overview says `Status: starting` with the controller source `starting: run
+state not written yet`, not `unknown` and the read error. While a launch is
+starting or running and the controller's last record says otherwise (a
+resumed run reads `stopped` until its first save), the overview shows the
+hub's state, the controller source notes `last recorded <status>`, and the
+earlier blocker is not repeated. Each managed launch ends its stderr log
+(`hub logs`) with `graphloom: run <id> <status>[: <stop reason>][; blocker:
+<blocker>][ (retryable|final)]`.
+
 Read failures retain the last observation with a stale marker. Silence reports
 possible lack of progress; it never proves death or authorizes a replacement.
 Cap log retention per launch and event-reader buffers; a slow viewer cannot block a
@@ -726,7 +767,8 @@ its authentication remain a separately designed feature.
 | `GET /v1/submissions` and `GET /v1/submissions/:id` | Bounded list and detail; search parameters `state` (repeatable), `graph`, `repo`, `key`, `since`, `until`, `grep`, `limit`, `archived` (§3.1) |
 | `POST /v1/submissions/:id/commands` | Typed pause, resume, cancel, policy-update or archive command |
 | `PATCH /v1/settings` | Change global concurrency limit |
-| `GET /v1/health` | Health and aggregate scheduling state: version, socket, counts, faults, archive index size (§3.1) |
+| `GET /v1/health` | Health and aggregate scheduling state: version, socket, counts, faults, archive index size, the hub's environment summary (§3.1) |
+| `POST /v1/doctor` | Doctor's checks run by the hub in its own environment; body `{"taskPath"?}` (absolute); one at a time (§3.1) |
 | `GET /v1/events?since=<cursor>` | Bounded NDJSON observation stream; reconnect cursor and explicit retention gaps |
 | `GET /v1/submissions/:id/logs` | Bounded log read/follow with offset |
 
@@ -767,6 +809,50 @@ remaining unit processes, giving the hub a chance to coordinate shutdown. See
 External execution still requires runner reconciliation after restart. A host
 reboot follows the same durable queue recovery. Enabling lingering for startup
 without a login is an operator deployment choice.
+
+### 9.1 The service's environment
+
+A systemd user service reads no shell profile. Its runs inherit the unit's
+environment, so a toolchain the profile puts on `PATH` (a Go or nvm Node, say),
+`CLAUDE_CONFIG_DIR` or `CODEX_HOME` (without which an agent job gets a `401`
+from its provider), and the runner config's token variables are missing unless
+the unit provides them, while `graphloom doctor` in the operator's shell still
+passes. `graphloom hub service` writes that environment explicitly, as two
+drop-ins beside the unit `graphloom-hub.service`, under
+`$XDG_CONFIG_HOME/systemd/user/graphloom-hub.service.d/` (default
+`~/.config/systemd/user/...`):
+
+- `--capture-env` starts a clean login shell of `$SHELL` (`-l -i -c` with only
+  `HOME`, `USER`, `LOGNAME`, `SHELL` and `TERM=dumb`, stdin closed, 20 s) and
+  keeps an allowlist: `PATH`, Go's variables (`GO` followed by capitals or
+  digits only, so never `GOOGLE_API_KEY`), `CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
+  `LANG`, `LC_ALL`, and the proxy variables (`HTTP_PROXY` ... `NO_PROXY`, either
+  case). A proxy value with credentials in it and a value spanning lines are
+  left out and named. They become `Environment=` lines of `environment.conf`.
+- `--token-env-file <file>` writes `tokens.conf`, `EnvironmentFile=-<file>`,
+  and fills `<file>` owner-only (mode 0600, written through a renamed temporary
+  file) with the runner config's `github.tokenEnv` (the hub config's
+  `runnerConfig`, else the default runner config): from that variable in the
+  caller's environment, else `gh auth token`. The write token is opt-in:
+  `--write-token` adds `github.writeTokenEnv` the same way. A secret is never
+  captured anywhere but this file, and never printed.
+- Without `--write` both drop-ins are printed and nothing is written; with it,
+  the token file and the drop-ins are written (mode 0600). Either way only
+  variable names go to stderr. Plain `graphloom hub service` still prints the
+  unit and installs nothing.
+
+```sh
+graphloom hub service --capture-env --token-env-file ~/.config/graphloom/hub-tokens.env --write
+systemctl --user daemon-reload && systemctl --user restart graphloom-hub.service
+graphloom hub status     # the environment summary
+graphloom hub doctor --task ./tasks/fix/task.yaml
+```
+
+Re-run it after changing the shell profile or a toolchain, and after `gh auth
+login` or a token rotation (the token file is a copy), then reload and restart
+the service; a restart stops active runs cooperatively and continues them. The
+two drop-ins are independent: refreshing the tokens leaves the captured
+environment alone, and the reverse.
 
 The hub must not use the daily-update shim as the running daemon executable.
 Runtime upgrades are an explicit service restart; existing runs retain their
@@ -840,6 +926,7 @@ Test observable admission and process behavior, not just queue implementation.
 | Planned restart versus repeated unplanned daemon crashes | Planned continuation preserves retry allowance; unplanned recovery exhausts its bounded allowance |
 | Managed direct resume or second hub instance | Cannot bypass the slot scheduler or the hub lock |
 | Missing runtime version, cgroup delegation or cleanup capability | Refuse managed launch with an actionable explanation |
+| Service environment lacks a tool or variable the operator's shell has | `hub status` warns for an enabled harness's missing CLI; `hub doctor` fails the check runs would fail; `hub service --capture-env` prints only allowlisted names, tokens only into the 0600 file |
 | Same run in terminal and chat | Same snapshot facts and controller revision; no client-owned scheduling |
 | Single panel or several panels requested | Independent rendering or shared observation frame; same facts and stable job selection |
 | TTY resize, narrow view, Unicode labels, redirected output | Readable panels or append-only plain/JSON; no stray control sequences |
