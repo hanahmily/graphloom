@@ -1,6 +1,6 @@
 # PR design review graph (`pr-design-review`)
 
-Status: implemented, `pr-design-review` 0.1.2 (`examples/plugins/pr-design-review`).
+Status: implemented, `pr-design-review` 0.1.3 (`examples/plugins/pr-design-review`).
 This is round 1 of a pull request's review: the design-level review. Round 2, the
 detail review, is the [PR-review graph](design-pr-review-graph.md) (`pr-review`
 1.x). The two graphs are independent plugins that share the review kit
@@ -589,3 +589,8 @@ and `large-artifacts` exercise the shared report. The design review's own:
   apache/skywalking-banyandb#1485 had two partially answered items)
   ([§5.5](#55-output-one-file)); an item anchors at the first in-diff line its
   answer cites, before the change's first cite ([§8](#8-the-gate)).
+- **0.1.3:** the review kit reads a large pull request's hunk headers in groups of
+  files that each fit one command report, and lists a file whose own headers do not
+  fit as not measured, rather than failing the Report stage (it blocked
+  apache/skywalking-banyandb#1487, 181 files)
+  ([PR review §6.8](design-pr-review-graph.md#68-measurements)).

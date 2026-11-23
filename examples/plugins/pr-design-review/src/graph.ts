@@ -81,7 +81,7 @@ import { CLAIM_CHECK_REFERENCES, CLAIM_CHECK_SCHEMA, CLAIM_CHECK_SCHEMA_NAME } f
 import { REPORTER_SCHEMA_NAME, REVISION_SCHEMA_NAME, reportSpec, type ReportFlow } from "./kit/flow.js";
 import { budgetShortfall, largeNeeds } from "./kit/large.js";
 import { largeCheckScope, planLargeReporter } from "./kit/largeprompts.js";
-import { measurementState, metricsDiffCommand, STATIC_ONLY_NOTE, staticBaseCommand, staticCommand } from "./kit/measurements.js";
+import { measurementState, STATIC_ONLY_NOTE, staticBaseCommand, staticCommand } from "./kit/measurements.js";
 import { planChecker, planReporter } from "./kit/prompts.js";
 import { assignmentProblem, type FileSpill } from "./kit/fit.js";
 import { isLarge } from "./kit/mode.js";
@@ -174,7 +174,7 @@ export function definitionFor(profile: Profile): GraphDefinition {
     },
     {
       id: REQUIREMENT_MEASUREMENTS,
-      statement: `For every function the pull request adds or modifies, complexity and nesting were measured by the pinned static tools (gometrics, tsmetrics) over the head tree, under bwrap with no network, and every value recomputes from its evidence. The files run in batches of at most 8, each tool printing compact JSON; a batch whose report does not fit one command report is split in two, down to one file, and a file whose own report still does not fit is listed as not measured (never a failed run). A modified function is also measured at the base: its file is read at the pinned base (git show <base>:<path>, read-only, recorded whole) and measured by the same tools, confined with no network and recomputed from the recorded text, so its row shows base → head and says whether an over-the-limit value was already there, or why the base is not known. The table has the columns Function, Change, Complexity and Nesting. No coverage, CRAP or mutation is measured, required or accepted, and no Docker sandbox runs: ${STATIC_ONLY_NOTE} No measurement makes a question or a round-1 item.`,
+      statement: `For every function the pull request adds or modifies, complexity and nesting were measured by the pinned static tools (gometrics, tsmetrics) over the head tree, under bwrap with no network, and every value recomputes from its evidence. The changed lines' hunk headers are read by one git diff -U0 command, or, when its report does not fit one command report, by groups of the measured files halved in the pull request's order down to one file, and a file whose own headers still do not fit is listed as not measured (never a failed run). The files run in batches of at most 8, each tool printing compact JSON; a batch whose report does not fit one command report is split in two, down to one file, and a file whose own report still does not fit is listed as not measured (never a failed run). A modified function is also measured at the base: its file is read at the pinned base (git show <base>:<path>, read-only, recorded whole) and measured by the same tools, confined with no network and recomputed from the recorded text, so its row shows base → head and says whether an over-the-limit value was already there, or why the base is not known. The table has the columns Function, Change, Complexity and Nesting. No coverage, CRAP or mutation is measured, required or accepted, and no Docker sandbox runs: ${STATIC_ONLY_NOTE} No measurement makes a question or a round-1 item.`,
       evidenceSchema: "graphloom-metrics-v1",
     },
     {
@@ -763,9 +763,11 @@ function measureAndWrite(ctx: Context, view: RunView, analysis: Analysis, flow: 
     case "observe":
       return withPrivate(observe({ paths: m.paths }, "observe the changed files the static tools measure, so their records can be recomputed from the head's bytes"));
     case "diff": {
-      const diff = commandState(view, COMMAND.metricsDiff, metricsDiffCommand());
-      if (diff.failed && !diff.retry && diff.run !== undefined) return supervise({ reason: `the changed-lines diff failed: ${describeCommand(diff.run.command)}`, evidenceRefs: [diff.run.record.ref] }, "escalate a failed diff");
-      return withPrivate(dispatch(commandJob(REPORT_STAGE, "List the changed lines (git diff -U0 -w)", { commands: [metricsDiffCommand()], env: { ...GIT_ENV } }), "list the head-side changed lines for the static metrics tools"));
+      // One command lists every measured file's hunk headers; when its report does not fit, the files are listed again in groups (design §6.8).
+      const commands = m.commands.slice(0, 16);
+      const whole = commands.length === 1 && commands[0]!.id === COMMAND.metricsDiff;
+      if (whole) return withPrivate(dispatch(commandJob(REPORT_STAGE, "List the changed lines (git diff -U0 -w)", { commands, env: { ...GIT_ENV } }), "list the head-side changed lines for the static metrics tools"));
+      return withPrivate(dispatch(commandJob(REPORT_STAGE, `List the changed lines (git diff -U0 -w) of ${commands.length} group(s) of files`, { commands, continueOnFailure: true, env: { ...GIT_ENV } }), `list the head-side changed lines in ${commands.length} group(s) of files, so each group's hunk headers fit one command report`));
     }
     case "tools": {
       const binds = toolBinds(view, m.batches);

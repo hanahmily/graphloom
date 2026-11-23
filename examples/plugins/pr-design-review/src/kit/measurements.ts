@@ -105,16 +105,57 @@ export const DIFF_HEADERS_AWK =
   'substr($0, 1, 3) == "@@ " { print; split($2, a, ","); o = (a[2] == "" ? 1 : a[2] + 0); split($3, b, ","); n = (b[2] == "" ? 1 : b[2] + 0); next }';
 
 /**
+ * The diff script: `git diff -U0 -w` against the pinned base, reduced to its headers. A pipeline's status is awk's,
+ * so git's own status comes back on fd 3 and decides the command's: a git that fails (an unresolved HEAD, an
+ * unreadable object) fails the command rather than leave an empty or partial report.
+ */
+const diffScript = (git: string): string =>
+  `set -eu; rc=$( { { ${git} diff -U0 -w --no-color --no-ext-diff --no-textconv HEAD -- "$@" && s=0 || s=$?; echo "$s" >&3; } | awk '${DIFF_HEADERS_AWK}' > "$GRAPHLOOM_REPORT_FILE"; } 3>&1 ); [ "$rc" = 0 ] || { echo "git diff exited $rc" >&2; exit 1; }`;
+
+/**
  * `git diff -U0 -w` of the worktree against the pinned base, over the measured languages' files: the head-side
  * hunks, whitespace-only edits excluded (§5.1). It goes to the command's report file, whose tail the controller
- * keeps with a flag when it is cut, so a diff that does not fit is refused, never read short.
+ * keeps with a flag when it is cut, so a diff that does not fit is never read short: it is read again in groups of
+ * files instead (`DiffGroup`, `diffGroupCommand`).
  */
 export const metricsDiffCommand = (): EnvironmentCommand => ({
   id: COMMAND.metricsDiff,
-  // A pipeline's status is awk's, so git's own status comes back on fd 3 and decides the command's: a git that fails
-  // (an unresolved HEAD, an unreadable object) fails the command rather than leave an empty or partial report.
-  argv: ["sh", "-c", `set -eu; rc=$( { { git -c core.hooksPath=/dev/null diff -U0 -w --no-color --no-ext-diff --no-textconv HEAD -- "$@" && s=0 || s=$?; echo "$s" >&3; } | awk '${DIFF_HEADERS_AWK}' > "$GRAPHLOOM_REPORT_FILE"; } 3>&1 ); [ "$rc" = 0 ] || { echo "git diff exited $rc" >&2; exit 1; }`, COMMAND.metricsDiff, ...MEASURED_PATHSPECS],
+  argv: ["sh", "-c", diffScript("git -c core.hooksPath=/dev/null"), COMMAND.metricsDiff, ...MEASURED_PATHSPECS],
 });
+
+/**
+ * A group of measured files whose hunk headers one command lists. The root group is every measured file, read by
+ * `metricsDiffCommand` over the language pathspecs; when a group's report does not fit, it is replaced by its two
+ * halves in the measured files' order (`metrics-diff` gives `metrics-diff-a` and `metrics-diff-b`, those
+ * `metrics-diff-aa`, and so on), each naming its files, down to one file (design §6.8).
+ */
+export interface DiffGroup {
+  id: string;
+  paths: string[];
+}
+
+export function splitDiffGroup(g: DiffGroup): [DiffGroup, DiffGroup] {
+  const half = Math.ceil(g.paths.length / 2);
+  const child = (suffix: string): string => (g.id === COMMAND.metricsDiff ? `${g.id}-${suffix}` : `${g.id}${suffix}`);
+  return [
+    { id: child("a"), paths: g.paths.slice(0, half) },
+    { id: child("b"), paths: g.paths.slice(half) },
+  ];
+}
+
+/**
+ * The command that lists one group's hunk headers. The root group is `metricsDiffCommand` itself; any other group is
+ * the same diff over its files as literal pathspecs, a renamed file with its base path before it, so Git pairs the two
+ * as it does in the whole diff.
+ */
+export function diffGroupCommand(g: DiffGroup, files: readonly PullFile[]): EnvironmentCommand {
+  if (g.id === COMMAND.metricsDiff) return metricsDiffCommand();
+  const specs = g.paths.flatMap((p) => {
+    const previous = files.find((f) => f.path === p)?.previousPath;
+    return typeof previous === "string" && previous !== p ? [previous, p] : [p];
+  });
+  return { id: g.id, argv: ["sh", "-c", diffScript("git --literal-pathspecs -c core.hooksPath=/dev/null"), g.id, ...specs] };
+}
 
 const STATIC_SCRIPT =
   'set -eu; n="$1"; shift; h=""; while [ "$n" -gt 0 ]; do h="$h$1"; shift; n=$((n - 1)); done; kind="$1"; root="$2"; gen="$3"; node="$4"; gobin="${5:-go}"; wt=$(pwd -P); ' +
@@ -327,7 +368,8 @@ export type MeasurementState =
   /** The base files are to be measured by the same static tool. */
   | { state: "baseTools"; batches: BaseBatch[]; base: string }
   | { state: "observe"; paths: string[] }
-  | { state: "diff" }
+  /** The changed lines' hunk headers are to be listed: the diff groups still to run (design §6.8). */
+  | { state: "diff"; commands: EnvironmentCommand[] }
   | { state: "tools"; batches: Batch[]; hunks: Hunks }
   /** The sandbox images are to be checked, and pulled by digest when missing, before any sandboxed job (design §12.2). */
   | { state: "probe"; commands: EnvironmentCommand[] }
@@ -349,16 +391,46 @@ export function notRunReasons(profile: Pick<Profile, "metrics">): Reasons {
   };
 }
 
-function diffRun(evidence: readonly EvidenceRecord[]): CommandRun | undefined {
-  const own = metricsDiffCommand().argv;
-  return commandRuns(evidence, COMMAND.metricsDiff).filter((r) => r.command.argv.length === own.length && r.command.argv.every((a, i) => a === own[i])).at(-1);
+const indexOf = (evidence: readonly EvidenceRecord[], ref: string): number => evidence.findIndex((e) => e.ref === ref);
+
+/** Whether a diff's report cannot be read whole: cut by the controller, or over `MAX_DIFF_BYTES`. */
+const diffOverBudget = (run: CommandRun): boolean => {
+  const text = reportText(run);
+  return text.truncated || Buffer.byteLength(text.text, "utf8") > MAX_DIFF_BYTES;
+};
+
+/**
+ * The diff groups to run or read, from the evidence alone (design §6.8): the root group, and in place of a group whose
+ * run succeeded but whose report did not fit, its two halves, recursively, so a validator recomputes the same plan.
+ * A group's run counts only when it is the graph's own command (the same argv) and came after its parent's run. A
+ * single file whose own report still does not fit stays a leaf; `splits` are the refs of the runs that were split.
+ */
+function planDiff(evidence: readonly EvidenceRecord[], paths: readonly string[], files: readonly PullFile[]): { leaves: Array<{ group: DiffGroup; command: EnvironmentCommand; run: CommandRun | undefined }>; splits: string[] } {
+  const leaves: Array<{ group: DiffGroup; command: EnvironmentCommand; run: CommandRun | undefined }> = [];
+  const splits: string[] = [];
+  const visit = (group: DiffGroup, after: number): void => {
+    const command = diffGroupCommand(group, files);
+    const run = commandRuns(evidence, group.id)
+      .filter((r) => r.command.argv.length === command.argv.length && r.command.argv.every((a, i) => a === command.argv[i]) && indexOf(evidence, r.record.ref) > after)
+      .at(-1);
+    // The root lists every file of a measured language, not only the measured ones, so even a root of one measured file
+    // that does not fit is listed again by name (`metrics-diff-a`) before that file is judged too large.
+    const root = group.id === COMMAND.metricsDiff;
+    if (run !== undefined && succeeded(run.command) && diffOverBudget(run) && (group.paths.length > 1 || root)) {
+      splits.push(run.record.ref);
+      const children = group.paths.length > 1 ? splitDiffGroup(group) : [{ id: `${COMMAND.metricsDiff}-a`, paths: group.paths }];
+      for (const child of children) visit(child, indexOf(evidence, run.record.ref));
+      return;
+    }
+    leaves.push({ group, command, run });
+  };
+  visit({ id: COMMAND.metricsDiff, paths: [...paths] }, -1);
+  return { leaves, splits };
 }
 
-/** The newest run of a batch id since the diff that is the graph's own command for it. */
-function runSince(evidence: readonly EvidenceRecord[], id: string, own: (run: CommandRun) => boolean): CommandRun | undefined {
-  const diff = diffRun(evidence);
-  const after = diff === undefined ? -1 : evidence.findIndex((e) => e.ref === diff.record.ref);
-  return commandRuns(evidence, id).filter((r) => own(r) && evidence.findIndex((e) => e.ref === r.record.ref) > after).at(-1);
+/** The newest run of a batch id since `after` (the last diff the hunks come from) that is the graph's own command for it. */
+function runSince(evidence: readonly EvidenceRecord[], id: string, after: number, own: (run: CommandRun) => boolean): CommandRun | undefined {
+  return commandRuns(evidence, id).filter((r) => own(r) && indexOf(evidence, r.record.ref) > after).at(-1);
 }
 
 /**
@@ -366,13 +438,13 @@ function runSince(evidence: readonly EvidenceRecord[], id: string, own: (run: Co
  * by its two halves, recursively, so a validator recomputes the same plan. A single file whose report is still cut stays
  * a leaf (the caller reports it as not measured, never as a failure); `splits` are the refs of the cut runs.
  */
-function planBatches(evidence: readonly EvidenceRecord[], initial: readonly Batch[], hunks: Hunks, toolRoot: string | undefined): { leaves: Batch[]; runs: Map<string, CommandRun>; splits: string[] } {
+function planBatches(evidence: readonly EvidenceRecord[], initial: readonly Batch[], hunks: Hunks, toolRoot: string | undefined, after: number): { leaves: Batch[]; runs: Map<string, CommandRun>; splits: string[] } {
   const leaves: Batch[] = [];
   const runs = new Map<string, CommandRun>();
   const splits: string[] = [];
   const visit = (b: Batch): void => {
     const text = formatHunkFile(new Map(b.paths.flatMap((p) => (hunks.has(p) ? [[p, hunks.get(p)!] as const] : []))));
-    const run = runSince(evidence, b.id, (r) => ownStaticArgv(r.command.argv, STATIC_SCRIPT, b.id, b.language, text, 0, toolRoot));
+    const run = runSince(evidence, b.id, after, (r) => ownStaticArgv(r.command.argv, STATIC_SCRIPT, b.id, b.language, text, 0, toolRoot));
     if (run !== undefined && succeeded(run.command) && reportText(run).truncated && b.paths.length > 1) {
       splits.push(run.record.ref);
       for (const half of splitBatch(b)) visit(half);
@@ -404,24 +476,43 @@ export function measurementState(
   if (m.files.length === 0) return { state: "none", reason: "no changed file is in a measured language" };
   const unread = m.files.filter((f) => latestFile(evidence, f.path) === undefined).map((f) => f.path);
   if (unread.length > 0) return { state: "observe", paths: unread };
-  const diff = diffRun(evidence);
-  if (diff === undefined) return { state: "diff" };
-  if (!succeeded(diff.command)) {
+  // The changed lines' hunk headers, in as many diff groups as it takes for each report to fit (design §6.8).
+  const plan = planDiff(evidence, m.files.map((f) => f.path), files);
+  const pending: EnvironmentCommand[] = [];
+  const failedDiffs: CommandRun[] = [];
+  for (const { command, run } of plan.leaves) {
+    if (run === undefined) pending.push(command);
+    else if (succeeded(run.command)) continue;
     // A failure from before the operator's resume runs again once, as every command does.
-    if (canRetry?.(diff) === true) return { state: "diff" };
-    return { state: "failed", problems: [`${describeCommand(diff.command)}: ${outputTail(diff.command)}`], refs: [diff.record.ref], retry: [] };
+    else if (canRetry?.(run) === true) pending.push(command);
+    else failedDiffs.push(run);
   }
-  const text = reportText(diff);
-  if (text.truncated || Buffer.byteLength(text.text, "utf8") > MAX_DIFF_BYTES) {
-    return { state: "failed", problems: [`the changed lines' hunk headers (git diff -U0) did not fit the ${MAX_DIFF_BYTES}-byte report whole`], refs: [diff.record.ref], retry: [] };
+  if (failedDiffs.length > 0) {
+    return { state: "failed", problems: failedDiffs.map((r) => `${describeCommand(r.command)}: ${outputTail(r.command)}`), refs: [...plan.splits, ...failedDiffs.map((r) => r.record.ref)], retry: [] };
   }
-  const all = hunksFromUnifiedDiff(text.text, { headersOnly: true });
+  if (pending.length > 0) return { state: "diff", commands: pending };
   const wanted = new Set(m.files.map((f) => f.path));
-  const hunks: Hunks = new Map([...all].filter(([p]) => wanted.has(p)));
-  const { leaves: batches, runs, splits } = planBatches(evidence, batchesOf(m), hunks, toolRoot);
+  const hunks: Hunks = new Map();
+  const diffOverflowed: string[] = [];
+  const diffRefs = [...plan.splits];
+  let after = -1;
+  for (const { group, run } of plan.leaves) {
+    diffRefs.push(run!.record.ref);
+    after = Math.max(after, indexOf(evidence, run!.record.ref));
+    // Only a single file gets here (a longer group was split): it is reported as not measured, never a failure.
+    if (diffOverBudget(run!)) {
+      diffOverflowed.push(...group.paths);
+      continue;
+    }
+    const own = new Set(group.paths);
+    for (const [p, h] of hunksFromUnifiedDiff(reportText(run!).text, { headersOnly: true })) if (wanted.has(p) && own.has(p)) hunks.set(p, h);
+  }
+  const anchor = evidence[after]!.ref;
+  const measuredM: Measurable = { files: m.files.filter((f) => !diffOverflowed.includes(f.path)), excluded: m.excluded };
+  const { leaves: batches, runs, splits } = planBatches(evidence, batchesOf(measuredM), hunks, toolRoot, after);
   if (batches.some((b) => !runs.has(b.id))) return { state: "tools", batches: batches.filter((b) => !runs.has(b.id)), hunks };
   const problems: string[] = [];
-  const refs = [diff.record.ref, ...splits];
+  const refs = [...diffRefs, ...splits];
   const overflowed: string[] = [];
   const retry: Batch[] = [];
   const rerun: Batch[] = [];
@@ -483,18 +574,22 @@ export function measurementState(
   // Batches that failed before the operator's resume are measured again before anything is judged.
   if (rerun.length > 0) return { state: "tools", batches: rerun, hunks };
   if (problems.length > 0) return { state: "failed", problems, refs, retry };
-  const missing = m.files.map((f) => f.path).filter((p) => !covered.has(p) && !overflowed.includes(p) && hunks.has(p));
+  const missing = measuredM.files.map((f) => f.path).filter((p) => !covered.has(p) && !overflowed.includes(p) && hunks.has(p));
   if (missing.length > 0) return { state: "failed", problems: [`the tools accounted for none of: ${missing.slice(0, 5).join(", ")}`], refs, retry: [] };
   // The modified functions' values at the base (design §6.8): never a failure, only a row that says why its base is not known.
-  const withBase = baseState(evidence, records, files, diff.record.ref, profile, toolRoot);
+  const withBase = baseState(evidence, records, files, anchor, profile, toolRoot);
   if (withBase.state === "baseFiles") return { state: "baseFiles", commands: withBase.commands };
   if (withBase.state === "baseTools") return { state: "baseTools", batches: withBase.batches, base: withBase.base };
   const measured = withBase.records;
-  const measuredFiles = m.files.filter((f) => !overflowed.includes(f.path));
-  const excluded = [...m.excluded, ...overflowed.map((p) => ({ path: p, reason: `the static tool's output for ${p} did not fit one command report` }))];
+  const measuredFiles = measuredM.files.filter((f) => !overflowed.includes(f.path));
+  const excluded = [
+    ...m.excluded,
+    ...diffOverflowed.map((p) => ({ path: p, reason: `its changed lines' hunk headers (git diff -U0) are over ${MAX_DIFF_BYTES} bytes, more than one command report holds whole` })),
+    ...overflowed.map((p) => ({ path: p, reason: `the static tool's output for ${p} did not fit one command report` })),
+  ];
   // A static-only graph (the design review, design-pr-review-split §3.4) records complexity and nesting alone: no coverage, CRAP or mutation, and no not-run reason for them.
   if (profile.metrics.staticOnly === true) return { state: "ready", records: measured, refs, excluded, coverage: { enabled: false, runs: [] } };
-  const cov = coverageState({ evidence, records: measured, index, files: measuredFiles, profile, afterRef: diff.record.ref });
+  const cov = coverageState({ evidence, records: measured, index, files: measuredFiles, profile, afterRef: anchor });
   switch (cov.state) {
     case "probe":
       return { state: "probe", commands: cov.commands };
