@@ -28,7 +28,7 @@ import { fakeDiscovery } from "./discovery-fixture.js";
 
 const execFileAsync = promisify(execFile);
 const cli = path.join(repoRoot, "apps/graphloom/dist/main.js");
-const SKILLS = ["graphloom-deliver", "graphloom-issue", "graphloom-run", "graphloom-setup", "graphloom-triage", "graphloom-watch"];
+const SKILLS = ["graphloom-deliver", "graphloom-hub", "graphloom-issue", "graphloom-run", "graphloom-setup", "graphloom-triage", "graphloom-watch"];
 const version = versionInfo(repoRoot).version;
 
 const dirs: string[] = [];
@@ -74,7 +74,7 @@ describe("graphloom skills install, list, update, remove", { timeout: 60_000 }, 
 
     await mkdir(path.join(s.home, ".claude"));
     const installed = await s.graphloom("install");
-    expect(installed.stdout).toContain(`6 skill(s) written, 0 unchanged (version ${version})`);
+    expect(installed.stdout).toContain(`7 skill(s) written, 0 unchanged (version ${version})`);
     expect(readdirSync(s.claude).sort()).toEqual(SKILLS);
     expect(existsSync(s.codex)).toBe(false);
     for (const name of SKILLS) {
@@ -89,9 +89,9 @@ describe("graphloom skills install, list, update, remove", { timeout: 60_000 }, 
     expect(Object.values(await s.states("claude-code"))).toEqual(SKILLS.map(() => "current"));
     expect(Object.values(await s.states("codex"))).toEqual(SKILLS.map(() => "missing"));
     // A second install changes nothing.
-    expect((await s.graphloom("install")).stdout).toContain("0 skill(s) written, 6 unchanged");
+    expect((await s.graphloom("install")).stdout).toContain("0 skill(s) written, 7 unchanged");
     const text = (await s.graphloom("list")).stdout;
-    expect(text).toContain(`GraphLoom ${version} ships 6 skill(s)`);
+    expect(text).toContain(`GraphLoom ${version} ships 7 skill(s)`);
     expect(text).toMatch(/Codex \(.*\) — agent not found here/);
   });
 
@@ -214,7 +214,7 @@ describe("opencode as a target", { timeout: 60_000 }, () => {
   it("installs, lists, updates and removes in $XDG_CONFIG_HOME/opencode/skills, default ~/.config, and honours GRAPHLOOM_OPENCODE_SKILLS_DIR", async () => {
     const s = await sandbox();
     const installed = await s.graphloom("install", "--agent", "opencode");
-    expect(installed.stdout).toContain(`opencode (${s.opencode}): 6 skill(s) written`);
+    expect(installed.stdout).toContain(`opencode (${s.opencode}): 7 skill(s) written`);
     expect(readdirSync(s.opencode).sort()).toEqual(SKILLS);
     expect(marker(path.join(s.opencode, "graphloom-watch"))).toMatchObject({ product: "graphloom", skill: "graphloom-watch", version });
     expect(Object.values(await s.states("opencode"))).toEqual(SKILLS.map(() => "current"));
@@ -257,7 +257,7 @@ describe("opencode as a target", { timeout: 60_000 }, () => {
     await stub(path.join(s.home, ".opencode", "bin", "opencode"));
     expect(agentFound("opencode", s.env)).toBe(true);
     const written = await s.graphloom("install");
-    expect(written.stdout).toContain(`opencode (${s.opencode}): 6 skill(s) written`);
+    expect(written.stdout).toContain(`opencode (${s.opencode}): 7 skill(s) written`);
     expect(existsSync(s.claude)).toBe(false);
     await rm(path.join(s.home, ".opencode"), { recursive: true });
     // Its config directory (now holding the skills) still says opencode is here.
@@ -386,7 +386,7 @@ describe("opencode as a target", { timeout: 60_000 }, () => {
       }),
     ]);
     await execFileAsync(process.execPath, [cli, "skills", "install", "--agent", "opencode", "--agent", "codex"], { env });
-    expect(await rows({ opencode: true })).toEqual([expect.objectContaining({ name: "skills (opencode)", status: "pass", detail: expect.stringContaining(`6 current (${version})`) })]);
+    expect(await rows({ opencode: true })).toEqual([expect.objectContaining({ name: "skills (opencode)", status: "pass", detail: expect.stringContaining(`7 current (${version})`) })]);
 
     const shared = path.join(home, ".agents", "skills");
     await execFileAsync(process.execPath, [cli, "skills", "install", "graphloom-run", "--dir", shared], { env });
@@ -442,11 +442,11 @@ describe("setup and doctor", { timeout: 60_000 }, () => {
     dirs.push(home);
     const row = async () => doctorReport(await discovered(home, { claude: true })).checks.filter((c) => c.name.startsWith("skills ("));
     expect(await row()).toEqual([
-      expect.objectContaining({ name: "skills (claude-code)", status: "warn", fix: "graphloom skills install --agent claude-code", detail: expect.stringContaining("none of the 6 GraphLoom skills") }),
+      expect.objectContaining({ name: "skills (claude-code)", status: "warn", fix: "graphloom skills install --agent claude-code", detail: expect.stringContaining("none of the 7 GraphLoom skills") }),
     ]);
     const env = { HOME: home, PATH: "" };
     await execFileAsync(process.execPath, [cli, "skills", "install", "--agent", "claude-code"], { env });
-    expect(await row()).toEqual([expect.objectContaining({ status: "pass", detail: expect.stringContaining(`6 current (${version})`) })]);
+    expect(await row()).toEqual([expect.objectContaining({ status: "pass", detail: expect.stringContaining(`7 current (${version})`) })]);
     const dir = path.join(home, ".claude", "skills", "graphloom-run");
     await appendFile(path.join(dir, "SKILL.md"), "edit\n");
     expect((await row())[0]).toMatchObject({ status: "pass", detail: expect.stringContaining("edited by you, kept: graphloom-run") });

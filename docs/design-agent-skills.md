@@ -1,6 +1,7 @@
 # Agent skills: driving GraphLoom from a coding agent
 
-Status: implemented (skills, `wait --until progress`, `graphloom watch`, `graphloom skills`).
+Status: implemented (skills, `wait --until progress`, `graphloom watch`, `graphloom skills`,
+the `graphloom-hub` skill and hub-aware run, watch and triage, §1.1).
 
 An operator often drives GraphLoom from an interactive coding agent (Claude
 Code, Codex or opencode) rather than by hand: set the machine up, shape a
@@ -22,6 +23,7 @@ repository holds them in top-level [`skills/`](../skills):
 | `graphloom-run` | Refuses a request with unfilled placeholders, checks the checkout against the upstream default branch (asks before using a fresh base), writes `task.yaml`, `graphloom check`, starts the run fully detached (`setsid nohup`, in every agent: a tool's background-command time limit would otherwise stop it as an `operator stop`) with an `--on-stop` marker file and the repository's pinned toolchain on `PATH`, hands off to watch (inside a HAPI session, to a detached `graphloom watch` and ends its turn) |
 | `graphloom-watch` | A thin wrapper around `graphloom watch` (§2.1): Claude Code runs it as a background command and re-arms; Codex and opencode, which have no background-command notifications, loop in the foreground with `--timeout 9m` and re-arm silently on exit 2. Relays a move or heartbeat in one or two lines; on attention reports and asks the user; follows the last line of a `[graphloom watch]` message a HAPI watcher sends |
 | `graphloom-triage` | A stopped run the user asks about: diagnose the cause from `inspect`, `stats` and evidence first, then choose the resume form with the user |
+| `graphloom-hub` | Drives the [run hub](design-run-hub.md) (§1.1): checks it is reachable (never starts it), submits a checked task, reports status with `hub list` and `hub inspect` panels, pauses, cancels, resumes with the remedies the user chose, reads launch logs, sets the concurrency limit, archives, and searches past submissions with `hub list --json` and `jq` |
 | `graphloom-deliver` | Verifies the delivered branch (commit message, PR body, required sections), rebases onto a newer upstream base only on the user's yes, then runs the repository's checks once on a clean copy of the tree to push (helper files kept outside it), then pushes or opens the PR only with explicit approval |
 
 `graphloom-run` prepares the task with `graphloom task new`
@@ -33,8 +35,10 @@ changed in the same change as the CLI, so the drift test (§4) keeps passing.
 
 **Hard rules, in every skill.** Ask before anything outward-facing (push, pull
 request, issue creation, release). Never print or ask for a token or secret.
-Read run state only through `inspect`, `stats` and `wait`; never edit
-`state.json`. Name only real CLI commands and flags (§4 tests this).
+Read run state only through `inspect`, `stats` and `wait` (and, for a hub
+submission, `hub list`, `hub inspect` and `hub logs`); never edit
+`state.json` or the hub's `scheduler.json`. Name only real CLI commands and
+flags (§4 tests this).
 Run and watch start and monitor a run and never fix it: on any stop they
 summarize why (the stop reason, its blocker and any question it asks, quoted)
 and ask the user what to do next, without resuming, changing the environment,
@@ -52,6 +56,65 @@ started in the background is found without listing state directories.
 run from a shell matches that shell's own command line, which once hid a stop
 for two hours. Liveness comes from durable state (`graphloom wait`, which reads
 the state and the controller's owner claim) and the `--on-stop` hook.
+
+### 1.1 Driving the run hub
+
+The operator deploys the [run hub](design-run-hub.md) as a systemd user
+service; the skills drive it only through the `graphloom hub` CLI and never
+start, stop or restart it. A skill learns whether it is reachable from
+`graphloom hub list` (exit 0, or `cannot reach hub at <socket>`, exit 1; a
+`Fault:` line is a hub fault) and, when it is not, names the operator's
+`systemctl --user start` for the user. The CLI has no separate health
+command.
+
+- **`graphloom-hub`** covers the operator interface (design §3): `hub submit`
+  of a task written and checked by graphloom-run's rules, with an idempotency
+  `--key` reused after an uncertain reply; status from `hub list` and `hub
+  inspect` panels (`overview` by default; `topology`, `stages`, `jobs`,
+  `usage`, `activity`, `job`, `output` on request; `--format markdown` for a
+  chat reply); `hub pause` (a hold, resumable, no slot) against `hub cancel`
+  (permanent; continuing means a new submission and a new run); `hub resume`
+  with exactly the remedies the CLI accepts (`--approve <id> [--input
+  <name>=<value> ...]`, `--decline <id> [--reason <text>]`, `--reconciled`,
+  `--update-plugin`, `--update-executors`, `--upgrade`, `--supervisor`);
+  `hub logs` (never `--follow` as a tool call); `hub limit`; `hub policy
+  --renew` for a spent retry allowance, after diagnosis; `hub archive`. Every
+  control command runs only on the user's yes. It also warns that a hub run
+  takes `PATH` and token variables from the service's environment, not the
+  user's shell.
+- **History search.** The hub has no search or filter command: `hub list
+  --json` returns every submission it still holds (archived ones are
+  dropped), and the skill filters it with `jq` on `state`, `key`,
+  `acceptedAt`, `input.repoPath`, `input.taskPath`, `blocker` and the
+  observation; one run's history is `graphloom inspect` and `graphloom stats`
+  on its state directory under the hub (`<hub dir>/runs/<runId>`), which is
+  also the only way to find an archived submission's run.
+- **`graphloom-run`** submits through the hub when `hub list` succeeds without
+  a fault, and starts the run detached (`setsid nohup`) as before when the
+  hub is unreachable or faulted, or when the run needs a `PATH` prefix or an
+  exported token only the user's shell has. A hub submission records its id
+  in `.graphloom-watch/submission`.
+- **`graphloom-watch`** keeps `graphloom watch` for wake-ups (the hub stores
+  no chat destinations). A stopped hub run may be one the hub continues by
+  itself (`waiting` after a cooldown or transient failure, `queued`), and
+  `graphloom watch` returns at once while a run is not running, so for a hub
+  submission a small helper polls `hub list --json` (bounded, one minute
+  apart) while the submission is `queued`, `starting`, `stopping` or
+  `waiting`, then re-arms `graphloom watch` when the run works again, or
+  raises an attention for `paused`, `blocked`, `failed`, `canceled` or
+  `succeeded`, a hub `fault`, a blocker on a launch that still holds its
+  slot (unverified drainage), or a `graphloom watch` error. Inside a HAPI session one detached loop does both, keeps
+  waiting for as long as the hub keeps the submission queued or waiting, and
+  messages the session. `hub watch` is a live view that never exits; the skill leaves
+  it to the user's terminal.
+- **`graphloom-triage`** also reads the hub's state for a hub submission: the
+  blocker, a spent retry allowance or repeated failure fingerprint, a launch
+  failure or unverified drainage, `initialization-failed` (only a plain `hub
+  resume` retries it), and the continuation the controller reported; it
+  proposes `hub resume` with the remedy, never `--on-stop`, which the hub and
+  `graphloom resume` on a hub run refuse.
+- **`graphloom-deliver`** is unchanged except for finding a hub run's state
+  directory under the hub.
 
 ## 2. `graphloom wait --until progress`
 
@@ -259,7 +322,11 @@ opencode was a target are GraphLoom's own copies there and `update`,
   body is within size bounds, and each skill carries the hard rules.
 - `skills-drift.test.ts`: extracts every `graphloom <command> [<sub>]
   [--flags]` from the skills' code spans and blocks and fails when the built
-  CLI's own `--help` lacks the command or the flag.
+  CLI's own `--help` lacks the command or the flag. A `graphloom hub <sub>`
+  is checked against `graphloom hub --help` (one line per subcommand,
+  `pause|cancel|archive` sharing one), and the skills together must name
+  every hub operator command (`submit`, `list`, `inspect`, `watch`, `logs`,
+  `limit`, `policy`, `pause`, `cancel`, `archive`, `resume`).
 - `skills-install.test.ts`: install, list, update, remove, edit detection,
   foreign directories, `--force`, and the marker digest against `sha256sum`,
   all in a temporary `HOME`; every target with its variables (opencode with

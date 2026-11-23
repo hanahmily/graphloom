@@ -27,6 +27,12 @@ graphloom inspect <run>
 graphloom stats <run>
 ```
 
+A run submitted to the hub keeps its state under the hub, not the
+repository: `<run>` is `~/.local/state/graphloom/hub/runs/<runId>` (or the run
+id with `--state-root ~/.local/state/graphloom/hub/runs`); its worktree and
+delivered branch are in the target repository as usual, and the submission
+is `succeeded` in `graphloom hub list`.
+
 Confirm `status` is `succeeded` and every node on the live path is accepted
 (`stages[].accepted` where `onPath`; a supervisor-only node is never required). The issue-fix
 graph delivers a local branch `fix/<issue>` in the target repository, with the

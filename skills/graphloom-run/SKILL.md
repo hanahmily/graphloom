@@ -1,6 +1,6 @@
 ---
 name: graphloom-run
-description: Start a GraphLoom run. Writes task.yaml (graph, repo, config profile, request), checks it with graphloom check, starts graphloom run fully detached (setsid nohup) with an --on-stop hook that writes a marker file, captures the run id from the start line, and hands the run to the graphloom-watch skill (or, inside a HAPI session, to a detached graphloom watch that messages the session). Never polls the process table. Use when the user wants to run a graph (for example issue-fix on an issue, or pr-design-review or pr-review on a pull request) on a repository.
+description: Start a GraphLoom run. Writes task.yaml (graph, repo, config profile, request), checks it with graphloom check, submits it to the run hub with graphloom hub submit when the hub is reachable, else starts graphloom run fully detached (setsid nohup) with an --on-stop hook that writes a marker file, captures the run id from the start line, and hands the run to the graphloom-watch skill (or, inside a HAPI session, to a detached graphloom watch that messages the session). Never polls the process table. Use when the user wants to run a graph (for example issue-fix on an issue, or pr-design-review or pr-review on a pull request) on a repository.
 ---
 
 # Start a GraphLoom run
@@ -161,9 +161,28 @@ adds the supervisor the run would pin and each agent role's harness. Fix every
 failure before starting (see the graphloom-setup skill). For a new profile, a
 zero-provider-call rehearsal is worth it: `graphloom rehearse task.yaml`.
 
-## 3. Start it detached
+## 3. Start it: through the hub, else detached
 
-Make a watch directory beside the task, write the stop hook as a small script
+**Through the hub when it is reachable.** When the operator runs the run hub
+(a systemd user service that queues runs under a concurrency limit and
+continues them after cooldowns), submit to it instead of starting a process:
+
+```sh
+graphloom hub list
+```
+
+Exit 0 without a `Fault:` line: submit as graphloom-hub section 2 says
+(`graphloom hub submit task.yaml --key <name>`, the submission id recorded in
+`.graphloom-watch/submission`), tell the user the submission id, run id and
+queue state, and continue with section 5. Never start the hub yourself.
+Start directly instead, as below, when it is unreachable (`cannot reach hub
+at ...`; say so, and that the operator starts it with `systemctl --user
+start`), when it reports a fault, or when the run needs what only your shell
+has: a toolchain prefixed on `PATH` (section 1) or a token the user exports.
+A hub run takes `PATH` and token variables from the hub service's
+environment; ask the user whether it provides them.
+
+**Detached.** Make a watch directory beside the task, write the stop hook as a small script
 (so no quote nests inside the start command), then start the run fully detached
 with stderr kept in a log (prefix the repository's toolchain on `PATH` first
 when section 1 found one, as `PATH=<dir>:$PATH graphloom run ...`):
@@ -215,8 +234,13 @@ died (see graphloom-triage).
 
 ## 5. Hand over
 
-Record the state directory in `.graphloom-watch/run`.
+Record the state directory in `.graphloom-watch/run` (for a hub submission,
+`~/.local/state/graphloom/hub/runs/<runId>`, the run id from `hub submit`).
 
+- **A hub submission**: hand over to graphloom-watch section 4, which waits
+  for the hub to start the run and knows which stops the hub continues by
+  itself. Inside a HAPI session, start the detached loop described there
+  (`hub-hapi.sh`) instead of the watcher below, and end your turn.
 - **Inside a HAPI session** (`HAPI_SESSION_ID` is set): start a detached
   watcher from the task directory and end your turn, so no tokens are spent
   while the run works:
@@ -257,3 +281,7 @@ graphloom resume <stateDir> --decline <approval-id> --reason "the report is enou
   An approval that declares inputs takes `--input <name>=<value>` with
   `--approve`, for example `graphloom resume <stateDir> --approve <approval-id>
   --input <name>=<value>`; ask the user for the values, never guess them.
+- For a hub submission the same decisions go through the hub:
+  `graphloom hub resume <submission> --decline <approval-id> --reason "<why>"`
+  or `graphloom hub resume <submission> --approve <approval-id> --input
+  <name>=<value>` (graphloom-hub section 6), on the same terms.

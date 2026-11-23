@@ -35,8 +35,8 @@ export function parseSkill(text: string): { front: Record<string, string>; body:
 }
 
 describe("shipped agent skills", () => {
-  it("are the six the design names", () => {
-    expect(names).toEqual(["graphloom-deliver", "graphloom-issue", "graphloom-run", "graphloom-setup", "graphloom-triage", "graphloom-watch"]);
+  it("are the seven the design names", () => {
+    expect(names).toEqual(["graphloom-deliver", "graphloom-hub", "graphloom-issue", "graphloom-run", "graphloom-setup", "graphloom-triage", "graphloom-watch"]);
   });
 
   for (const name of names) {

@@ -14,7 +14,7 @@ import { execFileAsync, repoRoot } from "./cli-env.js";
 const cli = path.join(repoRoot, "apps/graphloom/dist/main.js");
 const skillsDir = path.join(repoRoot, "skills");
 /** Commands whose second word is a subcommand. */
-const WITH_SUB = new Set(["self", "skills"]);
+const WITH_SUB = new Set(["self", "skills", "hub"]);
 
 export interface Invocation {
   key: string;
@@ -42,6 +42,24 @@ export function helpIndex(help: string): Map<string, Set<string>> {
     for (const alt of rest.split(" | ")) {
       const sub = /^\s*([a-z][a-z-]*)(.*)$/.exec(alt);
       if (sub !== null) add(`${cmd} ${sub[1]}`, sub[2]!);
+    }
+  }
+  return index;
+}
+
+/**
+ * Adds `graphloom hub --help`'s lines to `index`: one unindented
+ * `graphloom hub <sub>[|<sub>...] ...` per line; `pause|cancel|archive` share their flags.
+ */
+export function addHubHelp(index: Map<string, Set<string>>, help: string): Map<string, Set<string>> {
+  index.set("hub", new Set(["--help"]));
+  for (const line of help.split("\n")) {
+    const m = /^graphloom hub ([a-z][a-z|-]*)(.*)$/.exec(line);
+    if (m === null) continue;
+    for (const sub of m[1]!.split("|")) {
+      const set = index.get(`hub ${sub}`) ?? new Set<string>();
+      for (const flag of m[2]!.matchAll(/--[a-z][a-z-]*/g)) set.add(flag[0]);
+      index.set(`hub ${sub}`, set);
     }
   }
   return index;
@@ -78,7 +96,8 @@ export function invocations(snippet: string): Invocation[] {
       if (at < 0) continue;
       const cmd = tokens[at + 1];
       if (cmd === undefined || cmd.startsWith("-")) continue;
-      const sub = WITH_SUB.has(cmd) ? tokens[at + 2] : undefined;
+      // `graphloom hub --help` names the command itself, not a subcommand.
+      const sub = WITH_SUB.has(cmd) && !tokens[at + 2]?.startsWith("-") ? tokens[at + 2] : undefined;
       const flags = tokens.slice(at + (sub !== undefined ? 3 : 2)).filter((t) => /^--[a-z]/.test(t)).map((t) => t.split("=")[0]!);
       found.push({ key: sub !== undefined ? `${cmd} ${sub}` : cmd, flags, text: segment.trim() });
     }
@@ -119,11 +138,19 @@ describe("skills reference only real CLI commands and flags", () => {
     expect(drift(index, invocations("graphloom self uninstall --purge-config; graphloom self prune --force"))).toEqual([
       "graphloom self prune has no --force (in: graphloom self prune --force)",
     ]);
+    addHubHelp(index, "graphloom hub list [--json] [--socket <path>]\ngraphloom hub pause|cancel|archive <submission> [--command-id <id>]\n");
+    expect(index.get("hub cancel")).toEqual(new Set(["--command-id"]));
+    expect(drift(index, invocations("graphloom hub --help"))).toEqual([]);
+    expect(drift(index, invocations("graphloom hub list --json | jq '.submissions[]'; graphloom hub archive <s> --force; graphloom hub nope"))).toEqual([
+      "graphloom hub archive has no --force (in: graphloom hub archive ARG --force)",
+      "unknown command graphloom hub nope (in: graphloom hub nope)",
+    ]);
   });
 
   it("finds every invocation in the shipped skills in the built CLI's --help", async () => {
     const help = (await execFileAsync(process.execPath, [cli, "--help"])).stdout;
-    const index = helpIndex(help);
+    // Hub subcommands and their flags must be in `graphloom hub --help`.
+    const index = addHubHelp(helpIndex(help), (await execFileAsync(process.execPath, [cli, "hub", "--help"])).stdout);
     expect(index.get("wait")).toEqual(new Set(["--state-root", "--until", "--since", "--timeout", "--json"]));
     const problems: string[] = [];
     const seen = new Set<string>();
@@ -135,5 +162,7 @@ describe("skills reference only real CLI commands and flags", () => {
     expect(problems).toEqual([]);
     // The skills drive the commands this design is about.
     for (const key of ["doctor", "setup", "check", "run", "wait", "stats", "inspect", "resume", "skills install"]) expect(seen, key).toContain(key);
+    // The hub skill covers the hub's operator commands (docs/design-run-hub.md §3).
+    for (const key of ["submit", "list", "inspect", "watch", "logs", "limit", "policy", "pause", "cancel", "archive", "resume"]) expect(seen, `hub ${key}`).toContain(`hub ${key}`);
   });
 });
