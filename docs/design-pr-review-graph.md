@@ -882,7 +882,9 @@ The section follows a few rules:
   order (`metrics-diff-a`, `metrics-diff-b`), each a command that names its files
   as literal pathspecs (a renamed file with its base path, so Git pairs the two as
   in the whole diff); a group whose report still does not fit is halved again
-  (`metrics-diff-aa`, `metrics-diff-ab`, …), down to one file. The groups' hunks
+  (`metrics-diff-aa`, `metrics-diff-ab`, …), down to one file. (The root lists
+  every file of a measured language, measured or not, so a root of one measured
+  file that does not fit is listed again by name, `metrics-diff-a`.) The groups' hunks
   are merged. A group's run counts only when it is the graph's own command (the
   same argv) recorded after its parent's run, so the plan is a function of the
   evidence and the validators recompute it; a small pull request still uses the one

@@ -413,9 +413,13 @@ function planDiff(evidence: readonly EvidenceRecord[], paths: readonly string[],
     const run = commandRuns(evidence, group.id)
       .filter((r) => r.command.argv.length === command.argv.length && r.command.argv.every((a, i) => a === command.argv[i]) && indexOf(evidence, r.record.ref) > after)
       .at(-1);
-    if (run !== undefined && succeeded(run.command) && diffOverBudget(run) && group.paths.length > 1) {
+    // The root lists every file of a measured language, not only the measured ones, so even a root of one measured file
+    // that does not fit is listed again by name (`metrics-diff-a`) before that file is judged too large.
+    const root = group.id === COMMAND.metricsDiff;
+    if (run !== undefined && succeeded(run.command) && diffOverBudget(run) && (group.paths.length > 1 || root)) {
       splits.push(run.record.ref);
-      for (const half of splitDiffGroup(group)) visit(half, indexOf(evidence, run.record.ref));
+      const children = group.paths.length > 1 ? splitDiffGroup(group) : [{ id: `${COMMAND.metricsDiff}-a`, paths: group.paths }];
+      for (const child of children) visit(child, indexOf(evidence, run.record.ref));
       return;
     }
     leaves.push({ group, command, run });

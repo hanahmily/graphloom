@@ -134,6 +134,20 @@ describe("the changed lines of a large pull request (design §6.8)", () => {
     expect(measurementState(evidence, files, profile)).toEqual(ready);
   });
 
+  it("lists a single measured file again by name when the root over every file of its language does not fit", () => {
+    const one = files.slice(0, 1);
+    const evidence = [fileEvidence(paths[0]!)];
+    // The root diff covers every *.go file, measured or not (a generated tree, a file outside the profile's globs): it does not fit.
+    evidence.push(commandEvidence(metricsDiffCommand(), diffText(paths, hunksOf)));
+    const s = measurementState(evidence, one, profile);
+    const named = diffGroupCommand({ id: "metrics-diff-a", paths: [paths[0]!] }, one);
+    expect(s).toEqual({ state: "diff", commands: [named] });
+    evidence.push(commandEvidence(named, diffText([paths[0]!], hunksOf)));
+    const next = measurementState(evidence, one, profile);
+    expect(next.state).toBe("tools");
+    if (next.state === "tools") expect([...next.hunks.keys()]).toEqual([paths[0]]);
+  });
+
   it("does not count a group's run from before its parent's, nor a foreign command under a group's id", () => {
     const evidence = paths.map(fileEvidence);
     const [a, b] = splitDiffGroup({ id: COMMAND.metricsDiff, paths }).map((g) => diffGroupCommand(g, files));
