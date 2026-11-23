@@ -1,6 +1,6 @@
 {
   "graphId": "pr-review",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "sdkProtocol": 1,
   "taskConfig": "required",
   "entryPoints": {
@@ -16,10 +16,10 @@
     "vitest": "^4.1.12"
   },
   "digests": {
-    "sourceTree": "b692689bca3f4c0839fb7f174240f47ff87eebe452e4687eab8c809ccd1b900f",
+    "sourceTree": "b3d80802b6baf0630dc9f029745e6ab67504f05a0e3df730154681afc5fc53bf",
     "packageLock": "1123e4e7d6011e4d012ec8a7d176b90952dd9efc98c832e27e3c856aad263108",
     "files": {
-      "package.json": "77d4dd49bdac1d385248fe9852a23c73c34b285698e1ce6cb657be50720ca0a5",
+      "package.json": "ba5246a5f1b1bd22ad4b4dafd26846c0b23a3c0aab04a29f5cf8c152d2a5013d",
       "package-lock.json": "1123e4e7d6011e4d012ec8a7d176b90952dd9efc98c832e27e3c856aad263108",
       "tsconfig.json": "d166142bd5d917d1eb7d3011cf6423c652f30e2989881deec6147a997bf41597",
       "profiles/banyandb.json": "ed576959e7e034bd145ae697c7160b2ea1b1ced532a2cf59b8c55596a22e0b32",
@@ -60,7 +60,7 @@
       "vendor/diagram-design/scripts/verify-geometry.py": "33fb89edbdc8b9cf625a388ba47147bf46ec9e8ae84b7110e240de165732001f",
       "src/context.ts": "f8fb727e3610decdd3fe1580aa1aafa623ab9a66c96628a4a95d7757e039742b",
       "src/draft.ts": "3926fc7a4533b20bcc4080089b6db39eb681bd2e61da7e5df5a4475015b7c921",
-      "src/graph.ts": "d6278b91a14536958bfccf05c698273cc693f1788379d24444f636be57b2ea3f",
+      "src/graph.ts": "9bf7957b27409db433152dab58c235bc28aba2bea338353795d0677d0ca89cde",
       "src/html.ts": "f3924adecf34e61876a585da6de0caf6d72bcc10e9dedb3c751a36a61d27f006",
       "src/index.ts": "70879220b9d758df6ae508987dce0a944164b1cb4956d2c65f85aa08e68fe1d8",
       "src/kit/analysis.ts": "98e49401ab61e25e0663a6b8aeecf0903eca7e12b81f859654c08332fde597fa",
@@ -95,7 +95,7 @@
       "src/kit/largeprompts.ts": "b50da707490a766448e948fc0877c0547a18f6cf0498eeff0d829ff837883255",
       "src/kit/ledger.ts": "67e7fdfa0a2cbf7a6ed49c18fa27f97c18d75e66e4aefb10e4cd0a7b9626ea64",
       "src/kit/ledgerv2.ts": "29923844566c5a1a5415692bd19636f99d1a49e330c0d238b0828a47af029380",
-      "src/kit/measurements.ts": "a4c50a739aa84635e293011a1560fe0d60314b0e60d6f4bf412b7e50304784d3",
+      "src/kit/measurements.ts": "1c915aeb24f678ff780fe61c8a3648f16ec48ee8b2be858ce7b73191ab2f6c6a",
       "src/kit/metrics/coverage.ts": "65286aff243c869cda09ceb4d803247f92807d4640970fcf5417ffe52ac4b5bf",
       "src/kit/metrics/crap.ts": "0b40d4785ab3b1da37a1fbc32029fb2f346930c7f23182fb1779c22df230e7eb",
       "src/kit/metrics/generated.ts": "aac742beb0af53afc62cb0b24e79c6f61a5528dff06c256551db0be7119a44ba",
@@ -160,7 +160,7 @@
       "src/reviewvalidators.ts": "15288a1c64c9946469d3adda3088f5c4960de28a1d21f350275a1a6a0df6cdf2",
       "src/runcontext.ts": "a4a405d839051b302491145b26bb4b67ed35abfc937f03291d37fd38a98b7595",
       "src/validators.ts": "80a572bc3ce91736e8fff3ff28079c28bcd76ae761d250b5cf731f68f46b73f8",
-      "src/version.ts": "7f29788a3f22d1bc75a16cd6cca4fb539f0230257e29f594fa4531d7ad73b694",
+      "src/version.ts": "13047c42445ca7fa20cce1ccdf8ad6363089ccf078a50e15ca8afac45d383077",
       "src/visual.ts": "53f5464147d1ae463ffb9ab1c22ddb4407e55c20ef1c9893822259ad19d6527b",
       "test/areas.test.ts": "b1e12094b42cbc5016d464374d60b1ff032e046801217b7f2ab7bbbe0726a4e9",
       "test/assignments-fit.test.ts": "26b634ce186149a71565ed6feecc4df65d6a901a0ddbbcf6e89c538d4a41db9d",
@@ -174,6 +174,7 @@
       "test/crap.test.ts": "82db56db32013b6079b5001195ef025379b7e74b0b1ad4973d88de720a4b3c98",
       "test/detectors.test.ts": "83b8192ea9854cb9188ca55f4850bacc7aad1a27f030035f9d7aea0e75790b60",
       "test/diagrams.test.ts": "49641667493cb8c33c325c9524ceb3849b0b4fadc1a2f9b0cdc3d14bb0b59665",
+      "test/diff-groups.test.ts": "8fcf798dcc3825eacf02e37e9da165ba2d78f70fe9510b378f3a0cbe65b5b163",
       "test/digest.test.ts": "daa201d070f286981a300af392b8b93efa745e0a5a16b5a3371333766d8e82ec",
       "test/externalized-evidence.test.ts": "f105cb9f2f262e57fe3d5f7509e52897931476f8b89a959196e47f31f1519798",
       "test/flowlayout.test.ts": "4b1a524cf64870ec388f4e4cb70edc063d21ee8c83aa2aac9382b786e8c46bbf",

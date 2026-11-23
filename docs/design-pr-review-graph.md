@@ -873,6 +873,25 @@ The section follows a few rules:
   the recorded file text as it does the head's. A base measurement that does
   not recompute, or fails, never fails the report: it leaves that row's base
   unknown, with the reason.
+- **The changed lines fit the report.** The tools' hunks come from
+  `git diff -U0 -w` of the head against the pinned base, reduced to its file and
+  hunk headers (the bodies are never read), recorded as the report of one command,
+  `metrics-diff`, over the measured languages' files. A report is never read
+  short: when it is cut, or over 60,000 bytes, the files are listed again in two
+  groups, the first and second half of the measured files in the pull request's
+  order (`metrics-diff-a`, `metrics-diff-b`), each a command that names its files
+  as literal pathspecs (a renamed file with its base path, so Git pairs the two as
+  in the whole diff); a group whose report still does not fit is halved again
+  (`metrics-diff-aa`, `metrics-diff-ab`, …), down to one file. The groups' hunks
+  are merged. A group's run counts only when it is the graph's own command (the
+  same argv) recorded after its parent's run, so the plan is a function of the
+  evidence and the validators recompute it; a small pull request still uses the one
+  command. A single file whose own headers do not fit is not a failure of the run:
+  its functions are not measured, and the section says `Not measured: <path> (its
+  changed lines' hunk headers (git diff -U0) are over 60000 bytes, more than one
+  command report holds whole)` (since `pr-review` 1.1.3 and `pr-design-review`
+  0.1.3; before, the whole Report stage failed, as apache/skywalking-banyandb#1487's
+  181 files, 71,735 bytes of headers, did).
 - **Batches fit the report.** The static tools run over the changed files in
   batches of at most 8 (`static-go-1`, `static-typescript-2`, …), and each
   prints one **compact** JSON document (no indentation), because a command
@@ -3100,6 +3119,15 @@ graph over time.
   occur once); the draft applies a confirmed finding's corrections to its posted
   text, or states one it cannot apply, and `draft-composed` fails a draft that
   ignores one; v1 results still read, with none ([§8.1](#81-review), [§8.4](#84-draft)).
+- **1.1.3:** the changed lines' hunk headers of a large pull request are read in
+  groups of files that each fit one command report (apache/skywalking-banyandb#1487:
+  181 files whose headers were 71,735 bytes blocked the Report stage). The one
+  `metrics-diff` command still reads them when they fit; when they do not, it is
+  replaced by its halves in the measured files' order (`metrics-diff-a`,
+  `metrics-diff-b`, then `metrics-diff-aa`, …), each naming its files, and a single
+  file whose own headers do not fit is listed as not measured with its reason, never
+  a failed stage ([§6.8](#68-measurements)). The review kit's change, shared with
+  `pr-design-review` 0.1.3.
 
 **Where 1.0 differs from its design.** The split design (now
 [a pointer](design-pr-review-split.md)) planned a Checks stage when the profile has
