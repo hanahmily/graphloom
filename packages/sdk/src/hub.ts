@@ -119,10 +119,61 @@ export interface HubSubmission {
   journalBytes: number;
 }
 export interface HubArchivedSubmission { archived: true; id: string; runId: string; requestDigest: string; contentDigest: string; key?: string; }
+/** What a task asked for, read from its captured task file: never authority, only search text. */
+export interface HubRequestSummary {
+  /** The task's graph id, when the captured task could be read. */
+  graph?: string;
+  /** SHA-256 of the task's request text. */
+  digest: string;
+  /** The request's first nonblank line, at most 200 characters. */
+  firstLine: string;
+}
+/**
+ * One archived submission in the bounded archive index (docs/design-run-hub.md §4.1).
+ * History only: the idempotency tombstone in the snapshot, not this entry, reserves the key.
+ */
+export interface HubArchiveEntry {
+  archived: true;
+  id: string;
+  runId: string;
+  key?: string;
+  graph?: string;
+  repoPath: string;
+  taskPath: string;
+  /** The submission's request digest (its captured inputs), as in its tombstone. */
+  requestDigest: string;
+  request?: HubRequestSummary;
+  acceptedAt: string;
+  /** The terminal record's last update. */
+  settledAt: string;
+  archivedAt: string;
+  state: "succeeded" | "failed" | "canceled";
+  /** The run's state directory, when the hub runtime knows it. */
+  stateDir?: string;
+  blocker?: string;
+}
 export interface HubStatus {
   hubId: string;
   maxConcurrentRuns: number;
   occupiedSlots: number;
   submissions: HubSubmission[];
   fault?: string;
+  /** Search replies only: what each listed live submission asked for, by submission id. */
+  summaries?: Record<string, HubRequestSummary>;
+  /** Search replies with archived entries requested: matching archive index entries. */
+  archived?: HubArchiveEntry[];
+  /** Search replies only: matches before `limit` applied. */
+  matched?: number;
+}
+/** `GET /v1/health`: the hub's status with aggregate counts and service health. */
+export interface HubHealth extends HubStatus {
+  /** The running hub's GraphLoom version, when its installation records one. */
+  version?: string;
+  socket?: string;
+  counts?: Partial<Record<HubSchedulingState, number>>;
+  archivedEntries?: number;
+  archiveIndexError?: string;
+  monitoringError?: string;
+  retentionError?: string;
+  closing?: boolean;
 }

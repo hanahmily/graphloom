@@ -5,3 +5,4 @@ export { assertHubGrant, DEFAULT_HUB_CONFIG, Hub, openHub } from "./hub.js";
 export { createLinuxHubDriver, launchCgroupPath } from "./linux.js";
 export type { LinuxHubDriverOptions, HubCommandSpec, HubGrantMessage, HubStopMessage } from "./linux.js";
 export type { HubDriver, HubExecutionObservation, HubSubmitRequest, OpenHubOptions } from "./types.js";
+export { ARCHIVE_INDEX_BYTES, ARCHIVE_INDEX_ENTRIES, ARCHIVE_INDEX_FILE, HubArchiveIndex } from "./archive.js";

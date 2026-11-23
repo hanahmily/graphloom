@@ -1,6 +1,6 @@
 ---
 name: graphloom-hub
-description: Drive GraphLoom runs through the run hub, the operator's systemd user service that queues submissions under a concurrency limit and continues them automatically. Checks the hub is reachable (never starts it), submits a checked task with graphloom hub submit, reports status with hub list and hub inspect panels, pauses, cancels, resumes (with --approve, --decline, --reconciled, --update-plugin, --upgrade remedies the user chose), reads launch logs, sets the concurrency limit, archives finished submissions, and searches past submissions through hub list --json and jq. Every control action only on the user's yes; never diagnoses, fixes or answers a run's questions. Use when the user wants to submit, check, stop, resume or find runs on the hub.
+description: Drive GraphLoom runs through the run hub, the operator's systemd user service that queues submissions under a concurrency limit and continues them automatically. Checks the hub is reachable (never starts it), submits a checked task with graphloom hub submit, reports status with hub list and hub inspect panels, pauses, cancels, resumes (with --approve, --decline, --reconciled, --update-plugin, --upgrade remedies the user chose), reads launch logs, sets the concurrency limit, archives finished submissions, and searches past and archived submissions with hub list filters. Every control action only on the user's yes; never diagnoses, fixes or answers a run's questions. Use when the user wants to submit, check, stop, resume or find runs on the hub.
 ---
 
 # Drive runs through the GraphLoom hub
@@ -33,7 +33,8 @@ Every `graphloom hub` command talks to it over a Unix socket
   release).
 - Never print or ask for a token or secret. A hub run gets its tokens from
   the hub service's environment, not from your shell.
-- Read run state only through `graphloom hub list`, `graphloom hub inspect`,
+- Read run state only through `graphloom hub status`, `graphloom hub list`,
+  `graphloom hub inspect`,
   `graphloom inspect`, `graphloom stats` and `graphloom wait`;
   never edit `state.json` or the hub's `scheduler.json`.
 - Use only commands and flags `graphloom --help` and `graphloom hub --help`
@@ -45,15 +46,20 @@ Every `graphloom hub` command talks to it over a Unix socket
 ## 1. Is the hub reachable?
 
 ```sh
-graphloom hub list
+graphloom hub status
 ```
 
-Exit 0 prints `Hub <id> · occupied <n>/<limit>`, then one line per submission
-(`<submission>  <state>  <runId>  <blocker>`), or `No submissions.`. A
-`Fault:` line is a persistence or reconciliation fault: the hub admits nothing
-new until the operator fixes it; quote it.
+Exit 0: the hub answers and has no fault. It prints `Hub <id> · healthy`,
+the GraphLoom version it runs, its socket, `Limit <n> · occupied <n>/<limit> ·
+queued <n>`, and per-state counts. A `Retention error:`, `Monitoring error:`
+or `Archive index error:` line is worth quoting to the user, but the hub still
+admits work.
 
-`cannot reach hub at <socket>` (exit 1) means no hub is serving that socket.
+Exit 3: the hub answers but is `FAULTED` (a persistence or reconciliation
+fault, printed as `Fault: ...`) or shutting down. It admits nothing new until
+the operator fixes it; quote the fault.
+
+Exit 1 (`cannot reach hub at <socket>`): no hub is serving that socket.
 Tell the user, and that the operator starts the service, for example:
 
 ```sh
@@ -65,6 +71,12 @@ systemctl --user start graphloom-hub.service
 output under; `journalctl --user -u graphloom-hub.service` shows why it
 stopped). Do not run the start yourself. Until it serves, a new run can still
 start directly with graphloom-run, outside the hub's limit; the user chooses.
+
+In a script, `graphloom hub status --json` prints `reachable` and `healthy`
+(and, when reachable, `version`, `counts`, `fault`). A hub older than
+`hub status` refuses the command (`unknown hub command status`); then fall
+back to `graphloom hub list`: exit 0 means reachable, and a `Fault:` line is a
+fault.
 
 ## 2. Submit a run
 
@@ -234,32 +246,57 @@ graphloom hub archive <submission>
 ```
 
 Only a `succeeded`, `failed` or `canceled` submission whose run has drained.
-It leaves `hub list`; its run state, worktree and branch stay; its key stays
-reserved (submitting the same task with it returns the archived result, never
-a new run). Ask first: archived submissions are no longer searchable through
-the hub.
+It leaves `hub list`'s queue; its run state, worktree and branch stay; its key
+stays reserved (submitting the same task with it returns the archived result,
+never a new run). The hub keeps a compact entry for it in its archive index
+(id, run id, key, graph, repository, task path, request first line, times,
+final state, state directory, blocker), which `hub list --archived` searches.
+The index is bounded (the newest 5,000 entries); older entries drop out of
+search, but their runs stay on disk. Ask first.
 
 ## 9. Search past submissions
 
-The hub has no search command: `graphloom hub list --json` returns every
-submission it still holds (archived ones excepted), and `jq` filters it.
-Useful fields: `id`, `runId`, `key`, `state`, `blocker`, `acceptedAt`,
-`updatedAt`, `eligibleAt`, `automaticResumes`, `input.taskPath`,
-`input.repoPath`, `input.baseCommit`, `observation.status`,
-`observation.continuation`, `launch.failure.message`.
+`graphloom hub list` with any filter searches, newest first; `--archived`
+adds archived submissions (marked `(archived)`):
 
 ```sh
-graphloom hub list --json | jq -r '.submissions[] | [.acceptedAt, .id, .state, .runId, .input.taskPath] | @tsv'
-graphloom hub list --json | jq '.submissions[] | select(.state == "blocked" or .state == "failed") | {id, runId, blocker}'
-graphloom hub list --json | jq '.submissions[] | select(.input.repoPath | test("widgets")) | {id, state, acceptedAt}'
-graphloom hub list --json | jq '.submissions[] | select(.acceptedAt >= "2026-11-01") | {id, key, state}'
-graphloom hub list --json | jq '.submissions[] | select(.key == "fix-widgets-42")'
+graphloom hub list --state blocked --state failed
+graphloom hub list --repo widgets --since 3d
+graphloom hub list --repo . --limit 10
+graphloom hub list --graph issue-fix --grep "flaky test" --archived
+graphloom hub list --key fix-widgets-42 --archived
+graphloom hub list --since 2026-11-01 --until 2026-11-08 --archived --limit 50
 ```
 
-Without `jq`, `graphloom hub list` prints one line per submission to `grep`.
+| Flag | Matches |
+|---|---|
+| `--state <s>` | Any of the given states (repeat it); an archived entry's final state |
+| `--graph <id>` | The task's graph |
+| `--repo <path-or-text>` | A path (starting with `/`, `.` or `~`) is the exact repository; other text is part of its path |
+| `--key <text>` | Part of the idempotency key |
+| `--since`, `--until` | Accepted at or after / at or before an ISO time, or a duration ago (`90s`, `10m`, `2h`, `3d`, `1w`) |
+| `--grep <text>` | Text in the request or the blocker, any case (an archived entry keeps only the request's first line) |
+| `--limit <n>` | The newest `n` matches; the header says `<n> of <total>` |
+
+Each line is `<acceptedAt>  <submission>  <state>  <runId>  <graph>
+<request first line>`, then `blocker: ...` when there is one. `--json` gives
+the same matches as `submissions` (full records), `summaries` (graph and
+request line per submission), `archived` (index entries, each with
+`stateDir`) and `matched`. Reach for `jq` on `--json` only for a field the
+flags do not cover (for example `automaticResumes` or `launch.failure`):
+
+```sh
+graphloom hub list --state blocked --json | jq '.submissions[] | {id, automaticResumes, failureRepeats, launch}'
+```
+
+For a hub older than these flags (`--state is not valid for hub list`), fall
+back to `graphloom hub list --json | jq '.submissions[] | select(...)'`; it
+returns only the queue, not archived submissions.
+
 For one run's history, open its state: `graphloom inspect <runId> --state-root
 ~/.local/state/graphloom/hub/runs` (status, stop reason, path, visits,
 remedies) and `graphloom stats <runId> --state-root
 ~/.local/state/graphloom/hub/runs` (what each stage used). An archived
-submission's run is found only there, by run id: list
-`~/.local/state/graphloom/hub/runs/` and inspect the candidates.
+entry's `stateDir` names that directory. A submission archived before the hub
+had its archive index, or evicted from it, is found only there, by run id:
+list `~/.local/state/graphloom/hub/runs/` and inspect the candidates.
