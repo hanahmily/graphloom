@@ -17,6 +17,7 @@ import { createController, intakeTask, loadRunState, saveRunState } from "./cont
 import { assertAutomaticContinuation, authorizeManagedRun, beginManagedCommand, finishManagedCommand, observeContinuation, readManagedBinding, reconcileManagedRun, releaseManagedRun, type ManagedRunGrant } from "./managed.js";
 import { createRunWorktree } from "./worktree.js";
 import { withDirectoryLock } from "./lock.js";
+import { stopMarkOf } from "./stop-class.js";
 import * as durableState from "./state.js";
 
 const exec = promisify(execFile);
@@ -137,6 +138,58 @@ describe("managed controller", () => {
     vi.spyOn(host, "describe").mockRejectedValue(new Error("fixture crash after approval commit"));
     await expect(interrupted.controller.resume({ runRef: interrupted.stateDir, managed: interrupted.managed, runner: runner([]), host, approval })).rejects.toThrow("fixture crash");
     await expect(interrupted.controller.resume({ runRef: interrupted.stateDir, managed: interrupted.managed, runner: runner([]), plugin: interrupted.plugin(), validators: {}, approval })).rejects.toThrow("application is unsettled");
+  });
+
+  const commandRecords = async (env: { stateDir: string; commandFiles: () => Promise<string[]> }) =>
+    Promise.all((await env.commandFiles()).map(async (file) => JSON.parse(await readFile(path.join(env.stateDir, file), "utf8")) as { applied: boolean }));
+
+  it("refuses a wrong approval combined with --upgrade before the move, and a retry under the same command ID applies both", async () => {
+    const env = await stoppedRun();
+    const upgrade = { install: { version: "0.2.0", root: env.dir } };
+    const wrong = { runRef: env.stateDir, managed: env.managed, runner: runner([]), plugin: env.plugin(), validators: {}, upgrade, approval: { approvalId: "missing", decision: "approve" as const } };
+    await expect(env.controller.resume(wrong)).rejects.toThrow("declares no approval");
+    await expect(env.controller.resume(wrong)).rejects.toThrow("declares no approval");
+    expect(await env.commandFiles()).toEqual([]);
+    expect((await loadRunState(env.stateDir)).install).toEqual(env.state.install);
+
+    const unreadable = await stoppedRun();
+    await saveRunState({ ...unreadable.state, definition: { ...unreadable.state.definition, approvals: [{ id: "publish", files: ["missing.txt"] }] } });
+    const missingFile = { runRef: unreadable.stateDir, managed: unreadable.managed, runner: runner([]), upgrade, approval: { approvalId: "publish", decision: "approve" as const } };
+    await expect(unreadable.controller.resume(missingFile)).rejects.toThrow("does not exist");
+    expect(await unreadable.commandFiles()).toEqual([]);
+
+    await env.controller.resume({ ...wrong, approval: { approvalId: "publish", decision: "approve" } });
+    const state = await loadRunState(env.stateDir);
+    expect(state.install).toEqual(upgrade.install);
+    expect(state.evidence.filter((evidence) => evidence.payload !== null && typeof evidence.payload === "object" && "type" in evidence.payload && evidence.payload.type === "operator-approval")).toHaveLength(1);
+    expect(await commandRecords(env)).toEqual([expect.objectContaining({ applied: true })]);
+  });
+
+  it("settles a committed upgrade as applied when the resume then stops before running", async () => {
+    const env = await stoppedRun();
+    await saveRunState({ ...env.state, worktreeBranch: "graphloom/elsewhere" });
+    const request = { runRef: env.stateDir, managed: env.managed, runner: runner([]), upgrade: { install: { version: "0.2.0", root: env.dir } } };
+    expect((await env.controller.resume(request)).stopReason).toBe("worktree mismatch");
+    expect((await loadRunState(env.stateDir)).install).toEqual(request.upgrade.install);
+    expect(await commandRecords(env)).toEqual([expect.objectContaining({ applied: true })]);
+    // The retry is deduplicated: the move is not replayed, and nothing reports an unsettled command.
+    expect((await env.controller.resume(request)).stopReason).toBe("worktree mismatch");
+    expect((await loadRunState(env.stateDir)).installHistory).toHaveLength(1);
+  });
+
+  it.each(["final stop held", "quota reconciliation"] as const)("settles a supervisor pin saved by an early return (%s) and a retry succeeds", async (path) => {
+    const env = await stoppedRun();
+    const stopped = path === "final stop held"
+      ? { ...env.state, stopReason: "fixture final stop", stopClass: { by: "plugin" as const, retryable: false, reason: "fixture final stop" }, stopMark: stopMarkOf({ ...env.state, stopReason: "fixture final stop" }, env.state.candidateDigest) }
+      : { ...env.state, reconciliationRequired: { operationId: "old", stageId: "write", reason: "unknown effect", since: new Date().toISOString() } };
+    await saveRunState(stopped as typeof env.state);
+    const request = { runRef: env.stateDir, managed: env.managed, runner: runner([]), plugin: env.plugin(), validators: {}, supervisorPin: { selection: { harness: "pi", source: "fallback" as const, reason: "fixture" } } };
+    const report = await env.controller.resume(request);
+    expect(report.status).toBe("stopped");
+    expect(report.stopReason).toBe(path === "final stop held" ? "fixture final stop" : "harness quota hit after possible effects; reconcile before resuming");
+    expect((await loadRunState(env.stateDir)).supervisorSelection).toMatchObject({ harness: "pi" });
+    expect(await commandRecords(env)).toEqual([expect.objectContaining({ applied: true })]);
+    expect((await env.controller.resume(request)).status).toBe("stopped");
   });
 
   it("rechecks a cleared quota hold after reloading under the run lock", async () => {

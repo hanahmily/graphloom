@@ -148,9 +148,23 @@ export function inputReferences(submission: { input: Pick<HubInput, "runtimePath
   return [input.runtimePath, input.bundlePath, ...(input.runtimeNode ? [input.runtimeNode] : []), ...(input.runtimeRoot ? [input.runtimeRoot] : [])];
 }
 
-/** Include current ownership after explicit upgrades and installed executor/plugin pins. */
+/**
+ * Include current ownership after explicit upgrades and installed executor/plugin pins.
+ * A launch that failed before its first state save leaves neither state.json nor the
+ * execution marker the controller syncs before any upgrade or graph effect: only the
+ * captured input can be referenced. Missing state after that marker fails conservatively.
+ */
 async function ownerReferences(directory: string, submission: HubSubmission, cache: Map<string, { identity: string; references: string[] }>): Promise<string[]> {
-  const handle = await open(path.join(directory, "runs", submission.runId, "state.json"), "r");
+  const runDirectory = path.join(directory, "runs", submission.runId);
+  let handle;
+  try { handle = await open(path.join(runDirectory, "state.json"), "r"); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    const started = await access(path.join(runDirectory, "managed-execution-started.json")).then(() => true, (marker: NodeJS.ErrnoException) => { if (marker.code === "ENOENT") return false; throw marker; });
+    if (started) throw new Error("managed execution started but run state is missing; retaining installation pins");
+    cache.delete(submission.runId);
+    return inputReferences(submission);
+  }
   let identity: string;
   let state: unknown;
   try {

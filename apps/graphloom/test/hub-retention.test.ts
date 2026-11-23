@@ -168,11 +168,36 @@ describe("hub installation retention", () => {
     await retention.refresh();
     await writeFile(stateFile, "corrupt");
     await expect(retention.refresh()).rejects.toThrow();
+    // State the controller saved once is missing after its execution marker: nothing is released.
+    await writeFile(path.join(path.dirname(stateFile), "managed-execution-started.json"), "{}");
     await rm(stateFile);
-    await expect(retention.close()).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(retention.close()).rejects.toThrow("run state is missing");
     await access(hubRetentionFile(root, hub, "1.0.0"));
     await access(hubRetentionFile(root, hub, "1.1.0"));
     await absent(hubRetentionFile(root, hub, "1.2.0"));
+  });
+
+  it("references only the captured input of a launch that failed before its first state save", async () => {
+    const root = await temporary();
+    const daemon = await input(root, "1.0.0");
+    const captured = await input(root, "1.1.0");
+    const released = await input(root, "1.2.0");
+    const hub = path.join(root, "hub");
+    const failed = submission(captured, "failed");
+    failed.generation = 1;
+    // A failed launch may leave its run directory behind, without state.json or the execution marker.
+    await mkdir(path.join(hub, "runs", failed.runId), { recursive: true });
+    const other = { ...submission(released, "succeeded"), id: "other", runId: "other" };
+    const retention = await HubInstallationRetention.open(hub, [daemon], () => [failed, other]);
+    await retention.protect(inputReferences(other), async () => undefined);
+    await access(hubRetentionFile(root, hub, "1.2.0"));
+    await retention.refresh();
+    await absent(hubRetentionFile(root, hub, "1.2.0"));
+    await access(hubRetentionFile(root, hub, "1.1.0"));
+    await retention.close();
+    await absent(hubRetentionFile(root, hub, "1.0.0"));
+    await absent(hubRetentionFile(root, hub, "1.2.0"));
+    await access(hubRetentionFile(root, hub, "1.1.0"));
   });
 
   it("refreshes upgraded ownership after state replacement and releases the obsolete owner", async () => {

@@ -707,6 +707,12 @@ export function createController(): Controller {
           managedCommandStarted = true;
         }
       };
+      // A return (not a throw) after the journal was written leaves a durably saved, consistent state:
+      // the remedy applied so far is the command's result, so a retry under its ID must not replay it.
+      // A throw leaves the record unsettled, as a crash would, for the operator to reconcile.
+      const settleManagedCommand = async () => {
+        if (managedCommandStarted && request.managed?.commandId !== undefined) await finishManagedCommand(stateDir, request.managed.commandId);
+      };
       await withDirectoryLock(stateDir, "run.exec.lock", async () => {
         if (getSession(stateDir) || getSession(request.runRef)) {
           throw new Error("cannot resume: run has an active controller session; stop first");
@@ -738,6 +744,16 @@ export function createController(): Controller {
             stateFormats,
             checkPluginUpdate: (current) => checkPluginUpdate(current, request),
             assertResumable: (current) => assertSupervisorRestorable(request, current),
+            // A remedy the resume would refuse after the move is refused before it, so a wrong approval or pin moves nothing.
+            checkRemedies: async (current) => {
+              // The switch journal settles provider and model only, so the pinned harness judged here is the one the resume judges.
+              applySupervisorPin(current, request.supervisorPin);
+              if (request.approval === undefined) return;
+              const problem = approvalRefusal(current, request.approval);
+              if (problem !== undefined) throw new Error(problem);
+              // Reads the declared files the way the resume will; the result is discarded.
+              await applyApproval(current, request.approval);
+            },
             beforeCommit: beforeManagedMutation,
           });
         }
@@ -976,6 +992,7 @@ export function createController(): Controller {
       });
 
       if (state.status !== "running" || !session) {
+        await settleManagedCommand();
         return toReport(state, await listDirtyPaths(state.intake.repoPath));
       }
 
@@ -1003,6 +1020,7 @@ export function createController(): Controller {
             blocker: `plugin describe failed on resume: ${described.observation.message}`,
           };
           await saveRunState(state);
+          await settleManagedCommand();
           return toReport(state, await listDirtyPaths(state.intake.repoPath));
         }
         try {
@@ -1020,6 +1038,7 @@ export function createController(): Controller {
             blocker: err instanceof Error ? err.message : String(err),
           };
           await saveRunState(state);
+          await settleManagedCommand();
           return toReport(state, await listDirtyPaths(state.intake.repoPath));
         }
         const executorCheck = await verifyExecutorCatalog(state, request.runner, request.updateExecutors === true).catch(
@@ -1028,6 +1047,7 @@ export function createController(): Controller {
         if (executorCheck !== undefined && "blocker" in executorCheck) {
           state = { ...state, status: "stopped", stopReason: "executor pin mismatch", blocker: executorCheck.blocker };
           await saveRunState(state);
+          await settleManagedCommand();
           return toReport(state, await listDirtyPaths(state.intake.repoPath));
         }
         const executorUpdate: { catalog: ExecutorCatalogEntry[]; repins: ExecutorRepin[] } | undefined = executorCheck;
@@ -1046,6 +1066,7 @@ export function createController(): Controller {
             blocker: rehydrated.reason,
           };
           await saveRunState(state);
+          await settleManagedCommand();
           return toReport(state, await listDirtyPaths(state.intake.repoPath));
         }
 
