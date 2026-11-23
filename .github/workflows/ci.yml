@@ -1,31 +1,124 @@
 name: CI
 
+# Two tiers (docs/design-typescript-core.md §11.1, "CI test tiers"; the lists are apps/graphloom/test/tiers.ts):
+#   - A pull request runs the PR tier: every test except the CLI suite's full-tier groups, plus each group whose paths
+#     the change touches (examples/plugins/pr-review/** pulls in the whole pr-review rehearsal, and so on).
+#   - Every push to main (after the merge, so a failure names one commit), a daily schedule and a manual dispatch run
+#     the full tier. A failing full run on main opens an issue, or comments on the open one, naming the commit, the
+#     failing jobs and the failing test files.
+# The work is spread over parallel jobs that each build once: typecheck and the header check, the package suites in
+# two jobs, the CLI suite in vitest shards, and the CLI's Docker tests in their own job. The job named `test` needs all
+# of them and fails when any did not pass; it is the one status check branch protection requires.
+
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+
+concurrency:
+  # A new push to a pull request supersedes its running checks. Every other run has a group of its own: a shared
+  # group would drop a pending run on main when a third push arrives, leaving a merged commit unverified.
+  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.ref) || format('ci-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  # Ensure workspace devDependencies (typescript, vitest) install under npm ci.
+  NODE_ENV: development
+  # GitHub's hosted runners have 4 CPUs; the default of 6 test workers per package would oversubscribe them.
+  GRAPHLOOM_TEST_WORKERS: "3"
 
 jobs:
-  test:
+  plan:
+    name: plan
     runs-on: ubuntu-latest
-    # A run takes about 20 minutes (plus about 2 for the cache warm-up and the Docker coverage tests); vitest 4 has no RPC timeout, so a hung worker would otherwise hold the runner for hours.
-    timeout-minutes: 45
-    env:
-      # Ensure workspace devDependencies (typescript, vitest) install under npm ci.
-      NODE_ENV: development
-      # GitHub's hosted runners have 4 CPUs; the default of 6 test workers per package would oversubscribe them.
-      GRAPHLOOM_TEST_WORKERS: "3"
-      # The Docker tests (pr-review coverage, sandbox pull) must run here; a missing prerequisite fails them instead of skipping.
-      GRAPHLOOM_REQUIRE_DOCKER_TESTS: "1"
+    timeout-minutes: 5
+    outputs:
+      tier: ${{ steps.plan.outputs.tier }}
+      groups: ${{ steps.plan.outputs.groups }}
+      shards: ${{ steps.plan.outputs.shards }}
+      coverage: ${{ steps.plan.outputs.coverage }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The pull request's changed paths need the merge base with main.
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
 
+      # test-groups.mjs loads apps/graphloom/test/tiers.ts directly, which needs Node's type stripping.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+
+      - name: Pick the tier and the groups a pull request touches
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            tier=pr
+            groups=$(node scripts/ci/test-groups.mjs "origin/$BASE_REF")
+            shards='[1,2,3,4]'
+          else
+            tier=full
+            groups=
+            shards='[1,2,3,4,5,6]'
+          fi
+          # pr-review-coverage-docker.test.ts (group pr-review) is the one test that reads the warmed caches.
+          case ",$groups," in *,pr-review,*) coverage=true ;; *) coverage=$([ "$tier" = full ] && echo true || echo false) ;; esac
+          echo "tier=$tier" >>"$GITHUB_OUTPUT"
+          echo "groups=$groups" >>"$GITHUB_OUTPUT"
+          echo "shards=$shards" >>"$GITHUB_OUTPUT"
+          echo "coverage=$coverage" >>"$GITHUB_OUTPUT"
+          echo "tier $tier; full-tier groups added: ${groups:-none}; CLI shards $shards; coverage caches $coverage" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  typecheck:
+    name: typecheck and headers
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "26"
           cache: npm
+      - name: Install
+        run: npm ci
+      - name: Check source headers
+        run: npm run check:headers
+      # npm run typecheck builds first: workspace packages resolve each other from dist/.
+      - name: Build and typecheck
+        run: npm run typecheck
 
+  packages:
+    name: packages (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The controller's suite alone takes about as long as all the other package suites together.
+          - name: controller
+            args: --only @graphloom/controller
+          - name: others
+            args: --exclude @graphloom/controller,@graphloom/cli
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+          cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: false
       # Supervisor-originated jobs run confined with bubblewrap (docs/design-typescript-core.md);
       # the tests that exercise the real confinement need it, and Ubuntu 24.04 runners restrict
       # the unprivileged user namespaces it uses.
@@ -35,25 +128,174 @@ jobs:
           sudo apt-get install -y bubblewrap
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           bwrap --ro-bind / / --dev /dev --unshare-pid --proc /proc true
-
       - name: Install
         run: npm ci
-
-      # Workspace packages resolve runtime from dist/; build before typecheck/test.
       - name: Build
         run: npm run build
+      - name: Test
+        run: node scripts/ci/test-workspaces.mjs ${{ matrix.args }} --report-dir reports
+      - name: Keep the test reports
+        if: always() && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-packages-${{ matrix.name }}
+          path: reports/
+          retention-days: 14
+          if-no-files-found: ignore
 
-      - name: Typecheck
-        run: npm run typecheck
-
-      # pr-review's coverage sandbox is offline and reads the host's Go module and npm caches, which a fresh runner lacks.
+  cli:
+    name: cli (shard ${{ matrix.shard }}/${{ strategy.job-total }})
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    env:
+      GRAPHLOOM_TEST_TIER: ${{ needs.plan.outputs.tier }}
+      GRAPHLOOM_TEST_GROUPS: ${{ needs.plan.outputs.groups }}
+      # The Docker tests run in the cli-docker job, which has their prerequisites.
+      GRAPHLOOM_TEST_DOCKER: exclude
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+          cache: npm
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
           cache: false
-
-      - name: Warm the coverage-test caches
-        run: scripts/ci/warm-coverage-caches.sh
-
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --ro-bind / / --dev /dev --unshare-pid --proc /proc true
+      - name: Install
+        run: npm ci
+      - name: Build
+        run: npm run build
       - name: Test
-        run: npm test
+        working-directory: apps/graphloom
+        run: npx vitest run --shard=${{ matrix.shard }}/${{ strategy.job-total }} --reporter=default --reporter=json --outputFile.json=../../reports/cli-${{ matrix.shard }}.json
+      - name: Keep the test reports
+        if: always() && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-cli-${{ matrix.shard }}
+          path: reports/
+          retention-days: 14
+          if-no-files-found: ignore
+
+  cli-docker:
+    name: cli (Docker)
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GRAPHLOOM_TEST_TIER: ${{ needs.plan.outputs.tier }}
+      GRAPHLOOM_TEST_GROUPS: ${{ needs.plan.outputs.groups }}
+      GRAPHLOOM_TEST_DOCKER: only
+      # The Docker tests (sandbox pull; pr-review coverage in the full tier) must run here; a missing prerequisite fails them instead of skipping.
+      GRAPHLOOM_REQUIRE_DOCKER_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+          cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: false
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --ro-bind / / --dev /dev --unshare-pid --proc /proc true
+      - name: Install
+        run: npm ci
+      - name: Build
+        run: npm run build
+      # pr-review's coverage sandbox is offline and reads the host's Go module and npm caches, which a fresh runner lacks.
+      - name: Warm the coverage-test caches
+        if: needs.plan.outputs.coverage == 'true'
+        run: scripts/ci/warm-coverage-caches.sh
+      - name: Test
+        working-directory: apps/graphloom
+        run: npx vitest run --reporter=default --reporter=json --outputFile.json=../../reports/cli-docker.json
+      - name: Keep the test reports
+        if: always() && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-cli-docker
+          path: reports/
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # The one check branch protection requires: it passes only when every job above passed.
+  test:
+    name: test
+    needs: [plan, typecheck, packages, cli, cli-docker]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every job passed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          echo "$RESULTS" | jq -e 'all(.[]; .result == "success")' >/dev/null
+
+  # A full-tier run on main that fails opens an issue (or comments on the open one) naming the commit and what failed.
+  report-failure:
+    name: report a failing full run
+    needs: [plan, typecheck, packages, cli, cli-docker]
+    if: failure() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: reports-*
+          path: reports
+          merge-multiple: true
+      - name: Open or update the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Full test suite failing on main"
+          failed_jobs=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" --paginate \
+            --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out") | "- \(.name) (\(.conclusion))"')
+          {
+            echo "The full test tier failed on \`$SHA\` ($EVENT): $RUN_URL"
+            echo
+            echo "Failing jobs:"
+            echo "${failed_jobs:-- (none recorded)}"
+            echo
+            echo "Failing test files:"
+            node scripts/ci/failed-files.mjs reports
+          } >body.md
+          cat body.md
+          number=$(gh issue list --state open --search "in:title \"$title\"" --json number,title \
+            --jq "map(select(.title == \"$title\")) | .[0].number // empty")
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body-file body.md
+          else
+            gh issue create --title "$title" --body-file body.md
+          fi

@@ -96,6 +96,25 @@ describe("createChildPluginHost", () => {
     expect(advanced.value.action.type).toBe("dispatch");
   });
 
+  it("leaves no callback timer pending once a call returns, so the caller's process can exit at once", async () => {
+    const host = await track(
+      createChildPluginHost({
+        entryModule: fixture("minimal", "graph.mjs"),
+        activeVersion: "minimal@1",
+        generation: 1,
+        workerModule: workerJs,
+        callbackTimeoutMs: 600_000,
+      }),
+    );
+    const timers = () => process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
+    expect((await host.describe(ctx("op-warm"))).ok).toBe(true);
+    const before = timers();
+    expect((await host.describe(ctx("op-describe"))).ok).toBe(true);
+    expect((await host.advance(ctx("op-advance"), view())).ok).toBe(true);
+    // A timer per call left armed would keep the event loop (a CLI run) alive for the full callback timeout.
+    expect(timers()).toBe(before);
+  });
+
   it("reports why the plugin entry failed to load, not the error envelope's missing run id", async () => {
     const host = await track(
       createChildPluginHost({

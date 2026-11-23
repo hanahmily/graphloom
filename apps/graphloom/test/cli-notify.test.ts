@@ -294,7 +294,8 @@ describe("graphloom wait", () => {
     const running = env.graphloom("run", "task.yaml");
     const stateDir = await runningStateDir(env);
 
-    const timedOut = await env.graphloom("wait", stateDir, "--timeout", "1s");
+    // The run hangs until stopped, so any timeout times out; a short one spares the poll's 1 s sleep.
+    const timedOut = await env.graphloom("wait", stateDir, "--timeout", "300ms");
     expect(timedOut.code).toBe(2);
     expect(timedOut.stderr).toContain("still running");
 

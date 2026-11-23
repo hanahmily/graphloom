@@ -10,7 +10,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { confinementUnsupported, createBuiltinExecutorRunner, type JobContext, type Runner } from "@graphloom/runner";
 import { commandBinding, commandExecutorPackage } from "@graphloom/executor-command";
 import type { JobSpec } from "@graphloom/sdk";
-import { exampleBundle, execFileAsync, goVersion, repoRoot } from "@graphloom/testkit";
+import { exampleBundle, goVersion } from "@graphloom/testkit";
+import { buildOnce } from "./build-once.js";
 
 const unsupported = await confinementUnsupported();
 const GO = goVersion();
@@ -36,7 +37,7 @@ let work: string;
 let runner: Runner;
 
 beforeAll(async () => {
-  await execFileAsync("npm", ["run", "build", "-w", "@graphloom/plugin-pr-review"], { cwd: repoRoot });
+  await buildOnce("@graphloom/plugin-pr-review");
   const measurements = (await import(pathToFileURL(path.join(bundle, "dist", "kit", "measurements.js")).href)) as Pick<Plugin, "staticCommand">;
   const rehearsal = (await import(pathToFileURL(path.join(bundle, "dist", "rehearsal.js")).href)) as Pick<Plugin, "FLAGS_DOC" | "REHEARSAL_HEAD_FILES">;
   plugin = { ...measurements, ...rehearsal };
