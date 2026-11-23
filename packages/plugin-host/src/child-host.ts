@@ -373,11 +373,14 @@ class ChildSession implements PluginHost {
     }
 
     let line: string;
+    // Cleared once the race settles: a callback timer left pending would hold the event
+    // loop open for up to timeoutMs after the last call, delaying the CLI's exit.
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       line = await Promise.race([
         linePromise,
-        sleep(this.timeoutMs).then(() => {
-          throw new TimeoutError(`plugin callback timed out after ${this.timeoutMs}ms`);
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new TimeoutError(`plugin callback timed out after ${this.timeoutMs}ms`)), this.timeoutMs);
         }),
         this.drainedPromise.then((code) => {
           throw new CrashError(
@@ -423,6 +426,8 @@ class ChildSession implements PluginHost {
           exitCode: this.exitCode,
         },
       };
+    } finally {
+      clearTimeout(timer);
     }
 
     return this.decodeResult(line, ctx, extract);

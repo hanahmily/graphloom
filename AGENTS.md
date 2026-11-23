@@ -30,7 +30,15 @@ npm run build
 `tsconfig.test.json`; builds use `tsconfig.json`, so `dist/` never contains tests.
 `npm test` also runs `npm run check:headers`: hand-written `.ts`, `.js`, `.mjs`,
 and `.sh` files start with the two-line SPDX header (after any shebang); run
-`node scripts/check-headers.mjs --fix` to add it to new files. After editing an
+`node scripts/check-headers.mjs --fix` to add it to new files. CI runs the tests
+in two tiers ([core design §11.1](docs/design-typescript-core.md#111-ci-test-tiers)):
+a pull request runs the PR tier (all but the CLI suite's full-tier groups, plus
+the groups whose paths it touches), split over parallel jobs and vitest shards
+whose aggregate check is named `test`; every push to `main`, a daily schedule and
+a manual dispatch run the full tier, and a failing full run on `main` opens an
+issue. The groups and their path triggers are listed only in
+`apps/graphloom/test/tiers.ts`; a new slow CLI test goes there, and
+`GRAPHLOOM_TEST_TIER=pr` reproduces a pull request's selection locally. After editing an
 example plugin's sources, regenerate its manifest with `npm run manifest -w <plugin>`.
 
 Agent skills for driving GraphLoom from Claude Code, Codex or opencode live in top-level
