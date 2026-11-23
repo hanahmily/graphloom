@@ -124,7 +124,7 @@ submission by itself (bounded, default 9 minutes) and prints its hub state
 cat > .graphloom-watch/hub-wait.sh <<'EOF'
 id=$(cat "$(dirname "$0")/submission"); n=0
 while :; do
-  s=$(graphloom hub list --json | jq -r --arg id "$id" '.submissions[] | select(.id == $id) | if .state == "running" and .observation.status != "running" then "starting" else .state end')
+  s=$(graphloom hub list --json | jq -r --arg id "$id" 'if .fault then "fault: \(.fault)" else (.submissions[] | select(.id == $id) | if .state == "running" and .observation.status != "running" then "starting" else .state end) end')
   case "$s" in queued|starting|stopping|waiting) ;; *) break ;; esac
   n=$((n + 1)); [ "$n" -ge "${1:-9}" ] && break
   sleep 60
@@ -147,6 +147,11 @@ foreground), and act on its line:
   `Blocker`, `Next eligible`), quote the blocker, and ask the user what to do
   (`unknown`: the hub is unreachable or the submission archived; see
   graphloom-hub section 1). Offer graphloom-deliver for `succeeded`.
+- `fault: ...`: the hub has a persistence or reconciliation fault and starts
+  nothing until the operator fixes it. Quote it and ask; do not re-arm.
+- A `graphloom watch` that exits 1 (an error, for example a state directory
+  that is not where the hub keeps it) is reported, not retried: show the
+  error and ask the user for the hub's state directory.
 
 **When `graphloom watch` reports the run stopped**, before treating it as an
 attention, look at the hub with `graphloom hub list`. If the submission is
@@ -166,7 +171,11 @@ cd "$(dirname "$0")/.." || exit 1
 while :; do
   s=$(sh .graphloom-watch/hub-wait.sh)
   case "$s" in
-    "hub state: running") graphloom watch "$(cat .graphloom-watch/run)" --until stop --notify 'hapi ping-peer "$HAPI_SESSION_ID" --message-file -' ;;
+    "hub state: running")
+      graphloom watch "$(cat .graphloom-watch/run)" --until stop --notify 'hapi ping-peer "$HAPI_SESSION_ID" --message-file -' 2>> .graphloom-watch/hub-hapi.log
+      rc=$?
+      [ "$rc" -eq 1 ] && { s="graphloom watch failed; see .graphloom-watch/hub-hapi.log"; break; }
+      [ "$rc" -eq 3 ] && sleep 60 ;;
     "hub state: queued"|"hub state: starting"|"hub state: stopping"|"hub state: waiting") ;;
     *) break ;;
   esac
