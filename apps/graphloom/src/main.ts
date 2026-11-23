@@ -12,7 +12,7 @@ import { createController, loadRunState, resolveStateDir, reconcileManagedRun } 
 import type { GraphRehearsal } from "@graphloom/sdk";
 import type { RunReport } from "@graphloom/controller";
 import { hubCommand, HUB_USAGE } from "./hub-cli.js";
-import { managedMain, routeManagedCommand, type ManagedExecution } from "./hub-managed.js";
+import { launchEndLine, managedMain, routeManagedCommand, type ManagedExecution } from "./hub-managed.js";
 import { observeOwnedRun } from "./hub-observe.js";
 import { cleanupOwnedRun } from "./hub-runtime.js";
 import { approvalFlags } from "./approval-flags.js";
@@ -220,6 +220,7 @@ async function main(args = process.argv.slice(2), managed?: ManagedExecution): P
         : {}),
     });
     console.log(JSON.stringify(report, null, 2));
+    if (managed) console.error(launchEndLine(report));
     process.exitCode = report.status === "succeeded" ? 0 : 1;
     await stopHook.fire(stopNotice(report));
     return;
@@ -408,6 +409,7 @@ async function main(args = process.argv.slice(2), managed?: ManagedExecution): P
         : {}),
     });
     console.log(JSON.stringify(report, null, 2));
+    if (managed) console.error(launchEndLine(report));
     process.exitCode = report.status === "succeeded" ? 0 : 1;
     await stopHook.fire(stopNotice(report));
     return;

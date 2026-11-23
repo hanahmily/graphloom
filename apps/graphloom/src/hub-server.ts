@@ -16,6 +16,7 @@ import { HubInstallationRetention, inputReferences } from "./hub-retention.js";
 import { selfInstall } from "./ownership.js";
 import { HubEvents } from "./hub-events.js";
 import { parseListQuery, readLiveRequest, searchHub, type LiveRequest } from "./hub-history.js";
+import { runHubDoctor, summarizeHubEnvironment } from "./hub-environment.js";
 
 export interface HubService {
   hub: Hub;
@@ -29,6 +30,8 @@ export interface HubServiceOptions {
   cache?: Map<string, HubMonitorCache>;
   captureInput?: (file: string) => Promise<HubInput>;
   observe?: (submission: HubSubmission) => Promise<MonitorSnapshot>;
+  /** The environment the hub's doctor and status summary see; production: the hub process's own, which its runs inherit. */
+  environment?: NodeJS.ProcessEnv;
 }
 
 /** Owner-only HTTP over Unix: no network listener or arbitrary command endpoint. */
@@ -105,6 +108,8 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
   let version: string | undefined;
   try { version = selfInstall().record.version; } catch { version = undefined; }
   let closing = false;
+  const environment = options.environment ?? process.env;
+  let doctoring = false;
   const server = createServer((request, response) => {
     void (async () => {
       const url = new URL(request.url ?? "/", "http://hub.local");
@@ -112,8 +117,9 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
         const status = scheduler.list();
         const counts: HubHealth["counts"] = {};
         for (const item of status.submissions) counts[item.state] = (counts[item.state] ?? 0) + 1;
+        const summary = await summarizeHubEnvironment(environment, config).catch((error: unknown) => ({ pathHead: [], pathEntries: 0, tools: [], variables: [], warnings: [], error: String(error).slice(0, 1024) }));
         const health: HubHealth = {
-          ...status, socket: config.socket, ...(version !== undefined ? { version } : {}), counts, archivedEntries: scheduler.archived().length,
+          ...status, socket: config.socket, ...(version !== undefined ? { version } : {}), counts, archivedEntries: scheduler.archived().length, environment: summary,
           ...(scheduler.archiveIndexError ? { archiveIndexError: scheduler.archiveIndexError } : {}),
           ...((monitoringError || historyError) ? { monitoringError: (monitoringError ?? historyError)! } : {}), ...(retentionError ? { retentionError } : {}), closing,
         };
@@ -140,6 +146,16 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
           await capture();
           return respond(response, 202, result);
         }
+      }
+      if (url.pathname === "/v1/doctor" && request.method === "POST") {
+        // The doctor's checks in the hub's own environment: what its runs find, not what the caller's shell has.
+        const body = await payload(request, ["taskPath"]);
+        const taskPath = body.taskPath === undefined ? undefined : text(body.taskPath, "taskPath");
+        if (taskPath !== undefined && !path.isAbsolute(taskPath)) throw new HubHttpError("taskPath must be absolute on the hub's machine", 400);
+        if (doctoring) throw new HubHttpError("the hub is already running a doctor; try again when it finishes", 409);
+        doctoring = true;
+        try { return respond(response, 200, await runHubDoctor(environment, config, taskPath)); }
+        finally { doctoring = false; }
       }
       if (url.pathname === "/v1/limit" && request.method === "POST") {
         const body = await payload(request, ["limit"]);

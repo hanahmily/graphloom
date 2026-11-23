@@ -118,7 +118,7 @@ describe("graphloom skills install, list, update, remove", { timeout: 60_000 }, 
     expect((await s.graphloom("install", "graphloom-nope", "--agent", "claude-code")).stderr).toContain("no bundled skill named graphloom-nope");
   });
 
-  it("updates outdated copies to this version, removes retired ones, and never installs a missing one", async () => {
+  it("updates outdated copies, removes retired ones, installs a missing one beside GraphLoom's copies, and none where there are none", async () => {
     const s = await sandbox();
     await s.graphloom("install", "--agent", "codex");
     // As an older version would have left them: other content, a marker matching it.
@@ -136,10 +136,14 @@ describe("graphloom skills install, list, update, remove", { timeout: 60_000 }, 
     );
 
     const updated = await s.graphloom("update", "--quiet");
-    expect(updated.stdout).toContain(`graphloom skills: 1 updated to ${version}, 1 no longer shipped removed`);
+    expect(updated.stdout).toContain(`graphloom skills: 1 updated to ${version}, 1 new installed (graphloom-issue), 1 no longer shipped removed`);
     expect(marker(old)).toMatchObject({ version });
     expect(existsSync(retired)).toBe(false);
-    expect(existsSync(path.join(s.codex, "graphloom-issue"))).toBe(false);
+    // A release's new skill reaches an agent that already has GraphLoom's skills ...
+    expect(marker(path.join(s.codex, "graphloom-issue"))).toMatchObject({ version });
+    expect(Object.values(await s.states("codex"))).toEqual(SKILLS.map(() => "current"));
+    // ... and none reaches an agent that has none.
+    expect(existsSync(s.claude)).toBe(false);
     // Nothing to do: --quiet says nothing.
     expect((await s.graphloom("update", "--quiet")).stdout).toBe("");
   });

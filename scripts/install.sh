@@ -428,7 +428,8 @@ do_install() {
 }
 
 # Refreshes the agent skill copies GraphLoom installed (never edited or foreign
-# ones, never a missing one) to the version just switched to, when it ships them.
+# ones) to the version just switched to, when it ships them, and installs that
+# version's new skills for each agent that already has GraphLoom's.
 refresh_skills() { # version
   bin="$home/versions/$1/bin/graphloom"
   [ -x "$bin" ] && [ -d "$home/versions/$1/skills" ] || return 0

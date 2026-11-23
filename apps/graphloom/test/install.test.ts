@@ -392,17 +392,19 @@ describe("self uninstall", () => {
 });
 
 describe("agent skills follow upgrade and uninstall (docs/design-agent-skills.md §3)", () => {
-  /** A release with the real CLI and this checkout's skills; `edit` changes graphloom-run's text in it. */
-  const withSkills = (edit?: string) => async (tree: string) => {
+  /** A release with the real CLI and this checkout's skills; `edit` changes graphloom-run's text in it; `without` leaves one out. */
+  const withSkills = (edit?: string, without?: string) => async (tree: string) => {
     await realCli(tree);
     await cp(path.join(repoRoot, "skills"), path.join(tree, "skills"), { recursive: true });
     if (edit !== undefined) await appendFile(path.join(tree, "skills", "graphloom-run", "SKILL.md"), edit);
+    if (without !== undefined) await rm(path.join(tree, "skills", without), { recursive: true });
   };
 
-  it("upgrade refreshes the copies GraphLoom installed (Claude Code's and opencode's) and skips edited ones; uninstall removes unedited ones", async () => {
+  it("upgrade refreshes the copies GraphLoom installed (Claude Code's and opencode's), installs the release's new skill beside them, and skips edited ones; uninstall removes unedited ones", async () => {
     const sb = await makeSandbox(base);
     await mkdir(path.join(sb.home, ".claude"), { recursive: true });
-    const first = await sb.build("0.1.0", { populate: withSkills() });
+    // 0.1.0 does not ship graphloom-hub yet; 0.2.0 adds it.
+    const first = await sb.build("0.1.0", { populate: withSkills(undefined, "graphloom-hub") });
     const r = sb.installer(["--from", first.tarball], quiet);
     expect(r.status, r.stderr).toBe(0);
     const skills = path.join(sb.home, ".claude", "skills");
@@ -411,19 +413,23 @@ describe("agent skills follow upgrade and uninstall (docs/design-agent-skills.md
 
     const install = sb.graphloom(["skills", "install", "--agent", "claude-code"], quiet);
     expect(install.status, install.stderr).toBe(0);
-    expect(install.stdout).toContain("7 skill(s) written, 0 unchanged (version 0.1.0)");
+    expect(install.stdout).toContain("6 skill(s) written, 0 unchanged (version 0.1.0)");
     await appendFile(path.join(skills, "graphloom-setup", "SKILL.md"), "\nmine\n");
     const marker = (name: string, dir = skills) => JSON.parse(readFileSync(path.join(dir, name, ".graphloom-skill.json"), "utf8")) as { version: string };
     // opencode's copies, in its default directory under ~/.config (XDG_CONFIG_HOME unset).
     const opencode = path.join(sb.home, ".config", "opencode", "skills");
     const oc = sb.graphloom(["skills", "install", "--agent", "opencode"], quiet);
     expect(oc.status, oc.stderr).toBe(0);
-    expect(readdirSync(opencode)).toHaveLength(7);
+    expect(readdirSync(opencode)).toHaveLength(6);
 
     await sb.publish("0.2.0", { populate: withSkills("\nNew in 0.2.0.\n") });
     const up = sb.graphloom(["upgrade"], quiet);
     expect(up.status, up.stderr).toBe(0);
-    expect(up.stdout, up.stdout + up.stderr).toContain("graphloom skills: 2 updated to 0.2.0");
+    expect(up.stdout, up.stdout + up.stderr).toContain("graphloom skills: 2 updated to 0.2.0, 2 new installed (graphloom-hub)");
+    // The new skill is installed for each agent that had GraphLoom's skills, and for no other.
+    expect(marker("graphloom-hub").version).toBe("0.2.0");
+    expect(marker("graphloom-hub", opencode).version).toBe("0.2.0");
+    expect(existsSync(path.join(sb.home, ".codex", "skills"))).toBe(false);
     expect(up.stdout).toContain(`kept ${path.join(skills, "graphloom-setup")} (you edited it)`);
     expect(readFileSync(path.join(skills, "graphloom-run", "SKILL.md"), "utf8")).toContain("New in 0.2.0.");
     expect(marker("graphloom-run").version).toBe("0.2.0");

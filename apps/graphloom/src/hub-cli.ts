@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { parseArgs, stripVTControlCharacters } from "node:util";
 import { realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { projectPanels, renderPanels, type ChatRenderer, type MonitorFormat } from "@graphloom/monitor";
-import type { HubHealth, HubSchedulingState, HubStatus, HubSubmission, HubRetryPolicy, MonitorPanelKind, MonitorSnapshot, PanelSelection } from "@graphloom/sdk";
+import type { HubEnvironmentSummary, HubHealth, HubSchedulingState, HubStatus, HubSubmission, HubRetryPolicy, MonitorPanelKind, MonitorSnapshot, PanelSelection } from "@graphloom/sdk";
 import { hubPaths, integer, loadHubConfig } from "./hub-config.js";
 import { hubRequest } from "./hub-client.js";
+import { captureLoginEnvironment, dropInPath, environmentDropIn, tokenEnvFileText, tokensDropIn, writeOwnerOnly, type CapturedEnvironment, type HubDoctorResult } from "./hub-environment.js";
+import { formatDoctor } from "./doctor.js";
+import { loadRunnerConfig } from "./runner-config.js";
 import { HUB_LIST_LIMIT_MAX, HUB_STATES, listQuery, type HubListFilter } from "./hub-history.js";
 import { serveHub, type HubLogPage } from "./hub-server.js";
 import type { HubEventPage } from "./hub-events.js";
@@ -18,8 +22,9 @@ import { installRoot } from "./version.js";
 
 export const HUB_USAGE = [
   "graphloom hub serve [--config <file>]",
-  "graphloom hub service [--config <file>]",
+  "graphloom hub service [--config <file>] [--capture-env] [--token-env-file <file> [--write-token]] [--write]",
   "graphloom hub status [--json] [--socket <path>]",
+  "graphloom hub doctor [--task <task.yaml>] [--json] [--socket <path>]",
   "graphloom hub submit <task.yaml> [--key <id>] [--socket <path>]",
   "graphloom hub list [--state <state> ...] [--graph <id>] [--repo <path|text>] [--key <text>] [--since <iso|duration>] [--until <iso|duration>] [--grep <text>] [--limit <n>] [--archived] [--json] [--socket <path>]",
   "graphloom hub inspect <submission> [--panel <overview|topology|stages|jobs|activity|job|usage|output>] [--format <text|ansi|markdown|json>] [--chat-renderer <auto|plain|katex>] [--job <operation-id>|--follow-current] [--attempt <n>] [--stage <stage>] [--width <columns>] [--cursor <cursor>] [--page-size <n>]",
@@ -35,8 +40,9 @@ export const HUB_USAGE = [
 /** One paragraph per command for `graphloom hub <command> --help`. */
 const HUB_HELP: Record<string, string> = {
   serve: "Runs the hub in the foreground (normally under the systemd user service).",
-  service: "Prints a systemd user unit for the hub; installs nothing.",
-  status: "Reports whether the hub is reachable and healthy: id, socket, version, limit, slot and state counts, faults.\nExit 0 healthy, 1 unreachable, 3 faulted or shutting down.",
+  service: "Prints a systemd user unit for the hub; installs nothing.\n--capture-env prints the drop-in graphloom-hub.service.d/environment.conf instead: PATH, Go's variables,\nCLAUDE_CONFIG_DIR, CODEX_HOME, LANG, LC_ALL and the proxies from a clean login shell of $SHELL.\n--token-env-file <file> prints the drop-in tokens.conf (EnvironmentFile=-<file>); the file holds the runner\nconfig's github.tokenEnv, from that variable or gh auth token, owner-only (0600); --write-token adds\ngithub.writeTokenEnv. --write writes the drop-ins (and the token file) instead; nothing is written without it.\nOnly names are printed, never a token. Re-run after a shell profile, toolchain or gh auth change.",
+  doctor: "Runs graphloom doctor's checks (with --task, the task's too) inside the running hub's environment:\nwhat its runs find, not what your shell has. Exit 0 no check failed, 1 one did or the hub is unreachable.",
+  status: "Reports whether the hub is reachable and healthy: id, socket, version, limit, slot and state counts, faults,\nand its environment (PATH head, where the agent CLIs resolve, which token variables are set; names only).\nExit 0 healthy, 1 unreachable, 3 faulted or shutting down.",
   submit: "Submits a task to the queue; the same --key and task return the same submission.",
   list: "Lists submissions in queue order. Any filter, --limit or --archived searches instead, newest first:\n--state is repeatable (any of); --repo is an exact path (starting with /, . or ~) or a substring;\n--key is a substring; --since/--until bound acceptance time by an ISO time or a duration ago\n(90s, 10m, 2h, 3d, 1w); --grep is case-insensitive text in the request or the blocker (an archived\nentry keeps only the request's first line); --archived adds the archive index.",
   inspect: "Renders a submission's monitoring panels. --stage narrows to one stage's neighbourhood;\n--follow-current selects the current stage's running job (instead of --job).",
@@ -52,8 +58,8 @@ const HUB_HELP: Record<string, string> = {
 const PANELS: MonitorPanelKind[] = ["overview", "topology", "stages", "jobs", "activity", "job", "usage", "output"];
 const FORMATS: MonitorFormat[] = ["text", "ansi", "markdown", "json"];
 const RENDERERS: ChatRenderer[] = ["auto", "plain", "katex"];
-const valueFlags = ["config", "socket", "key", "format", "chat-renderer", "job", "attempt", "stage", "cursor", "page-size", "width", "since", "until", "graph", "repo", "grep", "limit", "stream", "launch", "command-id", "approve", "decline", "reason", "supervisor", "automatic", "max-automatic-resumes", "max-elapsed-ms", "base-delay-ms", "max-delay-ms"];
-const booleanFlags = ["json", "plain", "once", "follow", "reconciled", "upgrade", "update-plugin", "update-executors", "follow-current", "renew", "archived", "help"];
+const valueFlags = ["task", "token-env-file", "config", "socket", "key", "format", "chat-renderer", "job", "attempt", "stage", "cursor", "page-size", "width", "since", "until", "graph", "repo", "grep", "limit", "stream", "launch", "command-id", "approve", "decline", "reason", "supervisor", "automatic", "max-automatic-resumes", "max-elapsed-ms", "base-delay-ms", "max-delay-ms"];
+const booleanFlags = ["capture-env", "write-token", "write", "json", "plain", "once", "follow", "reconciled", "upgrade", "update-plugin", "update-executors", "follow-current", "renew", "archived", "help"];
 const repeatable = ["panel", "input", "state"];
 
 export async function hubCommand(args: string[]): Promise<number> {
@@ -75,7 +81,7 @@ export async function hubCommand(args: string[]): Promise<number> {
     return command || yes("help") ? 0 : 2;
   }
   const allowed: Record<string, string[]> = {
-    serve: ["config", "socket"], service: ["config"], submit: ["key", "socket"], status: ["json", "socket"], limit: ["socket"],
+    serve: ["config", "socket"], service: ["config", "capture-env", "token-env-file", "write-token", "write"], doctor: ["task", "json", "socket"], submit: ["key", "socket"], status: ["json", "socket"], limit: ["socket"],
     list: ["json", "socket", "state", "graph", "repo", "key", "since", "until", "grep", "limit", "archived"],
     pause: ["command-id", "socket"], cancel: ["command-id", "socket"], archive: ["command-id", "socket"],
     resume: ["command-id", "socket", "reconciled", "approve", "input", "decline", "reason", "upgrade", "update-plugin", "update-executors", "supervisor"],
@@ -93,7 +99,7 @@ export async function hubCommand(args: string[]): Promise<number> {
     if (token.value !== undefined && token.value.length === 0) throw new Error(`--${token.name} needs a nonempty value`);
     seen.add(token.name);
   }
-  if (["service", "list", "status"].includes(command) && parsed.positionals.length !== 1) throw new Error(`hub ${command} takes no positional arguments`);
+  if (["service", "list", "status", "doctor"].includes(command) && parsed.positionals.length !== 1) throw new Error(`hub ${command} takes no positional arguments`);
 
   if (command === "serve") {
     if (parsed.positionals.length !== 1) throw new Error("hub serve takes configuration through --config");
@@ -113,8 +119,21 @@ export async function hubCommand(args: string[]): Promise<number> {
     return 0;
   }
   if (command === "service") {
-    console.log(hubServiceUnit(path.resolve(flag("config") ?? hubPaths().config)));
-    return 0;
+    if (!yes("capture-env") && flag("token-env-file") === undefined) {
+      if (yes("write") || yes("write-token")) throw new Error("--write and --write-token need --capture-env or --token-env-file");
+      console.log(hubServiceUnit(path.resolve(flag("config") ?? hubPaths().config)));
+      return 0;
+    }
+    return hubServiceEnvironment({ config: flag("config"), capture: yes("capture-env"), tokenEnvFile: flag("token-env-file"), writeToken: yes("write-token"), write: yes("write") });
+  }
+  if (command === "doctor") {
+    const task = flag("task");
+    let result: HubDoctorResult;
+    try { result = await hubRequest<HubDoctorResult>("POST", "/v1/doctor", task !== undefined ? { taskPath: path.resolve(task) } : {}, socket, 240_000); }
+    catch (error) { console.error(error instanceof Error ? error.message : String(error)); return 1; }
+    if (yes("json")) console.log(JSON.stringify(result.report, null, 2));
+    else console.log(`Doctor in the hub's environment (${socket}): what its runs find, not your shell\n\n${formatDoctor(result.report)}`);
+    return result.report.ok ? 0 : 1;
   }
   if (command === "submit") {
     const file = path.resolve(need());
@@ -304,7 +323,72 @@ export function formatHubStatus(health: HubHealth, socket: string): string {
     ...(health.retentionError ? [`Retention error: ${safeText(health.retentionError)}`] : []),
     ...(health.monitoringError ? [`Monitoring error: ${safeText(health.monitoringError)}`] : []),
     ...(health.archiveIndexError ? [`Archive index error: ${safeText(health.archiveIndexError)}`] : []),
+    ...(health.environment ? environmentLines(health.environment) : []),
   ].join("\n");
+}
+/** The hub's environment, names only: the PATH head, where each tool resolves, which variables are set. */
+function environmentLines(env: HubEnvironmentSummary): string[] {
+  const more = env.pathEntries - env.pathHead.length;
+  return [
+    `Environment PATH: ${env.pathHead.length ? safeText(env.pathHead.join(":")) : "(empty)"}${more > 0 ? ` (+${more} more)` : ""}`,
+    `Tools: ${env.tools.map((tool) => `${tool.name}${tool.command !== tool.name && tool.path === null ? ` (${safeText(tool.command)})` : ""} ${tool.path === null ? "not found" : safeText(tool.path)}`).join(" · ")}`,
+    ...(env.variables.length ? [`Variables: ${env.variables.map((v) => `${v.name} ${v.set ? "set" : "unset"} (${v.source})`).join(" · ")}`] : []),
+    ...(env.error ? [`Environment error: ${safeText(env.error)}`] : []),
+    ...env.warnings.map((warning) => `Warning: ${safeText(warning)}`),
+  ];
+}
+
+interface ServiceEnvironmentOptions { config: string | undefined; capture: boolean; tokenEnvFile: string | undefined; writeToken: boolean; write: boolean; }
+/**
+ * `hub service --capture-env` / `--token-env-file`: the drop-in that gives the
+ * service what a login shell has, and the owner-only token file it loads.
+ * Prints names, never values but the drop-in itself (which holds no secret).
+ */
+async function hubServiceEnvironment(options: ServiceEnvironmentOptions): Promise<number> {
+  if (options.writeToken && options.tokenEnvFile === undefined) throw new Error("--write-token needs --token-env-file");
+  const note = (line: string) => console.error(line);
+  let captured: CapturedEnvironment | undefined;
+  const shell = process.env.SHELL || "/bin/sh";
+  if (options.capture) {
+    captured = await captureLoginEnvironment({ shell, home: process.env.HOME ?? os.homedir(), ...(process.env.USER ? { user: process.env.USER } : {}) });
+    if (!captured.variables.some(([name]) => name === "PATH")) throw new Error(`a login shell of ${shell} set no PATH; nothing to capture`);
+    note(`captured from a clean login shell of ${shell}: ${captured.variables.map(([name]) => name).join(", ")}`);
+    for (const skip of captured.skipped) note(`not captured: ${skip.name} (${skip.reason})`);
+  }
+  let tokenFile: string | undefined;
+  let tokens: Array<[string, string]> = [];
+  if (options.tokenEnvFile !== undefined) {
+    tokenFile = path.resolve(options.tokenEnvFile);
+    const hubConfig = await loadHubConfig(options.config);
+    const runner = await loadRunnerConfig(hubConfig.runnerConfig !== undefined ? { ...process.env, GRAPHLOOM_RUNNER_CONFIG: hubConfig.runnerConfig } : process.env);
+    const names = [runner?.github?.tokenEnv, ...(options.writeToken ? [runner?.github?.writeTokenEnv] : [])].filter((name): name is string => Boolean(name));
+    if (options.writeToken && !runner?.github?.writeTokenEnv) throw new Error("--write-token, but the runner config names no github.writeTokenEnv");
+    if (names.length === 0) throw new Error("the runner config names no github.tokenEnv: no token to put in --token-env-file");
+    let ghToken: string | undefined;
+    for (const name of [...new Set(names)]) {
+      const own = process.env[name];
+      if (own) { tokens.push([name, own]); note(`token env file: ${name} from your environment`); continue; }
+      ghToken ??= await new Promise<string>((done, fail) => execFile("gh", ["auth", "token"], { timeout: 20_000 }, (error, stdout) => error ? fail(new Error(`gh auth token failed: ${error.message.split("\n")[0]}`)) : done(stdout.trim())));
+      if (!ghToken) throw new Error("gh auth token printed no token; run gh auth login");
+      tokens.push([name, ghToken]); note(`token env file: ${name} from gh auth token`);
+    }
+    if (!options.writeToken && runner?.github?.writeTokenEnv) note(`token env file: ${runner.github.writeTokenEnv} (github.writeTokenEnv) left out; --write-token adds it`);
+  }
+  // Two drop-ins, so capturing again never drops the token file, and the reverse.
+  const dropIns: Array<[string, string]> = [
+    ...(captured ? [[dropInPath("environment.conf"), environmentDropIn({ captured, shell })] as [string, string]] : []),
+    ...(tokenFile !== undefined ? [[dropInPath("tokens.conf"), tokensDropIn(tokenFile)] as [string, string]] : []),
+  ];
+  if (!options.write) {
+    for (const [file, text] of dropIns) process.stdout.write(`${dropIns.length > 1 ? `# ${file}\n` : ""}${text}`);
+    note(`printed only; with --write it writes ${[...dropIns.map(([file]) => file), ...(tokenFile !== undefined ? [tokenFile] : [])].join(" and ")}`);
+    return 0;
+  }
+  if (tokenFile !== undefined) { await writeOwnerOnly(tokenFile, tokenEnvFileText(tokens)); note(`wrote ${tokenFile} (mode 0600): ${tokens.map(([name]) => name).join(", ")}`); }
+  tokens = [];
+  for (const [file, text] of dropIns) { await writeOwnerOnly(file, text); note(`wrote ${file}`); }
+  note("apply it: systemctl --user daemon-reload && systemctl --user restart graphloom-hub.service (a restart stops active runs cooperatively and continues them afterwards)");
+  return 0;
 }
 
 async function watchHub(socket: string, id: string | undefined, options: { selection: PanelSelection; json: boolean; plain: boolean; once: boolean; since?: number; width?: number }): Promise<void> {

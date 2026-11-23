@@ -10,7 +10,7 @@ export class HubHttpError extends Error {
 }
 
 /** Local owner-only transport. Never falls back to a TCP endpoint. */
-export async function hubRequest<T>(method: string, route: string, body?: unknown, socket = hubPaths().socket): Promise<T> {
+export async function hubRequest<T>(method: string, route: string, body?: unknown, socket = hubPaths().socket, timeoutMs = 30_000): Promise<T> {
   const payload = body === undefined ? undefined : JSON.stringify(body);
   return new Promise<T>((resolve, reject) => {
     const req = request({ socketPath: socket, path: route, method, headers: { "content-type": "application/json", ...(payload !== undefined ? { "content-length": Buffer.byteLength(payload) } : {}) } }, (response) => {
@@ -20,7 +20,7 @@ export async function hubRequest<T>(method: string, route: string, body?: unknow
         else resolve(value as T);
       }, reject);
     });
-    req.setTimeout(30_000, () => req.destroy(new Error("hub request timed out; retry mutations with the same command/idempotency key")));
+    req.setTimeout(timeoutMs,() => req.destroy(new Error("hub request timed out; retry mutations with the same command/idempotency key")));
     req.on("error", (error) => reject(new Error(`cannot reach hub at ${socket}: ${error.message}`)));
     req.end(payload);
   });

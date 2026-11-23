@@ -88,10 +88,22 @@ the task with the user.
 **Mind what the hub does not take from your shell.** The run's command jobs
 and its runner config's token variables (`github.tokenEnv`, `writeTokenEnv`)
 come from the **hub service's environment**, and the service's `PATH` is the
-toolchain. When the repository pins a toolchain your shell would prefix on
-`PATH`, or the graph needs a token the user would export, ask the user
-whether the service's environment provides it (never read it); if not, start
-this run directly with graphloom-run. The same holds for the agents' logins:
+toolchain. Check what the hub's runs will find, not what your shell has:
+
+```sh
+graphloom hub doctor --task task.yaml
+```
+
+It runs the doctor's checks (agent CLIs and logins, token variables, the
+task's environment checks) inside the hub; exit 1 means a check failed there
+even when `graphloom doctor` passes in your shell. `graphloom hub status`
+also names the hub's `PATH` head, where `claude`/`codex` resolve, which token
+variables are set (never their values), and a `Warning:` line for an agent
+CLI the hub cannot find. On a failure, quote it and tell the user the
+operator refreshes the service's environment (`graphloom hub service
+--capture-env`, with `--token-env-file` for tokens; the operator runs it and
+restarts the service, never you), or start this run directly with
+graphloom-run. The same holds for the agents' logins:
 Claude Code finds its login through `CLAUDE_CONFIG_DIR` (and Codex through
 `CODEX_HOME`) when the user sets one in their shell profile; the service needs
 the same value, or the run's agent jobs fail to authenticate (`401 … OAuth

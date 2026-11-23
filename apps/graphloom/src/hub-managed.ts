@@ -200,3 +200,16 @@ export async function routeManagedCommand(cmd: string, args: string[]): Promise<
   console.log(JSON.stringify(result, null, 2));
   return true;
 }
+
+/**
+ * The last line a managed launch writes to its stderr log, so `hub logs` shows
+ * how the launch ended: the run's status, its stop reason, the blocker when it
+ * says more, and whether a resume runs the graph again.
+ */
+export function launchEndLine(report: { runId: string; status: string; stopReason?: string; blocker?: string; stopRetryable?: boolean }): string {
+  if (report.status === "succeeded") return `graphloom: run ${report.runId} succeeded`;
+  const one = (text: string) => text.replace(/\s+/g, " ").trim().slice(0, 2000);
+  const reason = report.stopReason !== undefined ? one(report.stopReason) : undefined;
+  const blocker = report.blocker !== undefined ? one(report.blocker) : undefined;
+  return `graphloom: run ${report.runId} ${report.status}${reason ? `: ${reason}` : ""}${blocker && blocker !== reason ? `; blocker: ${blocker}` : ""}${report.stopRetryable !== undefined ? ` (${report.stopRetryable ? "retryable" : "final"})` : ""}`;
+}

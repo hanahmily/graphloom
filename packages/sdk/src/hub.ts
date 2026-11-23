@@ -176,4 +176,39 @@ export interface HubHealth extends HubStatus {
   monitoringError?: string;
   retentionError?: string;
   closing?: boolean;
+  /** The hub process's environment, which its runs inherit (docs/design-run-hub.md §9). */
+  environment?: HubEnvironmentSummary;
+}
+/**
+ * What the hub's own environment provides to its runs: the head of `PATH`,
+ * where each tool resolves, and whether each named variable is set. Names
+ * only: no variable's value but `PATH` is ever reported.
+ */
+export interface HubEnvironmentSummary {
+  /** The first `PATH` entries, in order. */
+  pathHead: string[];
+  /** How many entries `PATH` has. */
+  pathEntries: number;
+  tools: HubEnvironmentTool[];
+  /** Variables runs read, by name: the runner config's token variables and the agents' login locations. */
+  variables: HubEnvironmentVariable[];
+  /** One line per tool a configured harness needs but the hub cannot find. */
+  warnings: string[];
+  /** Why part of the summary could not be read (an unreadable runner config, say). */
+  error?: string;
+}
+export interface HubEnvironmentTool {
+  name: string;
+  /** The command looked up: a name on `PATH`, or a configured path. */
+  command: string;
+  /** The absolute path it resolves to; null when not found. */
+  path: string | null;
+  /** What needs it, when something configured does (`runner config enables claude-code`). */
+  neededBy?: string[];
+}
+export interface HubEnvironmentVariable {
+  name: string;
+  set: boolean;
+  /** Where the name comes from (`github.tokenEnv`, `Claude Code login`). */
+  source: string;
 }

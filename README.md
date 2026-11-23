@@ -81,8 +81,13 @@ prints a user service unit with `Delegate=yes`; review and install it yourself:
 ```sh
 mkdir -p ~/.config/systemd/user
 graphloom hub service --config "$HOME/.config/graphloom/hub.json" > ~/.config/systemd/user/graphloom-hub.service
+# A user service reads no shell profile: give it your login shell's PATH, toolchains and
+# agent login locations, and (opt-in) the runner config's GitHub token in a 0600 file.
+graphloom hub service --capture-env --token-env-file ~/.config/graphloom/hub-tokens.env --write
 systemctl --user daemon-reload
 systemctl --user enable --now graphloom-hub.service
+graphloom hub status     # includes the hub's environment: PATH head, agent CLIs, token variables set
+graphloom hub doctor --task ./tasks/fix/task.yaml   # doctor's checks in the hub's environment
 graphloom hub submit ./tasks/fix/task.yaml --key fix-14169
 graphloom hub list
 graphloom hub limit 2

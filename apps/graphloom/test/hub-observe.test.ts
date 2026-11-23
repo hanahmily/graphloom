@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { livePath, loadRunState, nodeAccepted, type DurableRunState, type VisitRecord } from "@graphloom/controller";
 import type { HubStatus, HubSubmission } from "@graphloom/sdk";
+import { projectPanels, renderPanels } from "@graphloom/monitor";
 import { observeOwnedRun, snapshotOf, withHubSnapshot } from "../src/hub-observe.js";
 
 const fixture = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures/stats/395ec998-6e4");
@@ -186,5 +187,38 @@ describe("hub/frame composition", () => {
   it("calls a previously-launched run unknown when observations are missing", () => {
     const item = submission(); item.generation = 1; item.state = "running";
     expect(withHubSnapshot(undefined, item, hub(item), hubAt, "observation unavailable").run.status).toBe("unknown");
+  });
+
+  const launch = (mode: "initial" | "resume") => ({ id: "l-1", generation: 1, mode, phase: "granted" as const, reservedAt: hubAt, automatic: false });
+
+  it("says a just-launched run is starting, not unknown, before its first state save", async () => {
+    const item = submission(); item.generation = 1; item.state = "running"; item.launch = launch("initial");
+    const enoent = "Command failed: node main.js __hub-observe /hub/runs/run-1\nError: ENOENT: no such file or directory, open '/hub/runs/run-1/state.json'\n    at async open (node:internal/fs/promises:639:25)";
+    const snapshot = withHubSnapshot(undefined, item, hub(item), hubAt, enoent);
+    expect(snapshot.run.status).toBe("starting");
+    expect(snapshot.sources.find(source => source.id === "controller")).toMatchObject({ status: "unavailable", detail: "starting: run state not written yet" });
+    const report = await renderPanels(projectPanels(snapshot, { kinds: ["overview"] }), { format: "text", width: 120, noColor: true });
+    expect(report.output).toContain("Status: starting");
+    expect(report.output).toContain("starting: run state not written yet");
+    expect(report.output).not.toContain("ENOENT");
+    // Without a launch, or for another failure, the honest answer stays unknown.
+    expect(withHubSnapshot(undefined, item, hub(item), hubAt, "owning runtime timed out").run.status).toBe("unknown");
+    item.state = "blocked"; delete item.launch;
+    expect(withHubSnapshot(undefined, item, hub(item), hubAt, enoent).run.status).toBe("unknown");
+  });
+
+  it("prefers the hub's state while a launch is active over the controller's record from before it", async () => {
+    const run = await state(); run.status = "stopped"; run.blocker = "the earlier stop";
+    const owned = snapshotOf(run, observedAt);
+    const item = submission(); item.runId = run.runId; item.generation = 2; item.state = "running"; item.launch = launch("resume");
+    const merged = withHubSnapshot(owned, item, hub(item), hubAt);
+    expect(merged.run).toMatchObject({ status: "running", blocker: null });
+    expect(merged.sources.find(source => source.id === "controller")?.detail).toContain("last recorded stopped; the hub's launch is running");
+    // Once the launch is over, the controller's record is the status again.
+    item.state = "blocked"; delete item.launch;
+    expect(withHubSnapshot(owned, item, hub(item), hubAt).run.status).toBe("stopped");
+    // A running controller needs no reconciliation.
+    run.status = "running"; item.state = "running"; item.launch = launch("resume");
+    expect(withHubSnapshot(snapshotOf(run, observedAt), item, hub(item), hubAt).sources.find(source => source.id === "controller")?.detail ?? "").not.toContain("last recorded");
   });
 });

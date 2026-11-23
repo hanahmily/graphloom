@@ -124,7 +124,7 @@ describe("hub command over a Unix socket", () => {
     expect(lines[0]).toBe("graphloom — TypeScript harness");
     const hubLines = lines.filter((line) => line.includes("graphloom hub "));
     expect(hubLines.length).toBeGreaterThanOrEqual(14);
-    expect(hubLines.filter((line) => /^ {2}graphloom hub [a-z]/.test(line))).toHaveLength(14);
+    expect(hubLines.filter((line) => /^ {2}graphloom hub [a-z]/.test(line))).toHaveLength(15);
     expect(lines.findIndex((line) => line.startsWith("  graphloom hub status"))).toBeGreaterThan(lines.indexOf("Usage:"));
   });
 
