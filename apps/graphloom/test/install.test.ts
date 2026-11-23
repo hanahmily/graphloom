@@ -411,14 +411,14 @@ describe("agent skills follow upgrade and uninstall (docs/design-agent-skills.md
 
     const install = sb.graphloom(["skills", "install", "--agent", "claude-code"], quiet);
     expect(install.status, install.stderr).toBe(0);
-    expect(install.stdout).toContain("6 skill(s) written, 0 unchanged (version 0.1.0)");
+    expect(install.stdout).toContain("7 skill(s) written, 0 unchanged (version 0.1.0)");
     await appendFile(path.join(skills, "graphloom-setup", "SKILL.md"), "\nmine\n");
     const marker = (name: string, dir = skills) => JSON.parse(readFileSync(path.join(dir, name, ".graphloom-skill.json"), "utf8")) as { version: string };
     // opencode's copies, in its default directory under ~/.config (XDG_CONFIG_HOME unset).
     const opencode = path.join(sb.home, ".config", "opencode", "skills");
     const oc = sb.graphloom(["skills", "install", "--agent", "opencode"], quiet);
     expect(oc.status, oc.stderr).toBe(0);
-    expect(readdirSync(opencode)).toHaveLength(6);
+    expect(readdirSync(opencode)).toHaveLength(7);
 
     await sb.publish("0.2.0", { populate: withSkills("\nNew in 0.2.0.\n") });
     const up = sb.graphloom(["upgrade"], quiet);
