@@ -8,7 +8,7 @@
  * first, and a job is never dispatched with one over a bound (`commandJobProblem`). The executor declares the same
  * numbers as its input shape; a test holds these equal to its own validator.
  */
-import { BUILTIN_COMMAND_EXECUTOR_ID, jsonSchemaProblem, MAX_EXECUTOR_INPUT_BYTES, type EnvironmentCommand, type JobSpec, type RunView } from "@graphloom/sdk";
+import { BUILTIN_COMMAND_EXECUTOR_ID, MAX_EXECUTOR_INPUT_BYTES, type EnvironmentCommand, type JobSpec } from "@graphloom/sdk";
 
 /** Commands one job may hold. */
 export const MAX_JOB_COMMANDS = 16;
@@ -52,10 +52,11 @@ export function fitJob(commands: readonly EnvironmentCommand[]): EnvironmentComm
 
 /**
  * Why a job the graph is about to dispatch would be rejected by the command executor before it runs, or undefined when
- * it would not (or is not a built-in command job). It checks the kit's bounds, the input's serialized size, and the
- * input shape the executor declares in the run view when there is one.
+ * it would not (or is not a built-in command job): the kit's bounds and the input's serialized size. The input shape
+ * the executor declares in the run view is not applied: it describes the input for an agent, and a JSON Schema
+ * `pattern` cannot carry the executor's case-insensitive id rule, so `search-S1`, which the executor takes, would fail it.
  */
-export function commandJobProblem(job: JobSpec, view?: Pick<RunView, "executors">): string | undefined {
+export function commandJobProblem(job: JobSpec): string | undefined {
   if (job.kind !== "command" || (job.executor !== undefined && job.executor.id !== BUILTIN_COMMAND_EXECUTOR_ID)) return undefined;
   const input = job.input as { commands?: unknown } | undefined;
   if (input === undefined || input === null || !Array.isArray(input.commands)) return undefined;
@@ -66,7 +67,5 @@ export function commandJobProblem(job: JobSpec, view?: Pick<RunView, "executors"
     if (problem !== undefined) return problem;
   }
   const bytes = Buffer.byteLength(JSON.stringify(input), "utf8");
-  if (bytes > MAX_EXECUTOR_INPUT_BYTES) return `the job's input is ${bytes} bytes once serialized; an executor input carries at most ${MAX_EXECUTOR_INPUT_BYTES}`;
-  const shape = view?.executors?.find((e) => e.id === BUILTIN_COMMAND_EXECUTOR_ID)?.inputShape;
-  return shape !== undefined ? jsonSchemaProblem(shape.schema, input) : undefined;
+  return bytes > MAX_EXECUTOR_INPUT_BYTES ? `the job's input is ${bytes} bytes once serialized; an executor input carries at most ${MAX_EXECUTOR_INPUT_BYTES}` : undefined;
 }

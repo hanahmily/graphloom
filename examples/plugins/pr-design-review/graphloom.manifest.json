@@ -16,7 +16,7 @@
     "vitest": "^4.1.12"
   },
   "digests": {
-    "sourceTree": "2ea3d323082747172780abad4dc4ff83e5cfba8ee9b93593ac929016cace94e0",
+    "sourceTree": "ed26a35d51c37c3eb9d9a46c17fcfd00717ea88fa59d92285c1a7d509af834c4",
     "packageLock": "6abe1ee61ea10688f7d8ae11564051daae1d0265442a48530dd14bbc87667461",
     "files": {
       "package.json": "62c6e23ba79cd15d52da258571433f96c1bb722ba819fc264097ee5a266ee95e",
@@ -54,7 +54,7 @@
       "src/answers.ts": "f89a9248b3bba76060fc32fad1034469a35547478c9ad30073d359989b096f3b",
       "src/designledger.ts": "da6399799ee770c6a8879a5badf8541266fc89f94dcad534b7836288d7a26fd0",
       "src/designvalidators.ts": "82800d783f8b36475e8776a639bd5e6538eb97343f14daa09787c76b10cb3dbc",
-      "src/graph.ts": "c19d4b07e64511d6259316f354aa11d62316fd396b47f8ed0f888f166ea090a1",
+      "src/graph.ts": "2cb4e18e00351746bc94b7804aa33038eff2d394b1e0b87e8d6d4058b051cf4e",
       "src/html.ts": "9cddb101e318b1a5e61586fa688bbdae451f690a65d0e2085389d27e96cce995",
       "src/incremental.ts": "4ad51dd189c8f1aa698f6dec09edb6f7c16b52bf2b3e261337d8f02b2d1192c7",
       "src/index.ts": "f6c5ec2365991d74d03ebaada4341f09cc4b3ee778cacd37f4bc0905fed9514b",
@@ -64,7 +64,7 @@
       "src/kit/aspects.ts": "cea71f510465491c265c464d83d833158bf448308970b15b69397bbf1e26b9ce",
       "src/kit/attempt.ts": "78b14efbaa07ad82ceec25ed9a994aefdc9509c71d303f0c2735f13766c2ed61",
       "src/kit/basetree.ts": "09f12dd8efb9acd20a48a62ae029f8c05b676c4eaa77bdfdabe18f283b425450",
-      "src/kit/bounds.ts": "cde2a4936a73fa9255c6a636e331c406f995835323a0e04fe706f1e23365b723",
+      "src/kit/bounds.ts": "c6cc894e56aca816ab6cd87be71b0a3cfaa3b2fec6360a07acd6768cd1145674",
       "src/kit/briefing.ts": "50628794c7cf1a33975036ada92e80f76f99516f2f02ea1a4b8601ea22534d5f",
       "src/kit/cards.ts": "bd6c9eb38c9542d30ea6bfcc45985750316ec9c00cc62e65a4d5419cbe1921e3",
       "src/kit/cites.ts": "aac861a7321fb094c1e6a199b1c53c34dddb98df29bc2e9812ca4d4ad6f28725",
@@ -150,7 +150,7 @@
       "src/validators.ts": "a5423bbc0129366aff593b2afd00f13fc42f5b98d581fbfbdc06150763387bba",
       "src/version.ts": "bc78c0d3f1f5863aa52f252789b30c1b8cf1a0cb3ca6a585cef5443e3ac37687",
       "src/visual.ts": "662bf5dbf7a5e5900eabdd70877df2d250be0a1ced8b10acfd117e118125e6be",
-      "test/command-bounds.test.ts": "27c1aa71977c6a3da6f595073198aa5870fb680d8e0868b6f11ce4f0b66aaa10",
+      "test/command-bounds.test.ts": "d4bbcad64c6000b24b45706d05a59a1c86238763af3788eb267e14a1840c52bd",
       "test/graph.test.ts": "555bfbea11fe773ce9269777e9a4dcc8acd67715200c7ec913eea22535f54e04",
       "test/kit-drift.test.ts": "dc756a1e6296583de209e812fe4451c2c477c5d77c7cb74d4d7301dcc50b54e7",
       "test/later-head.test.ts": "95ed69fae3c270a0cda098c9c0bfec520debe518c83e32ce284bf85de46e52c3",

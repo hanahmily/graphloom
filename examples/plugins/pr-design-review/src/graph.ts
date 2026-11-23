@@ -291,16 +291,16 @@ const withPrivate = (decision: GraphDecision): GraphDecision => ({ ...decision, 
 export function advancePullRequest(view: RunView): GraphDecision {
   const attempts = noteAttempt(readAttempts(view.privateState), view);
   const scoped: RunView = { ...view, evidence: attemptEvidence(view.evidence, view.candidateDigest, attempts) };
-  return { ...withinCommandBounds(advance(scoped), scoped), privateState: JSON.stringify(attempts) };
+  return { ...withinCommandBounds(advance(scoped)), privateState: JSON.stringify(attempts) };
 }
 
 /**
  * A command job the command executor would reject for one of its input bounds is never dispatched: a rejected job
  * leaves no run, so the graph would plan the same job again. The supervisor is asked to repair the planning instead.
  */
-function withinCommandBounds(decision: GraphDecision, view: RunView): GraphDecision {
+function withinCommandBounds(decision: GraphDecision): GraphDecision {
   if (decision.action.type !== "dispatch") return decision;
-  const problem = commandJobProblem(decision.action.job, view);
+  const problem = commandJobProblem(decision.action.job);
   if (problem === undefined) return decision;
   return supervise({ reason: `the graph planned a command job the command executor would reject before running it: ${problem}` }, "escalate a planned command over the command executor's input bounds");
 }

@@ -4,7 +4,7 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { BUILTIN_COMMAND_EXECUTOR_ID, MAX_EXECUTOR_INPUT_BYTES, type EnvironmentCommand, type EvidenceRecord, type JobSpec } from "@graphloom/sdk";
+import { BUILTIN_COMMAND_EXECUTOR_ID, jsonSchemaProblem, MAX_EXECUTOR_INPUT_BYTES, type EnvironmentCommand, type EvidenceRecord, type JobSpec } from "@graphloom/sdk";
 import { describe, expect, it } from "vitest";
 import { COMMAND_ID_PATTERN, commandJobProblem, fitJob, MAX_ARG_CHARS, MAX_ARGV, MAX_JOB_COMMANDS, MAX_PATH_ARG_CHARS } from "../src/kit/bounds.js";
 import { COMMAND } from "../src/kit/constants.js";
@@ -67,10 +67,20 @@ describe("the command executor's input bounds (design §6.8)", () => {
     expect(commandJobProblem(job(["sh", "x".repeat(MAX_ARG_CHARS + 1)]))).toContain("argv[1]");
     // A job for another executor is not this check's.
     expect(commandJobProblem({ ...job(over), executor: { id: "graphloom.github/read" } })).toBeUndefined();
-    // The shape the run view carries is applied as declared.
-    const view = { executors: [{ id: BUILTIN_COMMAND_EXECUTOR_ID, inputShape: { schema: { type: "object", properties: { commands: { type: "array", maxItems: 1 } } } } }] };
-    const two = { ...job(["true"]), input: { commands: [{ id: "a", argv: ["true"] }, { id: "b", argv: ["true"] }] } } as JobSpec;
-    expect(commandJobProblem(two, view as never)).toContain("at most 1 items");
+    expect(commandJobProblem({ ...job(["true"]), executor: { id: BUILTIN_COMMAND_EXECUTOR_ID } })).toBeUndefined();
+  });
+
+  it("takes every id the executor takes, upper case included (a symbol search is search-S1)", async () => {
+    const job = { stageId: "s", kind: "command", purpose: "diagnostic", readOnly: true, instruction: "i", input: { commands: [{ id: "search-S1", argv: ["true"] }, { id: "Tree-Quote-2", argv: ["true"] }] } } as JobSpec;
+    expect(commandJobProblem(job)).toBeUndefined();
+    if (present) {
+      const { commandInputProblem, COMMAND_INPUT_SHAPE } = await executor();
+      expect(commandInputProblem(job.input)).toBeUndefined();
+      // The declared shape's pattern has no case flag, so judging by it would refuse what the executor takes:
+      // the guard must not (it stopped every pr-review rehearsal after Review, at the symbol searches).
+      expect(jsonSchemaProblem(COMMAND_INPUT_SHAPE.schema as unknown as Record<string, unknown>, job.input)).toContain("must match");
+    }
+    expect(commandJobProblem({ ...job, input: { commands: [{ id: "-bad", argv: ["true"] }] } } as JobSpec)).toContain("the id must match");
   });
 
   it("packs a job's commands within its count and its bytes", () => {

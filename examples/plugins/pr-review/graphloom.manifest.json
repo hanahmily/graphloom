@@ -16,7 +16,7 @@
     "vitest": "^4.1.12"
   },
   "digests": {
-    "sourceTree": "cfcb5d1295575bc370e9757eea45a536b45a628b3146ccd7925281d70c46a5ef",
+    "sourceTree": "8ac81472e22fac8e9380b952dcc78e903cde956f6cc6f93e19c18fb585abbed0",
     "packageLock": "1123e4e7d6011e4d012ec8a7d176b90952dd9efc98c832e27e3c856aad263108",
     "files": {
       "package.json": "4da215b4c5dc226778005f26f10dbfbaff3c02140d9699c9e246631c0da455e9",
@@ -60,7 +60,7 @@
       "vendor/diagram-design/scripts/verify-geometry.py": "33fb89edbdc8b9cf625a388ba47147bf46ec9e8ae84b7110e240de165732001f",
       "src/context.ts": "f8fb727e3610decdd3fe1580aa1aafa623ab9a66c96628a4a95d7757e039742b",
       "src/draft.ts": "3926fc7a4533b20bcc4080089b6db39eb681bd2e61da7e5df5a4475015b7c921",
-      "src/graph.ts": "57a485bec9da759f524c4d6e15fdc71963ae5bc3d3e3c3197bc6e3e4cf688abb",
+      "src/graph.ts": "c3fe499f809ca59a148695139698aeea5a484a85f94f8a34c15774a00c3eeef1",
       "src/html.ts": "f3924adecf34e61876a585da6de0caf6d72bcc10e9dedb3c751a36a61d27f006",
       "src/index.ts": "70879220b9d758df6ae508987dce0a944164b1cb4956d2c65f85aa08e68fe1d8",
       "src/kit/analysis.ts": "98e49401ab61e25e0663a6b8aeecf0903eca7e12b81f859654c08332fde597fa",
@@ -69,7 +69,7 @@
       "src/kit/aspects.ts": "cea71f510465491c265c464d83d833158bf448308970b15b69397bbf1e26b9ce",
       "src/kit/attempt.ts": "78b14efbaa07ad82ceec25ed9a994aefdc9509c71d303f0c2735f13766c2ed61",
       "src/kit/basetree.ts": "09f12dd8efb9acd20a48a62ae029f8c05b676c4eaa77bdfdabe18f283b425450",
-      "src/kit/bounds.ts": "cde2a4936a73fa9255c6a636e331c406f995835323a0e04fe706f1e23365b723",
+      "src/kit/bounds.ts": "c6cc894e56aca816ab6cd87be71b0a3cfaa3b2fec6360a07acd6768cd1145674",
       "src/kit/briefing.ts": "50628794c7cf1a33975036ada92e80f76f99516f2f02ea1a4b8601ea22534d5f",
       "src/kit/cards.ts": "bd6c9eb38c9542d30ea6bfcc45985750316ec9c00cc62e65a4d5419cbe1921e3",
       "src/kit/cites.ts": "aac861a7321fb094c1e6a199b1c53c34dddb98df29bc2e9812ca4d4ad6f28725",
@@ -170,7 +170,7 @@
       "test/briefing.test.ts": "967482a394f92849bb8ec159077aa9d6258e3901752493cf106532103cda6496",
       "test/cards.test.ts": "9574c83725988c8d62f1f8c31eca813b9ac5ab0a5cbfaee99c0cda3a6adccbba",
       "test/claims.test.ts": "8ddb31d8aef749f62e723fd10a17f9e4e7bcf0a01c5c56e51b43ff40d8934b2e",
-      "test/command-bounds.test.ts": "27c1aa71977c6a3da6f595073198aa5870fb680d8e0868b6f11ce4f0b66aaa10",
+      "test/command-bounds.test.ts": "d4bbcad64c6000b24b45706d05a59a1c86238763af3788eb267e14a1840c52bd",
       "test/context-leads.test.ts": "aa983ae504edc4c1c560c1641d02004b15fd97dc1c9f2bad8eca7c4e6f05eb63",
       "test/coverage.test.ts": "f574bea323a455f070236531a45770795ff19215ed7beaa7e9bdb540d9a919ee",
       "test/crap.test.ts": "82db56db32013b6079b5001195ef025379b7e74b0b1ad4973d88de720a4b3c98",

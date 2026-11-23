@@ -913,8 +913,11 @@ The section follows a few rules:
   commands as fit 16 and the input's bytes; the rest run in the next job. A
   coverage plan whose commands do not fit one job is not run, with the reason
   that the changed functions are too many. As a last guard, a graph that would
-  dispatch a command job the executor's bounds or its declared input shape
-  refuses hands it to the supervisor instead of dispatching it.
+  dispatch a command job over one of these bounds hands it to the supervisor
+  instead. The guard checks the kit's bounds, not the input shape the executor
+  declares: a JSON Schema `pattern` cannot carry the executor's case-insensitive
+  id rule, so the shape would refuse an id such as `search-S1` that the executor
+  takes.
 - **Batches fit the report.** The static tools run over the changed files in
   batches of at most 8 (`static-go-1`, `static-typescript-2`, …), and each
   prints one **compact** JSON document (no indentation), because a command
