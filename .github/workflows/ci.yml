@@ -20,8 +20,9 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.event_name }}-${{ github.ref }}
-  # A new push to a pull request supersedes its running checks; runs on main always finish, each naming its commit.
+  # A new push to a pull request supersedes its running checks. Every other run has a group of its own: a shared
+  # group would drop a pending run on main when a third push arrives, leaving a merged commit unverified.
+  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.ref) || format('ci-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
