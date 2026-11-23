@@ -124,7 +124,7 @@ submission by itself (bounded, default 9 minutes) and prints its hub state
 cat > .graphloom-watch/hub-wait.sh <<'EOF'
 id=$(cat "$(dirname "$0")/submission"); n=0
 while :; do
-  s=$(graphloom hub list --json | jq -r --arg id "$id" 'if .fault then "fault: \(.fault)" else (.submissions[] | select(.id == $id) | if .state == "running" and .observation.status != "running" then "starting" else .state end) end')
+  s=$(graphloom hub list --json | jq -r --arg id "$id" 'if .fault then "fault: \(.fault)" else (.submissions[] | select(.id == $id) | if (.state == "starting" or .state == "running" or .state == "stopping") and .blocker then "blocker: \(.blocker | gsub("\\s+"; " "))" elif .state == "running" and .observation.status != "running" then "starting" else .state end) end')
   case "$s" in queued|starting|stopping|waiting) ;; *) break ;; esac
   n=$((n + 1)); [ "$n" -ge "${1:-9}" ] && break
   sleep 60
@@ -149,6 +149,9 @@ foreground), and act on its line:
   graphloom-hub section 1). Offer graphloom-deliver for `succeeded`.
 - `fault: ...`: the hub has a persistence or reconciliation fault and starts
   nothing until the operator fixes it. Quote it and ask; do not re-arm.
+- `blocker: ...` on a launch that still holds its slot (for example
+  `execution drainage is not verified`): the hub cannot confirm the launch
+  stopped and keeps the slot. Quote it and ask; do not re-arm.
 - A `graphloom watch` that exits 1 (an error, for example a state directory
   that is not where the hub keeps it) is reported, not retried: show the
   error and ask the user for the hub's state directory.
