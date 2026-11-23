@@ -28,8 +28,10 @@
  *        migrator and a fixture (§6 step 2).
  *   node scripts/release/prepare.mjs bump-components --root <repo> --current <json> --previous <release.json>
  *        Raises the patch version of each executor and plugin that changed since
- *        the previous release at an unchanged version (§3), with every place
- *        its version lives. Prints "<kind> <name> <from> <to>" per component.
+ *        the previous release at an unchanged version, and moves each one whose
+ *        version is below the previous release's to one patch above it (§3),
+ *        with every place its version lives. Prints "<kind> <name> <from> <to>"
+ *        per component.
  *   node scripts/release/prepare.mjs latest --tags <file> [--below <v>]
  *        The newest MAJOR.MINOR.PATCH among `v<version>` tags, one per line.
  */
@@ -161,13 +163,24 @@ function pluginSources(dir) {
 /**
  * §3 and §6 step 2: after the lockstep bump, raises the patch version of every
  * executor and plugin whose digest or manifest differs from `previous`
- * (release.json) at an unchanged version, in every place the version lives:
+ * (release.json) at an unchanged version, and moves every one whose version is
+ * below the previous release's (main lagging a local snapshot release, §6)
+ * to one patch above the previous release's, in every place the version lives:
  * its package.json, a plugin's graph version constant (`GRAPH_VERSION = "x"`
  * or a `version: "x"` line) and own lockfile, and the dependency pins on an
- * executor in other workspaces. A component whose version already differs
- * from the previous release's is left alone. `current` has the release.json
+ * executor in other workspaces. A component whose version is already above
+ * the previous release's is left alone. `current` has the release.json
  * shape (digests of the tree as it is now). Returns `{ kind, name, from, to }`.
  */
+/** The version a component moves to, or undefined: above `was` when lower, a patch up when equal but changed. */
+function nextComponentVersion(version, was, changed) {
+  if (!was) return undefined;
+  const order = compareVersions(version, was.version);
+  if (order < 0) return patchBump(was.version);
+  if (order === 0 && changed) return patchBump(version);
+  return undefined;
+}
+
 export function bumpComponents(root, current, previous) {
   const bumped = [];
   const dirs = workspaceDirs(root);
@@ -182,20 +195,20 @@ export function bumpComponents(root, current, previous) {
   };
   for (const e of current.executors ?? []) {
     const was = wasExecutor.get(e.package);
-    if (!was || was.digest === e.digest || was.version !== e.version) continue;
+    const to = nextComponentVersion(e.version, was, was?.digest !== e.digest);
+    if (to === undefined) continue;
     const rel = dirs.find((d) => d.startsWith("executors/") && readJson(path.join(root, d, "package.json")).name === e.package);
     if (!rel) throw new Error(`executor ${e.package} has no workspace under executors/`);
-    const to = patchBump(e.version);
     bumpPackage(rel, to);
     pins.set(e.package, to);
     bumped.push({ kind: "executor", name: e.package, from: e.version, to });
   }
   for (const p of current.plugins ?? []) {
     const was = wasPlugin.get(p.graphId);
-    if (!was || (was.manifestSha256 === p.manifestSha256 && was.sourceTree === p.sourceTree) || was.version !== p.version) continue;
+    const to = nextComponentVersion(p.version, was, was !== undefined && (was.manifestSha256 !== p.manifestSha256 || was.sourceTree !== p.sourceTree));
+    if (to === undefined) continue;
     const rel = dirs.find((d) => d.startsWith("examples/plugins/") && readJson(path.join(root, d, "graphloom.manifest.json")).graphId === p.graphId);
     if (!rel) throw new Error(`plugin ${p.graphId} has no workspace under examples/plugins/`);
-    const to = patchBump(p.version);
     const dir = path.join(root, rel);
     bumpPackage(rel, to);
     // The graph's own declaration of its version.
@@ -404,7 +417,9 @@ export function stateFixtures(src) {
 }
 
 /**
- * The §3 bump rule and the §6 step 2 state-format rule. `current` has the
+ * The §3 bump rule (no component version below the previous release's, and
+ * none equal to it with a different digest or manifest) and the §6 step 2
+ * state-format rule. `current` has the
  * release.json shape (`executors`, `plugins`, `stateFormat`, and
  * `sdk.sdkProtocol` or `sdkProtocol`). `migrates(from)` says whether the
  * release carries a migration path from a format, and `fixtures` lists the
@@ -415,14 +430,18 @@ export function componentProblems(previous, current, { migrates = () => true, fi
   const byPackage = new Map((previous.executors ?? []).map((e) => [e.package, e]));
   for (const e of current.executors ?? []) {
     const was = byPackage.get(e.package);
-    if (was && was.digest !== e.digest && was.version === e.version) {
+    if (was && compareVersions(e.version, was.version) < 0) {
+      problems.push(`executor ${e.package}: its version ${e.version} is lower than ${was.version} in ${previous.version}; a component's version never goes backwards`);
+    } else if (was && was.digest !== e.digest && was.version === e.version) {
       problems.push(`executor ${e.package}: its digest changed since ${previous.version}, but its version is still ${e.version}; bump it`);
     }
   }
   const byGraph = new Map((previous.plugins ?? []).map((p) => [p.graphId, p]));
   for (const p of current.plugins ?? []) {
     const was = byGraph.get(p.graphId);
-    if (was && (was.manifestSha256 !== p.manifestSha256 || was.sourceTree !== p.sourceTree) && was.version === p.version) {
+    if (was && compareVersions(p.version, was.version) < 0) {
+      problems.push(`plugin ${p.graphId}: its version ${p.version} is lower than ${was.version} in ${previous.version}; a component's version never goes backwards`);
+    } else if (was && (was.manifestSha256 !== p.manifestSha256 || was.sourceTree !== p.sourceTree) && was.version === p.version) {
       problems.push(`plugin ${p.graphId}: its manifest changed since ${previous.version}, but its version is still ${p.version}; bump it`);
     }
   }

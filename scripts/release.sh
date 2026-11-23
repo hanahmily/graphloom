@@ -111,7 +111,15 @@ done
 command -v node >/dev/null || { echo "release.sh needs a host node to fetch the pinned runtime" >&2; exit 2; }
 if [ -n "$previous_json" ] && [ "$first" = 1 ]; then echo "--previous and --first are mutually exclusive" >&2; exit 2; fi
 if [ -n "$signing_key" ] && [ "$unsigned" = 1 ]; then echo "--signing-key and --unsigned are mutually exclusive" >&2; exit 2; fi
-[ -z "$previous_json" ] || previous_json=$(cd "$(dirname "$previous_json")" && pwd -P)/$(basename "$previous_json")
+if [ -n "$previous_json" ]; then
+  [ -f "$previous_json" ] || { echo "--previous $previous_json: no such file" >&2; exit 2; }
+  previous_json=$(cd "$(dirname "$previous_json")" && pwd -P)/$(basename "$previous_json")
+  # The bump rule compares against an earlier release: a local snapshot's
+  # release.json (§6 "Local snapshot releases") must be below <version>.
+  node -e 'const [v, file] = process.argv.slice(1); const p = String(require(file).version);
+    const [a, b] = [v, p].map((s) => s.split(".").map(Number));
+    if (!((a[0] - b[0] || a[1] - b[1] || a[2] - b[2]) > 0)) { console.error(`--previous is release ${p}, which is not below ${v}`); process.exit(2); }' "$version" "$previous_json" || exit 2
+fi
 # File modes in the tarball come from what the build creates; fix them (§2.5).
 umask 022
 
@@ -340,7 +348,9 @@ Edit it to what an operator notices, fill in every TODO (the upgrade notes above
   regenerate_manifests "$work/manifests"
   # The lockstep bump changes every executor's digest and every plugin's manifest, so a
   # component with no change of its own would fail the bump rule (§3). Raise the patch
-  # version of each one the previous release records at the same version.
+  # version of each one the previous release records at the same version, and move
+  # each one below the previous release's version (main lagging a local snapshot,
+  # §6 "Local snapshot releases") to one patch above it.
   : >"$work/component-bumps"
   if [ -n "$previous_json" ]; then
     node "$rel/prepare.mjs" components --src "$work/manifests" --out "$work/components-before.json"

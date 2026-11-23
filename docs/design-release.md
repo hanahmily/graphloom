@@ -445,8 +445,10 @@ The release runs without a host Node. The host still needs the tools in §4.4.
   calls built-ins "versioned packages included with the standard installation."
   It also allows executors and bundles to be upgraded independently within the
   protocol. Runs pin them by digest, not by version. A release check (§6)
-  enforces a rule: if a component's digest changed since the previous release's
-  `release.json`, its version must also have changed. A plugin's
+  enforces a rule against the previous release's `release.json`: a
+  component's version never goes below the previous release's, and if its
+  digest changed, its version must also have changed (equal with a different
+  digest is refused; equal with the same digest, or higher, passes). A plugin's
   `package.json` version must also equal its manifest `version`, and its
   generated manifest must be current (`npm run manifest` produces no diff).
   The lockstep bump itself changes every executor's digest (its recorded
@@ -456,7 +458,10 @@ The release runs without a host Node. The host still needs the tools in §4.4.
   previous release at an unchanged version (§6 step 2). A component whose
   version already differs from the previous release's, because the maintainer
   bumped it for a change of its own, is left alone, as are the minor and major
-  parts of any version.
+  parts of any version. A component whose version on `main` is below the
+  previous release's (main lags a local snapshot release, §6 "Local snapshot
+  releases") is moved to one patch above the previous release's version, so
+  the operator never edits versions by hand.
 - **Breaking changes.** Before 1.0, a breaking change needs a minor release;
   after 1.0, a major release. Breaking changes include the SDK protocol
   (`sdkProtocol`), CLI flags, configuration keys, and the support window for
@@ -1511,8 +1516,9 @@ scripts/release.sh publish <version>   # steps 9-10, after the maintainer confir
    `package-lock.json` with `npm install --package-lock-only`. Regenerate the
    plugin manifests on a built copy of the bumped tree, then apply the component
    bump rule against the previous `release.json`: each executor or plugin whose
-   digest or manifest changed at an unchanged version gets a patch bump in every
-   place its version lives (`package.json`, a plugin's graph version constant
+   digest or manifest changed at an unchanged version gets a patch bump, and
+   each one whose version is below the previous release's moves to one patch
+   above it, in every place its version lives (`package.json`, a plugin's graph version constant
    such as `GRAPH_VERSION` or `version:` in its source and its own lockfile, the
    dependency pins on an executor in `apps/graphloom` and `packages/testkit`);
    the lockfile and manifests are refreshed again, and the bumped components are
@@ -1618,6 +1624,33 @@ scripts/release.sh publish <version>   # steps 9-10, after the maintainer confir
 A release's gate is local, like every merge gate today. Its record is the
 `gate` field in `release.json` and the script's log, which is attached to the
 release PR.
+
+### Local snapshot releases
+
+A local snapshot is a release built for this machine and never published: it
+is prepared on a local `release/v<version>` branch that is never merged back,
+built, and installed with `install.sh --from`. `main` then lags the snapshot:
+each component the snapshot's `prepare` bumped still has its older version on
+`main`, and the published `release.json` that `prepare` would download knows
+nothing of the snapshot. Comparing against the published release would then let
+the next snapshot move a component backwards (for example `hello` 0.1.4 in the
+installed snapshot, 0.1.3 on `main`) with a different digest. So a snapshot is
+prepared against the installed snapshot's `release.json`:
+
+```text
+scripts/release.sh prepare <version> --no-pr --previous "$GRAPHLOOM_HOME/current/release.json"
+git checkout release/v<version>
+scripts/release.sh build   <version> --previous "$GRAPHLOOM_HOME/current/release.json"   # plus the signing options
+```
+
+`prepare` moves every component below the installed snapshot's version to one
+patch above it (§3), and the bump rule, in `prepare` and in `build
+--previous`, refuses a component whose version is lower than the previous
+release's, or equal to it with a different digest or manifest. `prepare` and
+`build` also refuse a `--previous` release whose version is not below
+`<version>`.
+An official release keeps comparing against the newest published release,
+which `main` never lags, so its behaviour is unchanged.
 
 ### R1 as implemented
 
@@ -1795,7 +1828,8 @@ runs steps 3 to 8 on `<rev>`, which defaults to `HEAD`. It publishes nothing.
     the components are computed as `release.json` will record them.
     `check-components` then applies the §3 bump rule against the previous
     release's `release.json` (`--previous`, else downloaded from the newest
-    release). A changed digest needs a changed version. A newer
+    release). A component's version is never below the previous release's,
+    and a changed digest needs a changed version. A newer
     `stateFormat` needs the staged controller's `migrationPath` from the
     previous format and a committed fixture in that format. A changed
     `sdkProtocol` needs a breaking release.

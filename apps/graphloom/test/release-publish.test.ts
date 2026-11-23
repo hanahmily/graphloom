@@ -181,6 +181,36 @@ describe("prepare.mjs helpers (§3, §6 step 2)", () => {
     expect(P.componentProblems(previous, { ...same, version: "0.2.0", sdkProtocol: 2 })).toEqual([]);
   });
 
+  it("orders component versions against the previous release: lower or equal-with-a-new-digest is refused, equal-and-same or higher passes", () => {
+    const previous = {
+      version: "0.2.3",
+      stateFormat: 1,
+      executors: [{ package: "@graphloom/executor-command", version: "0.1.4", digest: "d1" }],
+      plugins: [{ graphId: "hello", version: "0.1.4", manifestSha256: "m1", sourceTree: "s1" }],
+    };
+    const at = (exec: { version: string; digest: string }, plugin: { version: string; manifestSha256: string; sourceTree: string }) => ({
+      version: "0.2.4",
+      stateFormat: 1,
+      executors: [{ package: "@graphloom/executor-command", ...exec }],
+      plugins: [{ graphId: "hello", ...plugin }],
+    });
+    // Lower: refused, whatever the digest (main lagging a local snapshot).
+    expect(P.componentProblems(previous, at({ version: "0.1.3", digest: "d2" }, { version: "0.1.3", manifestSha256: "m2", sourceTree: "s2" }))).toEqual([
+      "executor @graphloom/executor-command: its version 0.1.3 is lower than 0.1.4 in 0.2.3; a component's version never goes backwards",
+      "plugin hello: its version 0.1.3 is lower than 0.1.4 in 0.2.3; a component's version never goes backwards",
+    ]);
+    expect(P.componentProblems(previous, at({ version: "0.1.3", digest: "d1" }, { version: "0.0.9", manifestSha256: "m1", sourceTree: "s1" }))).toHaveLength(2);
+    // Equal with a different digest or manifest: refused.
+    expect(P.componentProblems(previous, at({ version: "0.1.4", digest: "d2" }, { version: "0.1.4", manifestSha256: "m1", sourceTree: "s2" }))).toEqual([
+      "executor @graphloom/executor-command: its digest changed since 0.2.3, but its version is still 0.1.4; bump it",
+      "plugin hello: its manifest changed since 0.2.3, but its version is still 0.1.4; bump it",
+    ]);
+    // Equal with the same digest, or higher with any: passes.
+    expect(P.componentProblems(previous, at({ version: "0.1.4", digest: "d1" }, { version: "0.1.4", manifestSha256: "m1", sourceTree: "s1" }))).toEqual([]);
+    expect(P.componentProblems(previous, at({ version: "0.1.5", digest: "d2" }, { version: "0.2.0", manifestSha256: "m2", sourceTree: "s2" }))).toEqual([]);
+    expect(P.componentProblems(previous, at({ version: "0.10.0", digest: "d1" }, { version: "1.0.0", manifestSha256: "m1", sourceTree: "s1" }))).toEqual([]);
+  });
+
   it("finds the newest release tag, optionally below a version", () => {
     const tags = ["v0.1.0", "v0.10.0", "v0.9.3", "release-1", "v1.0.0-rc.1", "0.11.0", ""];
     expect(P.latestVersion(tags)).toBe("0.10.0");
@@ -307,6 +337,44 @@ describe("bumpComponents: the automatic component bump (§3, §6 step 2)", () =>
     expect(P.componentProblems(previous, after)).toEqual([]);
     // Bumping again with the new versions is a no-op: nothing is raised twice.
     expect(P.bumpComponents(root, after, previous)).toEqual([]);
+  });
+
+  it("starts above the previous release when main lags it (a local snapshot), changed or not", async () => {
+    const root = await tree();
+    // The installed snapshot recorded higher versions than main has: command 0.1.7, alpha 0.3.4, beta 0.4.1 unchanged.
+    const snapshot = {
+      ...previous,
+      version: "0.2.3",
+      executors: [{ package: "@graphloom/executor-command", version: "0.1.7", digest: "a" }, ...previous.executors.slice(1)],
+      plugins: [
+        { graphId: "alpha", version: "0.3.4", manifestSha256: "changed", sourceTree: "t1" },
+        ...previous.plugins.slice(1),
+      ],
+    };
+    const bumped = P.bumpComponents(root, current, snapshot);
+    expect(bumped).toEqual([
+      { kind: "executor", name: "@graphloom/executor-command", from: "0.1.5", to: "0.1.8" },
+      // alpha's digest equals the snapshot's, but 0.3.0 is below 0.3.4: it still moves above.
+      { kind: "plugin", name: "alpha", from: "0.3.0", to: "0.3.5" },
+      { kind: "plugin", name: "beta", from: "0.4.1", to: "0.4.2" },
+    ]);
+    const read = (rel: string) => JSON.parse(readFileSync(path.join(root, rel), "utf8"));
+    expect(read("executors/command/package.json").version).toBe("0.1.8");
+    expect(read("apps/graphloom/package.json").dependencies["@graphloom/executor-command"]).toBe("0.1.8");
+    expect(read("examples/plugins/alpha/package.json").version).toBe("0.3.5");
+    expect(read("examples/plugins/alpha/package-lock.json")).toMatchObject({ version: "0.3.5", packages: { "": { version: "0.3.5" } } });
+    expect(readFileSync(path.join(root, "examples/plugins/alpha/src/graph.ts"), "utf8")).toBe('export const GRAPH_VERSION = "0.3.5";\n');
+    // gamma (0.5.0, above the snapshot's 0.4.9) and github (0.2.1, above 0.2.0) are left alone.
+    expect(read("examples/plugins/gamma/package.json").version).toBe("0.5.0");
+    expect(read("executors/github/package.json").version).toBe("0.2.1");
+    const after = {
+      ...current,
+      executors: current.executors.map((e) => ({ ...e, version: bumped.find((b: { name: string }) => b.name === e.package)?.to ?? e.version })),
+      plugins: current.plugins.map((p) => ({ ...p, version: bumped.find((b: { name: string }) => b.name === p.graphId)?.to ?? p.version })),
+    };
+    expect(P.componentProblems(snapshot, current).length).toBeGreaterThan(0);
+    expect(P.componentProblems(snapshot, after)).toEqual([]);
+    expect(P.bumpComponents(root, after, snapshot)).toEqual([]);
   });
 
   it("refuses a plugin whose version is declared in two source files", async () => {
@@ -482,6 +550,11 @@ describe("release.sh prepare (§6 steps 1-2)", () => {
     expect(r.stderr).toContain("0.1.0 is not greater than the latest release 0.2.0");
     r = fx.releaseSh(["prepare", "0.3.0", "--first", "--no-pr", "--node-dir", fx.nodeDir]);
     expect(r.stderr).toContain("--first, but 0.2.0 is already released");
+    // A --previous release (a local snapshot's) must be below the version prepared.
+    await writeJson(path.join(fx.base, "snapshot.json"), { version: "0.3.0" });
+    r = fx.releaseSh(["prepare", "0.3.0", "--no-pr", "--previous", path.join(fx.base, "snapshot.json"), "--node-dir", fx.nodeDir]);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("--previous is release 0.3.0, which is not below 0.3.0");
     expect(fx.git("branch", "--list", "release/*")).toBe("");
   }, 60_000);
 
@@ -588,6 +661,28 @@ describe("release.sh prepare (§6 steps 1-2)", () => {
     expect(body).toContain("- executor @graphloom/executor-command: 0.1.0 -> 0.1.1");
     expect(body).toContain("- plugin hello: 0.1.0 -> 0.1.1");
     expect(fx.ghCalls().filter((c) => c.startsWith("pr create"))).toHaveLength(2);
+  }, 180_000);
+
+  it("prepares a local snapshot against the installed snapshot's release.json: components main lags move above it", async () => {
+    const fx = await makeFixture();
+    await writeFile(path.join(fx.repo, "CHANGELOG.md"), `# Changelog\n\n${COMPLETE_SECTION("0.1.0")}`);
+    // The installed snapshot 0.0.9 was prepared on a branch never merged back: it recorded higher versions than main's 0.1.0.
+    const snapshot = path.join(fx.base, "installed-release.json");
+    await writeJson(snapshot, {
+      version: "0.0.9",
+      stateFormat: 1,
+      executors: [{ package: "@graphloom/executor-command", version: "0.1.2", digest: "f".repeat(64) }],
+      plugins: [{ graphId: "hello", version: "0.1.4", manifestSha256: "e".repeat(64), sourceTree: "d".repeat(64) }],
+    });
+    const r = fx.releaseSh(["prepare", "0.1.0", "--no-pr", "--previous", snapshot, "--node-dir", fx.nodeDir]);
+    expect(r.status, r.stderr + r.stdout).toBe(0);
+    expect(r.stdout).toContain("component bump: executor @graphloom/executor-command 0.1.0 -> 0.1.3");
+    expect(r.stdout).toContain("component bump: plugin hello 0.1.0 -> 0.1.5");
+    expect(r.stdout).toContain("components: the bump rule holds against 0.0.9");
+    const show = (f: string) => JSON.parse(fx.git("show", `HEAD:${f}`));
+    expect(show("executors/command/package.json").version).toBe("0.1.3");
+    expect(show("examples/plugins/hello/graphloom.manifest.json").version).toBe("0.1.5");
+    expect(fx.ghCalls().some((c) => c.startsWith("pr create"))).toBe(false);
   }, 180_000);
 });
 
