@@ -1896,3 +1896,64 @@ graphloom resume <run> --approve review-layer --input areas=A3,A17,A18
   wins, so the operator corrects an input by approving again.
 - `graphloom --help` names `--input`; the `graphloom-run` skill tells an agent to
   ask the user for the values.
+
+## 18. Run hub
+
+The [run hub design](design-run-hub.md) extends local standalone execution with
+a daemon that queues tasks, launches CLI child processes, observes their progress
+and usage, and schedules bounded automatic continuation. Its central control is
+an operator-set maximum number of concurrent runs, including startup and cleanup.
+New runs and resumptions share that allowance. The controller retains ownership
+of run state, acceptance, reconciliation, budgets and recovery authority.
+
+This single-machine extension is implemented by `packages/hub` and the CLI.
+It uses managed launch/ownership, crash-safe intake,
+structured continuation eligibility, and verified process drainage before slots
+can be reused. Standalone runs outside the hub keep their existing behavior.
+
+New managed bindings record `initializationProtocol: 1`. After the first state
+save, the controller durably writes `managed-execution-started.json` before
+calling `onRunCreated`, creating a supervisor, or admitting graph execution.
+Resume ensures the same marker before an upgrade or other execution mutation.
+With verified drainage and matching intake provenance, an absent marker on a
+new-protocol binding permits retrying failed initialization under the same run ID.
+Missing state after the marker, or a legacy binding without this protocol, requires
+operator reconciliation; absence of `state.json` alone never authorizes replay.
+
+Managed remedy commands are inspected without writing intent during preflight.
+Verified cleanup precedes upgrades, and the controller rechecks the launch grant
+immediately before journaling the first durable remedy mutation. An approval,
+cleanup, or upgrade refusal that applied nothing leaves the command ID retryable.
+An applied receipt prevents duplicate remedies; an interrupted mutation keeps its
+unsettled intent and requires reconciliation.
+
+Stop intent preserves this order: explicit operator stop, planned service
+interruption, then control-channel disconnect. A later disconnect retains the
+planned interruption's command ID. Stop metadata is parsed once when read;
+malformed or unreadable metadata still requests an explicit operator stop. Managed
+quota yields recheck the persisted hold under the run lock before stopping.
+
+The [monitoring panels](design-monitor-panels.md) render topology,
+progress, usage and execution details independently in terminals and coding-agent
+chats. Shared value contracts belong in the SDK; `packages/monitor`
+module owns pure semantic panel projection and rendering. Terminal adapters use
+character cells with ANSI or plain output; chat adapters use Markdown, with an
+optional bounded KaTeX serializer for native static colors through HAPI's existing
+math renderer. These share facts and identities, not identical geometry. Unknown
+hosts use plain Markdown; complex graphs retain complete paginated adjacency and
+charts retain numeric values, units and gaps when rich rendering is unavailable.
+This route requires no HAPI change or screenshot, and does not promise interactive
+or continuously updating chat messages. Future MCP Apps require host integration.
+
+Live terminal input and on-demand chat formatting stay outside the controller
+and scheduler.
+Panels are read-only; rendering failure, viewer exit or watch disconnection cannot
+change execution. The monitor consumes the [directed topology](design-graph-topology.md),
+including cycles, live paths and supervisor-only nodes, from the owning runtime.
+Legacy stage views remain a compatibility fallback.
+Display code cannot introduce execution dependencies or parallel jobs. A full
+dashboard is optional.
+
+Managed execution is qualified with scripted runs and cgroup filesystem fixtures.
+Real systemd/cgroup/container deployment and each HAPI rich message surface need
+separate operational qualification; unknown chat surfaces use plain reports.

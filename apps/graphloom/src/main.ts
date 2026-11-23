@@ -8,9 +8,13 @@
 import { existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
-import { createController, loadRunState, resolveStateDir } from "@graphloom/controller";
+import { createController, loadRunState, resolveStateDir, reconcileManagedRun } from "@graphloom/controller";
 import type { GraphRehearsal } from "@graphloom/sdk";
 import type { RunReport } from "@graphloom/controller";
+import { hubCommand, HUB_USAGE } from "./hub-cli.js";
+import { managedMain, routeManagedCommand, type ManagedExecution } from "./hub-managed.js";
+import { observeOwnedRun } from "./hub-observe.js";
+import { cleanupOwnedRun } from "./hub-runtime.js";
 import { approvalFlags } from "./approval-flags.js";
 import { createCliRunner } from "./cli-runner.js";
 import { harnessRepairDeps, resolveBundlePath, resolveBundlePathForResume } from "./repair-config.js";
@@ -41,9 +45,24 @@ import {
   supervisorRestore,
 } from "./supervisor-config.js";
 
-async function main(): Promise<void> {
-  const args = process.argv.slice(2);
+async function main(args = process.argv.slice(2), managed?: ManagedExecution): Promise<void> {
   const cmd = args[0];
+  if (cmd === "hub") { process.exitCode = await hubCommand(args.slice(1)); return; }
+  if (cmd === "__hub-capabilities") { console.log(JSON.stringify({ managedProtocol: 1, executionObservation: 1, monitorSchema: 1, runtime: selfInstall().record })); return; }
+  if (cmd === "__hub-managed") { await managedMain(args.slice(1), main); return; }
+  if (cmd === "__hub-observe") {
+    if ((args.length !== 2 && !(args.length === 3 && args[2] === "--execution-only")) || !path.isAbsolute(args[1]!)) throw new Error("invalid owning-runtime observation request");
+    console.log(JSON.stringify(await observeOwnedRun(args[1]!, args[2] === "--execution-only"))); return;
+  }
+  if (cmd === "__hub-cleanup") {
+    if (args.length !== 4 || !path.isAbsolute(args[1]!)) throw new Error("invalid owning-runtime cleanup request");
+    console.log(JSON.stringify(await cleanupOwnedRun(args[1]!, args[2]!, args[3]!))); return;
+  }
+  if (cmd === "__hub-reconcile") {
+    if (!managed || args.length !== 2) throw new Error("reconciliation requires a managed launch grant");
+    const runner = createCliRunner(await requireRunnerConfig());
+    console.log(JSON.stringify(await reconcileManagedRun(args[1]!, managed.grant, runner))); return;
+  }
 
   if (cmd === "version" || cmd === "--version" || cmd === "-V") {
     console.log(formatVersion(installRoot(), args.slice(1)));
@@ -146,13 +165,14 @@ async function main(): Promise<void> {
 
   // A run-scoped command on a run another installed version owns runs there (docs/design-release.md §5.1).
   const self = selfInstall();
-  const dispatched = await dispatchToOwner(cmd, args, self);
+  if (!managed && await routeManagedCommand(cmd, args)) return;
+  const dispatched = managed ? undefined : await dispatchToOwner(cmd, args, self);
   if (dispatched !== undefined) {
     process.exitCode = dispatched;
     return;
   }
 
-  await firstRunSetup(cmd, args);
+  if (!managed) await firstRunSetup(cmd, args);
 
   const controller = createController();
 
@@ -163,7 +183,7 @@ async function main(): Promise<void> {
     const stopHook = armStopHook(args);
     const runnerConfig = await requireRunnerConfig(process.env, (loaded) => stopHook.useConfig(loaded.notify));
     const runner = createCliRunner(runnerConfig);
-    const config = await loadSupervisorConfig();
+    const config = managed && process.env.GRAPHLOOM_HUB_NO_SUPERVISOR === "1" ? undefined : await loadSupervisorConfig();
     // design-supervisor-harnesses.md §7.3: --supervisor, then the operator's select, then the plugin's
     // preference, then the operator's order; resolved once the plugin described itself, and pinned at intake.
     const supervisorFlag = flagValue(args, "--supervisor");
@@ -175,12 +195,14 @@ async function main(): Promise<void> {
     const report = await controller.run({
       ...hostBuildField(),
       taskPath,
+      ...(managed ? { managed: managed.grant, runId: managed.grant.runId } : {}),
       install: self.record,
       onRunCreated: async ({ runId, stateDir }) => {
         crashContext = { runId, stateDir };
         // A run started in the background is found by this line (wait, stats and inspect take either).
         console.error(`graphloom: run ${runId} started; state ${stateDir}`);
         await recordOwnership(self, { runId, stateDir, ...(bundlePath !== undefined ? { plugin: bundlePath } : {}) });
+        await managed?.created({ runId, stateDir });
       },
       runner,
       ...(stateRoot !== undefined ? { stateRoot } : {}),
@@ -342,7 +364,7 @@ async function main(): Promise<void> {
     });
     const runnerConfig = await requireRunnerConfig(process.env, (loaded) => stopHook.useConfig(loaded.notify));
     const runner = createCliRunner(runnerConfig);
-    const config = await loadSupervisorConfig();
+    const config = managed && process.env.GRAPHLOOM_HUB_NO_SUPERVISOR === "1" ? undefined : await loadSupervisorConfig();
     const resolvedRoot = stateRoot ? path.resolve(stateRoot) : undefined;
     const supervisorFlag = flagValue(args, "--supervisor");
     if (args.includes("--supervisor") && (supervisorFlag === undefined || supervisorFlag.startsWith("--"))) throw new Error("--supervisor needs a harness");
@@ -364,6 +386,7 @@ async function main(): Promise<void> {
         });
     if (plan.pin?.transition !== undefined) console.error(`supervisor: ${plan.pin.transition.from} -> ${plan.pin.transition.to} (${plan.pin.transition.reason})`);
     const report = await controller.resume({
+      ...(managed ? { managed: managed.grant } : {}),
       runRef,
       runner,
       ...hostBuildField(),
@@ -376,7 +399,7 @@ async function main(): Promise<void> {
       // The controller has no restore of its own: a run's supervisor binding
       // is restored on the harness it is pinned to, with or without a config.
       restoreSupervisor: supervisorRestore(plan.config ?? config),
-      ...(plan.pin !== undefined ? { supervisorPin: plan.pin } : {}),
+      ...(plan.pin !== undefined && managed?.grant.automatic !== true ? { supervisorPin: plan.pin } : {}),
       ...(plan.config !== undefined && plan.harness !== undefined
         ? {
             supervisorFactory: supervisorFactoryFor(plan.config, plan.harness),
@@ -669,6 +692,7 @@ function flagValue(args: string[], name: string): string | undefined {
 }
 
 function printHelp(): void {
+  console.log(HUB_USAGE.join("\n"));
   console.log(`graphloom — TypeScript harness
 
 Usage:

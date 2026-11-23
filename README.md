@@ -62,6 +62,68 @@ With reduced-motion enabled the recordings show their final frame.
 
 Or drive all of this from Claude Code, Codex or opencode with the GraphLoom skills: `graphloom skills install`, then ask it to run issue-fix, pr-design-review or pr-review.
 
+## Run several graphs through a local hub
+
+The hub queues tasks and controls how many graph runs execute at once. A resumed
+run uses the same limit. It serves trusted users through one Linux account and an
+owner-only Unix socket. Existing standalone `graphloom run` commands remain
+outside that limit.
+
+Create `~/.config/graphloom/hub.json` with your desired capacity:
+
+```json
+{ "maxConcurrentRuns": 3 }
+```
+
+The hub requires a delegated Linux cgroup v2 subtree. `graphloom hub service`
+prints a user service unit with `Delegate=yes`; review and install it yourself:
+
+```sh
+mkdir -p ~/.config/systemd/user
+graphloom hub service --config "$HOME/.config/graphloom/hub.json" > ~/.config/systemd/user/graphloom-hub.service
+systemctl --user daemon-reload
+systemctl --user enable --now graphloom-hub.service
+graphloom hub submit ./tasks/fix/task.yaml --key fix-14169
+graphloom hub list
+graphloom hub limit 2
+graphloom hub watch <submission>
+graphloom hub pause <submission>
+graphloom hub resume <submission>
+```
+
+Use the runner/supervisor configuration created by `graphloom setup`, or set their
+paths in the hub config. The queue pins task/config bytes, repository base, bundle
+and runtime identities. Input drift blocks a queued launch. A run retains its
+slot until its controller, descendants and external execution have drained.
+Automatic continuation is bounded and excludes approvals, exhausted budgets,
+unknown stops and unresolved effects. `hub policy` changes a submission's retry
+policy; `hub cancel` withdraws it permanently. `hub logs --follow` reads bounded
+process logs.
+
+Request panels separately in terminals or coding-agent chats:
+
+```sh
+graphloom hub inspect <submission> --panel topology --format ansi
+graphloom hub inspect <submission> --panel usage --format text
+graphloom hub inspect <submission> --panel overview --format markdown --chat-renderer katex
+graphloom hub inspect <submission> --format json
+```
+
+The eight panels are `overview`, `topology`, `stages`, `jobs`, `activity`, `job`,
+`usage` and `output`; repeat `--panel` to combine them. Colored chat output is
+static Markdown/KaTeX for an assistant reply, with plain details and fallbacks.
+`auto` stays plain until a host profile is qualified; tool output alone does not
+make a host render math. An agent can include the requested panel in its reply;
+`hub watch` follows updates in the terminal.
+No HAPI changes, screenshot capture or MCP connection are required.
+
+Source-level tests cover the scheduler, controller integration, Unix transport,
+and renderers. Deployment still needs qualification on the operator's
+systemd/cgroup/container setup; deployed HAPI color rendering is also a separate
+host check. Live harness output and aggregate token/context counters are shown as
+unavailable when the owning runtime cannot report them. See the
+[hub design](docs/design-run-hub.md) and [panel design](docs/design-monitor-panels.md).
+
 ## FAQ
 
 **Does it post to my pull requests by itself?** Only if you give it a token for writing (`github.writeTokenEnv` in the runner config). Without one, the run stops with the draft ready for you to read.

@@ -316,7 +316,7 @@ describe("bumpComponents: the automatic component bump (§3, §6 step 2)", () =>
   });
 });
 
-const LOCKSTEP_PACKAGES = ["sdk", "agent-harness", "controller", "plugin-host", "supervisor", "runner"];
+const LOCKSTEP_PACKAGES = ["sdk", "agent-harness", "controller", "plugin-host", "supervisor", "runner", "hub", "monitor"];
 
 const GENERATE_MANIFEST = `${HEADER}import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";

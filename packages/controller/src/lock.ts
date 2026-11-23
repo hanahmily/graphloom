@@ -21,10 +21,12 @@ export async function withDirectoryLock<T>(
     delayMs?: number;
     /** Retained for existing callers; kernel locks do not expire by elapsed time. */
     leaseMs?: number;
+    /** Intake may need exclusion before preflight permits creating its state root. */
+    createDirectory?: boolean;
   },
 ): Promise<T> {
-  await mkdir(lockDir, { recursive: true });
-  const resource = path.join(await realpath(lockDir), lockName);
+  if (options?.createDirectory !== false) await mkdir(lockDir, { recursive: true });
+  const resource = path.join(await canonicalDirectory(lockDir), lockName);
   if (process.platform !== "linux" || process.getuid === undefined) {
     throw new Error("directory locking requires Linux and util-linux flock");
   }
@@ -67,5 +69,15 @@ export async function withDirectoryLock<T>(
   } finally {
     child.stdin.end();
     await closed;
+  }
+}
+
+/** Canonicalize an absent leaf through its existing ancestor without creating it. */
+async function canonicalDirectory(directory: string): Promise<string> {
+  const absolute = path.resolve(directory);
+  try { return await realpath(absolute); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT" || path.dirname(absolute) === absolute) throw error;
+    return path.join(await canonicalDirectory(path.dirname(absolute)), path.basename(absolute));
   }
 }

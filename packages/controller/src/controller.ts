@@ -4,6 +4,7 @@
 import { randomUUID } from "node:crypto";
 import { access, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { beginManagedCommand, checkManagedCommand, finishManagedCommand, markManagedExecutionStarted, managedCommandApplied, authorizeManagedRun, authorizeManagedStop, authorizeManagedResume, assertManagedRunner, assertAutomaticContinuation, releaseManagedRun, type ManagedRunGrant } from "./managed.js";
 import {
   emptyCaseFile,
   type BudgetRemaining,
@@ -133,6 +134,7 @@ export interface SupervisorChoice {
 }
 
 export interface RunRequest {
+  managed?: ManagedRunGrant;
   /**
    * The GraphLoom build running this controller (product version and commit, as
    * `graphloom version` prints it). Recorded on the run; a final stop depends on
@@ -214,6 +216,7 @@ export interface RunRequest {
 }
 
 export interface ResumeRequest {
+  managed?: ManagedRunGrant;
   /**
    * The GraphLoom build running this controller (product version and commit, as
    * `graphloom version` prints it). Recorded on the run; a final stop depends on
@@ -409,7 +412,7 @@ export interface InspectReport {
 
 export interface Controller {
   run(request: RunRequest): Promise<RunReport>;
-  stop(runRef: string, options?: { stateRoot?: string }): Promise<InspectReport>;
+  stop(runRef: string, options?: { stateRoot?: string; managed?: ManagedRunGrant; interruptionId?: string; managedDisconnect?: boolean }): Promise<InspectReport>;
   /**
    * Ask the run's supervisor to continue on another operator-configured model.
    * Applied before the next supervisor prompt, including after resume.
@@ -442,132 +445,158 @@ export function createController(): Controller {
       const intake = request.rehearsalGate !== undefined ? { ...taskIntake, rehearsalGate: request.rehearsalGate } : taskIntake;
       const runId = assertSafeRunId(request.runId ?? randomUUID().slice(0, 12));
       const stateRoot = request.stateRoot ?? defaultStateRoot(intake.repoPath);
-      const activeVersion = `${intake.bundle.graphId}@${intake.bundle.version}`;
-
-      const host = await openHost({
-        intake,
-        activeVersion,
-        generation: 1,
-        stateDir: path.join(stateRoot, runId),
-        ...(request.plugin !== undefined ? { plugin: request.plugin } : {}),
-        ...(request.host !== undefined ? { host: request.host } : {}),
-      });
-
-      const session: ActiveSession = {
-        runId,
-        stateDir: path.join(stateRoot, runId),
-        host,
-        stopRequested: false,
-      };
-      registerSession(session);
-      let supervisor = request.supervisor;
-
-      try {
-        const described = await host.describe({
-          runId,
-          operationId: "describe",
-          expectedStateRevision: 0,
-        });
-        if (!described.ok) {
-          throw new Error(`plugin describe failed: ${described.observation.message}`);
+      return withDirectoryLock(stateRoot, `intake-${runId}.lock`, async () => {
+        const intakeDir = path.join(stateRoot, runId);
+        if (request.managed !== undefined) {
+          await withDirectoryLock(intakeDir, "run.exec.lock", async () => {
+            await authorizeManagedRun(intakeDir, request.managed, intake);
+            await assertManagedRunner(request.runner, intakeDir);
+          });
+        } else {
+          // Standalone preflight refusals retain their existing no-run-directory behavior.
+          await authorizeManagedRun(intakeDir);
         }
-        const definition = described.value;
-        assertDefinitionMatchesPin(definition, intake);
-        const stopAfter = request.stopAfterStage !== undefined ? stopNodeNamed(definition, request.stopAfterStage) : undefined;
-        // Controller defaults < the graph's declared defaultBudgets < task budgets.
-        const budgeted = applyGraphDefaultBudgets(intake, definition);
-        // §7.3: resolved once the plugin described its preference, before any run state; a refusal refuses the run.
-        const choice = supervisor === undefined && request.selectSupervisor !== undefined ? await request.selectSupervisor(definition.supervisor) : undefined;
-        const supervisorFactory = choice !== undefined ? choice.supervisorFactory : request.selectSupervisor !== undefined ? undefined : request.supervisorFactory;
-        const repair = choice !== undefined ? choice.repair : request.repair;
-
-        const revisionBridge = { current: 0 };
-        const validators = resolveValidators(
-          request.validators,
-          () => session.host,
-          definition.defaultValidators.map((b) => b.validatorId),
-          {
-            runId,
-            stateDir: path.join(stateRoot, runId),
-            getStateRevision: () => revisionBridge.current,
-          },
-        );
-
-        const sourceDirtyBefore = await listDirtyPaths(intake.repoPath);
-        const { worktreePath, branchName } = await createRunWorktree(
-          intake.repoPath,
-          runId,
-          intake.pinnedHead,
-          session.stateDir,
-        );
-
-        let state = initialState({
-          runId,
-          intake: budgeted,
-          definition,
-          worktreePath,
-          worktreeBranch: branchName,
-          stateRoot,
-          sourceDirtyBefore,
+        const stateExists = await access(path.join(intakeDir, "state.json")).then(() => true, (error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return false;
+          throw error;
         });
-        state = { ...state, stateFormat: CURRENT_STATE_FORMAT, ...(request.install !== undefined ? { install: { ...request.install } } : {}), ...(request.hostBuild !== undefined ? { hostBuild: request.hostBuild } : {}) };
-        // §7.4: the harness is pinned at intake.
-        if (choice !== undefined) state = { ...state, supervisorSelection: selectionRecord(choice.selection, state) };
-        const executorCatalog = await pinExecutorCatalog(request.runner);
-        if (executorCatalog !== undefined) state = { ...state, executorCatalog };
-        const executorGrants = await currentExecutorGrants(request.runner).catch(() => undefined);
-        if (executorGrants !== undefined) state = { ...state, executorGrants };
-        revisionBridge.current = state.stateRevision;
-        session.stateDir = state.stateDir;
-        registerSession(session);
-        await ensureArtifactDir(state);
-        await clearStopRequest(state.stateDir);
-        // Own the run before durable state says `running`, so a reader never sees
-        // a running run without a live owner claim, however slow startup is.
-        await claimRunOwner(state.stateDir);
-        await saveRunState(state);
-        await request.onRunCreated?.({ runId, stateDir: state.stateDir });
-        if (supervisor === undefined && supervisorFactory !== undefined) {
-          supervisor = await supervisorFactory({ runId, stateDir: state.stateDir });
+        const existing = stateExists ? await loadRunState(intakeDir) : undefined;
+        if (existing !== undefined) {
+          if (request.managed === undefined) throw new Error(`run ${runId} already exists; resume it instead`);
+          return toReport(existing, await listDirtyPaths(existing.intake.repoPath));
         }
+        const activeVersion = `${intake.bundle.graphId}@${intake.bundle.version}`;
 
-        state = await runNormalLoop(state, {
+        const host = await openHost({
+          intake,
+          activeVersion,
+          generation: 1,
+          stateDir: path.join(stateRoot, runId),
+          ...(request.plugin !== undefined ? { plugin: request.plugin } : {}),
+          ...(request.host !== undefined ? { host: request.host } : {}),
+        });
+
+        const session: ActiveSession = {
+          runId,
+          stateDir: path.join(stateRoot, runId),
           host,
-          runner: request.runner,
-          validators,
-          shouldStop: async () =>
-            (await sessionStop(session)) ||
-            (stopAfter !== undefined && acceptedOnPath(await loadRunState(session.stateDir), stopAfter)),
-          revisionBridge,
-          ...(supervisor !== undefined ? { supervisor } : {}),
-          ...(repair !== undefined ? { repair } : {}),
-          ...(request.proposalReviewer !== undefined ? { proposalReviewer: request.proposalReviewer } : {}),
-          ...resolveCandidateHost(request),
-          ...resolveRecreateHost(session, {
-            intake,
-            activeVersion,
-            generation: host.generation,
-            ...(request.plugin !== undefined ? { plugin: request.plugin } : {}),
-            ...(request.host !== undefined ? { host: request.host } : {}),
-            ...(request.recreateHost !== undefined
-              ? { recreateHost: request.recreateHost }
-              : {}),
-          }),
-        });
+          stopRequested: false,
+        };
+        registerSession(session);
+        let supervisor = request.supervisor;
 
-        const sourceDirtyAfter = await listDirtyPaths(intake.repoPath);
-        return toReport(state, sourceDirtyAfter);
-      } finally {
-        await clearStopRequest(session.stateDir);
-        await supervisor?.close?.().catch(() => undefined);
-        await reapSession(session);
-        await clearOwnerClaim(session.stateDir);
-      }
+        try {
+          const described = await host.describe({
+            runId,
+            operationId: "describe",
+            expectedStateRevision: 0,
+          });
+          if (!described.ok) {
+            throw new Error(`plugin describe failed: ${described.observation.message}`);
+          }
+          const definition = described.value;
+          assertDefinitionMatchesPin(definition, intake);
+          const stopAfter = request.stopAfterStage !== undefined ? stopNodeNamed(definition, request.stopAfterStage) : undefined;
+          // Controller defaults < the graph's declared defaultBudgets < task budgets.
+          const budgeted = applyGraphDefaultBudgets(intake, definition);
+          // §7.3: resolved once the plugin described its preference, before any run state; a refusal refuses the run.
+          const choice = supervisor === undefined && request.selectSupervisor !== undefined ? await request.selectSupervisor(definition.supervisor) : undefined;
+          const supervisorFactory = choice !== undefined ? choice.supervisorFactory : request.selectSupervisor !== undefined ? undefined : request.supervisorFactory;
+          const repair = choice !== undefined ? choice.repair : request.repair;
+
+          const revisionBridge = { current: 0 };
+          const validators = resolveValidators(
+            request.validators,
+            () => session.host,
+            definition.defaultValidators.map((b) => b.validatorId),
+            {
+              runId,
+              stateDir: path.join(stateRoot, runId),
+              getStateRevision: () => revisionBridge.current,
+            },
+          );
+
+          const sourceDirtyBefore = await listDirtyPaths(intake.repoPath);
+          const { worktreePath, branchName } = await createRunWorktree(
+            intake.repoPath,
+            runId,
+            intake.pinnedHead,
+            session.stateDir,
+            request.managed !== undefined,
+          );
+
+          let state = initialState({
+            runId,
+            intake: budgeted,
+            definition,
+            worktreePath,
+            worktreeBranch: branchName,
+            stateRoot,
+            sourceDirtyBefore,
+          });
+          state = { ...state, stateFormat: CURRENT_STATE_FORMAT, ...(request.install !== undefined ? { install: { ...request.install } } : {}), ...(request.hostBuild !== undefined ? { hostBuild: request.hostBuild } : {}) };
+          // §7.4: the harness is pinned at intake.
+          if (choice !== undefined) state = { ...state, supervisorSelection: selectionRecord(choice.selection, state) };
+          const executorCatalog = await pinExecutorCatalog(request.runner);
+          if (executorCatalog !== undefined) state = { ...state, executorCatalog };
+          const executorGrants = await currentExecutorGrants(request.runner).catch(() => undefined);
+          if (executorGrants !== undefined) state = { ...state, executorGrants };
+          revisionBridge.current = state.stateRevision;
+          session.stateDir = state.stateDir;
+          registerSession(session);
+          await ensureArtifactDir(state);
+          await clearStopRequest(state.stateDir);
+          // Own the run before durable state says `running`, so a reader never sees
+          // a running run without a live owner claim, however slow startup is.
+          await claimRunOwner(state.stateDir);
+          await saveRunState(state);
+          if (request.managed !== undefined) await markManagedExecutionStarted(state.stateDir);
+          await request.onRunCreated?.({ runId, stateDir: state.stateDir });
+          if (supervisor === undefined && supervisorFactory !== undefined) {
+            supervisor = await supervisorFactory({ runId, stateDir: state.stateDir });
+          }
+
+          state = await runNormalLoop(state, {
+            host,
+            runner: request.runner,
+            validators,
+            managed: request.managed !== undefined,
+            shouldStop: async () =>
+              (await sessionStop(session)) ||
+              (stopAfter !== undefined && acceptedOnPath(await loadRunState(session.stateDir), stopAfter)),
+            revisionBridge,
+            ...(supervisor !== undefined ? { supervisor } : {}),
+            ...(repair !== undefined ? { repair } : {}),
+            ...(request.proposalReviewer !== undefined ? { proposalReviewer: request.proposalReviewer } : {}),
+            ...resolveCandidateHost(request),
+            ...resolveRecreateHost(session, {
+              intake,
+              activeVersion,
+              generation: host.generation,
+              ...(request.plugin !== undefined ? { plugin: request.plugin } : {}),
+              ...(request.host !== undefined ? { host: request.host } : {}),
+              ...(request.recreateHost !== undefined
+                ? { recreateHost: request.recreateHost }
+                : {}),
+            }),
+          });
+
+          const sourceDirtyAfter = await listDirtyPaths(intake.repoPath);
+          return toReport(state, sourceDirtyAfter);
+        } finally {
+          await clearStopRequest(session.stateDir);
+          await supervisor?.close?.().catch(() => undefined);
+          await reapSession(session);
+          await clearOwnerClaim(session.stateDir);
+        }
+      }, { createDirectory: false });
     },
 
     async stop(runRef, options): Promise<InspectReport> {
       const stateDir = await resolveStateDir(runRef, options?.stateRoot);
-      await writeStopRequest(stateDir);
+      await authorizeManagedStop(stateDir, options?.managed);
+      if ((options?.managedDisconnect === true || options?.interruptionId !== undefined) && options?.managed === undefined) throw new Error("managed disconnect requires current launch grant");
+      const stopIntent = await writeStopRequest(stateDir, options?.interruptionId !== undefined ? { interruptionCommandId: options.interruptionId } : options?.managedDisconnect === true ? { managedDisconnect: true } : undefined);
 
       const session = getSession(stateDir) ?? getSession(runRef);
       if (session) {
@@ -599,8 +628,9 @@ export function createController(): Controller {
             {
               ...state,
               status: "stopped",
-              stopReason: "operator stop",
-              blocker: "stop requested",
+              stopReason: stopIntent.interruptionCommandId !== undefined || stopIntent.managedDisconnect === true ? "managed scheduling yield" : "operator stop",
+              blocker: stopIntent.interruptionCommandId !== undefined ? "hub service interruption" : "stop requested",
+              ...(stopIntent.interruptionCommandId !== undefined ? { managedContinuation: { cause: "service-interruption" as const, interruptionCommandId: stopIntent.interruptionCommandId } } : stopIntent.managedDisconnect === true ? { managedContinuation: { cause: "controller-crash" as const } } : {}),
             },
             "operator stop",
           );
@@ -633,16 +663,20 @@ export function createController(): Controller {
     },
 
     async resume(request: ResumeRequest): Promise<RunReport> {
+      if (request.managed?.automatic === true && (request.reconciled === true || request.approval !== undefined || request.upgrade !== undefined || request.updatePlugin === true || request.updateExecutors === true || request.supervisorPin !== undefined)) {
+        throw new Error("automatic managed resume cannot apply operator remedies");
+      }
       const stateDir = await resolveStateDir(request.runRef, request.stateRoot);
       if (getSession(stateDir) || getSession(request.runRef)) {
         throw new Error("cannot resume: run has an active controller session; stop first");
       }
 
+      await authorizeManagedResume(stateDir, request.managed);
       const stateFormats = request.stateFormats ?? STATE_FORMATS;
       // An upgrade reads the state in its own format, under the lock, before anything loads it as this release's.
       let state: DurableRunState =
         request.upgrade !== undefined ? (undefined as unknown as DurableRunState) : await loadCurrentFormat(stateDir, stateFormats);
-      if (request.approval !== undefined && request.upgrade === undefined && (state.status === "succeeded" || state.status === "failed")) {
+      if (request.approval !== undefined && request.upgrade === undefined && (state.status === "succeeded" || state.status === "failed") && !(request.managed?.commandId !== undefined && await managedCommandApplied(stateDir, request.managed.commandId))) {
         throw new Error(approvalRefusal(state, request.approval)!);
       }
       if (request.upgrade === undefined && (state.status === "succeeded" || state.status === "failed")) {
@@ -659,6 +693,26 @@ export function createController(): Controller {
       let pluginUpdate: IntakePin["bundle"] | undefined;
       // Whether `--upgrade` re-pinned executors (they then count as updated for the final-stop decision).
       let upgradeRepinned = false;
+      let managedCommandStarted = false;
+      let reconciliationAcknowledged = false;
+      const verifyManagedExecution = async () => {
+        // Preflight may await slow cleanup or filesystem reads while the hub revokes the grant.
+        await request.managed?.verify();
+        if (request.managed !== undefined) await markManagedExecutionStarted(stateDir);
+      };
+      const beforeManagedMutation = async () => {
+        await verifyManagedExecution();
+        if (!managedCommandStarted && request.managed?.commandId !== undefined) {
+          await beginManagedCommand(stateDir, request.managed.commandId);
+          managedCommandStarted = true;
+        }
+      };
+      // A return (not a throw) after the journal was written leaves a durably saved, consistent state:
+      // the remedy applied so far is the command's result, so a retry under its ID must not replay it.
+      // A throw leaves the record unsettled, as a crash would, for the operator to reconcile.
+      const settleManagedCommand = async () => {
+        if (managedCommandStarted && request.managed?.commandId !== undefined) await finishManagedCommand(stateDir, request.managed.commandId);
+      };
       await withDirectoryLock(stateDir, "run.exec.lock", async () => {
         if (getSession(stateDir) || getSession(request.runRef)) {
           throw new Error("cannot resume: run has an active controller session; stop first");
@@ -669,6 +723,20 @@ export function createController(): Controller {
             `cannot resume: run owned by live controller pid ${owner.controllerPid}; stop first`,
           );
         }
+        await authorizeManagedRun(stateDir, request.managed);
+        if (request.managed !== undefined) await assertManagedRunner(request.runner, stateDir);
+        if (request.managed?.commandId !== undefined) {
+          const command = await checkManagedCommand(stateDir, request.managed.commandId);
+          if (command === "applied") {
+            const { approval: _approval, reconciled: _reconciled, upgrade: _upgrade, updatePlugin: _plugin, updateExecutors: _executors, supervisorPin: _supervisor, ...withoutRemedy } = request;
+            request = withoutRemedy;
+          }
+        }
+        // Verified drainage is preflight for every managed remedy, including an upgrade.
+        if (request.managed !== undefined) {
+          const cleanup = await releaseManagedRun(request.runner, request.managed.runId, stateDir);
+          if (!cleanup.drained) throw new Error(`managed external cleanup pending: ${cleanup.resources.join(", ")}`);
+        }
         if (request.upgrade !== undefined) {
           upgradeRepinned = await upgradeRun(stateDir, request.upgrade, {
             runner: request.runner,
@@ -676,6 +744,17 @@ export function createController(): Controller {
             stateFormats,
             checkPluginUpdate: (current) => checkPluginUpdate(current, request),
             assertResumable: (current) => assertSupervisorRestorable(request, current),
+            // A remedy the resume would refuse after the move is refused before it, so a wrong approval or pin moves nothing.
+            checkRemedies: async (current) => {
+              // The switch journal settles provider and model only, so the pinned harness judged here is the one the resume judges.
+              applySupervisorPin(current, request.supervisorPin);
+              if (request.approval === undefined) return;
+              const problem = approvalRefusal(current, request.approval);
+              if (problem !== undefined) throw new Error(problem);
+              // Reads the declared files the way the resume will; the result is discarded.
+              await applyApproval(current, request.approval);
+            },
+            beforeCommit: beforeManagedMutation,
           });
         }
         state = await loadCurrentFormat(stateDir, stateFormats);
@@ -684,11 +763,12 @@ export function createController(): Controller {
           if (request.approval !== undefined) throw new Error(approvalRefusal(state, request.approval)!);
           return;
         }
+        assertAutomaticContinuation(state, request.managed);
         // Refused before anything changes: an undeclared, unavailable or misplaced decision records nothing.
         const approvalProblem = request.approval !== undefined ? approvalRefusal(state, request.approval) : undefined;
         if (approvalProblem !== undefined) throw new Error(approvalProblem);
         // No controller owns the run now: whatever sandbox a stopped job left behind is stale.
-        await request.runner.releaseRun?.(state.runId).catch(() => undefined);
+        if (request.managed === undefined) await request.runner.releaseRun?.(state.runId).catch(() => undefined);
         // Evidence belongs to the stop being resumed; any stop from here on is a new one.
         // A pre-#120 run may carry `resumedSinceLastDecision`; nothing reads it
         // now, since the supervisor's first episode after resume starts a fresh
@@ -780,7 +860,9 @@ export function createController(): Controller {
         state = reconcileRepairJournal(state);
         state = await reconcileSwitchJournal(state);
         // After the switch journal settled on the old harness: a transition moves a settled binding.
+        const beforeSupervisorPin = state;
         state = applySupervisorPin(state, request.supervisorPin);
+        const supervisorPinChanged = state !== beforeSupervisorPin;
         state = await reassessAcceptedWorkspace(state);
         // §8: a retryable stop runs again; a final one surfaces the same
         // blocker until something it depends on changed.
@@ -819,6 +901,7 @@ export function createController(): Controller {
               ...(state.blocker !== undefined ? { detail: state.blocker.slice(0, 500) } : {}),
             },
           );
+          if (supervisorPinChanged) await beforeManagedMutation();
           await saveRunState(state);
           return;
         }
@@ -833,6 +916,7 @@ export function createController(): Controller {
         if (state.reconciliationRequired !== undefined) {
           const owed = state.reconciliationRequired;
           if (request.reconciled === true) {
+            reconciliationAcknowledged = true;
             const { reconciliationRequired: _owed, ...rest } = state;
             void _owed;
             state = recordRemedy(rest, {
@@ -846,6 +930,7 @@ export function createController(): Controller {
               stopReason: QUOTA_RECONCILE_STOP_REASON,
               blocker: boundText(`job ${owed.operationId} (stage ${owed.stageId}) may have had effects before the usage limit; reconcile it, then \`graphloom resume --reconciled\`: ${owed.reason}`),
             };
+            if (supervisorPinChanged) await beforeManagedMutation();
             await saveRunState(state);
             return;
           }
@@ -863,10 +948,12 @@ export function createController(): Controller {
           stopMark: _mark,
           stopReason: _stopReason,
           blocker: _blocker,
+          managedContinuation: _managedContinuation,
           ...resumed
         } = state;
         void _stopReason;
         void _blocker;
+        void _managedContinuation;
         void _repeats;
         void _class;
         void _mark;
@@ -881,6 +968,8 @@ export function createController(): Controller {
         };
         // At the new generation: the decision is current evidence for this run of the graph.
         if (request.approval !== undefined) state = await applyApproval(state, request.approval);
+        if (request.approval !== undefined || supervisorPinChanged || reconciliationAcknowledged) await beforeManagedMutation();
+        else await verifyManagedExecution();
         await clearStopRequest(stateDir);
         // Own the run before durable state says `running` again (see `run`).
         await claimRunOwner(stateDir);
@@ -903,6 +992,7 @@ export function createController(): Controller {
       });
 
       if (state.status !== "running" || !session) {
+        await settleManagedCommand();
         return toReport(state, await listDirtyPaths(state.intake.repoPath));
       }
 
@@ -930,6 +1020,7 @@ export function createController(): Controller {
             blocker: `plugin describe failed on resume: ${described.observation.message}`,
           };
           await saveRunState(state);
+          await settleManagedCommand();
           return toReport(state, await listDirtyPaths(state.intake.repoPath));
         }
         try {
@@ -947,6 +1038,7 @@ export function createController(): Controller {
             blocker: err instanceof Error ? err.message : String(err),
           };
           await saveRunState(state);
+          await settleManagedCommand();
           return toReport(state, await listDirtyPaths(state.intake.repoPath));
         }
         const executorCheck = await verifyExecutorCatalog(state, request.runner, request.updateExecutors === true).catch(
@@ -955,6 +1047,7 @@ export function createController(): Controller {
         if (executorCheck !== undefined && "blocker" in executorCheck) {
           state = { ...state, status: "stopped", stopReason: "executor pin mismatch", blocker: executorCheck.blocker };
           await saveRunState(state);
+          await settleManagedCommand();
           return toReport(state, await listDirtyPaths(state.intake.repoPath));
         }
         const executorUpdate: { catalog: ExecutorCatalogEntry[]; repins: ExecutorRepin[] } | undefined = executorCheck;
@@ -973,6 +1066,7 @@ export function createController(): Controller {
             blocker: rehydrated.reason,
           };
           await saveRunState(state);
+          await settleManagedCommand();
           return toReport(state, await listDirtyPaths(state.intake.repoPath));
         }
 
@@ -1016,12 +1110,14 @@ export function createController(): Controller {
             versionHistory: [...(state.versionHistory ?? []), { activeVersion: state.activeVersion, generation: state.generation, reason, at: new Date().toISOString() }],
           });
           revisionBridge.current = state.stateRevision;
+          await beforeManagedMutation();
           await saveRunState(state);
         }
 
         if (executorUpdate !== undefined && executorUpdate.repins.length > 0) {
           state = applyExecutorRepin(state, executorUpdate.catalog, executorUpdate.repins);
           revisionBridge.current = state.stateRevision;
+          await beforeManagedMutation();
           await saveRunState(state);
         }
 
@@ -1050,10 +1146,12 @@ export function createController(): Controller {
           await saveRunState(state);
         }
 
+        if (request.managed?.commandId !== undefined) await finishManagedCommand(stateDir, request.managed.commandId);
         state = await runNormalLoop(state, {
           host,
           runner: request.runner,
           validators,
+          managed: request.managed !== undefined,
           shouldStop: () => sessionStop(session!),
           revisionBridge,
           ...(supervisor !== undefined ? { supervisor } : {}),
