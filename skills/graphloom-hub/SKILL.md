@@ -79,7 +79,12 @@ come from the **hub service's environment**, and the service's `PATH` is the
 toolchain. When the repository pins a toolchain your shell would prefix on
 `PATH`, or the graph needs a token the user would export, ask the user
 whether the service's environment provides it (never read it); if not, start
-this run directly with graphloom-run.
+this run directly with graphloom-run. The same holds for the agents' logins:
+Claude Code finds its login through `CLAUDE_CONFIG_DIR` (and Codex through
+`CODEX_HOME`) when the user sets one in their shell profile; the service needs
+the same value, or the run's agent jobs fail to authenticate (`401 … OAuth
+access token is invalid`). When a hub run's first agent job fails that way,
+tell the user which variable the service lacks; don't retry the run.
 
 **Submit** with a key that names the work, so a retry after an uncertain
 reply never makes a second run, and record the submission beside the task:
