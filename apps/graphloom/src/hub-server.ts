@@ -6,7 +6,7 @@ import { createConnection } from "node:net";
 import { chmod, lstat, mkdir, open, readdir, unlink } from "node:fs/promises";
 import path from "node:path";
 import { openHub, type Hub, type HubDriver } from "@graphloom/hub";
-import type { HubInput, HubResumeRemedy, HubRetryPolicy, HubSubmission, MonitorSnapshot } from "@graphloom/sdk";
+import type { HubHealth, HubInput, HubResumeRemedy, HubRetryPolicy, HubSubmission, MonitorSnapshot } from "@graphloom/sdk";
 import { object, integer, type HubServiceConfig } from "./hub-config.js";
 import { HubHttpError, readJson } from "./hub-client.js";
 import { captureHubInput, inputDigest, writePrivateJsonOrText } from "./hub-input.js";
@@ -15,6 +15,7 @@ import { withHubSnapshot } from "./hub-observe.js";
 import { HubInstallationRetention, inputReferences } from "./hub-retention.js";
 import { selfInstall } from "./ownership.js";
 import { HubEvents } from "./hub-events.js";
+import { parseListQuery, readLiveRequest, searchHub, type LiveRequest } from "./hub-history.js";
 
 export interface HubService {
   hub: Hub;
@@ -44,7 +45,18 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
   let retentionError: string | undefined;
   const runtime = options.driver === undefined ? createHubRuntime(config, () => { void hub?.tick().catch(() => undefined); }) : undefined;
   const cache = options.cache ?? runtime?.cache ?? new Map<string, HubMonitorCache>();
-  try { hub = await openHub({ directory: config.directory, config, driver: options.driver ?? runtime!.driver }); }
+  // Captured tasks are immutable, so what each one asked for is read once per submission.
+  const requests = new Map<string, LiveRequest>();
+  const liveRequest = async (submission: HubSubmission): Promise<LiveRequest> => {
+    let found = requests.get(submission.id);
+    if (!found) { found = await readLiveRequest(submission.input.taskFile); requests.set(submission.id, found); }
+    return found;
+  };
+  const describeArchive = async (submission: HubSubmission) => {
+    const { summary } = await liveRequest(submission);
+    return { ...(summary.graph !== undefined ? { graph: summary.graph } : {}), request: summary, stateDir: path.join(config.directory, "runs", submission.runId) };
+  };
+  try { hub = await openHub({ directory: config.directory, config, driver: options.driver ?? runtime!.driver, describeArchive }); }
   catch (error) { await retention?.close().catch(() => undefined); throw error; }
   const scheduler = hub;
   let events: HubEvents;
@@ -90,14 +102,33 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
     const current = cache.get(submission.id);
     return withHubSnapshot(current?.snapshot, submission, scheduler.list(), new Date().toISOString(), current?.error);
   };
+  let version: string | undefined;
+  try { version = selfInstall().record.version; } catch { version = undefined; }
   let closing = false;
   const server = createServer((request, response) => {
     void (async () => {
       const url = new URL(request.url ?? "/", "http://hub.local");
-      if (request.method === "GET" && url.pathname === "/v1/health") return respond(response, 200, { ...scheduler.list(), ...((monitoringError || historyError) ? { monitoringError: monitoringError ?? historyError } : {}), ...(retentionError ? { retentionError } : {}), closing });
+      if (request.method === "GET" && url.pathname === "/v1/health") {
+        const status = scheduler.list();
+        const counts: HubHealth["counts"] = {};
+        for (const item of status.submissions) counts[item.state] = (counts[item.state] ?? 0) + 1;
+        const health: HubHealth = {
+          ...status, socket: config.socket, ...(version !== undefined ? { version } : {}), counts, archivedEntries: scheduler.archived().length,
+          ...(scheduler.archiveIndexError ? { archiveIndexError: scheduler.archiveIndexError } : {}),
+          ...((monitoringError || historyError) ? { monitoringError: (monitoringError ?? historyError)! } : {}), ...(retentionError ? { retentionError } : {}), closing,
+        };
+        return respond(response, 200, health);
+      }
       if (closing) throw new HubHttpError("hub is shutting down", 503);
       if (url.pathname === "/v1/submissions") {
-        if (request.method === "GET") return respond(response, 200, scheduler.list());
+        if (request.method === "GET") {
+          const filter = parseListQuery(url.searchParams);
+          const status = scheduler.list();
+          if (filter === undefined) return respond(response, 200, status);
+          const live = new Map<string, LiveRequest>();
+          for (const item of status.submissions) live.set(item.id, await liveRequest(item));
+          return respond(response, 200, searchHub(status, scheduler.archived(), live, filter));
+        }
         if (request.method === "POST") {
           const body = await payload(request, ["taskPath", "key"]);
           const file = text(body.taskPath, "taskPath");
@@ -128,7 +159,7 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
           const body = await payload(request, ["commandId"]);
           if (body.commandId !== undefined) text(body.commandId, "commandId", 256);
           const archived = await scheduler.archive(id);
-          cache.delete(archived.id);
+          cache.delete(archived.id); requests.delete(archived.id);
           await capture(); return respond(response, 202, archived);
         }
         const submission = scheduler.inspect(id);

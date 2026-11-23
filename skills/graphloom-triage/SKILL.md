@@ -36,8 +36,8 @@ Diagnose first. A resume is a decision the user makes once the cause is known.
   release).
 - Never print or ask for a token or secret.
 - Read run state only through `graphloom inspect`, `graphloom stats` and
-  `graphloom wait`, and a hub submission's through `graphloom hub list`,
-  `graphloom hub inspect` and `graphloom hub logs`;
+  `graphloom wait`, and a hub submission's through `graphloom hub status`,
+  `graphloom hub list`, `graphloom hub inspect` and `graphloom hub logs`;
   never edit `state.json` or the hub's `scheduler.json`.
 - Use only commands and flags `graphloom --help` lists.
 - Never decide liveness with `pgrep`/`ps`: use `graphloom wait`.
@@ -81,6 +81,9 @@ graphloom hub list --json | jq '.submissions[] | select(.id == "<submission>") |
 graphloom hub logs <submission>
 ```
 
+(The `jq` line reads one submission's full record; `hub list` has no
+filter by submission id.)
+
 | Hub says | Cause | What to check |
 |---|---|---|
 | `waiting` or `queued` with `Next eligible` | Nothing to diagnose: the hub continues the run by itself (cooldown, automatic retry, a free slot) | The time; tell the user |
@@ -91,9 +94,11 @@ graphloom hub logs <submission>
 | `owning controller did not authorize automatic continuation` | The controller's continuation said a person must decide | The run's stop as in section 2 |
 | `failed` | A terminal controller failure | The run's stop; artifacts are kept |
 
-A `Fault:` line in `graphloom hub list` is the hub's own persistence or
-reconciliation fault: report it to the user for the operator; it is not the
-run's cause.
+`graphloom hub status` exiting 3 with a `Fault:` line is the hub's own
+persistence or reconciliation fault: report it to the user for the operator;
+it is not the run's cause. An archived submission no longer appears in the
+queue; `graphloom hub list --archived --key <key>` (or `--grep <text>`) finds
+its index entry, whose `stateDir` (with `--json`) is the run to diagnose.
 
 ## 2. Classify the cause
 

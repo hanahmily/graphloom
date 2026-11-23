@@ -168,16 +168,17 @@ zero-provider-call rehearsal is worth it: `graphloom rehearse task.yaml`.
 continues them after cooldowns), submit to it instead of starting a process:
 
 ```sh
-graphloom hub list
+graphloom hub status
 ```
 
-Exit 0 without a `Fault:` line: submit as graphloom-hub section 2 says
+Exit 0 (healthy): submit as graphloom-hub section 2 says
 (`graphloom hub submit task.yaml --key <name>`, the submission id recorded in
 `.graphloom-watch/submission`), tell the user the submission id, run id and
 queue state, and continue with section 5. Never start the hub yourself.
-Start directly instead, as below, when it is unreachable (`cannot reach hub
-at ...`; say so, and that the operator starts it with `systemctl --user
-start`), when it reports a fault, or when the run needs what only your shell
+Start directly instead, as below, when it is unreachable (exit 1, `cannot
+reach hub at ...`; say so, and that the operator starts it with `systemctl
+--user start`), when it is faulted or shutting down (exit 3; quote its
+`Fault:` line), or when the run needs what only your shell
 has: a toolchain prefixed on `PATH` (section 1) or a token the user exports.
 A hub run takes `PATH` and token variables from the hub service's
 environment; ask the user whether it provides them.

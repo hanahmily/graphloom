@@ -24,7 +24,8 @@ submission id); section 4 adds what that changes.
   release).
 - Never print or ask for a token or secret; do not dump environment variables.
 - Read run state only through `graphloom watch`, for a hub submission also
-  `graphloom hub list` and `graphloom hub inspect` (and, when the user asks
+  `graphloom hub status`, `graphloom hub list` and `graphloom hub inspect`
+  (and, when the user asks
   for detail, `graphloom inspect` and `graphloom stats`);
   never edit `state.json` (nor hand-parse and rewrite it).
 - Use only commands and flags `graphloom --help` lists.
@@ -145,8 +146,10 @@ foreground), and act on its line:
 - `paused`, `blocked`, `failed`, `canceled`, `succeeded` or `unknown`: an
   attention. Read `graphloom hub inspect <submission>` (overview: status,
   `Blocker`, `Next eligible`), quote the blocker, and ask the user what to do
-  (`unknown`: the hub is unreachable or the submission archived; see
-  graphloom-hub section 1). Offer graphloom-deliver for `succeeded`.
+  (`unknown`: the hub is unreachable or the submission archived;
+  `graphloom hub status` tells which: exit 1 or 3 is the hub, see
+  graphloom-hub section 1; exit 0 means archived, and
+  `graphloom hub list --archived --key <key>` shows its final state). Offer graphloom-deliver for `succeeded`.
 - `fault: ...`: the hub has a persistence or reconciliation fault and starts
   nothing until the operator fixes it. Quote it and ask; do not re-arm.
 - `blocker: ...` on a launch that still holds its slot (for example

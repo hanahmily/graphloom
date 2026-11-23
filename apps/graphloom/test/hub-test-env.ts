@@ -36,14 +36,14 @@ export function fakeInput(file = "/tasks/task.yaml"): HubInput {
   const task = "graph: hello\nrepo: ./repo\nrequest: Test one graph.\n";
   return { task, taskDigest: createHash("sha256").update(task).digest("hex"), taskPath: file, repoPath: "/repo", baseCommit: "a".repeat(40), bundlePath: "/bundle", bundleDigest: "b".repeat(64), runtimePath: "/runtime/main.js", runtimeDigest: "c".repeat(64) };
 }
-export async function socketEnvironment(cleanups: Array<() => Promise<void>>, limit = 3, setup?: (directory: string) => Promise<void>) {
+export async function socketEnvironment(cleanups: Array<() => Promise<void>>, limit = 3, setup?: (directory: string) => Promise<void>, input: (file: string) => HubInput = fakeInput) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "gl-hub-http-"));
   cleanups.push(() => rm(directory, { recursive: true, force: true }));
   const config: HubServiceConfig = { directory, socket: path.join(directory, "hub.sock"), cgroupRoot: "/not-used", maxConcurrentRuns: limit,
     retry: { automatic: true, maxAutomaticResumes: 5, maxElapsedMs: 60000, baseDelayMs: 1000, maxDelayMs: 10000 }, pollIntervalMs: 1000, shutdownGraceMs: 0 };
   const driver = new SocketTestDriver();
   await setup?.(directory);
-  const service = await serveHub({ config, driver, captureInput: async file => fakeInput(file), observe: async submission => ({
+  const service = await serveHub({ config, driver, captureInput: async file => input(file), observe: async submission => ({
     schemaVersion: 1, frameId: `${submission.runId}:fixture`, observedAt: "2026-11-20T12:00:00Z",
     run: { id: submission.runId, status: "running", graph: "hello", currentStage: "Write", currentAttempt: 1 },
     sources: [{ id: "fixture-controller", status: "available", observedAt: "2026-11-20T12:00:00Z" }],
