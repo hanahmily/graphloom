@@ -12,6 +12,10 @@ export const SESSION_SAVE_INTERVAL_MS = 2_000;
  * Saves a session while its run is still going: `poke` on activity schedules
  * `save` (the first at once, then at most every `intervalMs`, one at a time),
  * and the first save that reports the session restorable calls `saved`.
+ * The agent may write the activity it just reported to its transcript only
+ * after a save has read it, so each save that follows activity is followed
+ * by one more `intervalMs` later, even when the agent then goes quiet (a
+ * long command): the saved copy is never left behind the last activity.
  * `close` stops scheduling and waits for a save in progress, so the run's
  * final save never races an early one.
  */
@@ -21,9 +25,16 @@ export function sessionSaver(save: () => Promise<boolean>, saved: () => void, in
   let last = Number.NEGATIVE_INFINITY;
   let closed = false;
   let reported = false;
+  // Activity seen since the last save started.
+  let active = false;
+  const schedule = () => {
+    timer = setTimeout(run, Math.max(0, last + intervalMs - Date.now()));
+  };
   const run = () => {
     timer = undefined;
     last = Date.now();
+    const followed = active;
+    active = false;
     chain = chain
       .then(save)
       .then((ok) => {
@@ -33,12 +44,16 @@ export function sessionSaver(save: () => Promise<boolean>, saved: () => void, in
         }
       })
       // An early save is best effort: the run's final save reports its own failure.
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .then(() => {
+        if (followed && !closed && timer === undefined) schedule();
+      });
   };
   return {
     poke(): void {
-      if (closed || timer !== undefined) return;
-      timer = setTimeout(run, Math.max(0, last + intervalMs - Date.now()));
+      if (closed) return;
+      active = true;
+      if (timer === undefined) schedule();
     },
     async close(): Promise<void> {
       closed = true;
