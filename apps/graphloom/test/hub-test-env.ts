@@ -9,7 +9,6 @@ import type { HubDriver, HubExecutionObservation } from "@graphloom/hub";
 import type { HubInput, HubLaunch, HubSubmission, MonitorSnapshot } from "@graphloom/sdk";
 import type { HubServiceConfig } from "../src/hub-config.js";
 import { serveHub } from "../src/hub-server.js";
-import type { HubDelivery } from "../src/hub-subscriptions.js";
 
 export class SocketTestDriver implements HubDriver {
   executions = new Map<string, HubExecutionObservation>();
@@ -43,14 +42,13 @@ export async function socketEnvironment(cleanups: Array<() => Promise<void>>, li
   const config: HubServiceConfig = { directory, socket: path.join(directory, "hub.sock"), cgroupRoot: "/not-used", maxConcurrentRuns: limit,
     retry: { automatic: true, maxAutomaticResumes: 5, maxElapsedMs: 60000, baseDelayMs: 1000, maxDelayMs: 10000 }, pollIntervalMs: 1000, shutdownGraceMs: 0 };
   const driver = new SocketTestDriver();
-  const deliveries: HubDelivery[] = [];
   await setup?.(directory);
-  const service = await serveHub({ config, driver, deliver: async delivery => { deliveries.push(delivery); return { state: "accepted" }; }, captureInput: async file => fakeInput(file), observe: async submission => ({
+  const service = await serveHub({ config, driver, captureInput: async file => fakeInput(file), observe: async submission => ({
     schemaVersion: 1, frameId: `${submission.runId}:fixture`, observedAt: "2026-11-20T12:00:00Z",
     run: { id: submission.runId, status: "running", graph: "hello", currentStage: "Write", currentAttempt: 1 },
     sources: [{ id: "fixture-controller", status: "available", observedAt: "2026-11-20T12:00:00Z" }],
     usage: { metrics: [{ id: "tokens", label: "Output", value: null, unit: "tokens", source: "not reported" }] },
   } satisfies MonitorSnapshot) });
   cleanups.push(() => service.close());
-  return { service, driver, config, directory, deliveries, socket: service.socket };
+  return { service, driver, config, directory, socket: service.socket };
 }

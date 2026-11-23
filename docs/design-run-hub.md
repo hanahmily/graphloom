@@ -2,7 +2,7 @@
 
 Status: implemented in this worktree, with deployment qualification outstanding.
 The local CLI, durable scheduler, managed controller/runner contract, reusable
-panels and explicit chat subscriptions are connected. This extends the
+panels and terminal watch are connected. This extends the
 [core design](design-typescript-core.md) without changing graph topology,
 acceptance, supervisor authority or run budgets.
 
@@ -11,10 +11,10 @@ remains a fictional visual-review artifact. Production rendering now lives in
 `packages/monitor`: text, ANSI, JSON and bounded Markdown/KaTeX, ELK topology with
 complete adjacency fallback, and quantitative cell charts. Tests use fake
 process drivers, real gated child processes with cgroup filesystem fixtures,
-scripted controller runs and injected chat delivery. Real delegated
+scripted controller runs and renderer fixtures. Real delegated
 systemd/cgroup/container stop/restart qualification and deployed HAPI assistant
 color qualification remain operational checks; no service was deployed as part
-of implementation. Unknown hosts and background reports use plain output.
+of implementation. Unknown chat hosts use plain output.
 
 ## 1. Outcome and scope
 
@@ -446,7 +446,7 @@ Reuse `progress.ts` and `stats.ts` semantics through an owning-version observati
 interface; extract their pure projections to a shared controller monitoring module
 instead of duplicating them in the hub. Poll changed durable state every five
 seconds with bounded parallelism; process/control events wake an earlier read.
-Watch notifications remain useful for people but do not drive scheduling. Do not
+Watch output remains useful for people but does not drive scheduling. Do not
 spawn one permanent `graphloom watch` process per submission.
 
 The topology implementation's live path and side visits determine what work is
@@ -463,7 +463,7 @@ Recorded calls may arrive only when jobs settle, so reported rates can lag work.
 
 Read failures retain the last observation with a stale marker. Silence reports
 possible lack of progress; it never proves death or authorizes a replacement.
-Cap log retention per launch and subscriber buffers; a slow viewer cannot block a
+Cap log retention per launch and event-reader buffers; a slow viewer cannot block a
 controller or grow the daemon without bound. Logs and run artifacts remain visible
 only to users authorized for the daemon's Unix account.
 
@@ -575,27 +575,12 @@ actual Markdown delivery surface, light/dark themes, narrow widths and error
 fallback, rather than treating one successful colored example as full support.
 KaTeX is an optional enhancement and cannot gate v1 hub launch or basic monitoring.
 
-The user or invoking agent registers a chat subscription to the originating
-session when submitting or attaching to a run. Its record contains the approved
-destination, submission filter, selected panels and detail limits, event cursor,
-requested and resolved renderer/capability profile, delivery policy and last
-delivery status. Reconnection rechecks a changed host profile; the safe fallback
-is plain Markdown, not guessed support. Do not infer recipients from a
-peer/session directory or broadcast.
-A HAPI adapter can use the existing watch-to-session notification mechanism;
-other hosts require their own supported background-notification or polling
-adapter. Where an inactive session cannot receive or be awakened under its policy,
-retain pending reports and show that delivery is pending. A delivery acknowledgement
-means accepted by the host, not read by the user. No adapter is started by this
-design change.
-
-Delivery failures known to precede acceptance retry at most five times using the
-same report ID. An ambiguous result is never blindly resent. Later reports may
-still be delivered; up to eight uncertain report identities are retained. Use
-`graphloom hub subscriptions` to inspect them, check the destination, then run
-`graphloom hub resolve-report <subscription-id> --report <report-id> --outcome accepted|failed`
-to record the observed outcome and free history capacity. The command does not
-resend the report or change graph execution.
+Chat panels are requested on demand. The user or invoking agent runs `hub inspect`
+and includes its canonical text or Markdown in the reply. The hub stores no chat
+destinations and does not send or retry session messages. A tool result can show
+the generated source; native colors require a supported assistant Markdown
+surface. The existing standalone `graphloom watch` notification workflow remains
+separate from hub monitoring.
 
 Chat reports use plain Markdown/text or the explicitly supported static KaTeX
 profile. Ordinary chat messages never receive raw ANSI escape sequences.
@@ -604,10 +589,9 @@ the normal panel delivery path. A future MCP Apps adapter may offer rich HTML
 panels for hosts that support the extension, but neither MCP Apps nor a HAPI/MCP
 client modification is a v1 prerequisite. A regular MCP tool can return structured
 panel data and a canonical text/Markdown representation; it does not add host
-rendering capability by itself. Reuse the current watch categories: stage moves
-batched over 60 seconds, a 15-minute quiet heartbeat, and prompt attention for
-operator blockers. Add queue admission, waiting/requeue, final success and failure
-events. Distinguish an automatically handled cooldown from an operator blocker:
+rendering capability by itself. Hub watch/events expose queue admission, graph
+progress, waiting/requeue, final success and failure. Distinguish an automatically
+handled cooldown from an operator blocker:
 the former reports the next eligible time without asking the user to resume.
 Hub retries remain controlled solely by the recorded submission policy. The
 existing standalone watch skill keeps its current watch-only rules.
@@ -619,33 +603,30 @@ Execution polling caches the owning runtime's small continuation observation whi
 `state.json` retains the same file identity. Owner and cgroup liveness are checked
 every poll, and cleanup reuses that observation. A changed state invalidates the
 cache. Full topology, jobs and usage projections are requested only for panel
-reads or subscribed reports, with a short refresh interval; cgroup counter sampling
-continues independently. Older owning runtimes without the execution-only capability
-still use their versioned observer, with the same cache.
+reads, including terminal watch refreshes, with a short refresh interval; cgroup
+counter sampling continues independently. Older owning runtimes without the
+execution-only capability still use their versioned observer, with the same cache.
 
 The canonical report can be printed even when no language model is available;
 agent prose is optional presentation, never scheduling evidence. Rendering and
-notification batching run as ordinary code; metric samples do not invoke an LLM.
-The host adapter must use a delivery surface whose rendering support is known;
-a background notification does not inherit the assistant-message renderer merely
-because both appear in the same session.
+sampling run as ordinary code; metric samples do not invoke an LLM. On-demand
+chat rendering uses a surface whose support is known; a tool result does not
+inherit the assistant-message renderer merely because both appear in one session.
 
 Keep three views distinct: an inspection or chat message is a timestamped
 snapshot; retained events and prior attempts are bounded history; a connected
 terminal watch is a live view with explicit stale/disconnected status. A new
-snapshot notification does not rewrite old chat history. Message replacement or
+snapshot reply does not rewrite old chat history. Message replacement or
 continuous rich-UI refresh requires a separate verified host capability and is
-outside the baseline. Color, panel size and delivery success are never evidence
+outside the baseline. Color, panel size and rendering success are never evidence
 that a graph advanced or succeeded.
 
 Expose a snapshot with an event cursor, then a bounded resumable event stream.
 Each event has a hub-local monotonic sequence, submission/run identity, observation
-time and controller revision when present. Persist report delivery cursors outside
-the scheduling snapshot. Reconnect replays retained events; an expired cursor
-returns an explicit gap and a fresh snapshot. Delivery is at least once, deduplicated
-by event/report ID where the destination supports it; do not claim exactly-once
-chat output across an ambiguous delivery acknowledgement. Bound stream buffers
-and report retention, and surface stale data or disconnected subscribers. Event
+time and controller revision when present. Clients retain their event cursors.
+Reconnect replays retained events; an expired cursor returns an explicit gap and
+a fresh snapshot. Clients deduplicate replayed events by sequence. Bound event
+buffers and retention, and surface stale data or disconnected viewers. Event
 production reflects recorded facts and observed changes; it is not a complete
 trace of every intermediate controller transition between samples.
 
@@ -670,10 +651,7 @@ its authentication remain a separately designed feature.
 | `POST /v1/submissions/:id/commands` | Typed pause, resume, cancel, policy-update or archive command |
 | `PATCH /v1/settings` | Change global concurrency limit |
 | `GET /v1/status` | Health and aggregate scheduling state |
-| `GET /v1/events?since=<cursor>` | Bounded NDJSON observation/report stream; reconnect cursor and explicit retention gaps |
-| `POST /v1/subscriptions` | Register an explicitly chosen chat destination, submission filter, panel selection and renderer/capability profile |
-| `GET /v1/subscriptions` and `DELETE /v1/subscriptions/:id` | Inspect delivery/cursor state or stop notification delivery |
-| `POST /v1/subscriptions/:id/reports/:reportId` | Resolve an uncertain delivery as accepted or failed after inspecting the destination |
+| `GET /v1/events?since=<cursor>` | Bounded NDJSON observation stream; reconnect cursor and explicit retention gaps |
 | `GET /v1/submissions/:id/logs` | Bounded log read/follow with offset |
 
 All mutations support command idempotency. Resume remedies use a command ID
@@ -753,9 +731,9 @@ The implementation follows these layers; production-host qualification remains s
 3. **Automatic continuation and observations.** Bounded retry policy, safe wait
    yields, versioned snapshots and reused progress/usage projections, independent
    panels with JSON/plain/Markdown and ANSI terminal rendering, an optional
-   terminal composition, and explicit agent-chat subscriptions with delivery
-   status. Qualify the optional static KaTeX profile on supported HAPI message
-   surfaces separately; it does not block the baseline. MCP Apps remains later
+   terminal composition, and on-demand chat snapshots. Qualify the optional
+   static KaTeX profile on supported HAPI message surfaces separately; it does
+   not block the baseline. MCP Apps remains later
    work for compatible hosts.
 4. **Deployment.** Unix transport, delegated cgroups, user service packaging,
    release retention and clean-install/restart verification.
@@ -791,12 +769,11 @@ Test observable admission and process behavior, not just queue implementation.
 | TTY resize, narrow view, Unicode labels, redirected output | Readable panels or append-only plain/JSON; no stray control sequences |
 | Known KaTeX host, unknown host, or changed host version | Explicit profile selection; auto is plain when capability is unverified; no inference from MCP connectivity |
 | KaTeX syntax characters, unsupported glyphs, large graph or renderer failure | Escaped data and bounded plain fallback; no arbitrary commands; every graph edge remains retrievable through paginated adjacency |
-| HAPI assistant message versus tool result or background notification | Qualify the actual delivery surface; success in one surface does not claim support in all |
+| HAPI assistant message versus tool result | Qualify the actual rendering surface; success in one surface does not claim support in all |
 | Static inspection, retained history and connected watch | Timestamps, history scope and live/stale state remain distinct; old snapshots do not appear live |
 | ANSI, Markdown/KaTeX and JSON for the same panel | Same identities, values, units, unknown/gap markers and status words; color/layout adds no acceptance claim |
-| Viewer exits or notification destination disconnects | Runs continue; reconnect resumes or reports an explicit event gap |
-| Chat delivery retries or loses its acknowledgement | Stable report IDs, bounded retries, honest delivery status; no new run execution |
-| High-frequency metric updates | Bounded code-driven sampling/coalescing; no per-sample model calls or chat-history flood |
+| Viewer exits or watch connection disconnects | Runs continue; reconnect resumes or reports an explicit event gap |
+| High-frequency metric updates | Bounded code-driven sampling; no per-sample model calls or unsolicited chat output |
 | Browser/phone preview or future MCP client | No public hub listener or implicit bypass of the local socket boundary |
 | UI marks a stage or run complete | Completion comes from controller evidence/status, never animation or job exit alone |
 | Real systemd stop/restart/reboot-equivalent test | Queue restored, descendants accounted for, user holds preserved |

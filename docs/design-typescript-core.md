@@ -1945,8 +1945,9 @@ charts retain numeric values, units and gaps when rich rendering is unavailable.
 This route requires no HAPI change or screenshot, and does not promise interactive
 or continuously updating chat messages. Future MCP Apps require host integration.
 
-Live terminal input and chat delivery stay outside the controller and scheduler.
-Panels are read-only; rendering failure, viewer exit or notification loss cannot
+Live terminal input and on-demand chat formatting stay outside the controller
+and scheduler.
+Panels are read-only; rendering failure, viewer exit or watch disconnection cannot
 change execution. The monitor consumes the [directed topology](design-graph-topology.md),
 including cycles, live paths and supervisor-only nodes, from the owning runtime.
 Legacy stage views remain a compatibility fallback.

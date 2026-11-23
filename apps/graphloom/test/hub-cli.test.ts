@@ -4,7 +4,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { HubSubmission } from "@graphloom/sdk";
 import { hubCommand, hubServiceUnit } from "../src/hub-cli.js";
-import { openSubscriptions } from "../src/hub-subscriptions.js";
 import { hubRequest } from "../src/hub-client.js";
 import { socketEnvironment } from "./hub-test-env.js";
 
@@ -53,20 +52,6 @@ describe("hub command over a Unix socket", () => {
     expect(service.hub.inspect(item.id).pendingCommand?.remedy).toMatchObject({ approve: "approval-1", inputs: { choice: "yes" } });
   });
 
-  it("resolves an uncertain delivery through the explicit operator command", async () => {
-    let subscriptionId = ""; let reportId = "";
-    const { socket, deliveries } = await socketEnvironment(cleanups, 0, async directory => {
-      const subscriptions = await openSubscriptions(directory, { deliver: async () => ({ state: "uncertain", reason: "response lost" }) });
-      subscriptionId = (await subscriptions.add({ sessionId: "fixture-session" })).id;
-      await subscriptions.tick({ cursor: 0, gap: false, events: [] }, { hubId: "fixture", occupiedSlots: 0, maxConcurrentRuns: 0, submissions: [] });
-      reportId = subscriptions.list()[0]!.reports[0]!.id;
-    });
-    expect(JSON.parse((await invoke(["resolve-report", subscriptionId, "--report", reportId, "--outcome", "accepted", "--socket", socket])).out)).toEqual({ resolved: true });
-    const subscriptions = JSON.parse((await invoke(["subscriptions", "--socket", socket])).out);
-    expect(subscriptions[0].reports[0]).toMatchObject({ id: reportId, state: "accepted", attempts: 1 });
-    expect(deliveries).toHaveLength(0);
-  });
-
   it.each([
     ["list", "--format", "json"], ["list", "unexpected"], ["service", "unexpected"],
     ["inspect", "s", "--format", "bogus"], ["inspect", "s", "--format", "text", "--chat-renderer", "katex"],
@@ -75,7 +60,7 @@ describe("hub command over a Unix socket", () => {
     ["watch", "--json", "--plain"], ["logs", "s", "--stream", "other"],
     ["pause", "s", "--approve", "approval"], ["resume", "s", "--input", "choice=yes"],
     ["resume", "s", "--approve", "a", "--decline", "b"], ["resume", "s", "--approve", "a", "--input", "choice=yes", "--input", "choice=no"],
-    ["resolve-report", "s"], ["resolve-report", "s", "--report", "r", "--outcome", "retry"],
+    ["subscribe", "session"], ["subscriptions"], ["unsubscribe", "s"], ["resolve-report", "s"],
     ["submit", "a", "--key="], ["policy", "s", "--automatic", "maybe"], ["policy", "s"], ["unknown"],
   ])("rejects invalid commands before a transport request: %j", async (...args) => {
     await expect(invoke([...args, "--socket", "/nonexistent-hub.sock"])).rejects.not.toThrow("cannot reach hub");

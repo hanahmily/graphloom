@@ -188,7 +188,7 @@ export async function routeManagedCommand(cmd: string, args: string[]): Promise<
   const binding = await readManagedBinding(stateDir);
   if (!binding) return false;
   if (cmd === "delete") throw new Error("a managed run cannot be deleted; cancel/archive it through its hub first");
-  if (args.includes("--rehearsal") || args.includes("--on-stop")) throw new Error("managed resume does not accept --rehearsal or --on-stop; use a hub subscription for reports");
+  if (args.includes("--rehearsal") || args.includes("--on-stop")) throw new Error("managed resume does not accept --rehearsal or --on-stop; use hub inspect or hub watch for monitoring");
   const endpoint = JSON.parse(await boundedText(path.join(binding.hubStateDir, "endpoint.json"), 4096)) as { hubId?: string; socket?: string };
   if (endpoint.hubId !== binding.hubId || typeof endpoint.socket !== "string" || !path.isAbsolute(endpoint.socket)) throw new Error("managed hub endpoint is unavailable; start its hub before controlling this run");
   const remedy = cmd === "resume" ? parseRemedy(args) : undefined;

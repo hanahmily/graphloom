@@ -6,14 +6,12 @@ import { createConnection } from "node:net";
 import { chmod, lstat, mkdir, open, readdir, unlink } from "node:fs/promises";
 import path from "node:path";
 import { openHub, type Hub, type HubDriver } from "@graphloom/hub";
-import type { HubInput, HubResumeRemedy, HubRetryPolicy, HubSubmission, MonitorSnapshot, MonitorPanelKind } from "@graphloom/sdk";
+import type { HubInput, HubResumeRemedy, HubRetryPolicy, HubSubmission, MonitorSnapshot } from "@graphloom/sdk";
 import { object, integer, type HubServiceConfig } from "./hub-config.js";
 import { HubHttpError, readJson } from "./hub-client.js";
 import { captureHubInput, inputDigest, writePrivateJsonOrText } from "./hub-input.js";
 import { createHubRuntime, readSubmissionMonitor, cacheMonitor, type HubMonitorCache } from "./hub-runtime.js";
 import { withHubSnapshot } from "./hub-observe.js";
-import { projectPanels, renderPanels } from "@graphloom/monitor";
-import { openSubscriptions, type HubSubscriptions, type HubSubscriptionsOptions } from "./hub-subscriptions.js";
 import { HubInstallationRetention, inputReferences } from "./hub-retention.js";
 import { selfInstall } from "./ownership.js";
 import { HubEvents } from "./hub-events.js";
@@ -27,7 +25,6 @@ export interface HubServiceOptions {
   config: HubServiceConfig;
   /** Tests replace effects at the driver seam, never through a production CLI flag. */
   driver?: HubDriver;
-  deliver?: HubSubscriptionsOptions["deliver"];
   cache?: Map<string, HubMonitorCache>;
   captureInput?: (file: string) => Promise<HubInput>;
   observe?: (submission: HubSubmission) => Promise<MonitorSnapshot>;
@@ -53,8 +50,6 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
   let events: HubEvents;
   let monitoringError: string | undefined;
   let historyError: string | undefined;
-  let subscriptionsError: string | undefined;
-  let subscriptions: HubSubscriptions | undefined;
   try { events = await HubEvents.open(config.directory, scheduler.list().hubId); }
   catch (error) { historyError = `durable event history unavailable: ${String(error)}`; events = HubEvents.volatile(scheduler.list().hubId); }
   let capturing = false;
@@ -65,8 +60,6 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
       try { await retention?.refresh(); retentionError = undefined; }
       catch (error) { retentionError = String(error); }
       await events.capture(scheduler.list()); monitoringError = undefined;
-      if (subscriptions) void subscriptions.tick(events.read(subscriptions.cursor()), scheduler.list()).then(
-        () => { subscriptionsError = undefined; }, (error: unknown) => { subscriptionsError = String(error); });
     }
     catch (error) { monitoringError = error instanceof Error ? error.message : String(error); }
     finally { capturing = false; }
@@ -97,23 +90,11 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
     const current = cache.get(submission.id);
     return withHubSnapshot(current?.snapshot, submission, scheduler.list(), new Date().toISOString(), current?.error);
   };
-  try {
-    subscriptions = await openSubscriptions(config.directory, {
-      ...(options.deliver ? { deliver: options.deliver } : {}),
-      async render(subscription, status) {
-        if (!subscription.submissionId) return `Hub occupied ${status.occupiedSlots}/${status.maxConcurrentRuns}\n${status.submissions.slice(0, 12).map((s) => `${s.id} ${s.state}`).join("\n")}`;
-        const submission = status.submissions.find((s) => s.id === subscription.submissionId);
-        if (!submission) return `Submission ${subscription.submissionId} is archived or unavailable.`;
-        const snapshot = await monitor(submission);
-        return (await renderPanels(projectPanels(snapshot, { kinds: subscription.panels }), { format: "text", width: 64, maxBytes: 800 })).output;
-      },
-    });
-  } catch (error) { subscriptionsError = `chat subscriptions unavailable: ${String(error)}`; }
   let closing = false;
   const server = createServer((request, response) => {
     void (async () => {
       const url = new URL(request.url ?? "/", "http://hub.local");
-      if (request.method === "GET" && url.pathname === "/v1/health") return respond(response, 200, { ...scheduler.list(), ...((monitoringError || historyError) ? { monitoringError: monitoringError ?? historyError } : {}), ...(subscriptionsError ? { subscriptionsError } : {}), ...(retentionError ? { retentionError } : {}), closing });
+      if (request.method === "GET" && url.pathname === "/v1/health") return respond(response, 200, { ...scheduler.list(), ...((monitoringError || historyError) ? { monitoringError: monitoringError ?? historyError } : {}), ...(retentionError ? { retentionError } : {}), closing });
       if (closing) throw new HubHttpError("hub is shutting down", 503);
       if (url.pathname === "/v1/submissions") {
         if (request.method === "GET") return respond(response, 200, scheduler.list());
@@ -138,34 +119,6 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
         await capture();
         const since = url.searchParams.has("since") ? integer(Number(url.searchParams.get("since")), "since") : undefined;
         return respond(response, 200, events.read(since, url.searchParams.get("submission") ?? undefined));
-      }
-      if (url.pathname === "/v1/subscriptions") {
-        if (!subscriptions) throw new HubHttpError(subscriptionsError ?? "subscriptions unavailable", 503);
-        if (request.method === "GET") return respond(response, 200, subscriptions.list());
-        if (request.method === "POST") {
-          const body = await payload(request, ["sessionId", "submissionId", "panels", "wake"]);
-          if (body.submissionId !== undefined) scheduler.inspect(text(body.submissionId, "submissionId"));
-          if (body.wake !== undefined && typeof body.wake !== "boolean") throw new HubHttpError("wake must be boolean", 400);
-          const result = await subscriptions.add({ sessionId: text(body.sessionId, "sessionId"),
-            ...(body.submissionId !== undefined ? { submissionId: text(body.submissionId, "submissionId") } : {}),
-            ...(body.panels !== undefined ? { panels: body.panels as MonitorPanelKind[] } : {}),
-            ...(body.wake !== undefined ? { wake: body.wake as boolean } : {}),
-          });
-          void capture(); return respond(response, 201, result);
-        }
-      }
-      const reportMatch = /^\/v1\/subscriptions\/([^/]+)\/reports\/([^/]+)$/.exec(url.pathname);
-      if (reportMatch && request.method === "POST") {
-        if (!subscriptions) throw new HubHttpError("subscriptions unavailable", 503);
-        const body = await payload(request, ["outcome"]);
-        if (body.outcome !== "accepted" && body.outcome !== "failed") throw new HubHttpError("outcome must be accepted or failed", 400);
-        await subscriptions.resolve(decodeURIComponent(reportMatch[1]!), decodeURIComponent(reportMatch[2]!), body.outcome);
-        return respond(response, 200, { resolved: true });
-      }
-      const subscriptionMatch = /^\/v1\/subscriptions\/([^/]+)$/.exec(url.pathname);
-      if (subscriptionMatch && request.method === "DELETE") {
-        if (!subscriptions) throw new HubHttpError("subscriptions unavailable", 503);
-        await subscriptions.remove(decodeURIComponent(subscriptionMatch[1]!)); return respond(response, 200, { removed: true });
       }
       const match = /^\/v1\/submissions\/([^/]+)(?:\/(snapshot|pause|resume|cancel|archive|policy|logs))?$/.exec(url.pathname);
       if (match) {

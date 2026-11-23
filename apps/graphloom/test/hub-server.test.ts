@@ -76,36 +76,30 @@ describe("hub Unix service with an injected execution driver", () => {
     expect(await hubRequest("POST", "/v1/submissions", { taskPath: "/tasks/a.yaml", key: "archived" }, socket)).toMatchObject({ archived: true, id: item.id });
   });
 
-  it("keeps admission available when event history or chat subscription files are corrupt", async () => {
-    for (const filename of ["events.json", "subscriptions.json"]) {
-      const { service, socket, driver, directory } = await socketEnvironment(cleanups, 1, async directory => {
-        await writeFile(path.join(directory, filename), "{corrupt");
-      });
-      const health = await hubRequest<{ monitoringError?: string; subscriptionsError?: string }>("GET", "/v1/health", undefined, socket);
-      expect(filename === "events.json" ? health.monitoringError : health.subscriptionsError).toContain("unavailable");
-      const item = await hubRequest<HubSubmission>("POST", "/v1/submissions", { taskPath: "/tasks/recovery.yaml" }, socket);
-      await service.hub.tick();
-      expect(service.hub.inspect(item.id).state).toBe("running"); expect(driver.grants).toHaveLength(1);
-      expect(await readFile(path.join(directory, filename), "utf8")).toBe("{corrupt");
-      if (filename === "subscriptions.json") await expect(hubRequest("GET", "/v1/subscriptions", undefined, socket)).rejects.toMatchObject({ status: 503 });
-      else expect(await hubRequest("GET", "/v1/events", undefined, socket)).toMatchObject({ events: expect.any(Array) });
-    }
+  it("keeps admission available when event history is corrupt", async () => {
+    const { service, socket, driver, directory } = await socketEnvironment(cleanups, 1, async directory => {
+      await writeFile(path.join(directory, "events.json"), "{corrupt");
+    });
+    const health = await hubRequest<{ monitoringError?: string }>("GET", "/v1/health", undefined, socket);
+    expect(health.monitoringError).toContain("unavailable");
+    const item = await hubRequest<HubSubmission>("POST", "/v1/submissions", { taskPath: "/tasks/recovery.yaml" }, socket);
+    await service.hub.tick();
+    expect(service.hub.inspect(item.id).state).toBe("running"); expect(driver.grants).toHaveLength(1);
+    expect(await readFile(path.join(directory, "events.json"), "utf8")).toBe("{corrupt");
+    expect(await hubRequest("GET", "/v1/events", undefined, socket)).toMatchObject({ events: expect.any(Array) });
   });
 
-  it("creates only explicit chat subscriptions and delivers through the injected read-only seam", async () => {
-    const { socket, service, deliveries, driver } = await socketEnvironment(cleanups, 0);
-    const item = await hubRequest<HubSubmission>("POST", "/v1/submissions", { taskPath: "/tasks/chat.yaml" }, socket);
-    expect(deliveries).toHaveLength(0);
-    const requested = { sessionId: "fixture-session", submissionId: item.id, panels: ["overview"], wake: false };
-    const subscription = await hubRequest<{ id: string }>("POST", "/v1/subscriptions", requested, socket);
-    expect(await hubRequest("POST", "/v1/subscriptions", requested, socket)).toMatchObject({ id: subscription.id });
-    await expect.poll(async () => { await hubRequest("GET", "/v1/events", undefined, socket); return deliveries.length; }).toBe(1);
-    expect(deliveries[0]).toMatchObject({ sessionId: "fixture-session", wake: false });
-    expect(Buffer.byteLength(deliveries[0]!.text)).toBeLessThanOrEqual(1024);
-    expect(deliveries[0]!.text).not.toContain("\u001b");
-    expect(service.hub.list().occupiedSlots).toBe(0); expect(driver.grants).toHaveLength(0);
-    await hubRequest("DELETE", `/v1/subscriptions/${subscription.id}`, undefined, socket);
-    expect(await hubRequest("GET", "/v1/subscriptions", undefined, socket)).toEqual([]);
+  it("ignores legacy chat delivery state and exposes no subscription endpoints", async () => {
+    const { socket, directory } = await socketEnvironment(cleanups, 0, async directory => {
+      await writeFile(path.join(directory, "subscriptions.json"), "{obsolete");
+    });
+    expect(await hubRequest("GET", "/v1/health", undefined, socket)).not.toHaveProperty("subscriptionsError");
+    for (const [method, route, body] of [
+      ["GET", "/v1/subscriptions", undefined],
+      ["POST", "/v1/subscriptions", { sessionId: "session", wake: true }],
+      ["DELETE", "/v1/subscriptions/old", undefined],
+      ["POST", "/v1/subscriptions/old/reports/report", { outcome: "accepted" }],
+    ] as const) await expect(hubRequest(method, route, body, socket)).rejects.toMatchObject({ status: 404 });
+    expect(await readFile(path.join(directory, "subscriptions.json"), "utf8")).toBe("{obsolete");
   });
-
 });

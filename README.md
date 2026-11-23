@@ -107,19 +107,18 @@ graphloom hub inspect <submission> --panel topology --format ansi
 graphloom hub inspect <submission> --panel usage --format text
 graphloom hub inspect <submission> --panel overview --format markdown --chat-renderer katex
 graphloom hub inspect <submission> --format json
-graphloom hub subscribe <hapi-session-id> --submission <submission> --panel overview
 ```
 
 The eight panels are `overview`, `topology`, `stages`, `jobs`, `activity`, `job`,
 `usage` and `output`; repeat `--panel` to combine them. Colored chat output is
 static Markdown/KaTeX for an assistant reply, with plain details and fallbacks.
 `auto` stays plain until a host profile is qualified; tool output alone does not
-make a host render math. Explicit HAPI subscriptions send bounded plain reports,
-coalesce changes and do not wake an inactive session unless `--wake` is requested.
+make a host render math. An agent can include the requested panel in its reply;
+`hub watch` follows updates in the terminal.
 No HAPI changes, screenshot capture or MCP connection are required.
 
 Source-level tests cover the scheduler, controller integration, Unix transport,
-renderers and delivery. Deployment still needs qualification on the operator's
+and renderers. Deployment still needs qualification on the operator's
 systemd/cgroup/container setup; deployed HAPI color rendering is also a separate
 host check. Live harness output and aggregate token/context counters are shown as
 unavailable when the owning runtime cannot report them. See the

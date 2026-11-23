@@ -25,16 +25,12 @@ export const HUB_USAGE = [
   "graphloom hub policy <submission> [--automatic <true|false>] [--max-automatic-resumes <n>] [--max-elapsed-ms <n>] [--base-delay-ms <n>] [--max-delay-ms <n>] [--renew] [--command-id <id>]",
   "graphloom hub pause|cancel|archive <submission> [--command-id <id>]",
   "graphloom hub resume <submission> [--command-id <id>] [--reconciled] [--approve <id> [--input <name>=<value> ...]|--decline <id> [--reason <text>]] [--upgrade] [--update-plugin] [--update-executors] [--supervisor <harness>]",
-  "graphloom hub subscribe <session-id> [--submission <id>] [--panel <kind>] [--wake]",
-  "graphloom hub subscriptions",
-  "graphloom hub unsubscribe <subscription-id>",
-  "graphloom hub resolve-report <subscription-id> --report <report-id> --outcome <accepted|failed>",
 ];
 const PANELS: MonitorPanelKind[] = ["overview", "topology", "stages", "jobs", "activity", "job", "usage", "output"];
 const FORMATS: MonitorFormat[] = ["text", "ansi", "markdown", "json"];
 const RENDERERS: ChatRenderer[] = ["auto", "plain", "katex"];
-const valueFlags = ["report", "outcome", "config", "socket", "key", "format", "chat-renderer", "job", "attempt", "stage", "cursor", "page-size", "width", "since", "stream", "launch", "command-id", "approve", "decline", "reason", "supervisor", "submission", "automatic", "max-automatic-resumes", "max-elapsed-ms", "base-delay-ms", "max-delay-ms"];
-const booleanFlags = ["json", "plain", "once", "follow", "reconciled", "upgrade", "update-plugin", "update-executors", "follow-current", "wake", "renew", "help"];
+const valueFlags = ["config", "socket", "key", "format", "chat-renderer", "job", "attempt", "stage", "cursor", "page-size", "width", "since", "stream", "launch", "command-id", "approve", "decline", "reason", "supervisor", "automatic", "max-automatic-resumes", "max-elapsed-ms", "base-delay-ms", "max-delay-ms"];
+const booleanFlags = ["json", "plain", "once", "follow", "reconciled", "upgrade", "update-plugin", "update-executors", "follow-current", "renew", "help"];
 
 export async function hubCommand(args: string[]): Promise<number> {
   const parsed = parseArgs({ args, allowPositionals: true, strict: true, tokens: true, options: {
@@ -56,8 +52,7 @@ export async function hubCommand(args: string[]): Promise<number> {
     resume: ["command-id", "socket", "reconciled", "approve", "input", "decline", "reason", "upgrade", "update-plugin", "update-executors", "supervisor"],
     inspect: ["socket", "panel", "format", "chat-renderer", "job", "attempt", "stage", "cursor", "page-size", "width", "follow-current"],
     watch: ["socket", "panel", "job", "attempt", "stage", "cursor", "page-size", "width", "follow-current", "plain", "json", "once", "since"],
-    logs: ["socket", "stream", "follow", "launch"], subscribe: ["socket", "submission", "panel", "wake"], subscriptions: ["socket"], unsubscribe: ["socket"],
-    "resolve-report": ["socket", "report", "outcome"],
+    logs: ["socket", "stream", "follow", "launch"],
     policy: ["socket", "command-id", "automatic", "max-automatic-resumes", "max-elapsed-ms", "base-delay-ms", "max-delay-ms", "renew"],
   };
   if (!allowed[command]) throw new Error(`unknown hub command ${command}`);
@@ -69,7 +64,7 @@ export async function hubCommand(args: string[]): Promise<number> {
     if (token.value !== undefined && token.value.length === 0) throw new Error(`--${token.name} needs a nonempty value`);
     seen.add(token.name);
   }
-  if (["service", "list", "subscriptions"].includes(command) && parsed.positionals.length !== 1) throw new Error(`hub ${command} takes no positional arguments`);
+  if (["service", "list"].includes(command) && parsed.positionals.length !== 1) throw new Error(`hub ${command} takes no positional arguments`);
 
   if (command === "serve") {
     if (parsed.positionals.length !== 1) throw new Error("hub serve takes configuration through --config");
@@ -187,16 +182,6 @@ export async function hubCommand(args: string[]): Promise<number> {
     } finally { process.off("SIGINT", stop); }
     return 0;
   }
-  if (command === "subscriptions") { console.log(JSON.stringify(await hubRequest("GET", "/v1/subscriptions", undefined, socket), null, 2)); return 0; }
-  if (command === "subscribe") {
-    console.log(JSON.stringify(await hubRequest("POST", "/v1/subscriptions", { sessionId: need(), ...(flag("submission") ? { submissionId: flag("submission") } : {}), ...(kinds.length ? { panels: kinds } : {}), wake: yes("wake") }, socket), null, 2)); return 0;
-  }
-  if (command === "resolve-report") {
-    const id = need(); const report = flag("report"); const outcome = flag("outcome");
-    if (!report || !["accepted", "failed"].includes(outcome ?? "")) throw new Error("resolve-report requires --report and --outcome accepted|failed after inspecting the destination");
-    console.log(JSON.stringify(await hubRequest("POST", `/v1/subscriptions/${encodeURIComponent(id)}/reports/${encodeURIComponent(report)}`, { outcome }, socket), null, 2)); return 0;
-  }
-  if (command === "unsubscribe") { console.log(JSON.stringify(await hubRequest("DELETE", `/v1/subscriptions/${encodeURIComponent(need())}`, undefined, socket), null, 2)); return 0; }
   throw new Error(`unknown hub command ${command}`);
 }
 

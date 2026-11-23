@@ -8,8 +8,8 @@ no dashboard or new controller scheduling authority.
 The [throwaway panel prototype](../apps/graphloom/prototype-monitor-panels/README.md)
 remains available for comparison. Production tests exercise all eight panels,
 text/ANSI/JSON/Markdown rendering, KaTeX parsing with trust disabled, quantitative
-charts, complex ELK routing and adjacency fallback. Actual HAPI assistant/tool/
-notification surfaces must be qualified separately; `auto` is plain by default.
+charts, complex ELK routing and adjacency fallback. Actual HAPI assistant and tool
+surfaces must be qualified separately; `auto` is plain by default.
 
 The monitor consumes the SDK normalization and controller traversal described in
 the [topology design](design-graph-topology.md). Declared edges, the live path,
@@ -198,15 +198,16 @@ Cell drawing, chart layout and serializers are internal to this module. Shared
 value/wire contracts belong in `packages/sdk`.
 Owning-version controller observation code supplies the existing progress and
 usage semantics; the hub adds queue and lifecycle facts. CLI code owns local
-reads/socket access, watch subscriptions and live terminal input/redraw.
-Host adapters own capability profiles and message delivery. Neither terminal
-control, KaTeX runtime dependencies nor chat SDK dependencies enter the controller
+reads/socket access, watch event streams and live terminal input/redraw.
+Chat callers select capability profiles and include rendered panels in their
+replies. Neither terminal control, KaTeX runtime dependencies nor chat SDK
+dependencies enter the controller
 or hub scheduler. The serializer emits supported math syntax; HAPI owns its
 already-installed KaTeX runtime. No additional renderer service is required.
 
 This seam can also serve standalone runs later: hub fields are absent when a run
 is unmanaged. It does not require one watcher process per panel. Selecting
-several panels shares one source subscription.
+several panels shares one observation stream.
 
 Selection is explicit and stable. A job panel names an operation ID and attempt;
 it does not silently switch to another job when a stage retries. An optional
@@ -316,13 +317,13 @@ colors alone never establish status or acceptance.
 
 A host profile records the renderer/version, actual delivery surface, tested
 math subset, theme/width constraints and maximum message size. Qualify assistant
-Markdown separately from tool results and background notifications. A successful
-tool call or accepted message is not proof that its contents rendered. The current
+Markdown separately from tool results. A successful tool call or accepted message
+is not proof that its contents rendered. The current
 proof uses KaTeX 0.16.27 with `trust: false`; deployed HAPI delivery, all eight
 panels, light/dark themes, mobile widths and unsupported labels still need tests.
 Unknown or incompatible profiles make `auto` choose plain Markdown. An operator
 can explicitly request KaTeX for on-demand review without marking the host as
-qualified for automatic delivery.
+qualified for `auto` selection.
 
 The serializer emits only a fixed command subset and treats every graph label,
 reason and metric as data. Escape TeX metacharacters; do not allow labels to create
@@ -342,7 +343,7 @@ Local validation catches syntax/encoding errors; a host rendering failure may
 not be observable remotely. Always keep run identity, time and critical status
 readable outside math, and make `--chat-renderer plain` available for recovery.
 
-### Inspection, history and notifications
+### Inspection, history and terminal watch
 
 1. **On demand:** the agent invokes the inspection command or an equivalent
    read-only host tool. Return structured panel data with a canonical text or
@@ -350,29 +351,23 @@ readable outside math, and make `--chat-renderer plain` available for recovery.
    in its assistant reply; a Bash tool result alone may display the source. The
    panel is deterministic and usable without model interpretation. It includes
    identity, observation time and freshness so it can be quoted accurately.
-2. **Notifications:** an explicit subscription to the originating session sends
-   a compact overview on meaningful change. Include only relevant panels: for
-   example topology on reentry or usage on a budget threshold. Do not stream
-   every token, redraw or periodic sample into conversation history. Use the
-   hub's bounded coalescing policy and approximately 1 KiB report target; the
-   notification budget may require plain output even for a KaTeX-capable host.
+2. **Terminal watch:** `hub watch` follows the selected panels through the hub's
+   snapshot and event interface. The viewer keeps its event cursor, displays gaps
+   and stale data, and detaches without changing execution. The hub does not
+   store chat destinations or send background messages into sessions.
 3. **History:** each chat report is an immutable, timestamped snapshot. Earlier
    reports do not become live because a later report arrives. A connected
    terminal watch shows current frames and stale/gap indicators. A retained event
    cursor is not a promise to retain every historical metric sample forever.
 
-Reuse the hub's report IDs, cursor/gap handling, coalescing and delivery status.
-A subscription records the explicit destination, selected panels, detail limits
-and rendering profile/version, not a saved full-screen layout. A destination
-change requires an explicit subscription change. Rendering and sampling happen
-in code, with no LLM call per metric or redraw. Do not wake an agent solely to
-obtain color; if the direct notification path is plain, use plain notifications
-and reserve colored assistant replies for on-demand inspection. Delivery retry
-never becomes a graph retry, and notification failure never blocks execution.
+Rendering and sampling happen in code, with no LLM call per metric or redraw.
+On-demand chat inspection uses the requested panels, detail limits and renderer;
+it requires no persistent chat delivery state. Snapshot reads and watch reconnects
+never become graph retries, and rendering failures never block execution.
 
-Notification delivery and opening a viewer cannot consume a run slot or restart
-a run. The monitor itself never sends input to a live agent. The
-screenshot's "send" shortcut would be a separate control feature; the existing
+Opening a viewer cannot consume a run slot or restart a run. The monitor itself
+never sends input to a live agent. The screenshot's "send" shortcut would be a
+separate control feature; the existing
 `graphloom session open` forks eligible recorded sessions rather than attaching
 to a live job.
 
@@ -430,7 +425,7 @@ Keep output read-only, bounded and escaped for the target renderer. Strip child
 terminal controls; protect Markdown code fences; handle Unicode display width.
 Use user-visible messages, tool summaries and evidence, not private reasoning.
 Retrieve long transcripts or diffs on demand through references instead of
-copying them into every panel or notification. Show missing/retired artifacts
+copying them into every panel. Show missing/retired artifacts
 explicitly, since retained session metadata does not guarantee a transcript
 still exists.
 
@@ -445,11 +440,11 @@ still exists.
    Qualify the ANSI panel and quantitative cell-chart renderers, including Unicode
    widths, sparse samples and readable plain output.
 3. Qualify the ELK-to-cell adapter for branches/cycles and add live terminal
-   rendering and explicit chat subscriptions using the same panels. Preserve a
+   rendering and on-demand chat inspection using the same panels. Preserve a
    complete adjacency view while routing qualification is incomplete.
 4. Implement the bounded KaTeX serializer and qualify the actual HAPI assistant
-   delivery path. Extend qualification separately to any notification or tool
-   surface that supports it. This enhancement does not block basic hub delivery.
+   rendering path. Qualify tool surfaces separately if they support it.
+   This enhancement does not block basic hub monitoring.
    A complete dashboard, browser UI and MCP Apps integration are optional work.
 
 Behavior checks should cover receipt invalidation on reentry, job success before
@@ -470,10 +465,10 @@ changing a panel must not change execution.
 | Label contains TeX, Markdown fences or terminal controls | Data remains inert and legible; no injected command or broken report |
 | KaTeX fragment exceeds a bound or fails local validation | Plain report from the same frame with a fallback reason |
 | Unknown host or changed capability profile | `auto` uses plain output until that profile/surface is qualified |
-| HAPI assistant message, tool result and notification | Test each separately; do not extrapolate from the component proof |
+| HAPI assistant message and tool result | Test each separately; do not extrapolate from the component proof |
 | Light/dark theme, narrow/mobile view or `NO_COLOR` | Readable labels and values; status remains understandable without color |
 | Token totals arrive only at settlement, or a sample is lost/reset | Honest sampled/cumulative labels and gaps; no invented real-time rate |
-| Notification burst, disconnect or lost acknowledgement | Bounded coalescing/retries, stable report IDs and no effect on run scheduling |
+| Watch disconnect, reconnect or expired event cursor | Explicit replay/gap handling and no effect on run scheduling |
 | Old chat snapshot beside a live watch | Distinct observation times and live/stale indications |
 
 Current evidence is deliberately limited:
@@ -484,8 +479,8 @@ Current evidence is deliberately limited:
 | Complex topology SDK | Integrated owning SDK normalization and controller path acceptance; recorded visits and supervisor side visits projected, legacy-derived paths labelled |
 | Eight-panel prototype | Fictional fixtures, four run states, hand-placed graph; HTML/plain/ANSI review artifact |
 | KaTeX renderer | Eight-panel summaries with complete plain details; trust-disabled parser tests and bounded fallback |
-| Deployed HAPI profile and live notifications | Not end-to-end qualified |
+| Deployed HAPI on-demand rendering profile | Not end-to-end qualified |
 | ELK-to-cell routing and area charts | Implemented; geometry validation, complete adjacency fallback, scaled charts and explicit gaps tested |
 
 Runtime and rendering checks run with the affected workspace suites. Actual
-HAPI delivery qualification is separate from parser and injected transport tests.
+HAPI rendering qualification is separate from parser and local transport tests.
