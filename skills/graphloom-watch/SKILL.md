@@ -164,9 +164,12 @@ continues (as above) is relayed in one line, with nothing armed:
 cat > .graphloom-watch/hub-hapi.sh <<'EOF'
 cd "$(dirname "$0")/.." || exit 1
 while :; do
-  s=$(sh .graphloom-watch/hub-wait.sh 1440)
-  [ "$s" = "hub state: running" ] || break
-  graphloom watch "$(cat .graphloom-watch/run)" --until stop --notify 'hapi ping-peer "$HAPI_SESSION_ID" --message-file -'
+  s=$(sh .graphloom-watch/hub-wait.sh)
+  case "$s" in
+    "hub state: running") graphloom watch "$(cat .graphloom-watch/run)" --until stop --notify 'hapi ping-peer "$HAPI_SESSION_ID" --message-file -' ;;
+    "hub state: queued"|"hub state: starting"|"hub state: stopping"|"hub state: waiting") ;;
+    *) break ;;
+  esac
 done
 printf '[graphloom watch] attention · submission %s · %s\nReport this to the user and ask what to do next. Do not resume, fix, or answer its questions.\n' "$(cat .graphloom-watch/submission)" "$s" | hapi ping-peer "$HAPI_SESSION_ID" --message-file -
 EOF

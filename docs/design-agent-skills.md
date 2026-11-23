@@ -102,8 +102,9 @@ command.
   apart) while the submission is `queued`, `starting`, `stopping` or
   `waiting`, then re-arms `graphloom watch` when the run works again, or
   raises an attention for `paused`, `blocked`, `failed`, `canceled` or
-  `succeeded`. Inside a HAPI session one detached loop does both and messages
-  the session. `hub watch` is a live view that never exits; the skill leaves
+  `succeeded`. Inside a HAPI session one detached loop does both, keeps
+  waiting for as long as the hub keeps the submission queued or waiting, and
+  messages the session. `hub watch` is a live view that never exits; the skill leaves
   it to the user's terminal.
 - **`graphloom-triage`** also reads the hub's state for a hub submission: the
   blocker, a spent retry allowance or repeated failure fingerprint, a launch
