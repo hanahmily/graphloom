@@ -1250,6 +1250,59 @@ user-authored plugin without changes to the controller; the
 repeatable behavior; one real-backend hello run verifies actual agent integration.
 These are release requirements, not claims of tests already run.
 
+### 11.1 CI test tiers
+
+Locally, `npm test` builds once and runs every test in every workspace. GitHub CI
+(`.github/workflows/ci.yml`) runs the same tests in two tiers, so a pull request
+gets a fast answer and nothing is dropped:
+
+- **PR tier**, on every pull request: every test except the CLI suite's full-tier
+  groups, plus each group whose paths the pull request touches.
+- **Full tier**, everything: on every push to `main` (after the merge, so a
+  failure names one commit), daily on a schedule, and on a manual dispatch. When a
+  full run on `main` fails, the workflow opens an issue titled "Full test suite
+  failing on main", or comments on the open one, naming the commit, the failing
+  jobs and the failing test files.
+
+The groups live in one place, `apps/graphloom/test/tiers.ts`, which
+`apps/graphloom/vitest.config.ts` reads; `tiers.test.ts` checks that the PR tier
+and the groups together are every test file, each exactly once.
+
+| Group | Full-tier files | A pull request touching these runs it too |
+|---|---|---|
+| `pr-design-review` | `pr-design-review-rehearsal.{answers,necessity,publish,report}` | `examples/plugins/pr-design-review/**`, `examples/plugins/review-kit/**` |
+| `pr-review` | `pr-review-rehearsal.{context,leads,robustness}`, `pr-review-coverage-docker` | `examples/plugins/pr-review/**`, `examples/plugins/review-kit/**` |
+| `issue-fix` | `issue-fix-rehearsal.{arbitrate,boundaries,probe}`, `matrix/issue-fix`, `matrix/issue-fix-supervisor` | `examples/plugins/issue-fix/**` |
+| `session` | `session` | `apps/graphloom/src/session*`, `packages/agent-harness/**` |
+| `topology` | `topology-e2e` | `packages/controller/src/{traversal,supervisor-node}*`, `packages/sdk/src/topology*` |
+| `doctor-task` | `doctor-task` | `apps/graphloom/src/doctor*` |
+| `matrix-hello` | `matrix/hello` | (none) |
+
+Each rehearsal suite is split across `<graph>-rehearsal.<group>.test.ts` files
+sharing a fixture module (`<graph>-rehearsal.ts`), so vitest's workers run the
+scenarios in parallel. The smoke set stays in the PR tier, in
+`<graph>-rehearsal.smoke.test.ts`: pr-design-review's check and happy scenario,
+pr-review's check and prelude scenario, and issue-fix's happy scenario and L0
+check.
+
+Three variables select what the CLI suite runs; unset, it runs everything:
+`GRAPHLOOM_TEST_TIER` (`pr` drops the full-tier groups; `full`), `GRAPHLOOM_TEST_GROUPS`
+(comma-separated groups the PR tier runs anyway; CI sets it from
+`scripts/ci/test-groups.mjs <base>`, which reads `git diff --name-only
+<base>...HEAD`), and `GRAPHLOOM_TEST_DOCKER` (`exclude` or `only` the files that
+need Docker: `sandbox` and `pr-review-coverage-docker`).
+
+The workflow's jobs run in parallel, each installing and building once:
+`plan` (the tier and the touched groups), `typecheck and headers`, `packages
+(controller)` and `packages (others)` (`scripts/ci/test-workspaces.mjs`, vitest
+against the built `dist/`), `cli (shard i/N)` (the CLI suite without its Docker
+files, `vitest --shard`, four shards on a pull request and six in the full tier),
+and `cli (Docker)`, the only job with `GRAPHLOOM_REQUIRE_DOCKER_TESTS=1` and,
+when `pr-review-coverage-docker` runs, the warmed coverage caches
+(`scripts/ci/warm-coverage-caches.sh`). The job named `test` needs all of them
+and fails unless each passed; it is the one status check branch protection
+requires.
+
 ## 12. Implementation plan
 
 1. **M1 — TypeScript SDK and isolated plugin host.** Establish public value/wire

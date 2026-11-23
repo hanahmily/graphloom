@@ -20,7 +20,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createBuiltinExecutorRunner, type JobContext, type Runner } from "@graphloom/runner";
 import { commandBinding, commandExecutorPackage } from "@graphloom/executor-command";
 import type { EvidenceRecord, JobSpec } from "@graphloom/sdk";
-import { exampleBundle, execFileAsync, repoRoot } from "@graphloom/testkit";
+import { exampleBundle, repoRoot } from "@graphloom/testkit";
+import { buildOnce } from "./build-once.js";
 
 const bundle = exampleBundle("pr-review");
 
@@ -70,7 +71,7 @@ let goReady = false;
 let tsReady = false;
 
 beforeAll(async () => {
-  await execFileAsync("npm", ["run", "build", "-w", "@graphloom/plugin-pr-review"], { cwd: repoRoot });
+  await buildOnce("@graphloom/plugin-pr-review");
   const load = async <T>(rel: string): Promise<T> => (await import(pathToFileURL(path.join(bundle, "dist", rel)).href)) as T;
   const [coverage, graph, profile, reproplan, repro, review] = await Promise.all([load<Plugin["coverage"]>("kit/coverage.js"), load<Plugin["graph"]>("graph.js"), load<Plugin["profile"]>("kit/profile.js"), load<Plugin["reproplan"]>("reproplan.js"), load<Plugin["repro"]>("repro.js"), load<Plugin["review"]>("review.js")]);
   const banyandb = JSON.parse(await readFile(path.join(bundle, "profiles", "banyandb.json"), "utf8")) as Record<string, unknown>;
