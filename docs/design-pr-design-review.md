@@ -1,6 +1,6 @@
 # PR design review graph (`pr-design-review`)
 
-Status: implemented, `pr-design-review` 0.1.4 (`examples/plugins/pr-design-review`).
+Status: implemented, `pr-design-review` 0.1.5 (`examples/plugins/pr-design-review`).
 This is round 1 of a pull request's review: the design-level review. Round 2, the
 detail review, is the [PR-review graph](design-pr-review-graph.md) (`pr-review`
 1.x). The two graphs are independent plugins that share the review kit
@@ -600,4 +600,11 @@ and `large-artifacts` exercise the shared report. The design review's own:
   apache/skywalking-banyandb#1487's 181 files were rejected unrun and planned again;
   static batches likewise, jobs packed by count and bytes, and a command job over a
   bound goes to the supervisor rather than the executor
+  ([PR review §6.8](design-pr-review-graph.md#68-measurements)).
+- **0.1.5:** the static Go tool runs with its own Go environment: `GOROOT` is the
+  root of the `go` it runs, not one inherited from the operator's shell that the
+  sandbox did not bind (apache/skywalking-banyandb#1487: every `static-go-*` batch
+  exited 2 with `go: cannot find GOROOT directory`), and the toolchain, workspace,
+  flags and paths settings are the tool's own; the `go-root` check and the host's
+  `go env GOMODCACHE` no longer stop on an inherited `GOROOT` either
   ([PR review §6.8](design-pr-review-graph.md#68-measurements)).

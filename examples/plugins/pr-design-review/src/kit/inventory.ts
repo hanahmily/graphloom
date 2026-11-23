@@ -209,7 +209,7 @@ export function parseSites(text: string): Map<string, string> {
 
 const SOURCE_GO =
   String.raw`set -u
-{ mc=$(go env GOMODCACHE 2>/dev/null || true)
+{ mc=$(unset GOROOT; go env GOMODCACHE 2>/dev/null || true)
 while [ "$#" -ge 2 ]; do
   m="$1"; v="$2"; shift 2
   esc=$(printf '%s' "$m" | sed 's/[A-Z]/!&/g' | tr 'A-Z' 'a-z')
@@ -232,7 +232,8 @@ done; echo '` +
 
 /**
  * Where a dependency's source is on this machine: the module cache directory
- * of each required Go version, and `node_modules/<pkg>` in the operator's
+ * of each required Go version (asked of `go` with no inherited `GOROOT`, which
+ * may name a toolchain `go` cannot find, §6.8), and `node_modules/<pkg>` in the operator's
  * review clone (the worktree's common Git directory's parent) for npm.
  */
 export function sourceCommands(deps: readonly Dependency[]): EnvironmentCommand[] {

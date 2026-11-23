@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { confinementUnsupported, createBuiltinExecutorRunner, hasPrivateTmp } from "@graphloom/runner";
-import { boundedInputShape, REHEARSAL_ONLY_ENV, type ExecutorContext } from "@graphloom/sdk";
+import { boundedInputShape, jsonSchemaProblem, REHEARSAL_ONLY_ENV, type ExecutorContext } from "@graphloom/sdk";
 import { COMMAND_INPUT_SHAPE, COMMAND_RUN_ID, commandInputProblem, commandSucceeded, createCommandExecutor, isCommandInput, type CommandOutcome } from "./run.js";
 
 let dir: string;
@@ -237,6 +237,19 @@ describe("command input problems and declared shape", () => {
     expect(isCommandInput(COMMAND_INPUT_SHAPE.example)).toBe(true);
     expect(COMMAND_INPUT_SHAPE.schema.required).toEqual(["commands"]);
     expect(boundedInputShape(COMMAND_INPUT_SHAPE)).toEqual(COMMAND_INPUT_SHAPE);
+  });
+
+  it("publishes the command-id pattern its validator applies: the same ids are accepted and rejected", () => {
+    const pattern = COMMAND_INPUT_SHAPE.schema.properties.commands.items.properties.id.pattern;
+    // A JSON Schema pattern carries no flags: read it as an agent or a guard would.
+    const published = new RegExp(pattern, "u");
+    const ids = ["a", "go-env", "search-S1", "Search", "S1", "metrics-diff-ab", "x.y_z", "0", "A".repeat(64), "a".repeat(65), "", "-a", ".a", "_a", "a b", "a/b", "é", "a:b"];
+    for (const id of ids) {
+      const valid = commandInputProblem({ commands: [{ id, argv: ["true"] }] }) === undefined;
+      expect(published.test(id), id).toBe(valid);
+      expect(jsonSchemaProblem(COMMAND_INPUT_SHAPE.schema as unknown as Record<string, unknown>, { commands: [{ id, argv: ["true"] }] }) === undefined, id).toBe(valid);
+    }
+    expect(published.test("search-S1")).toBe(true);
   });
 });
 

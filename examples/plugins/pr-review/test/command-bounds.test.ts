@@ -76,9 +76,9 @@ describe("the command executor's input bounds (design §6.8)", () => {
     if (present) {
       const { commandInputProblem, COMMAND_INPUT_SHAPE } = await executor();
       expect(commandInputProblem(job.input)).toBeUndefined();
-      // The declared shape's pattern has no case flag, so judging by it would refuse what the executor takes:
-      // the guard must not (it stopped every pr-review rehearsal after Review, at the symbol searches).
-      expect(jsonSchemaProblem(COMMAND_INPUT_SHAPE.schema as unknown as Record<string, unknown>, job.input)).toContain("must match");
+      // The declared shape publishes the very pattern the executor applies (since executor-command 0.1.4; before, it lacked
+      // the case flag and refused search-S1, which stopped every pr-review rehearsal after Review at the symbol searches).
+      expect(jsonSchemaProblem(COMMAND_INPUT_SHAPE.schema as unknown as Record<string, unknown>, job.input)).toBeUndefined();
     }
     expect(commandJobProblem({ ...job, input: { commands: [{ id: "-bad", argv: ["true"] }] } } as JobSpec)).toContain("the id must match");
   });

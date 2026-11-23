@@ -26,7 +26,8 @@ const MAX_ARG_CHARS = 4_096;
 const OUTPUT_TAIL_BYTES = 8_192;
 const REPORT_TAIL_BYTES = 65_536;
 const KILL_GRACE_MS = 5_000;
-const COMMAND_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
+/** A command id. Spelled out with both cases rather than the `i` flag, so the input shape publishes the very pattern the validator applies. */
+const COMMAND_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export interface CommandSpec {

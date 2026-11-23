@@ -111,8 +111,12 @@ const PULL_SCRIPT = [
   "printf 'unavailable: %s\\n' \"$(printf '%s' \"$out\" | tail -n 1 | cut -c1-300)\"; exit 0",
 ].join("\n");
 
-/** Where the host keeps what a sandbox mounts read-only: the Go module cache and the npm cache. Read from `/`, so a pull request's `.npmrc` or `go.mod` cannot answer. */
-const MODCACHE_SCRIPT = 'cd / && GOTOOLCHAIN=local go env GOMODCACHE 2>/dev/null || true';
+/**
+ * Where the host keeps what a sandbox mounts read-only: the Go module cache and the npm cache. Read from `/`, so a pull
+ * request's `.npmrc` or `go.mod` cannot answer, and with no inherited `GOROOT`: an operator's may name another toolchain,
+ * and `go` stops on a GOROOT it cannot find rather than use its own (§6.8).
+ */
+const MODCACHE_SCRIPT = 'cd / && unset GOROOT && GOTOOLCHAIN=local go env GOMODCACHE 2>/dev/null || true';
 const NPMCACHE_SCRIPT = "cd / && npm config get cache 2>/dev/null || true";
 
 /**
