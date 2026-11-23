@@ -23,7 +23,7 @@ repository holds them in top-level [`skills/`](../skills):
 | `graphloom-run` | Refuses a request with unfilled placeholders, checks the checkout against the upstream default branch (asks before using a fresh base), writes `task.yaml`, `graphloom check`, starts the run fully detached (`setsid nohup`, in every agent: a tool's background-command time limit would otherwise stop it as an `operator stop`) with an `--on-stop` marker file and the repository's pinned toolchain on `PATH`, hands off to watch (inside a HAPI session, to a detached `graphloom watch` and ends its turn) |
 | `graphloom-watch` | A thin wrapper around `graphloom watch` (§2.1): Claude Code runs it as a background command and re-arms; Codex and opencode, which have no background-command notifications, loop in the foreground with `--timeout 9m` and re-arm silently on exit 2. Relays a move or heartbeat in one or two lines; on attention reports and asks the user; follows the last line of a `[graphloom watch]` message a HAPI watcher sends |
 | `graphloom-triage` | A stopped run the user asks about: diagnose the cause from `inspect`, `stats` and evidence first, then choose the resume form with the user |
-| `graphloom-hub` | Drives the [run hub](design-run-hub.md) (§1.1): checks it is reachable (never starts it), submits a checked task, reports status with `hub list` and `hub inspect` panels, pauses, cancels, resumes with the remedies the user chose, reads launch logs, sets the concurrency limit, archives, and searches past submissions with `hub list --json` and `jq` |
+| `graphloom-hub` | Drives the [run hub](design-run-hub.md) (§1.1): checks it is reachable (never starts it), submits a checked task, reports status with `hub list` and `hub inspect` panels, pauses, cancels, resumes with the remedies the user chose, reads launch logs, sets the concurrency limit, archives, and searches past submissions with `hub list` filters (`--state`, `--repo`, `--grep`, `--since`, `--archived`, ...) |
 | `graphloom-deliver` | Verifies the delivered branch (commit message, PR body, required sections), rebases onto a newer upstream base only on the user's yes, then runs the repository's checks once on a clean copy of the tree to push (helper files kept outside it), then pushes or opens the PR only with explicit approval |
 
 `graphloom-run` prepares the task with `graphloom task new`
@@ -62,10 +62,9 @@ the state and the controller's owner claim) and the `--on-stop` hook.
 The operator deploys the [run hub](design-run-hub.md) as a systemd user
 service; the skills drive it only through the `graphloom hub` CLI and never
 start, stop or restart it. A skill learns whether it is reachable from
-`graphloom hub list` (exit 0, or `cannot reach hub at <socket>`, exit 1; a
-`Fault:` line is a hub fault) and, when it is not, names the operator's
-`systemctl --user start` for the user. The CLI has no separate health
-command.
+`graphloom hub status` (design §3.1: exit 0 healthy, 1 unreachable, 3 faulted
+or shutting down; `--json` gives `reachable` and `healthy`) and, when it is
+not, names the operator's `systemctl --user start` for the user.
 
 - **`graphloom-hub`** covers the operator interface (design §3): `hub submit`
   of a task written and checked by graphloom-run's rules, with an idempotency
@@ -82,16 +81,19 @@ command.
   control command runs only on the user's yes. It also warns that a hub run
   takes `PATH` and token variables from the service's environment, not the
   user's shell.
-- **History search.** The hub has no search or filter command: `hub list
-  --json` returns every submission it still holds (archived ones are
-  dropped), and the skill filters it with `jq` on `state`, `key`,
-  `acceptedAt`, `input.repoPath`, `input.taskPath`, `blocker` and the
-  observation; one run's history is `graphloom inspect` and `graphloom stats`
-  on its state directory under the hub (`<hub dir>/runs/<runId>`), which is
-  also the only way to find an archived submission's run.
-- **`graphloom-run`** submits through the hub when `hub list` succeeds without
-  a fault, and starts the run detached (`setsid nohup`) as before when the
-  hub is unreachable or faulted, or when the run needs a `PATH` prefix or an
+- **History search.** `hub list` filters in the hub (design §3.1):
+  `--state` (repeatable), `--graph`, `--repo`, `--key`, `--since`/`--until`
+  (ISO or a duration ago), `--grep` over the request and blocker, `--limit`
+  (newest first), and `--archived` to include the bounded archive index
+  (design §4.1), whose entries name the run id and state directory. The skill
+  uses these flags; `hub list --json | jq` remains a fallback for fields the
+  flags do not cover (and for a hub older than the flags). One run's history
+  is `graphloom inspect` and `graphloom stats` on its state directory under
+  the hub (`<hub dir>/runs/<runId>`); a submission archived before its hub
+  had the index is found only there, by run id.
+- **`graphloom-run`** submits through the hub when `hub status` exits 0, and
+  starts the run detached (`setsid nohup`) as before when the hub is
+  unreachable or faulted, or when the run needs a `PATH` prefix or an
   exported token only the user's shell has. A hub submission records its id
   in `.graphloom-watch/submission`.
 - **`graphloom-watch`** keeps `graphloom watch` for wake-ups (the hub stores

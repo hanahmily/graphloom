@@ -163,6 +163,6 @@ describe("skills reference only real CLI commands and flags", () => {
     // The skills drive the commands this design is about.
     for (const key of ["doctor", "setup", "check", "run", "wait", "stats", "inspect", "resume", "skills install"]) expect(seen, key).toContain(key);
     // The hub skill covers the hub's operator commands (docs/design-run-hub.md §3).
-    for (const key of ["submit", "list", "inspect", "watch", "logs", "limit", "policy", "pause", "cancel", "archive", "resume"]) expect(seen, `hub ${key}`).toContain(`hub ${key}`);
+    for (const key of ["status", "submit", "list", "inspect", "watch", "logs", "limit", "policy", "pause", "cancel", "archive", "resume"]) expect(seen, `hub ${key}`).toContain(`hub ${key}`);
   });
 });

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
-import type { HubConfig, HubInput, HubLaunch, HubObservation, HubProcessIdentity, HubSubmission } from "@graphloom/sdk";
+import type { HubArchiveEntry, HubConfig, HubInput, HubLaunch, HubObservation, HubProcessIdentity, HubSubmission } from "@graphloom/sdk";
 
 export interface HubExecutionObservation {
   execution: "live" | "drained" | "uncertain";
@@ -32,5 +32,13 @@ export interface OpenHubOptions {
   monotonic?: () => number;
   random?: () => number;
   autoPoll?: boolean;
+  /**
+   * What an archive index entry records beyond the queue record: the task's graph and
+   * request, read by the caller from the captured task, and the run's state directory.
+   * A failure leaves those fields out; it never blocks the archive.
+   */
+  describeArchive?: (submission: HubSubmission) => Promise<Pick<HubArchiveEntry, "graph" | "request" | "stateDir">>;
+  /** Tests shrink the archive index's retention bounds. */
+  archiveIndexBounds?: { entries: number; bytes: number };
 }
 export interface HubSubmitRequest { key?: string; requestDigest: string; input: HubInput; }

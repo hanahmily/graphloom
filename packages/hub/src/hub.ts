@@ -4,8 +4,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { mkdir, readFile } from "node:fs/promises";
-import type { HubArchivedSubmission, HubConfig, HubContinuation, HubObservation, HubResumeRemedy, HubRetryPolicy, HubStatus, HubSubmission } from "@graphloom/sdk";
+import type { HubArchiveEntry, HubArchivedSubmission, HubConfig, HubContinuation, HubObservation, HubResumeRemedy, HubRetryPolicy, HubStatus, HubSubmission } from "@graphloom/sdk";
 import { acquireHubLock } from "./lock.js";
+import { HubArchiveIndex } from "./archive.js";
 import { assertCapacity, durableWrite, HubStore, syncDirectory, validateConfig } from "./store.js";
 import type { HubSnapshot } from "./store.js";
 import type { HubDriver, HubSubmitRequest, OpenHubOptions } from "./types.js";
@@ -47,7 +48,8 @@ export async function openHub(options: OpenHubOptions): Promise<Hub> {
     for (const submission of Object.values(snapshot.submissions)) await store.command(submission, "");
     await options.driver.probe({ lockPid: lock.pid });
     if (lockLost) throw new Error("kernel hub lock lost during startup");
-    const hub = new Hub(store, snapshot, options, release);
+    const archiveIndex = await HubArchiveIndex.open(path.resolve(options.directory), snapshot.hubId, options.archiveIndexBounds);
+    const hub = new Hub(store, snapshot, options, release, archiveIndex);
     handleLoss = () => hub.lockLost();
     // Startup reconciliation is complete before the caller can accept work.
     await hub.tick();
@@ -69,7 +71,7 @@ export class Hub {
   private readonly random: () => number;
   private readonly deadlines = new Map<string, number>();
   private readonly driver: HubDriver;
-  constructor(private readonly store: HubStore, private snapshot: HubSnapshot, private readonly options: OpenHubOptions, private readonly release: () => Promise<void>) {
+  constructor(private readonly store: HubStore, private snapshot: HubSnapshot, private readonly options: OpenHubOptions, private readonly release: () => Promise<void>, private readonly archiveIndex: HubArchiveIndex) {
     this.now = options.now ?? Date.now;
     this.monotonic = options.monotonic ?? (() => performance.now());
     this.random = options.random ?? Math.random;
@@ -111,6 +113,10 @@ export class Hub {
     return copy({ hubId: this.snapshot.hubId, maxConcurrentRuns: this.snapshot.config.maxConcurrentRuns, occupiedSlots: this.occupied(), submissions: Object.values(this.snapshot.submissions).sort((a, b) => a.queueSequence - b.queueSequence), ...(this.fault ? { fault: this.fault } : {}) });
   }
   inspect(id: string): HubSubmission { return copy(this.get(id)); }
+  /** The bounded archive index, oldest first (docs/design-run-hub.md §4.1). */
+  archived(): HubArchiveEntry[] { return this.archiveIndex.list(); }
+  /** Why the archive index started empty, when its file was unreadable. */
+  get archiveIndexError(): string | undefined { return this.archiveIndex.loadError; }
   startPolling(): void {
     if (this.options.autoPoll === false || this.timer) return;
     this.timer = setInterval(() => { void this.tick().catch(() => undefined); }, this.snapshot.config.pollIntervalMs);
@@ -245,6 +251,21 @@ export class Hub {
       const s = this.get(id);
       if (!terminal(s) || s.launch) throw new Error("only terminal drained submissions can be archived");
       const tombstone: HubArchivedSubmission = { archived: true, id: s.id, runId: s.runId, requestDigest: s.requestDigest, contentDigest: s.contentDigest, ...(s.key ? { key: s.key } : {}) };
+      if (this.fault) throw new Error(`hub persistence fault: ${this.fault}`);
+      // History first: a crash before the snapshot commits leaves an index entry for a
+      // still-live submission, which searches skip; the reverse would lose the entry.
+      let described: Pick<HubArchiveEntry, "graph" | "request" | "stateDir"> = {};
+      try { described = await this.options.describeArchive?.(copy(s)) ?? {}; } catch { described = {}; }
+      const blocker = s.blocker ?? s.observation?.blocker;
+      await this.archiveIndex.add({
+        archived: true, id: s.id, runId: s.runId, ...(s.key ? { key: s.key } : {}),
+        ...(described.graph !== undefined ? { graph: described.graph } : {}),
+        repoPath: s.input.repoPath, taskPath: s.input.taskPath, requestDigest: s.requestDigest,
+        ...(described.request !== undefined ? { request: described.request } : {}),
+        acceptedAt: s.acceptedAt, settledAt: s.updatedAt, archivedAt: this.stamp(), state: s.state as HubArchiveEntry["state"],
+        ...(described.stateDir !== undefined ? { stateDir: described.stateDir } : {}),
+        ...(blocker ? { blocker } : {}),
+      });
       await this.commit((next) => { delete next.submissions[s.id]; next.tombstones.push(tombstone); });
       return tombstone;
     });

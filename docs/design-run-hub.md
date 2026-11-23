@@ -77,21 +77,33 @@ The CLI provides:
 
 ```sh
 graphloom hub serve --config ~/.config/graphloom/hub.json
+graphloom hub status
 graphloom hub submit ./tasks/fix/task.yaml --key fix-14169
 graphloom hub list
+graphloom hub list --state blocked --state failed --since 3d
+graphloom hub list --archived --repo widgets --grep "crash" --limit 20
 graphloom hub watch
 graphloom hub watch <submission> --plain
 graphloom hub inspect <submission>
 graphloom hub inspect <submission> --panel topology --format text
 graphloom hub inspect <submission> --panel topology --format ansi
 graphloom hub inspect <submission> --panel overview --format markdown --chat-renderer katex
+graphloom hub inspect <submission> --panel topology --stage review
+graphloom hub inspect <submission> --panel job --follow-current
 graphloom hub watch <submission> --panel usage
 graphloom hub logs <submission> --follow
 graphloom hub limit 3
 graphloom hub pause <submission>
 graphloom hub resume <submission>
 graphloom hub cancel <submission>
+graphloom hub archive <submission>
 ```
+
+`graphloom --help` lists every hub command; `graphloom hub --help` lists them
+alone, and `graphloom hub <command> --help` prints one command's usage and a
+short description. `inspect` and `watch` take `--stage <stage>` (narrow the
+topology and job panels to one stage's neighbourhood) and `--follow-current`
+(select the current stage's running job instead of naming one with `--job`).
 
 `submit` returns immediately after durable acceptance with `submissionId`, the
 reserved `runId`, queue position, and a reference usable by `hub inspect`.
@@ -139,6 +151,42 @@ hub default affects future submissions; an explicit policy update is required fo
 existing ones. `hub limit` persists the global limit immediately. The config seeds
 it on first creation; subsequent starts use the durable value and report it.
 
+### 3.1 Status and history search
+
+`graphloom hub status [--json]` reads `GET /v1/health`: hub ID, socket, the running
+hub's GraphLoom version, the limit, occupied slots, per-state submission counts,
+the archive index's size, and any fault, retention, monitoring or archive-index
+error. It is the reachability check for scripts and agent skills: exit 0 when the
+hub answers without a fault, 1 when nothing answers on the socket, 3 when it
+answers with a persistence fault or is shutting down. A retention, monitoring or
+archive-index error is printed but keeps exit 0; admission still works. `--json`
+prints the health object with `reachable` and `healthy` booleans and the
+submission count in place of the records; unreachable prints
+`{"reachable": false, "healthy": false, "socket", "error"}`.
+
+`graphloom hub list` without flags lists the retained queue in queue order. Any
+search flag turns it into a history search over the same records, newest
+acceptance first:
+
+| Flag | Matches |
+| --- | --- |
+| `--state <s>` | Repeatable; any of the scheduling states (an archived entry's final state) |
+| `--graph <id>` | The task's graph, read from the captured task |
+| `--repo <path-or-substring>` | An argument starting with `/`, `.` or `~` is resolved (and real-pathed) by the CLI and matches the repository exactly; anything else is a substring of its path |
+| `--key <substring>` | A substring of the idempotency key |
+| `--since`, `--until` | Inclusive bounds on acceptance time: an ISO time, or a duration before now (`90s`, `10m`, `2h`, `3d`, `1w`) resolved by the CLI |
+| `--grep <text>` | Case-insensitive text in the request or the blocker; a live submission's whole request, an archived entry's first line |
+| `--limit <n>` | At most `n` rows (1 to 10,000) after sorting; `matched` reports the count before it |
+| `--archived` | Also search the archive index (§4.1) |
+
+The filters combine with AND. The search runs in the hub
+(`GET /v1/submissions?state=…&graph=…&archived=true`); the reply keeps the list
+shape, with live matches in `submissions`, a `summaries` map of each match's
+graph, request digest and request first line, archive matches in `archived`, and
+`matched`. The plain reply without parameters is unchanged. The hub reads each
+captured task once (they are immutable) to know its graph and request; an
+unreadable task matches no graph and no request text.
+
 ## 4. Submission inputs and durable state
 
 Submission captures task bytes, config bytes, canonical repository and bundle
@@ -183,8 +231,8 @@ and never discard unsettled intent to compact history. Pause, cancel, drainage
 and settlement remain writable at the admission cap. Actual disk exhaustion stops
 new work and reports the persistence failure; it cannot be solved by a logical
 capacity reservation. An explicit archive operation removes
-terminal queue records while retaining run artifacts and compact idempotency
-tombstones in the snapshot. A tombstone records the key, request digest and original
+terminal queue records while retaining run artifacts, compact idempotency
+tombstones in the snapshot, and a history entry in the archive index (§4.1). A tombstone records the key, request digest and original
 submission/run IDs: a matching request returns an archived result, never a new run.
 The same 16 MiB cap applies; refuse new keys if it is reached. Keys remain reserved
 for the lifetime of this hub store. No automatic retention policy makes an old
@@ -203,6 +251,34 @@ The scheduling record has two independent axes:
 allowance is needed. `failed` is a terminal controller failure or unrecoverable
 initialization failure. Waiting and blocked submissions can have no live process.
 A scheduling label alone never releases a reservation.
+
+### 4.1 Archive index
+
+Archiving a submission first adds one entry to `archive-index.json` beside
+`scheduler.json`, then commits the snapshot without the queue record. The entry
+holds the submission and run IDs, idempotency key, graph, repository path,
+original task path, the submission's request digest, the request's own SHA-256
+and first nonblank line (at most 200 characters), acceptance, settlement (the
+terminal record's last update) and archive times, the final state, the run's
+state directory (`<hub directory>/runs/<runId>`) and the last blocker (at most
+512 characters). Graph, request and state directory come from the captured task
+and the hub runtime; when they cannot be read the entry omits them and the
+archive still proceeds. An entry that still exceeds 16 KiB keeps only its
+identity, times, state and clipped paths.
+
+The index is history, not authority. Tombstones alone reserve keys and answer
+repeated submissions; evicting an index entry never makes a request runnable
+again. Retention is bounded: the newest 5,000 entries and at most 8 MiB, the
+oldest evicted first when either bound is exceeded. Each archive rewrites the
+file through the same temporary-file, fsync and rename sequence as the snapshot.
+A crash between the index write and the snapshot commit leaves an entry for a
+still-live submission; searches skip entries whose submission is still in the
+queue, and the retried archive replaces the entry. A missing index (every hub
+store created before the index existed) starts empty: submissions archived
+earlier are not listed, and their runs remain findable only by run ID under
+`<hub directory>/runs/`. An unreadable or foreign index is renamed aside to
+`archive-index.json.damaged-<time>`, the hub starts with an empty index and
+reports `archiveIndexError` in health, and admission continues.
 
 ## 5. Concurrency contract
 
@@ -647,10 +723,10 @@ its authentication remain a separately designed feature.
 | Request | Meaning |
 | --- | --- |
 | `POST /v1/submissions` | Durable task submission; `Idempotency-Key` supported |
-| `GET /v1/submissions` and `GET /v1/submissions/:id` | Bounded paginated list and detail |
+| `GET /v1/submissions` and `GET /v1/submissions/:id` | Bounded list and detail; search parameters `state` (repeatable), `graph`, `repo`, `key`, `since`, `until`, `grep`, `limit`, `archived` (§3.1) |
 | `POST /v1/submissions/:id/commands` | Typed pause, resume, cancel, policy-update or archive command |
 | `PATCH /v1/settings` | Change global concurrency limit |
-| `GET /v1/status` | Health and aggregate scheduling state |
+| `GET /v1/health` | Health and aggregate scheduling state: version, socket, counts, faults, archive index size (§3.1) |
 | `GET /v1/events?since=<cursor>` | Bounded NDJSON observation stream; reconnect cursor and explicit retention gaps |
 | `GET /v1/submissions/:id/logs` | Bounded log read/follow with offset |
 

@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
+import { createHash } from "node:crypto";
 import { readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { HubStatus, HubSubmission, MonitorSnapshot } from "@graphloom/sdk";
+import type { HubHealth, HubInput, HubStatus, HubSubmission, MonitorSnapshot } from "@graphloom/sdk";
 import { HubHttpError, hubRequest } from "../src/hub-client.js";
-import { socketEnvironment } from "./hub-test-env.js";
+import { fakeInput, socketEnvironment } from "./hub-test-env.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { while (cleanups.length) await cleanups.pop()!(); });
@@ -101,5 +102,82 @@ describe("hub Unix service with an injected execution driver", () => {
       ["POST", "/v1/subscriptions/old/reports/report", { outcome: "accepted" }],
     ] as const) await expect(hubRequest(method, route, body, socket)).rejects.toMatchObject({ status: 404 });
     expect(await readFile(path.join(directory, "subscriptions.json"), "utf8")).toBe("{obsolete");
+  });
+});
+
+/** Tasks named `/tasks/<graph>--<repo>--<words>.yaml`: graph, repository and request from the name. */
+function namedInput(file: string): HubInput {
+  const [graph, repo, words] = path.basename(file, ".yaml").split("--") as [string, string, string];
+  const task = `graph: ${graph}\nrepo: ./repo\nrequest: |\n  ${words.replace(/-/g, " ")}\n  Second line about details.\n`;
+  return { ...fakeInput(file), task, taskDigest: createHash("sha256").update(task).digest("hex"), repoPath: `/repos/${repo}` };
+}
+
+describe("hub history search and health", () => {
+  async function seeded(cleanup = cleanups) {
+    const env = await socketEnvironment(cleanup, 0, undefined, namedInput);
+    const submit = async (name: string, key: string) => {
+      const item = await hubRequest<HubSubmission>("POST", "/v1/submissions", { taskPath: `/tasks/${name}.yaml`, key }, env.socket);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return item;
+    };
+    const fix = await submit("issue-fix--widgets--Fix-the-widget-crash", "fix-widgets-42");
+    const review = await submit("pr-review--widgets--Review-pull-request-7", "review-widgets-7");
+    const other = await submit("issue-fix--gadgets--Speed-up-gadget-loading", "fix-gadgets-3");
+    await hubRequest("POST", `/v1/submissions/${fix.id}/cancel`, { commandId: "cancel-fix" }, env.socket);
+    await hubRequest("POST", `/v1/submissions/${review.id}/pause`, { commandId: "pause-review" }, env.socket);
+    return { ...env, fix, review, other };
+  }
+  const search = (socket: string, query: string) => hubRequest<HubStatus>("GET", `/v1/submissions?${query}`, undefined, socket);
+  const ids = (status: HubStatus) => [...status.submissions.map((item) => item.id), ...(status.archived ?? []).map((entry) => entry.id)];
+
+  it("filters live submissions by state, graph, repository, key, time, text and limit, newest first", async () => {
+    const { socket, fix, review, other } = await seeded();
+    expect(ids(await search(socket, "limit=10"))).toEqual([other.id, review.id, fix.id]);
+    expect(ids(await search(socket, "state=canceled&state=paused"))).toEqual([review.id, fix.id]);
+    expect(ids(await search(socket, "graph=issue-fix"))).toEqual([other.id, fix.id]);
+    expect(ids(await search(socket, "repo=widgets"))).toEqual([review.id, fix.id]);
+    expect(ids(await search(socket, `repo=${encodeURIComponent("/repos/gadgets")}`))).toEqual([other.id]);
+    expect(ids(await search(socket, `repo=${encodeURIComponent("/repos")}`))).toEqual([]);
+    expect(ids(await search(socket, "key=widgets"))).toEqual([review.id, fix.id]);
+    expect(ids(await search(socket, "grep=WIDGET%20crash"))).toEqual([fix.id]);
+    expect(ids(await search(socket, "grep=details"))).toHaveLength(3);
+    expect(ids(await search(socket, `since=${encodeURIComponent(review.acceptedAt)}`))).toEqual([other.id, review.id]);
+    expect(ids(await search(socket, `until=${encodeURIComponent(review.acceptedAt)}`))).toEqual([review.id, fix.id]);
+    const limited = await search(socket, "limit=1");
+    expect(ids(limited)).toEqual([other.id]); expect(limited.matched).toBe(3);
+    expect(limited.summaries?.[other.id]).toMatchObject({ graph: "issue-fix", firstLine: "Speed up gadget loading" });
+    // The plain listing is unchanged: queue order, no summaries.
+    const plain = await hubRequest<HubStatus>("GET", "/v1/submissions", undefined, socket);
+    expect(plain.submissions.map((item) => item.id)).toEqual([fix.id, review.id, other.id]); expect(plain).not.toHaveProperty("summaries");
+    for (const bad of ["state=bogus", "limit=0", "since=yesterday", "archived=maybe", "nope=1", "graph=a&graph=b"]) {
+      await expect(search(socket, bad)).rejects.toMatchObject({ status: 400 });
+    }
+  });
+
+  it("finds archived submissions only with archived=true, under the same filters", async () => {
+    const { socket, fix, review, other, directory } = await seeded();
+    await hubRequest("POST", `/v1/submissions/${fix.id}/archive`, { commandId: "archive-fix" }, socket);
+    expect(ids(await search(socket, "limit=10"))).toEqual([other.id, review.id]);
+    const found = await search(socket, "archived=true&key=fix-widgets");
+    expect(found.submissions).toEqual([]);
+    expect(found.archived).toEqual([expect.objectContaining({
+      archived: true, id: fix.id, runId: fix.runId, key: "fix-widgets-42", graph: "issue-fix", repoPath: "/repos/widgets", taskPath: "/tasks/issue-fix--widgets--Fix-the-widget-crash.yaml",
+      request: expect.objectContaining({ firstLine: "Fix the widget crash", digest: expect.stringMatching(/^[a-f0-9]{64}$/) }),
+      state: "canceled", stateDir: path.join(directory, "runs", fix.runId), acceptedAt: fix.acceptedAt,
+    })]);
+    expect(ids(await search(socket, "archived=true&grep=widget%20crash"))).toEqual([fix.id]);
+    expect(ids(await search(socket, "archived=true&state=canceled"))).toEqual([fix.id]);
+    expect(ids(await search(socket, "archived=true&state=paused"))).toEqual([review.id]);
+    expect(ids(await search(socket, "archived=true&repo=widgets"))).toEqual([review.id, fix.id]);
+    expect(ids(await search(socket, "archived=true&limit=2"))).toEqual([other.id, review.id]);
+    expect(ids(await search(socket, "archived=true&graph=pr-review"))).toEqual([review.id]);
+  });
+
+  it("reports health with version, socket, counts and the archive index size", async () => {
+    const { socket, fix } = await seeded();
+    await hubRequest("POST", `/v1/submissions/${fix.id}/archive`, { commandId: "archive-fix" }, socket);
+    const health = await hubRequest<HubHealth>("GET", "/v1/health", undefined, socket);
+    expect(health).toMatchObject({ socket, counts: { paused: 1, queued: 1 }, archivedEntries: 1, closing: false, maxConcurrentRuns: 0 });
+    expect(health).not.toHaveProperty("fault");
   });
 });

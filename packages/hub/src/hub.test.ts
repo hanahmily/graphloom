@@ -456,3 +456,70 @@ describe("restart reconciliation", () => {
     expect(next.inspect(a.id).state).toBe("succeeded");
   });
 });
+
+describe("archive index", () => {
+  async function cancelAndArchive(hub: Hub, key: string): Promise<HubSubmission> {
+    const s = await accepted(hub, key);
+    await hub.cancel(s.id, { commandId: `cancel-${key}` });
+    await hub.archive(s.id);
+    return s;
+  }
+  it("records each archived submission durably, keeps its tombstone, and reloads it", async () => {
+    const f = await fixture(0);
+    const s = await accepted(f.hub, "ticket-9");
+    await f.hub.cancel(s.id, { commandId: "c" });
+    await f.hub.archive(s.id);
+    await f.hub.archive(s.id);
+    const [entry] = f.hub.archived();
+    expect(f.hub.archived()).toHaveLength(1);
+    expect(entry).toMatchObject({ archived: true, id: s.id, runId: s.runId, key: "ticket-9", repoPath: "/repos/example", taskPath: "/tasks/task.yaml", requestDigest: s.requestDigest, acceptedAt: s.acceptedAt, state: "canceled" });
+    expect(Date.parse(entry!.archivedAt)).toBeGreaterThan(0);
+    await f.hub.close({ graceMs: 0 });
+    const reopened = await openHub(f.options); hubs.push(reopened);
+    expect(reopened.archived()).toEqual([entry]);
+    expect(await reopened.submit(request("ticket-9"))).toMatchObject({ archived: true, id: s.id });
+  });
+  it("records what the describe hook reads, and archives without it when the hook fails", async () => {
+    const f = await fixture(0); await f.hub.close({ graceMs: 0 });
+    let fail = false;
+    const hub = await openHub({ ...f.options, describeArchive: async (s) => {
+      if (fail) throw new Error("task unreadable");
+      return { graph: "hello", request: { graph: "hello", digest: "d".repeat(64), firstLine: "Fix the widgets" }, stateDir: `/hub/runs/${s.runId}` };
+    } }); hubs.push(hub);
+    const first = await cancelAndArchive(hub, "a");
+    fail = true;
+    await cancelAndArchive(hub, "b");
+    const [a, b] = hub.archived();
+    expect(a).toMatchObject({ graph: "hello", request: { firstLine: "Fix the widgets" }, stateDir: `/hub/runs/${first.runId}` });
+    expect(b).not.toHaveProperty("graph"); expect(b).not.toHaveProperty("request");
+  });
+  it("evicts the oldest entries past its count and byte bounds; tombstones keep every key", async () => {
+    const f = await fixture(0); await f.hub.close({ graceMs: 0 });
+    const hub = await openHub({ ...f.options, archiveIndexBounds: { entries: 3, bytes: 1024 * 1024 } }); hubs.push(hub);
+    const ids: string[] = [];
+    for (const key of ["k1", "k2", "k3", "k4", "k5"]) ids.push((await cancelAndArchive(hub, key)).id);
+    expect(hub.archived().map((entry) => entry.id)).toEqual(ids.slice(2));
+    expect(await hub.submit(request("k1"))).toMatchObject({ archived: true, id: ids[0] });
+    await hub.close({ graceMs: 0 });
+    const small = await openHub({ ...f.options, archiveIndexBounds: { entries: 100, bytes: 1200 } }); hubs.push(small);
+    await cancelAndArchive(small, "k6");
+    const kept = small.archived();
+    expect(kept.length).toBeLessThan(4);
+    expect(kept.at(-1)?.key).toBe("k6");
+    expect(Buffer.byteLength(await readFile(path.join(f.directory, "archive-index.json"), "utf8"))).toBeLessThanOrEqual(1200 + 1);
+  });
+  it("starts empty for a store without an index and sets a damaged index aside without faulting", async () => {
+    const f = await fixture(0);
+    expect(f.hub.archived()).toEqual([]);
+    expect(f.hub.archiveIndexError).toBeUndefined();
+    await cancelAndArchive(f.hub, "x");
+    await f.hub.close({ graceMs: 0 });
+    await writeFile(path.join(f.directory, "archive-index.json"), "{not json");
+    const hub = await openHub(f.options); hubs.push(hub);
+    expect(hub.archived()).toEqual([]);
+    expect(hub.archiveIndexError).toMatch(/set aside as archive-index\.json\.damaged-/);
+    expect(hub.list().fault).toBeUndefined();
+    await cancelAndArchive(hub, "y");
+    expect(hub.archived().map((entry) => entry.key)).toEqual(["y"]);
+  });
+});

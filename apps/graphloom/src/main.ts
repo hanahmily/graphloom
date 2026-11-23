@@ -692,7 +692,6 @@ function flagValue(args: string[], name: string): string | undefined {
 }
 
 function printHelp(): void {
-  console.log(HUB_USAGE.join("\n"));
   console.log(`graphloom — TypeScript harness
 
 Usage:
@@ -720,6 +719,9 @@ Usage:
   graphloom skills install [<name>...] [--agent <claude-code|codex|opencode>] [--dir <dir>] [--force]
   graphloom skills update [--agent <claude-code|codex|opencode>] [--dir <dir>] [--quiet]
   graphloom skills remove [<name>...] [--agent <claude-code|codex|opencode>] [--dir <dir>] [--force]
+
+Run hub (docs/design-run-hub.md; graphloom hub <command> --help describes one command):
+  ${HUB_USAGE.join("\n  ")}
 
 session list shows a run's recorded agent sessions; session open forks one in your own terminal (Claude Code or
 Codex, under the job's confinement with the checkout read-only) and records the conversation when the agent
