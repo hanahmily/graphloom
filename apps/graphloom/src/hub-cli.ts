@@ -40,7 +40,7 @@ export const HUB_USAGE = [
 /** One paragraph per command for `graphloom hub <command> --help`. */
 const HUB_HELP: Record<string, string> = {
   serve: "Runs the hub in the foreground (normally under the systemd user service).",
-  service: "Prints a systemd user unit for the hub; installs nothing.\n--capture-env prints the drop-in graphloom-hub.service.d/environment.conf instead: PATH, Go's variables,\nCLAUDE_CONFIG_DIR, CODEX_HOME, LANG, LC_ALL and the proxies from a clean login shell of $SHELL.\n--token-env-file <file> prints the drop-in tokens.conf (EnvironmentFile=-<file>); the file holds the runner\nconfig's github.tokenEnv, from that variable or gh auth token, owner-only (0600); --write-token adds\ngithub.writeTokenEnv. --write writes the drop-ins (and the token file) instead; nothing is written without it.\nOnly names are printed, never a token. Re-run after a shell profile, toolchain or gh auth change.",
+  service: "Prints a systemd user unit for the hub; installs nothing.\n--capture-env prints the drop-in graphloom-hub.service.d/environment.conf instead: PATH, Go's variables,\nCLAUDE_CONFIG_DIR, CODEX_HOME, LANG, LC_ALL, the proxies and GraphLoom's own non-secret settings\n(GRAPHLOOM_DISABLE_AUTOUPDATE, the harness CLIs and models, ...) from a clean login shell of $SHELL.\n--token-env-file <file> prints the drop-in tokens.conf (EnvironmentFile=-<file>); the file holds the runner\nconfig's github.tokenEnv, from that variable or gh auth token, owner-only (0600); --write-token adds\ngithub.writeTokenEnv. --write writes the drop-ins (and the token file) instead; nothing is written without it.\nOnly names are printed, never a token. Re-run after a shell profile, toolchain or gh auth change.",
   doctor: "Runs graphloom doctor's checks (with --task, the task's too) inside the running hub's environment:\nwhat its runs find, not what your shell has. Exit 0 no check failed, 1 one did or the hub is unreachable.",
   status: "Reports whether the hub is reachable and healthy: id, socket, version, limit, slot and state counts, faults,\nand its environment (PATH head, where the agent CLIs resolve, which token variables are set; names only).\nExit 0 healthy, 1 unreachable, 3 faulted or shutting down.",
   submit: "Submits a task to the queue; the same --key and task return the same submission.",
@@ -352,6 +352,14 @@ async function hubServiceEnvironment(options: ServiceEnvironmentOptions): Promis
   if (options.capture) {
     captured = await captureLoginEnvironment({ shell, home: process.env.HOME ?? os.homedir(), ...(process.env.USER ? { user: process.env.USER } : {}) });
     if (!captured.variables.some(([name]) => name === "PATH")) throw new Error(`a login shell of ${shell} set no PATH; nothing to capture`);
+    // A runner config's token variables go only to the owner-only token file, whatever they are named.
+    const hubConfig = await loadHubConfig(options.config).catch(() => undefined);
+    const runner = await loadRunnerConfig(hubConfig?.runnerConfig !== undefined ? { ...process.env, GRAPHLOOM_RUNNER_CONFIG: hubConfig.runnerConfig } : process.env).catch(() => undefined);
+    const secret = new Set([runner?.github?.tokenEnv, runner?.github?.writeTokenEnv].filter((name): name is string => Boolean(name)));
+    captured = {
+      variables: captured.variables.filter(([name]) => !secret.has(name)),
+      skipped: [...captured.skipped, ...captured.variables.filter(([name]) => secret.has(name)).map(([name]) => ({ name, reason: "the runner config names it as a token; --token-env-file puts tokens in the owner-only file" }))],
+    };
     note(`captured from a clean login shell of ${shell}: ${captured.variables.map(([name]) => name).join(", ")}`);
     for (const skip of captured.skipped) note(`not captured: ${skip.name} (${skip.reason})`);
   }

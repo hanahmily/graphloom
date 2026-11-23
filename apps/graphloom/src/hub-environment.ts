@@ -121,13 +121,53 @@ export async function runHubDoctor(env: NodeJS.ProcessEnv, config: Pick<HubServi
 // ---------------------------------------------------------------- hub service --capture-env
 
 /**
+ * GraphLoom's own operator settings a run reads from its environment, none a
+ * secret: auto-update and where releases come from, the install home, the
+ * runner and supervisor configs, the wire bound, the harness CLIs, logins,
+ * models and timeouts the runner config can also set, the coding agents' retry
+ * policy, and the OCR override. Named one by one, never by prefix: a runner
+ * config's token variable may be named `GRAPHLOOM_...`, and tokens go only to
+ * the owner-only token file. Internal variables (a run's own, the harness
+ * module, the pass-through lists, tests') are not settings.
+ */
+export const CAPTURED_GRAPHLOOM_VARIABLES = [
+  "GRAPHLOOM_DISABLE_AUTOUPDATE",
+  "GRAPHLOOM_RELEASE_REPO",
+  "GRAPHLOOM_HOME",
+  "GRAPHLOOM_RUNNER_CONFIG",
+  "GRAPHLOOM_SUPERVISOR_CONFIG",
+  "GRAPHLOOM_MAX_WIRE_BYTES",
+  "GRAPHLOOM_CLAUDE_BIN",
+  "GRAPHLOOM_CLAUDE_CONFIG_DIR",
+  "GRAPHLOOM_CLAUDE_MODEL",
+  "GRAPHLOOM_CLAUDE_STARTUP_TIMEOUT_MS",
+  "GRAPHLOOM_CLAUDE_RESPONSE_TIMEOUT_MS",
+  "GRAPHLOOM_CODEX_BIN",
+  "GRAPHLOOM_CODEX_HOME",
+  "GRAPHLOOM_CODEX_MODEL",
+  "GRAPHLOOM_CODEX_REASONING_EFFORT",
+  "GRAPHLOOM_CODEX_RESPONSE_TIMEOUT_MS",
+  "GRAPHLOOM_PI_PROVIDER",
+  "GRAPHLOOM_PI_MODEL",
+  "GRAPHLOOM_PI_AGENT_DIR",
+  "GRAPHLOOM_CODING_RETRY_MAX_ATTEMPTS",
+  "GRAPHLOOM_CODING_RETRY_BASE_DELAY_MS",
+  "GRAPHLOOM_CODING_RETRY_MAX_DELAY_MS",
+  "GRAPHLOOM_OCR_BIN",
+] as const;
+
+const GRAPHLOOM_SETTINGS: ReadonlySet<string> = new Set(CAPTURED_GRAPHLOOM_VARIABLES);
+
+/**
  * The variables `--capture-env` keeps: `PATH`, Go's (`GOPATH`, `GOROOT`,
  * `GOTOOLCHAIN`, ...; no underscore, so never `GOOGLE_API_KEY`), the agents'
- * login locations, the locale, and the proxies. Nothing else, so no secret a
- * profile exports reaches the drop-in.
+ * login locations, the locale, the proxies, and GraphLoom's own settings
+ * (`CAPTURED_GRAPHLOOM_VARIABLES`). Nothing else, so no secret a profile
+ * exports reaches the drop-in.
  */
 export function capturedVariable(name: string): boolean {
   return /^(PATH|CLAUDE_CONFIG_DIR|CODEX_HOME|LANG|LC_ALL)$/.test(name)
+    || GRAPHLOOM_SETTINGS.has(name)
     || (/^GO[A-Z0-9]*$/.test(name) && !name.startsWith("GOOGLE"))
     || /^(http|https|ftp|all|no)_proxy$/i.test(name);
 }

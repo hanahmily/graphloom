@@ -827,8 +827,16 @@ drop-ins beside the unit `graphloom-hub.service`, under
   `HOME`, `USER`, `LOGNAME`, `SHELL` and `TERM=dumb`, stdin closed, 20 s) and
   keeps an allowlist: `PATH`, Go's variables (`GO` followed by capitals or
   digits only, so never `GOOGLE_API_KEY`), `CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
-  `LANG`, `LC_ALL`, and the proxy variables (`HTTP_PROXY` ... `NO_PROXY`, either
-  case). A value holding a URL with user information (a proxy's or `GOPROXY`'s
+  `LANG`, `LC_ALL`, the proxy variables (`HTTP_PROXY` ... `NO_PROXY`, either
+  case), and GraphLoom's own non-secret settings, named one by one, never by
+  prefix (`CAPTURED_GRAPHLOOM_VARIABLES`): `GRAPHLOOM_DISABLE_AUTOUPDATE` and
+  `GRAPHLOOM_RELEASE_REPO`, `GRAPHLOOM_HOME`, `GRAPHLOOM_RUNNER_CONFIG` and
+  `GRAPHLOOM_SUPERVISOR_CONFIG`, `GRAPHLOOM_MAX_WIRE_BYTES`, the harness CLIs,
+  logins, models and timeouts (`GRAPHLOOM_CLAUDE_*`, `GRAPHLOOM_CODEX_*`,
+  `GRAPHLOOM_PI_*`, but not the `*_PASS_ENV` lists), the coding agents' retry
+  policy (`GRAPHLOOM_CODING_RETRY_*`) and `GRAPHLOOM_OCR_BIN`; so a profile that
+  turns auto-update off keeps it off for the hub's runs. A variable the runner
+  config names as a token is never captured, whatever its name. A value holding a URL with user information (a proxy's or `GOPROXY`'s
   credentials, a user name alone included) and a value spanning lines are
   left out and named. They become `Environment=` lines of `environment.conf`.
 - `--token-env-file <file>` writes `tokens.conf`, `EnvironmentFile=-<file>`,
