@@ -331,7 +331,7 @@ function environmentLines(env: HubEnvironmentSummary): string[] {
   const more = env.pathEntries - env.pathHead.length;
   return [
     `Environment PATH: ${env.pathHead.length ? safeText(env.pathHead.join(":")) : "(empty)"}${more > 0 ? ` (+${more} more)` : ""}`,
-    `Tools: ${env.tools.map((tool) => `${tool.name} ${tool.path === null ? "not found" : safeText(tool.path)}`).join(" · ")}`,
+    `Tools: ${env.tools.map((tool) => `${tool.name}${tool.command !== tool.name && tool.path === null ? ` (${safeText(tool.command)})` : ""} ${tool.path === null ? "not found" : safeText(tool.path)}`).join(" · ")}`,
     ...(env.variables.length ? [`Variables: ${env.variables.map((v) => `${v.name} ${v.set ? "set" : "unset"} (${v.source})`).join(" · ")}`] : []),
     ...(env.error ? [`Environment error: ${safeText(env.error)}`] : []),
     ...env.warnings.map((warning) => `Warning: ${safeText(warning)}`),

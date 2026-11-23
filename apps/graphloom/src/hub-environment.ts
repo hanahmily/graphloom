@@ -52,15 +52,7 @@ export async function summarizeHubEnvironment(env: NodeJS.ProcessEnv, config: Pi
   const runner = await loadRunnerConfig(runEnv).catch((error: unknown) => { errors.push(error instanceof Error ? error.message : String(error)); return undefined; });
   const supervisor = await loadSupervisorConfig(runEnv).catch((error: unknown) => { errors.push(error instanceof Error ? error.message : String(error)); return undefined; });
   const entries = (runEnv.PATH ?? "").split(path.delimiter).filter(Boolean);
-  const needs = harnessNeeds(runner, supervisor);
-  const lookups: Array<{ name: string; command: string; neededBy?: string[] }> = [
-    { name: "claude", command: runner?.claude?.command ?? (runEnv[CLAUDE_BIN_ENV] || "claude"), ...(needs["claude-code"].length ? { neededBy: needs["claude-code"] } : {}) },
-    { name: "codex", command: runner?.codex?.command ?? (runEnv[CODEX_BIN_ENV] || "codex"), ...(needs.codex.length ? { neededBy: needs.codex } : {}) },
-    { name: "git", command: "git", neededBy: ["every run"] },
-    { name: "gh", command: "gh" },
-    { name: "docker", command: "docker" },
-    { name: "bwrap", command: "bwrap" },
-  ];
+  const lookups = toolLookups(runner, supervisor, runEnv);
   const tools: HubEnvironmentTool[] = await Promise.all(lookups.map(async (tool) => ({ ...tool, path: await resolve(tool.command, runEnv) })));
   const variables: HubEnvironmentVariable[] = [];
   const named = (name: string | undefined, source: string) => { if (name) variables.push({ name, set: Boolean(runEnv[name]), source }); };
@@ -73,14 +65,30 @@ export async function summarizeHubEnvironment(env: NodeJS.ProcessEnv, config: Pi
   return { pathHead: entries.slice(0, PATH_HEAD), pathEntries: entries.length, tools, variables, warnings, ...(errors.length ? { error: errors.join("; ").slice(0, 1024) } : {}) };
 }
 
-function harnessNeeds(runner: RunnerConfig | undefined, supervisor: SupervisorConfig | undefined): Record<"claude-code" | "codex", string[]> {
-  const needs: Record<"claude-code" | "codex", string[]> = { "claude-code": [], codex: [] };
+type ToolLookup = { name: string; command: string; neededBy?: string[] };
+
+/**
+ * The commands to resolve. The runner's and the supervisor's Claude Code and
+ * Codex are looked up each as its own config names it (the supervisor's
+ * `claude.command`/`codex.command`, default the bare name), merged when they
+ * are the same command, so one never masks the other.
+ */
+function toolLookups(runner: RunnerConfig | undefined, supervisor: SupervisorConfig | undefined, env: NodeJS.ProcessEnv): ToolLookup[] {
+  const lookups: ToolLookup[] = [];
+  const add = (name: string, command: string, need?: string) => {
+    const same = lookups.find((tool) => tool.name === name && tool.command === command);
+    if (same === undefined) lookups.push({ name, command, ...(need !== undefined ? { neededBy: [need] } : {}) });
+    else if (need !== undefined) (same.neededBy ??= []).push(need);
+  };
   const enabled = runner !== undefined ? enabledHarnesses(runner) : [];
-  for (const harness of ["claude-code", "codex"] as const) {
-    if (enabled.includes(harness)) needs[harness].push(`the runner config enables ${harness}`);
-    if (supervisor?.harnesses?.includes(harness)) needs[harness].push(`the supervisor config enables ${harness}`);
-  }
-  return needs;
+  const supervised = supervisor?.harnesses ?? [];
+  add("claude", runner?.claude?.command ?? (env[CLAUDE_BIN_ENV] || "claude"), enabled.includes("claude-code") ? "the runner config enables claude-code" : undefined);
+  if (supervised.includes("claude-code")) add("claude", supervisor?.claude?.command ?? "claude", "the supervisor config enables claude-code");
+  add("codex", runner?.codex?.command ?? (env[CODEX_BIN_ENV] || "codex"), enabled.includes("codex") ? "the runner config enables codex" : undefined);
+  if (supervised.includes("codex")) add("codex", supervisor?.codex?.command ?? "codex", "the supervisor config enables codex");
+  add("git", "git", "every run");
+  for (const name of ["gh", "docker", "bwrap"]) add(name, name);
+  return lookups;
 }
 
 export interface HubDoctorResult {
@@ -144,7 +152,7 @@ export function parseCapturedEnvironment(output: string, marker = CAPTURE_MARKER
     const value = entry.slice(eq + 1);
     if (!capturedVariable(name)) continue;
     if (/[\n\r]/.test(value)) skipped.push({ name, reason: "its value spans lines" });
-    else if (/_proxy$/i.test(name) && /:\/\/[^/@\s]*:[^/@\s]*@/.test(value)) skipped.push({ name, reason: "it holds credentials; put it in the --token-env-file instead" });
+    else if (/:\/\/[^/?#\s]*@/.test(value)) skipped.push({ name, reason: "it holds credentials (a URL with user information); give it to the service yourself, in an owner-only EnvironmentFile" });
     else variables.push([name, value]);
   }
   variables.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));

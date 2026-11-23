@@ -73,6 +73,22 @@ describe("hub status: the hub's environment, names only", () => {
     expect(environment.tools.find((tool) => tool.name === "claude")).toMatchObject({ path: null, neededBy: ["the runner config enables claude-code"] });
     expect(environment.variables.find((v) => v.name === "GL_TEST_READ_TOKEN")).toEqual({ name: "GL_TEST_READ_TOKEN", set: true, source: "github.tokenEnv" });
   });
+
+  it("looks up the supervisor's own Claude Code command apart from the runner's, so neither masks the other", async () => {
+    const home = await temp("gl-hub-env-");
+    const elsewhere = path.join(home, "opt", "claude-supervisor");
+    await executable(elsewhere, "#!/bin/sh\nexit 0\n");
+    await mkdir(path.join(home, ".config", "graphloom"), { recursive: true });
+    await writeFile(path.join(home, ".config", "graphloom", "runner.json"), JSON.stringify({ harness: "claude-code", allowUnrestricted: true }));
+    await writeFile(path.join(home, ".config", "graphloom", "supervisor.json"), JSON.stringify({ harnesses: ["claude-code"], claude: { command: elsewhere } }));
+    const { socket } = await socketEnvironment(cleanups, 1, undefined, undefined, { HOME: home, PATH: path.join(home, "empty-bin") });
+    const environment = (JSON.parse((await invoke(["status", "--json", "--socket", socket])).out) as { environment: HubEnvironmentSummary }).environment;
+    expect(environment.tools.filter((tool) => tool.name === "claude")).toEqual([
+      { name: "claude", command: "claude", path: null, neededBy: ["the runner config enables claude-code"] },
+      { name: "claude", command: elsewhere, path: elsewhere, neededBy: ["the supervisor config enables claude-code"] },
+    ]);
+    expect(environment.warnings.filter((w) => w.startsWith("claude "))).toEqual([expect.stringContaining("but the runner config enables claude-code")]);
+  });
 });
 
 describe("hub doctor: doctor's checks in the hub's environment", () => {
@@ -164,7 +180,7 @@ exec /bin/sh -c "$4"
     expect(r.stdout).toContain('Environment="no_proxy=localhost"');
     for (const leaked of ["GOOGLE_API_KEY", "secret-google", "OPENAI_API_KEY", "sk-secret-openai", "proxypass", "LEAK_ME", "banner", "EnvironmentFile"]) expect(r.stdout).not.toContain(leaked);
     expect(r.stderr).toContain(`captured from a clean login shell of ${s.shell}: CLAUDE_CONFIG_DIR, GOPATH, GOTOOLCHAIN, LANG, PATH, no_proxy`);
-    expect(r.stderr).toContain("not captured: HTTPS_PROXY (it holds credentials; put it in the --token-env-file instead)");
+    expect(r.stderr).toContain("not captured: HTTPS_PROXY (it holds credentials (a URL with user information); give it to the service yourself, in an owner-only EnvironmentFile)");
     expect(r.stderr).not.toContain("proxypass");
     expect(r.stderr).toContain(`printed only; with --write it writes ${s.dropIn}`);
     // The shell started clean: only HOME, SHELL, TERM (and USER/LOGNAME when the caller has them).
@@ -212,6 +228,10 @@ exec /bin/sh -c "$4"
     const captured = parseCapturedEnvironment("noise\0__graphloom_captured_environment__\0PATH=/a:/b\0GOFLAGS=50% \"x\" \\y\0MULTI=a\0LANG=x\ny\0");
     expect(captured.variables).toEqual([["GOFLAGS", '50% "x" \\y'], ["PATH", "/a:/b"]]);
     expect(captured.skipped).toEqual([{ name: "LANG", reason: "its value spans lines" }]);
+    // Credentials in any captured URL are left out: a Go proxy's, and a proxy's with a user name only.
+    const secrets = parseCapturedEnvironment("\0__graphloom_captured_environment__\0GOPROXY=https://proxy.golang.org,https://user:secret@goproxy.example\0HTTPS_PROXY=http://token@proxy.example:3128\0NO_PROXY=localhost,.example\0PATH=/a\0");
+    expect(secrets.variables).toEqual([["NO_PROXY", "localhost,.example"], ["PATH", "/a"]]);
+    expect(secrets.skipped.map((skip) => skip.name)).toEqual(["GOPROXY", "HTTPS_PROXY"]);
     const text = environmentDropIn({ captured, shell: "/bin/zsh", at: new Date(0) });
     expect(text).toContain("[Service]\nEnvironment=");
     expect(text).toContain('Environment="GOFLAGS=50%% \\"x\\" \\\\y"');

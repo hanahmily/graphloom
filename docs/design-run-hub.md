@@ -170,8 +170,9 @@ Status also reports the hub process's **environment**, which its runs inherit
 (§9): the first five `PATH` entries and how many follow, where `claude`,
 `codex`, `git`, `gh`, `docker` and `bwrap` resolve on that `PATH` (the
 runner config's `claude.command`/`codex.command` or `GRAPHLOOM_CLAUDE_BIN`/
-`GRAPHLOOM_CODEX_BIN` when set), and whether the runner config's
-`github.tokenEnv` and `github.writeTokenEnv` variables and `CLAUDE_CONFIG_DIR`
+`GRAPHLOOM_CODEX_BIN` when set; an enabled supervisor harness's own
+`claude.command`/`codex.command` is looked up separately), and whether the
+runner config's `github.tokenEnv` and `github.writeTokenEnv` variables and `CLAUDE_CONFIG_DIR`
 and `CODEX_HOME` are set: names and `set`/`unset` only, never a value but
 `PATH`. A `Warning:` line names each CLI a configured harness needs (the runner
 config's or the supervisor config's enabled harnesses; `git` for every run)
@@ -827,7 +828,8 @@ drop-ins beside the unit `graphloom-hub.service`, under
   keeps an allowlist: `PATH`, Go's variables (`GO` followed by capitals or
   digits only, so never `GOOGLE_API_KEY`), `CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
   `LANG`, `LC_ALL`, and the proxy variables (`HTTP_PROXY` ... `NO_PROXY`, either
-  case). A proxy value with credentials in it and a value spanning lines are
+  case). A value holding a URL with user information (a proxy's or `GOPROXY`'s
+  credentials, a user name alone included) and a value spanning lines are
   left out and named. They become `Environment=` lines of `environment.conf`.
 - `--token-env-file <file>` writes `tokens.conf`, `EnvironmentFile=-<file>`,
   and fills `<file>` owner-only (mode 0600, written through a renamed temporary
