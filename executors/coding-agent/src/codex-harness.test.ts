@@ -325,6 +325,9 @@ describe("Codex sessions", () => {
     await expect.poll(() => kept.length, { timeout: 5_000 }).toBe(1);
     const ref = `codex-${THREAD}`;
     expect(kept).toEqual([ref]);
+    // The first save may have read the rollout before Codex wrote the command it reported;
+    // the save that follows it an interval later keeps it while Codex is quiet.
+    await expect.poll(() => readFile(path.join(h.sessions, `${ref}.jsonl`), "utf8"), { timeout: 10_000 }).toContain("command_execution");
     // What a host that kills the job now would be left with.
     const killed = `${h.sessions}-killed`;
     temps.push(killed);
