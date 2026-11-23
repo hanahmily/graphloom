@@ -18,7 +18,7 @@ import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import type { HubEnvironmentSummary } from "@graphloom/sdk";
 import type { DoctorReport } from "../src/doctor.js";
 import { hubCommand } from "../src/hub-cli.js";
-import { capturedVariable, environmentDropIn, parseCapturedEnvironment } from "../src/hub-environment.js";
+import { CAPTURED_GRAPHLOOM_VARIABLES, capturedVariable, environmentDropIn, parseCapturedEnvironment } from "../src/hub-environment.js";
 import { repoRoot } from "./cli-env.js";
 import { makeDoctorEnv, removeDoctorBase } from "./doctor-env.js";
 import { socketEnvironment } from "./hub-test-env.js";
@@ -141,7 +141,7 @@ describe("hub service --capture-env and --token-env-file", () => {
     });
   }
   /** A login shell whose "profile" prints a banner and exports a toolchain and some secrets, then runs the command it is given. */
-  async function sandbox() {
+  async function sandbox(profileExtra = "") {
     const root = await temp("gl-hub-service-");
     const home = path.join(root, "home");
     const shell = path.join(root, "fake-shell");
@@ -154,6 +154,8 @@ export PATH=/opt/go/bin:/home/u/.nvm/versions/node/v26/bin:/usr/bin:/bin
 export GOPATH=/home/u/go GOTOOLCHAIN=local GOOGLE_API_KEY=secret-google OPENAI_API_KEY=sk-secret-openai
 export CLAUDE_CONFIG_DIR=/home/u/.claude-work LANG=C.UTF-8 no_proxy=localhost
 export HTTPS_PROXY=http://proxyuser:proxypass@proxy.example:3128
+export GRAPHLOOM_DISABLE_AUTOUPDATE=1 GRAPHLOOM_CLAUDE_MODEL=opus GRAPHLOOM_GITHUB_LIVE_TOKEN=ghp_secretLive GRAPHLOOM_CODING_HARNESS=/tmp/scripted.js
+${profileExtra}
 export ODD='50%% "quoted" \\\\ value'
 [ "$1 $2 $3" = "-l -i -c" ] || { echo "unexpected arguments: $*" >&2; exit 9; }
 exec /bin/sh -c "$4"
@@ -178,8 +180,11 @@ exec /bin/sh -c "$4"
     expect(r.stdout).toContain('Environment="CLAUDE_CONFIG_DIR=/home/u/.claude-work"');
     expect(r.stdout).toContain('Environment="LANG=C.UTF-8"');
     expect(r.stdout).toContain('Environment="no_proxy=localhost"');
-    for (const leaked of ["GOOGLE_API_KEY", "secret-google", "OPENAI_API_KEY", "sk-secret-openai", "proxypass", "LEAK_ME", "banner", "EnvironmentFile"]) expect(r.stdout).not.toContain(leaked);
-    expect(r.stderr).toContain(`captured from a clean login shell of ${s.shell}: CLAUDE_CONFIG_DIR, GOPATH, GOTOOLCHAIN, LANG, PATH, no_proxy`);
+    // GraphLoom's own settings: the profile turned auto-update off, and hub runs keep it off.
+    expect(r.stdout).toContain('Environment="GRAPHLOOM_DISABLE_AUTOUPDATE=1"');
+    expect(r.stdout).toContain('Environment="GRAPHLOOM_CLAUDE_MODEL=opus"');
+    for (const leaked of ["GOOGLE_API_KEY", "secret-google", "OPENAI_API_KEY", "sk-secret-openai", "proxypass", "LEAK_ME", "banner", "EnvironmentFile", "GRAPHLOOM_GITHUB_LIVE_TOKEN", "ghp_secretLive", "GRAPHLOOM_CODING_HARNESS"]) expect(r.stdout).not.toContain(leaked);
+    expect(r.stderr).toContain(`captured from a clean login shell of ${s.shell}: CLAUDE_CONFIG_DIR, GOPATH, GOTOOLCHAIN, GRAPHLOOM_CLAUDE_MODEL, GRAPHLOOM_DISABLE_AUTOUPDATE, LANG, PATH, no_proxy`);
     expect(r.stderr).toContain("not captured: HTTPS_PROXY (it holds credentials (a URL with user information); give it to the service yourself, in an owner-only EnvironmentFile)");
     expect(r.stderr).not.toContain("proxypass");
     expect(r.stderr).toContain(`printed only; with --write it writes ${s.dropIn}`);
@@ -187,6 +192,47 @@ exec /bin/sh -c "$4"
     const seen = readFileSync(s.seen, "utf8");
     expect(seen).not.toContain("LEAK_ME"); expect(seen).toContain(`HOME=${s.home}`); expect(seen).toContain("TERM=dumb");
     expect(() => statSync(s.dropIn)).toThrow();
+  });
+
+  it("never captures a variable the runner config names as a token, even one named like a GraphLoom setting", async () => {
+    const s = await sandbox();
+    await writeFile(path.join(s.home, ".config", "graphloom", "runner.json"), JSON.stringify({ harness: "claude-code", allowUnrestricted: true, github: { tokenEnv: "GRAPHLOOM_CLAUDE_MODEL" } }));
+    const r = await run(["hub", "service", "--capture-env"], s.env);
+    expect(r.code, r.stderr).toBe(0);
+    expect(r.stdout).toContain('Environment="GRAPHLOOM_DISABLE_AUTOUPDATE=1"');
+    expect(r.stdout).not.toContain("GRAPHLOOM_CLAUDE_MODEL");
+    expect(r.stdout).not.toContain("opus");
+    expect(r.stderr).toContain("not captured: GRAPHLOOM_CLAUDE_MODEL (the runner config names it as a token; --token-env-file puts tokens in the owner-only file)");
+  });
+
+  it("reads the token names from the runner config the login profile names, and keeps no GraphLoom setting when a runner config cannot be read", async () => {
+    // The caller's default runner config names other tokens; the profile points the service at its own.
+    const other = path.join(os.tmpdir(), `gl-hub-runner-${process.pid}-${Date.now()}.json`);
+    cleanups.push(() => rm(other, { force: true }));
+    await writeFile(other, JSON.stringify({ harness: "claude-code", allowUnrestricted: true, github: { tokenEnv: "GRAPHLOOM_CLAUDE_MODEL" } }));
+    const s = await sandbox(`export GRAPHLOOM_RUNNER_CONFIG='${other}'`);
+    let r = await run(["hub", "service", "--capture-env"], s.env);
+    expect(r.code, r.stderr).toBe(0);
+    expect(r.stdout).toContain(`Environment="GRAPHLOOM_RUNNER_CONFIG=${other}"`);
+    expect(r.stdout).not.toContain("GRAPHLOOM_CLAUDE_MODEL");
+    expect(r.stdout).not.toContain("opus");
+
+    // The profile names none: the service reads the default runner config, not the caller's own override.
+    const plain = await sandbox();
+    await writeFile(path.join(plain.home, ".config", "graphloom", "runner.json"), JSON.stringify({ harness: "claude-code", allowUnrestricted: true, github: { tokenEnv: "GRAPHLOOM_CLAUDE_MODEL" } }));
+    const callers = path.join(plain.root, "callers-runner.json");
+    await writeFile(callers, JSON.stringify({ harness: "claude-code", allowUnrestricted: true, github: { tokenEnv: "GL_TEST_READ_TOKEN" } }));
+    r = await run(["hub", "service", "--capture-env"], { ...plain.env, GRAPHLOOM_RUNNER_CONFIG: callers });
+    expect(r.code, r.stderr).toBe(0);
+    expect(r.stdout).toContain('Environment="GRAPHLOOM_DISABLE_AUTOUPDATE=1"');
+    expect(r.stdout).not.toContain("GRAPHLOOM_CLAUDE_MODEL");
+
+    await writeFile(other, "{ not json");
+    r = await run(["hub", "service", "--capture-env"], s.env);
+    expect(r.code, r.stderr).toBe(0);
+    expect(r.stdout).not.toContain("GRAPHLOOM_");
+    expect(r.stdout).toContain('Environment="PATH=');
+    expect(r.stderr).toContain("not captured: GRAPHLOOM_DISABLE_AUTOUPDATE (the runner config cannot be read, so its token variables are unknown; fix it and capture again)");
   });
 
   it("writes the drop-in and an owner-only token file with --write; the write token only with --write-token; never prints a token", async () => {
@@ -225,6 +271,11 @@ exec /bin/sh -c "$4"
   it("keeps only allowlisted names and escapes systemd specifiers and quotes", () => {
     for (const name of ["PATH", "GOPATH", "GOROOT", "GOTOOLCHAIN", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "LANG", "LC_ALL", "HTTPS_PROXY", "https_proxy", "NO_PROXY"]) expect(capturedVariable(name), name).toBe(true);
     for (const name of ["GOOGLE_API_KEY", "GOOGLEKEY", "GO_SECRET", "GITHUB_TOKEN", "ANTHROPIC_API_KEY", "HOME", "LC_CTYPE", "SSH_AUTH_SOCK"]) expect(capturedVariable(name), name).toBe(false);
+    // GraphLoom's own non-secret settings, named one by one; never by prefix, so no token, test or internal variable.
+    for (const name of CAPTURED_GRAPHLOOM_VARIABLES) expect(capturedVariable(name), name).toBe(true);
+    expect(CAPTURED_GRAPHLOOM_VARIABLES).toContain("GRAPHLOOM_DISABLE_AUTOUPDATE");
+    for (const name of ["GRAPHLOOM_GITHUB_LIVE_TOKEN", "GRAPHLOOM_LIVE_GITHUB_TOKEN", "GRAPHLOOM_REHEARSAL_GITHUB_TOKEN", "GRAPHLOOM_TEST_SECRET", "GRAPHLOOM_CODING_HARNESS", "GRAPHLOOM_CLAUDE_PASS_ENV", "GRAPHLOOM_RUN_ID", "GRAPHLOOM_REPORT_FILE", "GRAPHLOOM_HUB_NO_SUPERVISOR", "GRAPHLOOM_READONLY_SANDBOX", "GRAPHLOOM_TOKEN"]) expect(capturedVariable(name), name).toBe(false);
+    for (const name of CAPTURED_GRAPHLOOM_VARIABLES) expect(name, name).not.toMatch(/TOKEN|SECRET|KEY|PASS/);
     const captured = parseCapturedEnvironment("noise\0__graphloom_captured_environment__\0PATH=/a:/b\0GOFLAGS=50% \"x\" \\y\0MULTI=a\0LANG=x\ny\0");
     expect(captured.variables).toEqual([["GOFLAGS", '50% "x" \\y'], ["PATH", "/a:/b"]]);
     expect(captured.skipped).toEqual([{ name: "LANG", reason: "its value spans lines" }]);

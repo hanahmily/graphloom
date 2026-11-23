@@ -894,6 +894,30 @@ The section follows a few rules:
   command report holds whole)` (since `pr-review` 1.1.3 and `pr-design-review`
   0.1.3; before, the whole Report stage failed, as apache/skywalking-banyandb#1487's
   181 files, 71,735 bytes of headers, did).
+- **Every command fits the command executor.** The command executor rejects,
+  before it runs, a job of more than 16 commands, a command whose argv holds more
+  than 64 strings or a string over 4,096 characters, and an input over 256,000
+  bytes; a rejected job leaves no run, so a graph that plans from its evidence
+  would plan it again. The review kit plans against these bounds (`bounds.ts`; a
+  test holds them equal to the executor's own validator). A diff group's argv is
+  `sh`, `-c`, the script, its id and one string per path, two for a renamed file;
+  a group over 64 is halved, as a group whose report does not fit is, before it is
+  ever dispatched, so a group's size never depends on a rejected run (181 files
+  made halves of 91 and 90 files, over the bound, and the plan stalled; since
+  `pr-review` 1.1.4 and `pr-design-review` 0.1.4). A static batch whose hunks
+  would put its command over the bounds is halved before it runs the same way;
+  a single file whose hunks alone do not fit is not measured, with the reason
+  `its changed lines are too many to pass to the static tool in one command`. A
+  path longer than 1,024 characters (a renamed file's base path too) is not
+  observable, so one file always fits a group. A job carries as many of its
+  commands as fit 16 and the input's bytes; the rest run in the next job. A
+  coverage plan whose commands do not fit one job is not run, with the reason
+  that the changed functions are too many. As a last guard, a graph that would
+  dispatch a command job over one of these bounds hands it to the supervisor
+  instead. The guard checks the kit's bounds, not the input shape the executor
+  declares: a JSON Schema `pattern` cannot carry the executor's case-insensitive
+  id rule, so the shape would refuse an id such as `search-S1` that the executor
+  takes.
 - **Batches fit the report.** The static tools run over the changed files in
   batches of at most 8 (`static-go-1`, `static-typescript-2`, …), and each
   prints one **compact** JSON document (no indentation), because a command
@@ -3130,6 +3154,16 @@ graph over time.
   file whose own headers do not fit is listed as not measured with its reason, never
   a failed stage ([§6.8](#68-measurements)). The review kit's change, shared with
   `pr-design-review` 0.1.3.
+- **1.1.4:** every command the review kit plans fits the command executor's input
+  bounds (apache/skywalking-banyandb#1487 again: 181 files split into groups of
+  about 74 paths, each over the executor's 64 argv strings, which the executor
+  rejected before running, so the plan repeated the same commands). A diff group
+  over the bound is halved before it is dispatched, renames counted as two paths; a
+  static batch likewise, a file whose hunks alone do not fit listed as not
+  measured; paths over 1,024 characters are not observable; jobs are packed by
+  count and bytes; and a command job over a bound goes to the supervisor rather than
+  the executor ([§6.8](#68-measurements)). The review kit's change, shared with
+  `pr-design-review` 0.1.4.
 
 **Where 1.0 differs from its design.** The split design (now
 [a pointer](design-pr-review-split.md)) planned a Checks stage when the profile has

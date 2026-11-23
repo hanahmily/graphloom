@@ -1,6 +1,6 @@
 # PR design review graph (`pr-design-review`)
 
-Status: implemented, `pr-design-review` 0.1.3 (`examples/plugins/pr-design-review`).
+Status: implemented, `pr-design-review` 0.1.4 (`examples/plugins/pr-design-review`).
 This is round 1 of a pull request's review: the design-level review. Round 2, the
 detail review, is the [PR-review graph](design-pr-review-graph.md) (`pr-review`
 1.x). The two graphs are independent plugins that share the review kit
@@ -593,4 +593,11 @@ and `large-artifacts` exercise the shared report. The design review's own:
   files that each fit one command report, and lists a file whose own headers do not
   fit as not measured, rather than failing the Report stage (it blocked
   apache/skywalking-banyandb#1487, 181 files)
+  ([PR review §6.8](design-pr-review-graph.md#68-measurements)).
+- **0.1.4:** every command the review kit plans fits the command executor's input
+  bounds: a diff group whose argv would be over 64 strings (a path each, two for a
+  rename) is halved before it is dispatched, where 0.1.3's halves of
+  apache/skywalking-banyandb#1487's 181 files were rejected unrun and planned again;
+  static batches likewise, jobs packed by count and bytes, and a command job over a
+  bound goes to the supervisor rather than the executor
   ([PR review §6.8](design-pr-review-graph.md#68-measurements)).

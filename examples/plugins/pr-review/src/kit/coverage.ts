@@ -13,6 +13,7 @@
  * the sandbox.
  */
 import type { DockerConfinement, EnvironmentCommand, EvidenceRecord } from "@graphloom/sdk";
+import { commandFits, fitJob, MAX_PATH_ARG_CHARS } from "./bounds.js";
 import { COMMAND } from "./constants.js";
 import { commandRuns, isObject, latestFile, outputTail, reportText, type CommandRun } from "./evidence.js";
 import { formatSpec, goFunctionCoverage, parseCoverageReport, parseSpec, tsFunctionCoverage, type CoverageSpecFunction } from "./metrics/coverage.js";
@@ -537,9 +538,14 @@ export function coverageConfinement(plan: CoveragePlan, pluginRoot: string): Doc
   };
 }
 
-/** Whether a plan's specs fit the commands that carry them. */
+/**
+ * Whether a plan's specs fit the commands that carry them, and those commands one job, within the command executor's
+ * bounds (the plugin root taken at a path's longest, so a validator decides the same).
+ */
 export function planFits(plan: CoveragePlan): boolean {
-  return plan.commands.every((c) => writeChunks(c.spec).length <= MAX_SPEC_CHUNKS);
+  if (!plan.commands.every((c) => writeChunks(c.spec).length <= MAX_SPEC_CHUNKS)) return false;
+  const commands = plan.commands.map((c) => coverageCommand(c, `/${"x".repeat(MAX_PATH_ARG_CHARS - 20)}`, plan.sandbox.wallClockMs));
+  return commands.every(commandFits) && fitJob(commands).length === commands.length;
 }
 
 /** What one command's report says of its records. */

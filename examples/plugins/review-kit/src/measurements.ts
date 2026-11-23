@@ -21,6 +21,7 @@ import { formatHunkFile, hunksFromUnifiedDiff } from "./metrics/hunks.js";
 import { withCoverage } from "./metrics/coverage.js";
 import { isTestPath, languageOf, SCHEMA, type BaseMetrics, type FunctionIndexEntry, type Hunks, type Language, type MetricsDocument, type MetricsRecord } from "./metrics/record.js";
 import { validateMetricsDocument } from "./metrics/validate.js";
+import { commandFits, MAX_PATH_ARG_CHARS } from "./bounds.js";
 import { COMMAND } from "./constants.js";
 import type { Profile } from "./profile.js";
 import { isDeleted, type PullFile } from "./snapshot.js";
@@ -35,9 +36,12 @@ export const MAX_DIFF_BYTES = 60_000;
 
 export const STATIC_PREFIX = "static-";
 
-/** The observable path rule: a relative file path the controller can read (no `..`, no `.git`, a file name with an extension). */
+/**
+ * The observable path rule: a relative file path the controller can read (no `..`, no `.git`, a file name with an
+ * extension), no longer than a command argument the graph passes (`MAX_PATH_ARG_CHARS`).
+ */
 export function observable(p: string): boolean {
-  if (!/^[A-Za-z0-9_./-]+$/.test(p)) return false;
+  if (p.length > MAX_PATH_ARG_CHARS || !/^[A-Za-z0-9_./-]+$/.test(p)) return false;
   const parts = p.split("/");
   if (parts.some((s) => s === "" || s === "." || s === ".." || s === ".git")) return false;
   return parts.at(-1)!.indexOf(".", 1) > 0;
@@ -59,7 +63,7 @@ export function measurable(files: readonly PullFile[], profile: Pick<Profile, "m
     if (language === undefined) continue;
     const globs = profile.metrics.files[language];
     if (globs !== undefined && !matchesGeneratedGlob(globs, f.path)) continue;
-    if (!observable(f.path)) out.excluded.push({ path: f.path, reason: "its path cannot be observed" });
+    if (!observable(f.path) || (f.previousPath ?? "").length > MAX_PATH_ARG_CHARS) out.excluded.push({ path: f.path, reason: "its path cannot be observed" });
     else out.files.push({ path: f.path, language });
   }
   return out;
@@ -127,7 +131,9 @@ export const metricsDiffCommand = (): EnvironmentCommand => ({
  * A group of measured files whose hunk headers one command lists. The root group is every measured file, read by
  * `metricsDiffCommand` over the language pathspecs; when a group's report does not fit, it is replaced by its two
  * halves in the measured files' order (`metrics-diff` gives `metrics-diff-a` and `metrics-diff-b`, those
- * `metrics-diff-aa`, and so on), each naming its files, down to one file (design §6.8).
+ * `metrics-diff-aa`, and so on), each naming its files, down to one file (design §6.8). A group whose command would be
+ * over the command executor's bounds (`MAX_ARGV` strings: `sh`, `-c`, the script, the id and a path each, two for a
+ * rename) is halved the same way before it is ever dispatched, so every group the graph runs is one the executor takes.
  */
 export interface DiffGroup {
   id: string;
@@ -410,6 +416,11 @@ function planDiff(evidence: readonly EvidenceRecord[], paths: readonly string[],
   const splits: string[] = [];
   const visit = (group: DiffGroup, after: number): void => {
     const command = diffGroupCommand(group, files);
+    // A named group over the executor's bounds never runs: its halves run instead. One file always fits (`observable`).
+    if (group.id !== COMMAND.metricsDiff && group.paths.length > 1 && !commandFits(command)) {
+      for (const child of splitDiffGroup(group)) visit(child, after);
+      return;
+    }
     const run = commandRuns(evidence, group.id)
       .filter((r) => r.command.argv.length === command.argv.length && r.command.argv.every((a, i) => a === command.argv[i]) && indexOf(evidence, r.record.ref) > after)
       .at(-1);
@@ -438,12 +449,20 @@ function runSince(evidence: readonly EvidenceRecord[], id: string, after: number
  * by its two halves, recursively, so a validator recomputes the same plan. A single file whose report is still cut stays
  * a leaf (the caller reports it as not measured, never as a failure); `splits` are the refs of the cut runs.
  */
-function planBatches(evidence: readonly EvidenceRecord[], initial: readonly Batch[], hunks: Hunks, toolRoot: string | undefined, after: number): { leaves: Batch[]; runs: Map<string, CommandRun>; splits: string[] } {
+function planBatches(evidence: readonly EvidenceRecord[], initial: readonly Batch[], hunks: Hunks, toolRoot: string | undefined, after: number): { leaves: Batch[]; runs: Map<string, CommandRun>; splits: string[]; unfit: string[] } {
   const leaves: Batch[] = [];
   const runs = new Map<string, CommandRun>();
   const splits: string[] = [];
+  const unfit: string[] = [];
   const visit = (b: Batch): void => {
     const text = formatHunkFile(new Map(b.paths.flatMap((p) => (hunks.has(p) ? [[p, hunks.get(p)!] as const] : []))));
+    // A batch whose hunks would put its command over the executor's bounds never runs: its halves do, and a single file
+    // that still does not fit is reported as not measured.
+    if (!staticFits(text)) {
+      if (b.paths.length > 1) for (const half of splitBatch(b)) visit(half);
+      else unfit.push(...b.paths);
+      return;
+    }
     const run = runSince(evidence, b.id, after, (r) => ownStaticArgv(r.command.argv, STATIC_SCRIPT, b.id, b.language, text, 0, toolRoot));
     if (run !== undefined && succeeded(run.command) && reportText(run).truncated && b.paths.length > 1) {
       splits.push(run.record.ref);
@@ -454,7 +473,18 @@ function planBatches(evidence: readonly EvidenceRecord[], initial: readonly Batc
     if (run !== undefined) runs.set(b.id, run);
   };
   for (const b of initial) visit(b);
-  return { leaves, runs, splits };
+  return { leaves, runs, splits, unfit };
+}
+
+/**
+ * Whether a batch's hunks fit its static command within the command executor's bounds. The command's other strings
+ * (the plugin root, the generated globs, the node and Go binaries) are taken at a path's longest each, so the check
+ * needs no plugin root and a validator plans the same batches.
+ */
+function staticFits(hunkText: string): boolean {
+  const filler = "x".repeat(MAX_PATH_ARG_CHARS);
+  const parts = writeChunks(hunkText);
+  return commandFits({ id: "static-typescript-1", argv: ["sh", "-c", STATIC_SCRIPT, "static-typescript-1", String(parts.length), ...parts, "ts", filler, filler, filler, filler] });
 }
 
 /**
@@ -509,7 +539,7 @@ export function measurementState(
   }
   const anchor = evidence[after]!.ref;
   const measuredM: Measurable = { files: m.files.filter((f) => !diffOverflowed.includes(f.path)), excluded: m.excluded };
-  const { leaves: batches, runs, splits } = planBatches(evidence, batchesOf(measuredM), hunks, toolRoot, after);
+  const { leaves: batches, runs, splits, unfit } = planBatches(evidence, batchesOf(measuredM), hunks, toolRoot, after);
   if (batches.some((b) => !runs.has(b.id))) return { state: "tools", batches: batches.filter((b) => !runs.has(b.id)), hunks };
   const problems: string[] = [];
   const refs = [...diffRefs, ...splits];
@@ -574,18 +604,19 @@ export function measurementState(
   // Batches that failed before the operator's resume are measured again before anything is judged.
   if (rerun.length > 0) return { state: "tools", batches: rerun, hunks };
   if (problems.length > 0) return { state: "failed", problems, refs, retry };
-  const missing = measuredM.files.map((f) => f.path).filter((p) => !covered.has(p) && !overflowed.includes(p) && hunks.has(p));
+  const missing = measuredM.files.map((f) => f.path).filter((p) => !covered.has(p) && !overflowed.includes(p) && !unfit.includes(p) && hunks.has(p));
   if (missing.length > 0) return { state: "failed", problems: [`the tools accounted for none of: ${missing.slice(0, 5).join(", ")}`], refs, retry: [] };
   // The modified functions' values at the base (design §6.8): never a failure, only a row that says why its base is not known.
   const withBase = baseState(evidence, records, files, anchor, profile, toolRoot);
   if (withBase.state === "baseFiles") return { state: "baseFiles", commands: withBase.commands };
   if (withBase.state === "baseTools") return { state: "baseTools", batches: withBase.batches, base: withBase.base };
   const measured = withBase.records;
-  const measuredFiles = measuredM.files.filter((f) => !overflowed.includes(f.path));
+  const measuredFiles = measuredM.files.filter((f) => !overflowed.includes(f.path) && !unfit.includes(f.path));
   const excluded = [
     ...m.excluded,
     ...diffOverflowed.map((p) => ({ path: p, reason: `its changed lines' hunk headers (git diff -U0) are over ${MAX_DIFF_BYTES} bytes, more than one command report holds whole` })),
     ...overflowed.map((p) => ({ path: p, reason: `the static tool's output for ${p} did not fit one command report` })),
+    ...unfit.map((p) => ({ path: p, reason: "its changed lines are too many to pass to the static tool in one command" })),
   ];
   // A static-only graph (the design review, design-pr-review-split §3.4) records complexity and nesting alone: no coverage, CRAP or mutation, and no not-run reason for them.
   if (profile.metrics.staticOnly === true) return { state: "ready", records: measured, refs, excluded, coverage: { enabled: false, runs: [] } };

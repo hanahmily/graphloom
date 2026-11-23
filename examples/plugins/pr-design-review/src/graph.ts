@@ -33,6 +33,7 @@ import {
   type ValidatorBinding,
 } from "@graphloom/sdk";
 import { attemptEvidence, noteAttempt, readAttempts } from "./kit/attempt.js";
+import { commandJobProblem, fitJob } from "./kit/bounds.js";
 import { analyze, reportFlowOf, type Analysis } from "./kit/analysis.js";
 import { checkoutCommand, GIT_ENV, GUARD_REFUSED, guardCommand, headTreeCommand, ledgerReadCommand, pinnedBase, reviewDirCommand } from "./kit/commands.js";
 import {
@@ -290,7 +291,18 @@ const withPrivate = (decision: GraphDecision): GraphDecision => ({ ...decision, 
 export function advancePullRequest(view: RunView): GraphDecision {
   const attempts = noteAttempt(readAttempts(view.privateState), view);
   const scoped: RunView = { ...view, evidence: attemptEvidence(view.evidence, view.candidateDigest, attempts) };
-  return { ...advance(scoped), privateState: JSON.stringify(attempts) };
+  return { ...withinCommandBounds(advance(scoped)), privateState: JSON.stringify(attempts) };
+}
+
+/**
+ * A command job the command executor would reject for one of its input bounds is never dispatched: a rejected job
+ * leaves no run, so the graph would plan the same job again. The supervisor is asked to repair the planning instead.
+ */
+function withinCommandBounds(decision: GraphDecision): GraphDecision {
+  if (decision.action.type !== "dispatch") return decision;
+  const problem = commandJobProblem(decision.action.job);
+  if (problem === undefined) return decision;
+  return supervise({ reason: `the graph planned a command job the command executor would reject before running it: ${problem}` }, "escalate a planned command over the command executor's input bounds");
 }
 
 function advance(view: RunView): GraphDecision {
@@ -764,7 +776,7 @@ function measureAndWrite(ctx: Context, view: RunView, analysis: Analysis, flow: 
       return withPrivate(observe({ paths: m.paths }, "observe the changed files the static tools measure, so their records can be recomputed from the head's bytes"));
     case "diff": {
       // One command lists every measured file's hunk headers; when its report does not fit, the files are listed again in groups (design §6.8).
-      const commands = m.commands.slice(0, 16);
+      const commands = fitJob(m.commands);
       const whole = commands.length === 1 && commands[0]!.id === COMMAND.metricsDiff;
       if (whole) return withPrivate(dispatch(commandJob(REPORT_STAGE, "List the changed lines (git diff -U0 -w)", { commands, env: { ...GIT_ENV } }), "list the head-side changed lines for the static metrics tools"));
       return withPrivate(dispatch(commandJob(REPORT_STAGE, `List the changed lines (git diff -U0 -w) of ${commands.length} group(s) of files`, { commands, continueOnFailure: true, env: { ...GIT_ENV } }), `list the head-side changed lines in ${commands.length} group(s) of files, so each group's hunk headers fit one command report`));
@@ -772,11 +784,11 @@ function measureAndWrite(ctx: Context, view: RunView, analysis: Analysis, flow: 
     case "tools": {
       const binds = toolBinds(view, m.batches);
       if (binds === undefined) return supervise({ reason: "the environment check recorded no plugin directory, which the static tools run from" }, "escalate a missing plugin path");
-      const batches = m.batches.slice(0, 16);
       const generated = profile.metrics.generated;
       const goRoot = environmentOutput(view.evidence, "go-root");
       const goBin = goRoot !== undefined && path.isAbsolute(goRoot) && goRoot !== "/" ? path.join(goRoot, "bin", "go") : "go";
-      const commands = batches.map((b) => staticCommand(b, m.hunks, binds[0]!.path, generated, process.execPath, goBin));
+      // As many batches as one job carries within the command executor's bounds.
+      const commands = fitJob(m.batches.map((b) => staticCommand(b, m.hunks, binds[0]!.path, generated, process.execPath, goBin)));
       const job: JobSpec = {
         stageId: REPORT_STAGE,
         kind: "command",
@@ -786,18 +798,17 @@ function measureAndWrite(ctx: Context, view: RunView, analysis: Analysis, flow: 
         input: { commands, continueOnFailure: true },
         confinement: { kind: "bwrap", network: false, mask: [], binds },
       };
-      return withPrivate(dispatch(job, `measure ${batches.length} batch(es) of changed files with the static metrics tools, confined with no network`));
+      return withPrivate(dispatch(job, `measure ${commands.length} batch(es) of changed files with the static metrics tools, confined with no network`));
     }
     case "baseFiles":
       // The modified functions' base files, as `git show <base>:<path>` prints them: read-only, no repository code.
-      return withPrivate(dispatch(commandJob(REPORT_STAGE, "Read the base versions of the modified files (git show <base>:<path>)", { commands: m.commands.slice(0, 16), continueOnFailure: true, env: { ...GIT_ENV } }), `read ${Math.min(16, m.commands.length)} base file(s) so each modified function can be measured at the base too`));
+      return withPrivate(dispatch(commandJob(REPORT_STAGE, "Read the base versions of the modified files (git show <base>:<path>)", { commands: fitJob(m.commands), continueOnFailure: true, env: { ...GIT_ENV } }), `read ${fitJob(m.commands).length} base file(s) so each modified function can be measured at the base too`));
     case "baseTools": {
       const binds = toolBinds(view, m.batches);
       if (binds === undefined) return supervise({ reason: "the environment check recorded no plugin directory, which the static tools run from" }, "escalate a missing plugin path");
-      const batches = m.batches.slice(0, 16);
       const goRoot = environmentOutput(view.evidence, "go-root");
       const goBin = goRoot !== undefined && path.isAbsolute(goRoot) && goRoot !== "/" ? path.join(goRoot, "bin", "go") : "go";
-      const commands = batches.map((b) => staticBaseCommand(b, m.base, binds[0]!.path, profile.metrics.generated, process.execPath, goBin));
+      const commands = fitJob(m.batches.map((b) => staticBaseCommand(b, m.base, binds[0]!.path, profile.metrics.generated, process.execPath, goBin)));
       const job: JobSpec = {
         stageId: REPORT_STAGE,
         kind: "command",
@@ -807,7 +818,7 @@ function measureAndWrite(ctx: Context, view: RunView, analysis: Analysis, flow: 
         input: { commands, continueOnFailure: true, env: { ...GIT_ENV } },
         confinement: { kind: "bwrap", network: false, mask: [], binds },
       };
-      return withPrivate(dispatch(job, `measure ${batches.length} base file(s) with the static metrics tools, confined with no network`));
+      return withPrivate(dispatch(job, `measure ${commands.length} base file(s) with the static metrics tools, confined with no network`));
     }
     case "probe":
     case "coverage":
