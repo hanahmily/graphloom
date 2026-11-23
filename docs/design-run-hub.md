@@ -835,8 +835,10 @@ drop-ins beside the unit `graphloom-hub.service`, under
   logins, models and timeouts (`GRAPHLOOM_CLAUDE_*`, `GRAPHLOOM_CODEX_*`,
   `GRAPHLOOM_PI_*`, but not the `*_PASS_ENV` lists), the coding agents' retry
   policy (`GRAPHLOOM_CODING_RETRY_*`) and `GRAPHLOOM_OCR_BIN`; so a profile that
-  turns auto-update off keeps it off for the hub's runs. A variable the runner
-  config names as a token is never captured, whatever its name. A value holding a URL with user information (a proxy's or `GOPROXY`'s
+  turns auto-update off keeps it off for the hub's runs. A variable a runner
+  config names as a token (the hub config's `runnerConfig`, else the one the
+  profile names, and the caller's) is never captured, whatever its name; when
+  one cannot be read, no `GRAPHLOOM_*` setting is captured. A value holding a URL with user information (a proxy's or `GOPROXY`'s
   credentials, a user name alone included) and a value spanning lines are
   left out and named. They become `Environment=` lines of `environment.conf`.
 - `--token-env-file <file>` writes `tokens.conf`, `EnvironmentFile=-<file>`,

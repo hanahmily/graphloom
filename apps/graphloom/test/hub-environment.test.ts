@@ -141,7 +141,7 @@ describe("hub service --capture-env and --token-env-file", () => {
     });
   }
   /** A login shell whose "profile" prints a banner and exports a toolchain and some secrets, then runs the command it is given. */
-  async function sandbox() {
+  async function sandbox(profileExtra = "") {
     const root = await temp("gl-hub-service-");
     const home = path.join(root, "home");
     const shell = path.join(root, "fake-shell");
@@ -155,6 +155,7 @@ export GOPATH=/home/u/go GOTOOLCHAIN=local GOOGLE_API_KEY=secret-google OPENAI_A
 export CLAUDE_CONFIG_DIR=/home/u/.claude-work LANG=C.UTF-8 no_proxy=localhost
 export HTTPS_PROXY=http://proxyuser:proxypass@proxy.example:3128
 export GRAPHLOOM_DISABLE_AUTOUPDATE=1 GRAPHLOOM_CLAUDE_MODEL=opus GRAPHLOOM_GITHUB_LIVE_TOKEN=ghp_secretLive GRAPHLOOM_CODING_HARNESS=/tmp/scripted.js
+${profileExtra}
 export ODD='50%% "quoted" \\\\ value'
 [ "$1 $2 $3" = "-l -i -c" ] || { echo "unexpected arguments: $*" >&2; exit 9; }
 exec /bin/sh -c "$4"
@@ -202,6 +203,26 @@ exec /bin/sh -c "$4"
     expect(r.stdout).not.toContain("GRAPHLOOM_CLAUDE_MODEL");
     expect(r.stdout).not.toContain("opus");
     expect(r.stderr).toContain("not captured: GRAPHLOOM_CLAUDE_MODEL (the runner config names it as a token; --token-env-file puts tokens in the owner-only file)");
+  });
+
+  it("reads the token names from the runner config the login profile names, and keeps no GraphLoom setting when a runner config cannot be read", async () => {
+    // The caller's default runner config names other tokens; the profile points the service at its own.
+    const other = path.join(os.tmpdir(), `gl-hub-runner-${process.pid}-${Date.now()}.json`);
+    cleanups.push(() => rm(other, { force: true }));
+    await writeFile(other, JSON.stringify({ harness: "claude-code", allowUnrestricted: true, github: { tokenEnv: "GRAPHLOOM_CLAUDE_MODEL" } }));
+    const s = await sandbox(`export GRAPHLOOM_RUNNER_CONFIG='${other}'`);
+    let r = await run(["hub", "service", "--capture-env"], s.env);
+    expect(r.code, r.stderr).toBe(0);
+    expect(r.stdout).toContain(`Environment="GRAPHLOOM_RUNNER_CONFIG=${other}"`);
+    expect(r.stdout).not.toContain("GRAPHLOOM_CLAUDE_MODEL");
+    expect(r.stdout).not.toContain("opus");
+
+    await writeFile(other, "{ not json");
+    r = await run(["hub", "service", "--capture-env"], s.env);
+    expect(r.code, r.stderr).toBe(0);
+    expect(r.stdout).not.toContain("GRAPHLOOM_");
+    expect(r.stdout).toContain('Environment="PATH=');
+    expect(r.stderr).toContain("not captured: GRAPHLOOM_DISABLE_AUTOUPDATE (the runner config cannot be read, so its token variables are unknown; fix it and capture again)");
   });
 
   it("writes the drop-in and an owner-only token file with --write; the write token only with --write-token; never prints a token", async () => {

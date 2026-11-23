@@ -339,6 +339,38 @@ function environmentLines(env: HubEnvironmentSummary): string[] {
 }
 
 interface ServiceEnvironmentOptions { config: string | undefined; capture: boolean; tokenEnvFile: string | undefined; writeToken: boolean; write: boolean; }
+
+/**
+ * The token variables any runner config the hub's runs may read names: the hub
+ * config's `runnerConfig`, else the one the captured environment names, else
+ * the caller's; the caller's too. A config that cannot be read leaves its
+ * names unknown: `undefined`, and the caller then keeps no GraphLoom setting.
+ */
+async function tokenNames(configFile: string | undefined, captured: CapturedEnvironment): Promise<Set<string> | undefined> {
+  const capturedRunner = captured.variables.find(([name]) => name === "GRAPHLOOM_RUNNER_CONFIG")?.[1];
+  const names = new Set<string>();
+  try {
+    const forRuns = (await loadHubConfig(configFile)).runnerConfig ?? capturedRunner;
+    for (const env of [forRuns !== undefined ? { ...process.env, GRAPHLOOM_RUNNER_CONFIG: forRuns } : process.env, process.env]) {
+      const runner = await loadRunnerConfig(env);
+      for (const name of [runner?.github?.tokenEnv, runner?.github?.writeTokenEnv]) if (name) names.add(name);
+    }
+  } catch {
+    return undefined;
+  }
+  return names;
+}
+
+/** A captured environment without the runner configs' token variables (or, when those are unknown, without any GraphLoom setting). */
+function withoutTokens(captured: CapturedEnvironment, tokens: Set<string> | undefined): CapturedEnvironment {
+  const drop = (name: string): string | undefined => tokens === undefined
+    ? (name.startsWith("GRAPHLOOM_") ? "the runner config cannot be read, so its token variables are unknown; fix it and capture again" : undefined)
+    : (tokens.has(name) ? "the runner config names it as a token; --token-env-file puts tokens in the owner-only file" : undefined);
+  return {
+    variables: captured.variables.filter(([name]) => drop(name) === undefined),
+    skipped: [...captured.skipped, ...captured.variables.flatMap(([name]) => { const reason = drop(name); return reason === undefined ? [] : [{ name, reason }]; })],
+  };
+}
 /**
  * `hub service --capture-env` / `--token-env-file`: the drop-in that gives the
  * service what a login shell has, and the owner-only token file it loads.
@@ -352,14 +384,7 @@ async function hubServiceEnvironment(options: ServiceEnvironmentOptions): Promis
   if (options.capture) {
     captured = await captureLoginEnvironment({ shell, home: process.env.HOME ?? os.homedir(), ...(process.env.USER ? { user: process.env.USER } : {}) });
     if (!captured.variables.some(([name]) => name === "PATH")) throw new Error(`a login shell of ${shell} set no PATH; nothing to capture`);
-    // A runner config's token variables go only to the owner-only token file, whatever they are named.
-    const hubConfig = await loadHubConfig(options.config).catch(() => undefined);
-    const runner = await loadRunnerConfig(hubConfig?.runnerConfig !== undefined ? { ...process.env, GRAPHLOOM_RUNNER_CONFIG: hubConfig.runnerConfig } : process.env).catch(() => undefined);
-    const secret = new Set([runner?.github?.tokenEnv, runner?.github?.writeTokenEnv].filter((name): name is string => Boolean(name)));
-    captured = {
-      variables: captured.variables.filter(([name]) => !secret.has(name)),
-      skipped: [...captured.skipped, ...captured.variables.filter(([name]) => secret.has(name)).map(([name]) => ({ name, reason: "the runner config names it as a token; --token-env-file puts tokens in the owner-only file" }))],
-    };
+    captured = withoutTokens(captured, await tokenNames(options.config, captured));
     note(`captured from a clean login shell of ${shell}: ${captured.variables.map(([name]) => name).join(", ")}`);
     for (const skip of captured.skipped) note(`not captured: ${skip.name} (${skip.reason})`);
   }
