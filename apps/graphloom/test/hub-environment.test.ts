@@ -217,6 +217,16 @@ exec /bin/sh -c "$4"
     expect(r.stdout).not.toContain("GRAPHLOOM_CLAUDE_MODEL");
     expect(r.stdout).not.toContain("opus");
 
+    // The profile names none: the service reads the default runner config, not the caller's own override.
+    const plain = await sandbox();
+    await writeFile(path.join(plain.home, ".config", "graphloom", "runner.json"), JSON.stringify({ harness: "claude-code", allowUnrestricted: true, github: { tokenEnv: "GRAPHLOOM_CLAUDE_MODEL" } }));
+    const callers = path.join(plain.root, "callers-runner.json");
+    await writeFile(callers, JSON.stringify({ harness: "claude-code", allowUnrestricted: true, github: { tokenEnv: "GL_TEST_READ_TOKEN" } }));
+    r = await run(["hub", "service", "--capture-env"], { ...plain.env, GRAPHLOOM_RUNNER_CONFIG: callers });
+    expect(r.code, r.stderr).toBe(0);
+    expect(r.stdout).toContain('Environment="GRAPHLOOM_DISABLE_AUTOUPDATE=1"');
+    expect(r.stdout).not.toContain("GRAPHLOOM_CLAUDE_MODEL");
+
     await writeFile(other, "{ not json");
     r = await run(["hub", "service", "--capture-env"], s.env);
     expect(r.code, r.stderr).toBe(0);

@@ -343,7 +343,7 @@ interface ServiceEnvironmentOptions { config: string | undefined; capture: boole
 /**
  * The token variables any runner config the hub's runs may read names: the hub
  * config's `runnerConfig`, else the one the captured environment names, else
- * the caller's; the caller's too. A config that cannot be read leaves its
+ * the default; and the caller's own too. A config that cannot be read leaves its
  * names unknown: `undefined`, and the caller then keeps no GraphLoom setting.
  */
 async function tokenNames(configFile: string | undefined, captured: CapturedEnvironment): Promise<Set<string> | undefined> {
@@ -351,7 +351,10 @@ async function tokenNames(configFile: string | undefined, captured: CapturedEnvi
   const names = new Set<string>();
   try {
     const forRuns = (await loadHubConfig(configFile)).runnerConfig ?? capturedRunner;
-    for (const env of [forRuns !== undefined ? { ...process.env, GRAPHLOOM_RUNNER_CONFIG: forRuns } : process.env, process.env]) {
+    // The service's: the override the hub config or the profile gives, else the default (never the caller's own override).
+    const { GRAPHLOOM_RUNNER_CONFIG: _callers, ...withoutOverride } = process.env;
+    const service: NodeJS.ProcessEnv = forRuns !== undefined ? { ...withoutOverride, GRAPHLOOM_RUNNER_CONFIG: forRuns } : withoutOverride;
+    for (const env of [service, process.env]) {
       const runner = await loadRunnerConfig(env);
       for (const name of [runner?.github?.tokenEnv, runner?.github?.writeTokenEnv]) if (name) names.add(name);
     }
