@@ -26,6 +26,7 @@ import {
   designConflicts,
   emptyIssueTable,
   findingLedger,
+  GRAPH_VERSION,
   issueFileJson,
   parseProfile,
   parseVerification,
@@ -240,7 +241,7 @@ function simulate(s: Scenario) {
     validatorBindings: definition.defaultValidators,
     generation,
     stateRevision: step,
-    activeVersion: "issue-fix@0.17.0",
+    activeVersion: `issue-fix@${GRAPH_VERSION}`,
     config,
     candidateDigest: digest(),
     topology: { start: "fix", terminal: ["review"], edges: definition.edges!, implicit: false, path: structuredClone(pathVisits), ...(side !== undefined ? { sideVisit: { ...side } } : {}) },
@@ -398,7 +399,8 @@ describe("issue-fix 0.17.0 topology", () => {
   it("declares Fix ⇄ Review as edges and the supervisor-only Arbitrate with its approval and contracts", async () => {
     const d = createGraph().describe(BANYANDB);
     expect(() => assertGraphDefinition(d)).not.toThrow();
-    expect(d.version).toBe("0.17.0");
+    // The graph's version comes from its one source of truth, which `release.sh prepare` may bump (docs/design-release.md §3).
+    expect(d.version).toBe(GRAPH_VERSION);
     expect(d.stages.find((s) => s.id === "arbitrate")).toEqual({ id: "arbitrate", name: "Arbitrate", requirementIds: ["design-ruling"], entry: "supervisor", maxVisits: 6 });
     expect(d.edges).toEqual([
       { from: "fix", to: "review" },
@@ -433,7 +435,9 @@ describe("issue-fix 0.17.0 topology", () => {
     // maxVisits follows review.maxRulings: three more points the operator rules on after the cap.
     expect(createGraph().describe({ ...(BANYANDB as object), review: { ...(BANYANDB as { review: object }).review, maxRulings: 0 } }).stages.at(-1)!.maxVisits).toBe(3);
     const manifest = JSON.parse(await readFile(path.join(here, "../graphloom.manifest.json"), "utf8")) as { sdkProtocol: number; version: string };
-    expect(manifest).toMatchObject({ sdkProtocol: 2, version: "0.17.0" });
+    expect(manifest).toMatchObject({ sdkProtocol: 2, version: GRAPH_VERSION });
+    const pkg = JSON.parse(await readFile(path.join(here, "../package.json"), "utf8")) as { version: string };
+    expect(pkg.version).toBe(GRAPH_VERSION);
   });
 
   it("defaults and checks the arbiter's profile fields, and every shipped profile sets the arbiter", () => {
