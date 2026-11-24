@@ -13,7 +13,7 @@
  */
 import { createHash } from "node:crypto";
 import type { EnvironmentCommand } from "@graphloom/sdk";
-import { MAX_EXECUTOR_INPUT_BYTES } from "@graphloom/sdk";
+import { commandFits } from "./kit/bounds.js";
 import { reportText, type CommandRun } from "./kit/evidence.js";
 import { encodeArg } from "./kit/metrics/coverage.js";
 import { secretFindings } from "./kit/secrets.js";
@@ -153,7 +153,7 @@ export function reproCommand(s: ReproRunSpec, pluginRoot: string, wallClockMs: n
   const parts = writeChunks(reproSpec(s));
   if (parts.length > MAX_SPEC_CHUNKS) return undefined;
   const command: EnvironmentCommand = { id: reproCommandId(s.finding), argv: ["sh", `${pluginRoot}/tools/repro/repro.sh`, String(parts.length), ...parts], timeoutMs: Math.min(24 * 60 * 60_000, wallClockMs + 60_000) };
-  return Buffer.byteLength(JSON.stringify({ commands: [command] }), "utf8") <= MAX_EXECUTOR_INPUT_BYTES - 4_096 ? command : undefined;
+  return commandFits(command) ? command : undefined;
 }
 
 // ---------------------------------------------------------------- the report

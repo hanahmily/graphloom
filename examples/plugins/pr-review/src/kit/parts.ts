@@ -2,15 +2,17 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 /**
- * Multi-part writes (design §6.6). One command carries at most about 236,000 characters, so an artifact past that
- * (a large pull request's report.json, qa.json or review.md) is written as a bounded series of part commands, each
- * one job and so each recorded as evidence. The parts append, in order, to `<path>.parts`; the last checks the whole
+ * Multi-part writes (design §6.6). One command carries at most about 240,000 bytes once JSON-escaped, so an artifact
+ * past that (a large pull request's report.json, qa.json or review.md) is written as a bounded series of part commands,
+ * each one job and so each recorded as evidence, each sized so its job passes the command executor's input bounds
+ * (`splitParts`). The parts append, in order, to `<path>.parts`; the last checks the whole
  * file against the digest every part carries and renames it into place, so the final file is never half written.
  * Validators reconstruct the artifact by concatenating the recorded parts in order and checking the digest.
  * An artifact that fits one command is still written by its single command (`write.ts`).
  */
 import { createHash } from "node:crypto";
 import { MAX_EXECUTOR_INPUT_BYTES, type EnvironmentCommand, type EvidenceRecord } from "@graphloom/sdk";
+import { JOB_INPUT_RESERVE_BYTES, MAX_ARGV } from "./bounds.js";
 import { COMMAND, NECESSITY_JSON, PART_BASE, QA_JSON, REPORT_JSON, REVIEW_APPENDIX_HTML, REVIEW_DIR, REVIEW_HTML, REVIEW_MD } from "./constants.js";
 import { commandRuns, succeeded, type CommandRun } from "./evidence.js";
 import { necessityWriteCommand, qaWriteCommand, recordCommand, reportWriteCommand, writeChunks, writtenNecessity, writtenQa, writtenRecord, writtenReport } from "./write.js";
@@ -18,8 +20,9 @@ import { necessityWriteCommand, qaWriteCommand, recordCommand, reportWriteComman
 /** Argv elements of a part command that are not chunks: the shell, `-c`, the script, the id, the path, k, n, the digest and the chunk count. */
 const PART_FIXED = 9;
 /** Chunks one part command carries: the executor allows 64 argv elements. */
-export const MAX_PART_CHUNKS = 64 - PART_FIXED;
-const MAX_PART_INPUT_BYTES = MAX_EXECUTOR_INPUT_BYTES - 4_096;
+export const MAX_PART_CHUNKS = MAX_ARGV - PART_FIXED;
+/** The most parts one part set has, as `readParts` reads it: the widest k and n a part command carries. */
+const MAX_PARTS = 10_000;
 
 const PART_SCRIPT =
   'set -eu; path="$1"; k="$2"; n="$3"; digest="$4"; count="$5"; shift 5; [ "$#" -eq "$count" ] || { echo "part carries $# chunks, not $count" >&2; exit 6; }; ' +
@@ -40,10 +43,20 @@ export const sha256 = (text: string): string => createHash("sha256").update(text
 
 const partId = (base: string, k: number): string => `${base}-p${k}`;
 
-/** The pieces of `text` that each fit one part command: at most MAX_PART_CHUNKS chunks, and the executor's input bound once JSON-escaped. */
-export function splitParts(text: string): string[][] {
+/**
+ * The pieces of `text` that each fit one part command of `base` writing `path`, as the dispatch guard (`commandProblem`,
+ * bounds.ts) and the command executor measure that command: at most MAX_PART_CHUNKS chunks of at most 4,000 characters,
+ * and the whole command, serialized as a job's input (`{"commands":[...]}`, every chunk JSON-escaped), within what one
+ * command may take (the executor's input bound less `JOB_INPUT_RESERVE_BYTES`). The fixed part is measured at its
+ * widest (k, n and the chunk count at their most digits) and each chunk by its own escaped bytes and the comma before
+ * it, so the sum bounds the real command's size from above: text that grows under escaping (quotes, backslashes,
+ * newlines, control characters) yields more, smaller parts, never one over a bound. Each part is a job of its own.
+ */
+export function splitParts(text: string, base: string, path: string): string[][] {
   const chunks = writeChunks(text);
-  const bound = MAX_PART_INPUT_BYTES - 1_500 - Buffer.byteLength(PART_SCRIPT, "utf8");
+  const widest = partCommand(base, path, MAX_PARTS, MAX_PARTS, "0".repeat(64), Array.from({ length: MAX_PART_CHUNKS }, () => ""));
+  const fixed = Buffer.byteLength(JSON.stringify({ commands: [{ ...widest, argv: widest.argv.slice(0, PART_FIXED) }] }), "utf8");
+  const bound = MAX_EXECUTOR_INPUT_BYTES - JOB_INPUT_RESERVE_BYTES - fixed;
   const parts: string[][] = [];
   let cur: string[] = [];
   let bytes = 0;
@@ -63,9 +76,14 @@ export function splitParts(text: string): string[][] {
 
 /** The commands that write `text` to `path` as a multi-part artifact: one command per part, in order; one part for a small artifact. */
 export function partCommands(base: string, path: string, text: string): EnvironmentCommand[] {
-  const parts = splitParts(text);
+  const parts = splitParts(text, base, path);
   const digest = sha256(text);
-  return parts.map((chunks, i): EnvironmentCommand => ({ id: partId(base, i + 1), argv: ["sh", "-c", PART_SCRIPT, partId(base, i + 1), path, String(i + 1), String(parts.length), digest, String(chunks.length), ...chunks] }));
+  return parts.map((chunks, i) => partCommand(base, path, i + 1, parts.length, digest, chunks));
+}
+
+/** The `k`th of `n` part commands of `base` writing `path`, carrying `chunks`. */
+function partCommand(base: string, path: string, k: number, n: number, digest: string, chunks: readonly string[]): EnvironmentCommand {
+  return { id: partId(base, k), argv: ["sh", "-c", PART_SCRIPT, partId(base, k), path, String(k), String(n), digest, String(chunks.length), ...chunks] };
 }
 
 /** What the evidence holds of an artifact: nothing yet, a problem, or its text (with the records it rests on and where the last of them sits). */

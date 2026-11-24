@@ -1,6 +1,6 @@
 {
   "name": "@graphloom/plugin-pr-design-review",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "private": true,
   "description": "pr-design-review graph plugin: round 1 of a pull-request review as its own graph. A neutral, cited change report, the necessity question N1 and design-level questions with grounded answers (Fetch, Report, Questions, Answers), the round-1 gate, and one posted review of the open items, or nothing when the design review is clean (Publish)",
   "license": "Apache-2.0",

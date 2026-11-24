@@ -1,6 +1,6 @@
 # PR design review graph (`pr-design-review`)
 
-Status: implemented, `pr-design-review` 0.1.5 (`examples/plugins/pr-design-review`).
+Status: implemented, `pr-design-review` 0.1.6 (`examples/plugins/pr-design-review`).
 This is round 1 of a pull request's review: the design-level review. Round 2, the
 detail review, is the [PR-review graph](design-pr-review-graph.md) (`pr-review`
 1.x). The two graphs are independent plugins that share the review kit
@@ -608,3 +608,10 @@ and `large-artifacts` exercise the shared report. The design review's own:
   flags and paths settings are the tool's own; the `go-root` check and the host's
   `go env GOMODCACHE` no longer stop on an inherited `GOROOT` either
   ([PR review §6.8](design-pr-review-graph.md#68-measurements)).
+- **0.1.6:** a part-set write is sized against the dispatch guard's own bound, so
+  each part's job, with its chunks JSON-escaped, stays within the 247,808 bytes the
+  guard lets one command take (apache/skywalking-banyandb#1487: the Report stage
+  planned `report-json-p1` at 250,050 bytes, which the guard refused, and
+  `report.json` was never written); single-command writes, the ledger write and
+  the diagram check use the guard's own check too
+  ([PR review §6.6](design-pr-review-graph.md#66-output)).

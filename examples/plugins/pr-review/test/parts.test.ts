@@ -69,7 +69,7 @@ describe("multi-part writes (design 6.6)", () => {
   it("a small artifact is one part; an empty one too", () => {
     expect(partCommands("b", REPORT_JSON, "hello")).toHaveLength(1);
     expect(partCommands("b", REPORT_JSON, "")).toHaveLength(1);
-    expect(splitParts("")).toEqual([[]]);
+    expect(splitParts("", "b", REPORT_JSON)).toEqual([[]]);
   });
 
   it("splits by what the executor accepts once escaped: text made of escapes yields more parts, each within the input bound", () => {

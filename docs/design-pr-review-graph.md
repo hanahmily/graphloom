@@ -771,14 +771,26 @@ null when removed), `scope` (the lines by kind of file, counted by plugin code),
 `briefing` (`whatsNew`, `features`, `check` and `areas` as the claim check left
 them), the items' `state` and `behavior`, and `removedParts`.
 
-**Multi-part writes.** One command carries about 236,000 characters (at most
-55 chunks of 4,000 characters in the argv, and the executor's input bound once
-JSON-escaped), which a large pull request's `report.json`, `qa.json`,
-`review.md` or `review.html` can pass. An artifact that fits one command is
+**Multi-part writes.** One command carries at most 55 chunks of 4,000
+characters in the argv, and at most 247,808 bytes once serialized as a job's
+input with every chunk JSON-escaped (the executor's 256,000-byte input bound
+less the 8,192 bytes the dispatch guard reserves for the rest of the job,
+[§6.8](#68-measurements)); a large pull request's `report.json`, `qa.json`,
+`review.md` or `review.html` can pass that. An artifact that fits one command is
 written by its single command (`report-write`, `qa-write`, `necessity-write`,
-`ledger-write`), as before. One that does not is written as a **part set**: the
-text is cut into parts that each fit a command, in order, and each part is one
-command, so one job, recorded as evidence like any write
+`ledger-write`), as before; whether it fits is the guard's own check
+(`commandFits`), never a looser bound. One that does not is written as a **part
+set**: the text is cut into parts that each fit a command, in order, and each
+part is one command, so one job. A part is sized by the same rule the guard and
+the executor apply to the job that carries it: the part command's fixed argv
+(the script, its id, the path, and k, n and the chunk count at their widest)
+serialized, plus each chunk's own JSON-escaped bytes and its comma, stays within
+247,808 bytes, so text that grows under escaping (quotes, backslashes,
+newlines, control characters) is cut into more, smaller parts and no part is
+planned over a bound (before `pr-review` 1.1.6 and `pr-design-review` 0.1.6 a
+looser bound planned `report-json-p1` of apache/skywalking-banyandb#1487 at
+250,050 bytes, and the guard refused it). Each part is recorded as evidence like
+any write
 (`report-json-p1`, `report-json-p2`, …; `review-md-p<k>`, `qa-json-p<k>`,
 `review-md-qa-p<k>`, `review-html-p<k>`, `review-html-qa-p<k>`,
 `review-appendix-html-p<k>`, `review-appendix-html-qa-p<k>`,
@@ -3198,6 +3210,15 @@ graph over time.
   no longer stop on an inherited `GOROOT` either ([§6.8](#68-measurements)). The
   review kit's change, shared with `pr-design-review` 0.1.5; the kit's command-id
   pattern is spelled with both cases, as `executor-command` 0.1.4 publishes it.
+- **1.1.6:** a part-set write is sized against the dispatch guard's own bound: a
+  part's job, serialized with its chunks JSON-escaped, stays within the 247,808
+  bytes the guard lets one command take, where the splitter measured against
+  4,096 bytes less of reserve, so an artifact of more than one part planned its
+  first part over the guard's bound and the write was refused before it ran
+  (apache/skywalking-banyandb#1487: `report-json-p1` at 250,050 bytes). The
+  single-command writes, the ledger write, the diagram check and the repro command
+  are measured by the guard's own check too ([§6.6](#66-output)). The review kit's
+  change, shared with `pr-design-review` 0.1.6.
 
 **Where 1.0 differs from its design.** The split design (now
 [a pointer](design-pr-review-split.md)) planned a Checks stage when the profile has
