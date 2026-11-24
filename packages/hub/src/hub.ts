@@ -210,8 +210,10 @@ export class Hub {
       // A resume held by a pause is replaced by a new remedy; any other pending command is not.
       const held = submission.desiredAction === "hold" && !submission.launch ? submission.pendingCommand : undefined;
       if (kind === "resume" && remedy && (submission.launch || (submission.pendingCommand && submission.pendingCommand !== held))) throw new Error("a remedy needs a drained submission with no pending command");
+      // A retried held command keeps its identity; its remedy is the retry's (the same request,
+      // with the plugin bundle the hub resolved again for an --update-plugin).
       const command: HubCommand = retried && submission.pendingCommand?.id === commandId
-        ? copy(submission.pendingCommand)
+        ? { ...copy(submission.pendingCommand), ...(remedy ? { remedy: copy(remedy) } : {}) }
         : { id: commandId, kind, acceptedAt: this.stamp(), ...(remedy ? { remedy: copy(remedy) } : {}) };
       const cursor = retried ? submission.journalBytes : await this.store.journal(submission, { commandId, digest: requestDigest, acceptedAt: command.acceptedAt });
       await this.commit((next) => {

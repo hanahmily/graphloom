@@ -654,6 +654,16 @@ describe("operator commands and launch reports (campaign findings)", () => {
     expect(driver.launches).toHaveLength(launches);
   });
 
+  it("takes the plugin bundle resolved again when a held --update-plugin resume is resent", async () => {
+    const { hub, a } = await blockedOnApproval();
+    const update = (bundlePath: string) => ({ updatePlugin: true, plugin: { bundlePath, bundleDigest: "d".repeat(64) } });
+    await hub.resume(a.id, { commandId: "U", remedy: update("/plugins/old") });
+    await hub.pause(a.id);
+    expect(hub.inspect(a.id)).toMatchObject({ state: "paused", pendingCommand: { id: "U" } });
+    await hub.resume(a.id, { commandId: "U", remedy: update("/plugins/new") });
+    expect(hub.inspect(a.id).pendingCommand).toMatchObject({ id: "U", remedy: update("/plugins/new") });
+  });
+
   it("keeps an unapplied remedy when a plain resume arrives while its withdrawn launch drains", async () => {
     const { hub, driver, a } = await blockedOnApproval();
     await hub.resume(a.id, { commandId: "X", remedy }); await hub.tick();
