@@ -512,7 +512,9 @@ describe("createChildExecutorRunner", () => {
       const started = Date.now();
       const result = await groupRunner({ timeoutMs: 300, stopGraceMs: 400 }).runJob(job("acme.group/ignore-abort", { pidFile }, "1"), ctx);
       expect(result).toMatchObject({ summary: "executor child timed out after 300ms", failureKind: "timeout" });
-      expect(Date.now() - started).toBeGreaterThanOrEqual(700);
+      // timeout (300) + grace (400): an immediate kill would take ~300 ms. Node timers can fire a
+      // millisecond or two early relative to Date.now(), so allow a small tolerance below 700.
+      expect(Date.now() - started).toBeGreaterThanOrEqual(690);
       const pid = await pidIn(pidFile);
       process.kill(-pid, "SIGKILL");
     });

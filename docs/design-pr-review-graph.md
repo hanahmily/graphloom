@@ -915,9 +915,33 @@ The section follows a few rules:
   that the changed functions are too many. As a last guard, a graph that would
   dispatch a command job over one of these bounds hands it to the supervisor
   instead. The guard checks the kit's bounds, not the input shape the executor
-  declares: a JSON Schema `pattern` cannot carry the executor's case-insensitive
-  id rule, so the shape would refuse an id such as `search-S1` that the executor
-  takes.
+  declares. Before `executor-command` 0.1.4 that shape published the id pattern
+  without the validator's case-insensitive flag (a JSON Schema `pattern` carries
+  none), so it refused an id such as `search-S1` that the executor takes; the
+  executor now spells both cases out (`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`), the
+  shape publishes exactly the pattern it applies, and a test holds the two to the
+  same verdict on every id.
+- **The static tools' Go environment is their own.** The Go tool runs the `go` of
+  the root the environment check resolved in the worktree (`go-root`: `go env
+  GOROOT`, which follows `go.mod`'s toolchain line into the module cache's
+  `golang.org/toolchain@…`), bound read-only into the sandbox. The job inherits
+  the hub's or the operator's environment, which may export a `GOROOT` of another
+  toolchain that the sandbox does not bind (apache/skywalking-banyandb#1487:
+  `GOROOT=/home/…/go1.26.9`, while the resolved toolchain was go1.26.11 from the
+  module cache), and `go` stops on a GOROOT it cannot find (`go: cannot find GOROOT
+  directory`) even though the binary has its own: every `static-go-*` batch exited
+  2. So the static command and the base-side one set `GOROOT` to the root of the
+  `go` they run (`<root>` of `<root>/bin/go`), or unset it for a bare `go`, which
+  then finds its own; set `GOTOOLCHAIN=local`, `GOENV=off`, `GOWORK=off`,
+  `GOFLAGS=-mod=readonly` and `CGO_ENABLED=0`; and drop `GOPATH`, `GOMODCACHE`,
+  `GOOS`, `GOARCH`, `GOEXPERIMENT` and `GOBIN` (the tool has no dependencies and
+  runs where it is built). `GOCACHE` and `GOTMPDIR` stay: a confined job's point
+  into its scratch. The `go-root` check itself asks `go` again with `GOROOT` unset
+  when an inherited one stops it, and the `go env GOMODCACHE` that coverage and
+  dependency sources read always asks with it unset (the module cache does not
+  depend on it) (since `pr-review` 1.1.5 and `pr-design-review` 0.1.5).
+  Coverage runs in Docker with its environment named in full, so it inherits none
+  of these.
 - **Batches fit the report.** The static tools run over the changed files in
   batches of at most 8 (`static-go-1`, `static-typescript-2`, …), and each
   prints one **compact** JSON document (no indentation), because a command
@@ -3164,6 +3188,16 @@ graph over time.
   count and bytes; and a command job over a bound goes to the supervisor rather than
   the executor ([§6.8](#68-measurements)). The review kit's change, shared with
   `pr-design-review` 0.1.4.
+- **1.1.5:** the static Go tool runs with its own Go environment: `GOROOT` is the
+  root of the `go` it runs (or unset for a bare `go`), not one the hub's
+  environment inherited from the operator's shell, which the sandbox did not bind
+  (apache/skywalking-banyandb#1487: every `static-go-*` batch exited 2 with `go:
+  cannot find GOROOT directory`); `GOTOOLCHAIN`, `GOENV`, `GOWORK` and `GOFLAGS`
+  are the tool's own and `GOPATH`, `GOMODCACHE`, `GOOS`, `GOARCH`, `GOEXPERIMENT`
+  and `GOBIN` are dropped. The `go-root` check and the host's `go env GOMODCACHE`
+  no longer stop on an inherited `GOROOT` either ([§6.8](#68-measurements)). The
+  review kit's change, shared with `pr-design-review` 0.1.5; the kit's command-id
+  pattern is spelled with both cases, as `executor-command` 0.1.4 publishes it.
 
 **Where 1.0 differs from its design.** The split design (now
 [a pointer](design-pr-review-split.md)) planned a Checks stage when the profile has

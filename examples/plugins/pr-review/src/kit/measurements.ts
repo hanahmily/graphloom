@@ -163,10 +163,29 @@ export function diffGroupCommand(g: DiffGroup, files: readonly PullFile[]): Envi
   return { id: g.id, argv: ["sh", "-c", diffScript("git --literal-pathspecs -c core.hooksPath=/dev/null"), g.id, ...specs] };
 }
 
+/**
+ * The Go environment the static tool runs in, whatever the job inherited (design §6.8). The operator's shell may export
+ * a `GOROOT` of another toolchain (`/home/me/go1.26.9`) that the sandbox does not bind, and Go stops on a GOROOT it
+ * cannot find even when the binary it runs has its own root. So `GOROOT` is the root of the `go` the command runs (the
+ * `<root>/bin/go` the environment check resolved, which the job binds read-only), or unset for a bare `go`, which then
+ * finds its own root. `GOTOOLCHAIN=local` never switches, `GOENV=off` and `GOWORK=off` read no operator file, `GOFLAGS`
+ * is the tool's own, and `GOPATH`, `GOMODCACHE`, `GOOS`, `GOARCH`, `GOEXPERIMENT` and `GOBIN` are dropped: the tool has
+ * no dependencies and runs where it is built. `GOCACHE` and `GOTMPDIR` stay: a confined job's point into its scratch.
+ */
+export const GO_TOOL_ENV =
+  'unset GOROOT GOPATH GOMODCACHE GOOS GOARCH GOEXPERIMENT GOBIN; case "$gobin" in /*/bin/go) GOROOT="${gobin%/bin/go}"; export GOROOT;; esac; ' +
+  'export GOENV=off GOWORK=off GOTOOLCHAIN=local GOFLAGS=-mod=readonly CGO_ENABLED=0; ';
+
+/** Runs the language's static tool over the hunks in `$h`, with the head at `$wt`, into the report file. */
+const TOOL_RUN =
+  'if [ "$kind" = go ]; then ' +
+  GO_TOOL_ENV +
+  'printf \'%s\' "$h" | { cd "$root/tools/gometrics" && "$gobin" run . --head "$wt" --hunks - --generated "$gen"; } > "$GRAPHLOOM_REPORT_FILE"; ' +
+  'else printf \'%s\' "$h" | "$node" "$root/dist/metrics/tsmetrics-cli.js" --head "$wt" --hunks - --generated "$gen" > "$GRAPHLOOM_REPORT_FILE"; fi';
+
 const STATIC_SCRIPT =
   'set -eu; n="$1"; shift; h=""; while [ "$n" -gt 0 ]; do h="$h$1"; shift; n=$((n - 1)); done; kind="$1"; root="$2"; gen="$3"; node="$4"; gobin="${5:-go}"; wt=$(pwd -P); ' +
-  'if [ "$kind" = go ]; then printf \'%s\' "$h" | { cd "$root/tools/gometrics" && GOTOOLCHAIN=local GOFLAGS=-mod=readonly CGO_ENABLED=0 "$gobin" run . --head "$wt" --hunks - --generated "$gen"; } > "$GRAPHLOOM_REPORT_FILE"; ' +
-  'else printf \'%s\' "$h" | "$node" "$root/dist/metrics/tsmetrics-cli.js" --head "$wt" --hunks - --generated "$gen" > "$GRAPHLOOM_REPORT_FILE"; fi';
+  TOOL_RUN;
 
 /**
  * The command that measures one batch: its hunks travel in the argv, so the recorded bytes are the bytes measured.
@@ -255,14 +274,10 @@ export interface BaseBatch {
   text: string;
 }
 
-const BASE_TOOL_RUN =
-  'if [ "$kind" = go ]; then printf \'%s\' "$h" | { cd "$root/tools/gometrics" && GOTOOLCHAIN=local GOFLAGS=-mod=readonly CGO_ENABLED=0 "$gobin" run . --head "$wt" --hunks - --generated "$gen"; } > "$GRAPHLOOM_REPORT_FILE"; ' +
-  'else printf \'%s\' "$h" | "$node" "$root/dist/metrics/tsmetrics-cli.js" --head "$wt" --hunks - --generated "$gen" > "$GRAPHLOOM_REPORT_FILE"; fi';
-
 const STATIC_BASE_SCRIPT =
   'set -eu; n="$1"; shift; h=""; while [ "$n" -gt 0 ]; do h="$h$1"; shift; n=$((n - 1)); done; kind="$1"; root="$2"; gen="$3"; node="$4"; gobin="$5"; base="$6"; p="$7"; ' +
   'wt=$(mktemp -d); trap \'rm -rf "$wt"\' EXIT; mkdir -p "$wt/$(dirname "$p")"; git -c core.hooksPath=/dev/null show "$base:$p" > "$wt/$p"; ' +
-  BASE_TOOL_RUN;
+  TOOL_RUN;
 
 /**
  * The command that measures one base file: it writes the file as `git show` prints it into a scratch directory and runs
