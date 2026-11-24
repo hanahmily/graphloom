@@ -391,13 +391,16 @@ export class Hub {
       if (observation) s.observation = observation;
       if (inputUpdate) { s.input.bundlePath = inputUpdate.bundlePath; s.input.bundleDigest = inputUpdate.bundleDigest; }
       if (s.desiredAction !== "execute") { s.state = s.desiredAction === "hold" ? "paused" : "canceled"; return; }
+      // An unreconciled plugin input admits no further launch, not even an already accepted resume; only a completed run ignores it.
+      if (inputFailure && !(observation?.continuation?.kind === "complete" && observation.status === "succeeded")) {
+        delete s.pendingCommand; s.state = "blocked"; s.blocker = inputFailure; return;
+      }
       if (s.pendingCommand?.kind === "resume") { s.state = "queued"; s.queueSequence = ++next.sequence; return; }
       if (launch.phase !== "granted" && launchFailure) { s.state = "blocked"; s.blocker = launchFailure; return; }
       if (launch.phase !== "granted") { s.state = "queued"; s.queueSequence = ++next.sequence; return; }
       const continuation = observation?.continuation;
       if (continuation?.kind === "complete" && observation?.status === "succeeded") { s.state = "succeeded"; return; }
       if (continuation?.kind === "terminal") { s.state = "failed"; s.blocker = continuation.cause; return; }
-      if (inputFailure) { s.state = "blocked"; s.blocker = inputFailure; return; }
       const interruptionId = launch.stopReason === "service-interruption" ? launch.stopCommandId : launch.command?.kind === "service-interruption" ? launch.command.id : undefined;
       if (interruptionId && launch.mode !== "reconcile" && continuation?.kind === "operator" && continuation.cause === "reconciliation") {
         s.state = "queued"; s.queueSequence = ++next.sequence; s.reconciliationPending = true;

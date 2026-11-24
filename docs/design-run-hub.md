@@ -343,7 +343,8 @@ refused, the hub points the private link back at the recorded bundle, so the
 run stays on its pinned plugin and the stop reason says why. Any other resume,
 including a plain `hub resume`, keeps the recorded bundle exactly; it also
 repairs a private link an interrupted update left behind. A failure of this
-reconciliation blocks the submission with `plugin reconciliation failed: …`.
+reconciliation blocks the submission with `plugin reconciliation failed: …`
+(unless the run succeeded), dropping a resume accepted while the launch drained.
 
 ## 5. Concurrency contract
 

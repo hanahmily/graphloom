@@ -354,6 +354,16 @@ describe("bounded continuation and fairness", () => {
     driver.finish(reopened.inspect(a.id), retry());
     await reopened.tick();
     expect(reopened.inspect(a.id)).toMatchObject({ state: "blocked", blocker: "plugin reconciliation failed: link unreadable", input: { bundlePath: plugin.bundlePath } });
+    // A resume accepted while the launch drained does not start another launch past the failure.
+    await reopened.resume(a.id); await reopened.tick();
+    const launches = driver.launches.length;
+    await reopened.pause(a.id); await reopened.resume(a.id);
+    expect(reopened.inspect(a.id).pendingCommand?.kind).toBe("resume");
+    driver.finish(reopened.inspect(a.id), retry("other"));
+    await reopened.tick(); await reopened.tick();
+    expect(reopened.inspect(a.id)).toMatchObject({ state: "blocked", blocker: "plugin reconciliation failed: link unreadable" });
+    expect(reopened.inspect(a.id).pendingCommand).toBeUndefined();
+    expect(driver.launches).toHaveLength(launches);
   });
   it("puts a ready retry behind already queued work without blocking it while waiting", async () => {
     const { hub, driver, advance } = await fixture();
