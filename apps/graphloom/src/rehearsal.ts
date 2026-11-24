@@ -959,6 +959,14 @@ export async function resumeRehearsal(
   const cursorsPath = `${scenarioPath}.cursors.json`;
   const cursorsText = await readFile(cursorsPath, "utf8").catch(() => undefined);
   let continued = false;
+  const restoreScenario = async () => {
+    await writeFile(scenarioPath, scenarioText, "utf8");
+    if (cursorsText !== undefined) await writeFile(cursorsPath, cursorsText, "utf8");
+    else await rm(cursorsPath, { force: true });
+  };
+  // The run's operator decisions on the approval before this resume (its raw evidence when its format is an older one).
+  const approvalsBefore = options.approval === undefined ? 0
+    : approvalsOf(await loadRunState(stateDir).then((s) => s.evidence, () => (raw as { evidence?: EvidenceRecord[] }).evidence ?? []), options.approval.approvalId);
   if (options.approval !== undefined && (scenario.answers ?? []).some((a) => a.approval === options.approval!.approvalId)) {
     const answer = matchRehearsalAnswer(scenario, options.approval);
     if (answer === undefined) {
@@ -970,13 +978,12 @@ export async function resumeRehearsal(
     await writeFile(scenarioPath, JSON.stringify(scenario), "utf8");
     restartReplies(scenarioPath, Object.keys(answer.results ?? {}));
     continued = true;
-    options.onAnswer?.(answer);
   }
   const decisions = scenario.supervisor ?? [];
   const scripted = async () => createScriptedSupervisor({ decisions, start });
   const harness = await rehearsalHarness(rehearsalRoot, raw.definition !== undefined ? environmentCommandsOf(raw.definition) : new Map(), saved);
   try {
-    return await createController().resume({
+    const report = await createController().resume({
       ...(options.managed !== undefined ? { managed: options.managed.grant } : {}),
       runRef: stateDir,
       runner: harness.runner,
@@ -988,17 +995,32 @@ export async function resumeRehearsal(
       ...(options.reconciled === true ? { reconciled: true } : {}),
       ...(options.approval !== undefined ? { approval: options.approval } : {}),
     });
+    if (continued) {
+      // The answer continues the scenario only once the run recorded it: a resume that stopped before applying it
+      // (a pin or worktree mismatch) leaves the run, and so the scenario, as they were.
+      const answered = approvalsOf((await loadRunState(report.stateDir)).evidence, options.approval!.approvalId) > approvalsBefore;
+      if (answered) options.onAnswer?.(matchRehearsalAnswer(JSON.parse(scenarioText) as RehearsalScenario, options.approval!)!);
+      else await restoreScenario();
+    }
+    return report;
   } catch (error) {
-    // A refused resume leaves the run as it was, and so the scenario it rehearses.
-    if (continued && error instanceof RequestRefusedError) {
-      await writeFile(scenarioPath, scenarioText, "utf8");
-      if (cursorsText !== undefined) await writeFile(cursorsPath, cursorsText, "utf8");
-      else await rm(cursorsPath, { force: true });
+    // A resume that failed before the run recorded the answer leaves the run as it was, and so the scenario it rehearses.
+    if (continued) {
+      const recorded = await loadRunState(stateDir).then((s) => approvalsOf(s.evidence, options.approval!.approvalId), () => approvalsBefore);
+      if (recorded <= approvalsBefore) await restoreScenario();
     }
     throw error;
   } finally {
     harness.restore();
   }
+}
+
+/** How many operator decisions on `approvalId` `evidence` records. */
+function approvalsOf(evidence: readonly EvidenceRecord[], approvalId: string): number {
+  return evidence.filter((e) => {
+    const p = e.payload as { type?: unknown; approvalId?: unknown } | undefined;
+    return p?.type === "operator-approval" && p.approvalId === approvalId;
+  }).length;
 }
 
 /**

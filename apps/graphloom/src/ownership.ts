@@ -206,7 +206,8 @@ export async function dispatchToOwner(cmd: string, args: readonly string[], self
     return undefined;
   }
   console.error(`graphloom: run ${runId} belongs to GraphLoom ${plan.version}; running ${cmd} there (${plan.bin})`);
-  return runChild(plan.bin, args, { ...process.env, [DISPATCHED_ENV]: plan.version });
+  // The run as found here, by its state directory: an older version may not find a bare run ID where this one does.
+  return runChild(plan.bin, [args[0]!, stateDir, ...args.slice(2)], { ...process.env, [DISPATCHED_ENV]: plan.version });
 }
 
 /** Runs `bin args` with this process's stdio, forwarding termination signals; resolves with its exit status. */

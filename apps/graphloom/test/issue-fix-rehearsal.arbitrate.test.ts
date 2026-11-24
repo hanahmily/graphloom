@@ -94,4 +94,20 @@ describe.skipIf(GO === undefined)("graphloom rehearse (L1) of issue-fix's Arbitr
       expect(verdict.verdict, JSON.stringify({ blocker: verdict.blocker, convergence: verdict.convergence })).toBe("ready");
     }, 300_000);
   }
+
+  it("refuses an answer arbitrate-operator does not rehearse, and leaves the scenario as it was when the run refuses a rehearsed one", async () => {
+    const env = await rehearsal.ready();
+    let stateDir: string | undefined;
+    const report = await rehearse(env.taskPath, { commands: "run", scenario: "arbitrate-operator", keep: true, onRunCreated: ({ stateDir: dir }: { stateDir: string }) => void (stateDir = dir) } as Parameters<typeof rehearse>[1]);
+    expect(report.verdict).toBe("ready");
+    const scenarioPath = path.join(path.dirname(path.dirname(stateDir!)), "scenario.json");
+    const before = await readFile(scenarioPath, "utf8");
+    await expect(resumeRehearsal(stateDir!, { approval: { approvalId: "design-ruling", decision: "approve", inputs: { finding: "F1", ruling: "neither" }, operator: "maintainer" } }))
+      .rejects.toThrow(/rehearses no such answer to design-ruling; it rehearses: --approve design-ruling --input ruling=review-stands; --approve design-ruling --input ruling=implementation-stands; --decline design-ruling/);
+    // A rehearsed answer the run refuses (an input the approval does not declare) continues nothing.
+    let answered = false;
+    await expect(resumeRehearsal(stateDir!, { onAnswer: () => { answered = true; }, approval: { approvalId: "design-ruling", decision: "approve", inputs: { finding: "F1", ruling: "review-stands", undeclared: "x" }, operator: "maintainer" } })).rejects.toThrow();
+    expect(answered).toBe(false);
+    expect(await readFile(scenarioPath, "utf8")).toBe(before);
+  }, 300_000);
 });
