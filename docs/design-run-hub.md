@@ -1127,24 +1127,26 @@ from a `graphloom rehearse` run (both carry the `rehearsal-` run-ID prefix
 that keeps a plugin's refs under `rehearsal/<runId>/`).
 
 ```sh
-graphloom hub submit task.yaml --rehearsal [--scenario <name>] [--commands stub|run] [--offline] [--key <id>]
+graphloom hub submit task.yaml --rehearsal [--scenario <name>] [--commands stub|run] [--offline] [--stop-at <stage>] [--key <id>]
 ```
 
 ### 12.1 Captured input and identity
 
 The settings are part of the captured input (`HubInput.rehearsal`:
-`scenario`, `commands`, `offline`; only what was given), so of the request
-digest and the snapshot: they are durable, immutable and checked on the wire
-(a scenario name of at most 128 safe characters, `commands` `stub` or `run`,
-`offline` true; anything else is refused). A rehearsal submission's
+`scenario`, `commands`, `offline`, `stopAt`; only what was given), so of the
+request digest and the snapshot: they are durable, immutable and checked on the
+wire (a scenario name of at most 128 safe characters, `commands` `stub` or
+`run`, `offline` true, `stopAt` a node id or name of at most 128 characters,
+letters, digits, spaces, `.`, `_` or `-`; anything else is refused). A rehearsal submission's
 idempotency key is scoped apart: the hub stores `rehearsal:<key>`, and a
 real submission's key may not start with that prefix, so a rehearsal and a
 real submission of the same task and `--key` are always two submissions,
 never a conflict. Its run ID is `rehearsal-hub-<uuid>`. Intake captures the
 runner config when there is one (B2 probes the operator's real agent CLIs
 named there) but does not require it, and pins no supervisor config: the
-scenario's script is the supervisor. `--scenario`, `--commands` and
-`--offline` without `--rehearsal` are refused by the CLI before any request.
+scenario's script is the supervisor. `--scenario`, `--commands`,
+`--offline` and `--stop-at` without `--rehearsal` are refused by the CLI
+before any request.
 
 ### 12.2 Launch, scope of the stand-ins, continuation
 
@@ -1186,15 +1188,40 @@ recorded supervisor episodes, as `resume --rehearsal` does
 continuation, pause, cancel, service interruption, retention and archive are
 unchanged.
 
+With `stopAt` the initial launch runs `rehearse --stop-at <stage>`'s run: it
+stops as an operator stop once that node (id or name) is accepted on the live
+path, before the graph is asked for its next step, and the submission shows
+`blocked`. A plain `hub resume` continues it on the stand-ins to the run's end,
+as `resume --rehearsal` continues a direct `rehearse --stop-at`. The stop point
+holds for the initial launch only: a launch interrupted before the node was
+accepted leaves the verdict pending, and its continuation runs on to the end.
+
+Every shipped graph's scenarios run offline (`--offline`) with no GitHub at
+all: each scenario records the reads its run makes, and the offline GitHub
+stand-in declares the write executors too, so the binding withholds a write
+exactly as online. A review graph's Publish therefore stops with `posting not
+enabled` where online it would post, and a clean design review succeeds
+without a write. The issue-fix scenarios are meant for `--commands run`, on a
+task naming the issue they replay (`rehearsalRequest` of the plugin's
+rehearsal entry); quick mode cannot stand in for the command jobs whose output
+that graph reads back ([rehearsal design](design-graph-rehearsal.md#46-hermeticity-and-time)).
+`hub-rehearsal-shipped.<tier>.test.ts` submits them to a temporary hub and
+checks each recorded verdict equals the direct `rehearse` verdict.
+
 ### 12.3 Verdict
 
 The launch evaluates the rehearsal as `rehearse` does (the controller's
 boundary checks with the CLI's B2 capability probe and B3 call-log check
 merged in) and records it once, after the first launch whose run stopped for
-its own reasons: succeeded, failed, or a stop that needs the operator, such as
-a graph's declared approval. A launch the hub or the operator interrupted
-(a pause, a scheduling yield, a crash) leaves it pending, and a later launch
-takes it. A continuation of a recorded rehearsal keeps the recorded verdict:
+its own reasons: succeeded, failed, a stop that needs the operator, such as
+a graph's declared approval, or the submission's own stop point. A launch the
+hub or the operator interrupted (a pause, a scheduling yield, a crash) leaves
+it pending, and a later launch takes it. Under `stopAt` the verdict is the
+stop's, as `rehearse --stop-at` judges it: `ready` exactly when the run
+stopped once the node was accepted with no node after it on the live path
+accepted, else `not-ready` with the blocker `stop-at`; it carries no B-checks,
+names the node (`stoppedAt`), and `report.json` holds the stop report
+`rehearse --stop-at` prints. A continuation of a recorded rehearsal keeps the recorded verdict:
 for a scenario that expects an approval stop, the verdict is the stop's, and
 the approved continuation's success does not re-grade it.
 `<hub>/rehearsals/<runId>/verdict.json` holds the compact verdict (`verdict`,
@@ -1205,8 +1232,8 @@ The hub service reads the verdict file; it is never part of the scheduler's
 snapshot or a controller observation. `hub list --json` carries
 `rehearsals.<submission>` for each listed rehearsal with a verdict, `GET
 /v1/submissions/<id>` adds `rehearsalVerdict`, the overview panel of `hub
-inspect` adds a `Rehearsal:` line (scenario, commands, offline, verdict and
-the checks that did not pass), `hub list` marks a row `[rehearsal <scenario>:
+inspect` adds a `Rehearsal:` line (scenario, commands, offline, the stop
+point, verdict and the checks that did not pass), `hub list` marks a row `[rehearsal <scenario>:
 <verdict>]`, `hub status` counts rehearsal submissions by state
 (`rehearsalCounts`), and an archive index entry keeps the settings and the
 verdict. A rehearsal takes a slot like any submission: the limit covers
@@ -1219,3 +1246,5 @@ rehearsals and real runs together.
 | Rehearsal and real submission of one task and key | Two submissions, two run IDs, distinct digests; each key idempotent in its own scope |
 | Rehearsal settings without `--rehearsal`; `--supervisor` on a rehearsal | Refused |
 | Stand-in variables planted in the service's environment | Absent from a real launch's environment; a rehearsal sets its own |
+| Every scenario of every shipped graph, offline, through a hub | The recorded verdict equals the direct `rehearse` verdict, and every one is `ready` |
+| `--stop-at` on `hello`'s happy scenario, by id and by name | Blocks at the node with the stop's verdict, equal to `rehearse --stop-at`'s; `hub resume` continues to `succeeded` and keeps the verdict |

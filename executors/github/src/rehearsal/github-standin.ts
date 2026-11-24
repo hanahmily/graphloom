@@ -7,10 +7,15 @@
  * real by default during a rehearsal (cheap, and they verify the operator's
  * token), so this is loaded in place of `../executors.js` only when the
  * caller explicitly asks to replay recorded reads instead. It serves every
- * read-only `graphloom.github/*` id from the active scenario's own `reads`;
- * a write id is never declared here at all, so it fails the same way an
- * unknown executor id always does, regardless of the binding's own
- * `allowedEffects` (read-only by default, §4.6 never asks for writes).
+ * read-only `graphloom.github/*` id from the active scenario's own `reads`.
+ *
+ * It declares every write id of the real module too, with the real id,
+ * version, effect and input checks, so a graph sees the same executor catalog
+ * offline as online: the binding's `allowedEffects` (read-only in a rehearsal,
+ * §4.6 never asks for writes) withholds the write, and a graph that reads its
+ * grant (`effectGranted: false`, such as a review graph that then stops with
+ * `posting not enabled`) ends as it would online. A write that runs anyway
+ * fails: a stand-in never writes, and never reaches GitHub.
  *
  * A read the scenario has no recording for fails the job — never a
  * fabricated payload — and is logged so the evaluator can report the gap
@@ -18,6 +23,7 @@
  * recovery did with the failure.
  */
 import { defineExecutor, nextRead, recordUnverifiedRead, requireScenario, type ExecutorDefinition } from "@graphloom/sdk";
+import { executors as realExecutors } from "../executors.js";
 
 const STAND_IN_NAME = "github";
 
@@ -58,4 +64,24 @@ function readExecutor(id: string): ExecutorDefinition<unknown, unknown> {
   });
 }
 
-export const executors = READ_EXECUTOR_IDS.map(readExecutor);
+/** A write id as the real module declares it, minus its network capabilities, whose execution always fails: a rehearsal never writes. */
+function writeExecutor(real: ExecutorDefinition<unknown, unknown>): ExecutorDefinition<unknown, unknown> {
+  const { id, version, effect, inputSchema, inputProblem, inputShape } = real;
+  return defineExecutor<unknown, unknown>({
+    id,
+    effect,
+    ...(version !== undefined ? { version } : {}),
+    ...(inputSchema !== undefined ? { inputSchema } : {}),
+    ...(inputProblem !== undefined ? { inputProblem } : {}),
+    ...(inputShape !== undefined ? { inputShape } : {}),
+    async execute() {
+      requireScenario(STAND_IN_NAME);
+      return { status: "failed", summary: `rehearsal stand-in: ${id} is a write, and a rehearsal never writes to GitHub` };
+    },
+  });
+}
+
+export const executors = [
+  ...READ_EXECUTOR_IDS.map(readExecutor),
+  ...(realExecutors as ExecutorDefinition<unknown, unknown>[]).filter((e) => e.effect === "write").map(writeExecutor),
+];

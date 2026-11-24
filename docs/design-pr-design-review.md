@@ -1,6 +1,6 @@
 # PR design review graph (`pr-design-review`)
 
-Status: implemented, `pr-design-review` 0.1.7 (`examples/plugins/pr-design-review`).
+Status: implemented, `pr-design-review` 0.1.8 (`examples/plugins/pr-design-review`).
 This is round 1 of a pull request's review: the design-level review. Round 2, the
 detail review, is the [PR-review graph](design-pr-review-graph.md) (`pr-review`
 1.x). The two graphs are independent plugins that share the review kit
@@ -623,3 +623,10 @@ and `large-artifacts` exercise the shared report. The design review's own:
   be accepted again); and the answers' replay clears an earlier attempt's revision
   when a new attempt answers afresh
   ([PR review §5.1](design-pr-review-graph.md#51-convergence-after-a-reentry)).
+- **0.1.8:** the rehearsal scenarios expect where the graph ends: one with open
+  items stops after Round 1 with `posting not enabled` (a rehearsal never posts),
+  and a clean one (`design-clean`, `added-other`, `other-corrected`,
+  `incremental-round1`) succeeds `complete`; they said `report ready` and
+  `stopped`, from before Round 1 and Publish. Every scenario is `ready` with
+  `graphloom rehearse --offline`
+  ([rehearsal design §4.6](design-graph-rehearsal.md#46-hermeticity-and-time)).

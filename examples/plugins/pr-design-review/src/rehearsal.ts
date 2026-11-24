@@ -585,6 +585,15 @@ function diagramScenario(final: FinalReport, how: DiagramBehavior = "good"): { r
   return { results: { "diagrams-v1": replies.map((output) => ({ output })) }, commands };
 }
 
+/**
+ * Where a scenario with open items ends: Round 1 is decided and Publish would post them, the graph's one write. A rehearsal's
+ * runner never grants it (docs/design-graph-rehearsal.md §4.6), so Publish stops final with `posting not enabled` (graph.ts
+ * POSTING_NOT_ENABLED), offline or not.
+ */
+const OPEN_ITEMS: RehearsalScenario["expect"] = { status: "stopped", stopReason: "posting not enabled", receipts: ["fetch", "report", "questions", "answers", "round1"] };
+/** Where a clean design review ends: Publish posts nothing, needs no write, and the run succeeds complete. */
+const CLEAN: RehearsalScenario["expect"] = { status: "succeeded", stopReason: "complete", receipts: ["fetch", "report", "questions", "answers", "round1", "publish"] };
+
 function build(profile: Profile, pull: Pull, options: { body?: string; notes?: string[]; toolId?: string; corrections?: boolean; qa?: QaSpec; report?: (files: readonly PullFile[], sectionIds: readonly string[]) => Core; features?: (files: readonly PullFile[]) => Feature[]; unsupported?: string[]; diagrams?: DiagramBehavior; headFiles?: Readonly<Record<string, string>> }): Built {
   const files = pull.files.map((f) => pullFile(fileItem(f))!);
   const facts = detectFacts(files, profile);
@@ -659,7 +668,7 @@ function build(profile: Profile, pull: Pull, options: { body?: string; notes?: s
       results,
       commands: { ...commands(pull, options.toolId), ...quoteStubs(results["claim-check-v1"]!.at(-1)!, claimTargets(good, { sections }, { treeQuotes: large }), files), ...qa.commands, ...diagrams.commands },
       reads: reads({ ...pull, ...(options.body !== undefined ? { body: options.body } : {}) }),
-      expect: { status: "stopped", stopReason: "report ready", receipts: ["fetch", "report", "questions", "answers"] },
+      expect: OPEN_ITEMS,
     },
   };
 }
@@ -1074,11 +1083,11 @@ export function rehearsal(config: unknown): GraphRehearsal {
       // Run with `LARGE_LIMITS`: the pull request is large, partitioned into areas; the questions are the same per high-level change, in one batch.
       "large-pull-request": build(profile, LARGE_PULL, { toolId: "static-go-1" }).scenario,
       // Round 1 finds nothing (design-pr-review-split §3.6): Publish posts nothing and records the head as clean; no GitHub call, no write grant.
-      "design-clean": { ...clean, expect: { status: "stopped", stopReason: "complete", receipts: ["fetch", "report", "questions", "answers", "round1", "publish"] } },
+      "design-clean": { ...clean, expect: CLEAN },
       // The questioner adds a design-level question about the high-level change (§3.3): it is asked and answered like any other.
-      "added-other": build(profile, COMPLEX_PULL, { toolId: "static-go-1", qa: ADDED_OTHER({ item: "W1", text: "Does ParseTTL belong in pkg/schema, or with the other duration parsing of the storage layer?" }) }).scenario,
+      "added-other": { ...build(profile, COMPLEX_PULL, { toolId: "static-go-1", qa: ADDED_OTHER({ item: "W1", text: "Does ParseTTL belong in pkg/schema, or with the other duration parsing of the storage layer?" }) }).scenario, expect: CLEAN },
       // The questioner first adds a detail question of another type than other; it is refused and corrected (§3.3).
-      "other-corrected": build(profile, COMPLEX_PULL, { toolId: "static-go-1", qa: { ...ADDED_OTHER({ item: "W1", text: "Does ParseTTL belong in pkg/schema, or with the other duration parsing of the storage layer?" }), rejectedFirst: [{ key: "", type: "purpose", item: "W1", symbol: "", text: "Which test covers the error branches of this change?" }] } }).scenario,
+      "other-corrected": { ...build(profile, COMPLEX_PULL, { toolId: "static-go-1", qa: { ...ADDED_OTHER({ item: "W1", text: "Does ParseTTL belong in pkg/schema, or with the other duration parsing of the storage layer?" }), rejectedFirst: [{ key: "", type: "purpose", item: "W1", symbol: "", text: "Which test covers the error branches of this change?" }] } }).scenario, expect: CLEAN },
       // A codebase feature does what the change adds: the existing-feature answer cites ParseDuration outside the change, an `existing` item.
       "answer-finds-existing-feature": build(profile, RETENTION_PULL, { toolId: "static-go-1" }).scenario,
       // No declared dependency or internal package provides a back-off; every go.mod entry is listed with its source status.
@@ -1135,7 +1144,7 @@ export function rehearsal(config: unknown): GraphRehearsal {
       // A pull request of 1000 data files: report.json and review.html are past one write command, so each is written in parts.
       "large-artifacts": build(profile, ARTIFACTS_PULL, {}).scenario,
       // A later head: two new functions (Limit, Burst) with a clean Q&A, so a test can run it on an earlier head's ledger and a delta.
-      "incremental-round1": incrementalRehearsal(config),
+      "incremental-round1": { ...incrementalRehearsal(config), expect: CLEAN },
     },
   };
 }

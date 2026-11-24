@@ -12,7 +12,8 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { managedObservation, type DurableRunState, type RehearsalReport } from "@graphloom/controller";
-import { REHEARSAL_GITHUB_TOKEN_ENV, REHEARSAL_ONLY_ENV, type HubRehearsal, type HubRehearsalVerdict } from "@graphloom/sdk";
+import { HUB_REHEARSAL_STOP_AT, REHEARSAL_GITHUB_TOKEN_ENV, REHEARSAL_ONLY_ENV, type HubRehearsal, type HubRehearsalVerdict } from "@graphloom/sdk";
+import type { RehearsalStopReport } from "./rehearsal.js";
 import { writePrivateJsonOrText } from "./hub-input.js";
 
 /** `<hub directory>/rehearsals/<runId>`: a rehearsal submission's scenario, stand-in home, launchers and verdict. */
@@ -47,6 +48,7 @@ export function rehearsalArgs(settings: HubRehearsal): string[] {
     ...(settings.scenario !== undefined ? ["--scenario", settings.scenario] : []),
     ...(settings.commands !== undefined ? ["--commands", settings.commands] : []),
     ...(settings.offline === true ? ["--offline"] : []),
+    ...(settings.stopAt !== undefined ? ["--stop-at", settings.stopAt] : []),
   ];
 }
 
@@ -58,6 +60,7 @@ export function parseRehearsalSettings(value: unknown): HubRehearsal {
     if (key === "scenario" && typeof item === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(item)) settings.scenario = item;
     else if (key === "commands" && (item === "stub" || item === "run")) settings.commands = item;
     else if (key === "offline" && typeof item === "boolean") { if (item) settings.offline = true; }
+    else if (key === "stopAt" && typeof item === "string" && HUB_REHEARSAL_STOP_AT.test(item)) settings.stopAt = item;
     else throw new Error(`unknown or invalid rehearsal setting ${key}`);
   }
   return settings;
@@ -65,27 +68,52 @@ export function parseRehearsalSettings(value: unknown): HubRehearsal {
 
 /**
  * Records the verdict of a rehearsal submission's run, once: after the first
- * launch whose run stopped for its own reasons (succeeded, failed, or a stop
- * that needs the operator, such as an approval). A launch the hub or the
- * operator interrupted (a pause, a scheduling yield, a crash) leaves the
- * verdict pending; a later launch continuing a recorded rehearsal keeps it.
+ * launch whose run stopped for its own reasons (succeeded, failed, a stop that
+ * needs the operator, such as an approval, or the submission's `--stop-at`).
+ * A launch the hub or the operator interrupted (a pause, a scheduling yield, a
+ * crash) leaves the verdict pending; a later launch continuing a recorded
+ * rehearsal keeps it.
+ *
+ * With `stopped` (the stop report of a submission's `--stop-at`) the verdict
+ * is the stop's, as `rehearse --stop-at` judges it: ready exactly when the run
+ * stopped once that node was accepted, with no node after it accepted. That
+ * stop is an operator stop, the run's own end here, not an interruption.
  */
-export async function recordHubVerdict(rehearsalRoot: string, report: RehearsalReport, state: DurableRunState, launchId: string): Promise<HubRehearsalVerdict | undefined> {
+export async function recordHubVerdict(
+  rehearsalRoot: string,
+  report: RehearsalReport,
+  state: DurableRunState,
+  launchId: string,
+  stopped?: RehearsalStopReport,
+): Promise<HubRehearsalVerdict | undefined> {
   const existing = await readVerdictFile(path.join(rehearsalRoot, HUB_VERDICT_FILE));
   if (existing !== undefined) return existing;
   const continuation = managedObservation(state).continuation;
-  if (continuation?.kind === "automatic" || (continuation?.kind === "operator" && continuation.cause === "operator-stop")) return undefined;
-  const verdict: HubRehearsalVerdict = {
-    verdict: report.verdict,
-    boundaries: Object.fromEntries(Object.entries(report.boundaries).map(([boundary, result]) => [boundary, result.status])),
-    ...(report.blocker !== undefined ? { blocker: { boundary: report.blocker.boundary, reason: report.blocker.reason.slice(0, 1024) } } : {}),
-    convergence: report.convergence.met,
+  if (continuation?.kind === "automatic" || (continuation?.kind === "operator" && continuation.cause === "operator-stop" && stopped?.ok !== true)) return undefined;
+  const run = {
     runStatus: state.status,
     ...(state.stopReason !== undefined ? { stopReason: state.stopReason.slice(0, 512) } : {}),
     launchId,
     evaluatedAt: new Date().toISOString(),
   };
-  await writePrivateJsonOrText(path.join(rehearsalRoot, HUB_REPORT_FILE), `${JSON.stringify(report, null, 2)}\n`);
+  const verdict: HubRehearsalVerdict = stopped !== undefined
+    ? {
+        verdict: stopped.ok ? "ready" : "not-ready",
+        boundaries: {},
+        ...(!stopped.ok ? { blocker: { boundary: "stop-at", reason: `the run did not stop once ${stopped.stoppedAt} was accepted (live path ${stopped.path.join(" → ") || "empty"})` } } : {}),
+        convergence: stopped.ok,
+        stoppedAt: stopped.stoppedAt,
+        ...run,
+      }
+    : {
+        verdict: report.verdict,
+        boundaries: Object.fromEntries(Object.entries(report.boundaries).map(([boundary, result]) => [boundary, result.status])),
+        ...(report.blocker !== undefined ? { blocker: { boundary: report.blocker.boundary, reason: report.blocker.reason.slice(0, 1024) } } : {}),
+        convergence: report.convergence.met,
+        ...run,
+      };
+  // Beside it, what `graphloom rehearse` prints for the same settings: the stop report under --stop-at, else the rehearsal report.
+  await writePrivateJsonOrText(path.join(rehearsalRoot, HUB_REPORT_FILE), `${JSON.stringify(stopped ?? report, null, 2)}\n`);
   await writePrivateJsonOrText(path.join(rehearsalRoot, HUB_VERDICT_FILE), `${JSON.stringify(verdict, null, 2)}\n`);
   return verdict;
 }
@@ -113,6 +141,7 @@ export function rehearsalLine(settings: HubRehearsal, verdict: HubRehearsalVerdi
     `scenario ${settings.scenario ?? "happy"}`,
     `commands ${settings.commands ?? "stub"}`,
     ...(settings.offline === true ? ["offline"] : []),
+    ...(settings.stopAt !== undefined ? [`stop at ${settings.stopAt}`] : []),
     verdict === undefined
       ? "verdict pending"
       : `verdict ${verdict.verdict}${failed.length ? ` (${failed.join(", ")})` : ""}${verdict.blocker !== undefined ? `: ${verdict.blocker.boundary} ${verdict.blocker.reason.replace(/\s+/g, " ").slice(0, 200)}` : ""}`,

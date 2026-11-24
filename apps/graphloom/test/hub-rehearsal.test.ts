@@ -16,107 +16,30 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Duplex } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
-import { openHub, type Hub, type HubDriver, type HubExecutionObservation, type HubGrantMessage } from "@graphloom/hub";
-import type { HubHealth, HubLaunch, HubRehearsalVerdict, HubStatus, HubSubmission, MonitorSnapshot } from "@graphloom/sdk";
+import { openHub, type Hub, type HubDriver, type HubGrantMessage } from "@graphloom/hub";
+import type { HubHealth, HubStatus, HubSubmission, MonitorSnapshot } from "@graphloom/sdk";
 import { REHEARSAL_HOME_ENV, REHEARSAL_SCENARIO_ENV, REHEARSAL_SYNTHESIZED_ENV } from "@graphloom/sdk";
 import { digestExecutorSource } from "@graphloom/runner";
 import { createScope, createTopologyFixture, TOPOLOGY_APPROVAL, TOPOLOGY_APPROVAL_STOP, type TestScope } from "@graphloom/testkit";
-import type { HubServiceConfig } from "../src/hub-config.js";
 import { hubRequest } from "../src/hub-client.js";
 import { formatHubList, formatHubStatus, hubCommand, submitRehearsal } from "../src/hub-cli.js";
 import { runtimeDigest } from "../src/hub-input.js";
-import { observeOwnedRun } from "../src/hub-observe.js";
-import { serveHub, type HubService } from "../src/hub-server.js";
 import { selfInstall } from "../src/ownership.js";
 import { execFileAsync, repoRoot } from "./cli-env.js";
 import { fakeRunnerConfig, writeFakeCodingAgents } from "./fixtures/fake-coding-agents.js";
+import { childEnvironment, useTestHubs } from "./hub-harness.js";
 
-const main = path.join(repoRoot, "apps/graphloom/dist/main.js");
 const folders: string[] = [];
-const services: HubService[] = [];
 const hubs: Hub[] = [];
 const children: ChildProcess[] = [];
 let scope: TestScope | undefined;
+const { startHub, waitForState } = useTestHubs();
 afterEach(async () => {
   for (const child of children.splice(0)) if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-  for (const service of services.splice(0)) await service.close().catch(() => undefined);
   for (const hub of hubs.splice(0)) await hub.close({ graceMs: 0 }).catch(() => undefined);
   await scope?.dispose(); scope = undefined;
   await Promise.all(folders.splice(0).map((folder) => rm(folder, { recursive: true, force: true })));
 });
-
-/** The child environment: the test's own without GraphLoom or Claude settings, on a temporary HOME. */
-function childEnvironment(home: string, extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
-  const inherited = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("GRAPHLOOM_") && !name.startsWith("CLAUDE_")));
-  return { ...inherited, HOME: home, TMPDIR: home, ...extra };
-}
-
-/**
- * A hub driver that starts the compiled CLI's real managed bootstrap
- * (`__hub-managed`) as a plain child, grants it over fd 3, and reads the run's
- * observation once it exits: the Linux driver's protocol without its cgroups.
- */
-class ManagedChildDriver implements HubDriver {
-  readonly logs = new Map<string, string>();
-  private readonly launches = new Map<string, { child: ChildProcess; control: Duplex; exited: boolean }>();
-  constructor(private readonly directory: string, private readonly env: NodeJS.ProcessEnv) {}
-  async probe(): Promise<void> {}
-  async prepare(launch: HubLaunch, submission: HubSubmission) {
-    const child = spawn(process.execPath, [main, "__hub-managed", this.directory, submission.id], { cwd: this.directory, env: this.env, stdio: ["ignore", "pipe", "pipe", "pipe"] });
-    children.push(child);
-    const control = child.stdio[3] as Duplex;
-    control.on("error", () => undefined); control.resume();
-    const entry = { child, control, exited: false };
-    this.launches.set(launch.id, entry);
-    this.logs.set(launch.id, "");
-    child.stdout!.resume();
-    child.stderr!.on("data", (chunk: Buffer) => { this.logs.set(launch.id, `${this.logs.get(launch.id)}${chunk.toString()}`); });
-    child.once("close", () => { entry.exited = true; });
-    await new Promise<void>((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
-    return { bootId: "test-boot", pid: child.pid!, startTime: "1" };
-  }
-  async grant(launch: HubLaunch, submission: HubSubmission): Promise<void> {
-    const message: HubGrantMessage = { protocolVersion: 1, type: "grant", hubId: submission.hubId, submissionId: submission.id, runId: submission.runId, launchId: launch.id, generation: launch.generation, automatic: launch.automatic };
-    this.launches.get(launch.id)!.control.write(`${JSON.stringify(message)}\n`);
-  }
-  async inspect(launch: HubLaunch, submission: HubSubmission): Promise<HubExecutionObservation> {
-    const entry = this.launches.get(launch.id);
-    if (entry !== undefined && !entry.exited) return { execution: "live", ownerGone: false, externalStopped: false };
-    try {
-      const { observation } = await observeOwnedRun(path.join(this.directory, "runs", submission.runId), true);
-      return { execution: "drained", ownerGone: true, externalStopped: true, observation };
-    } catch { return { execution: "drained", ownerGone: true, externalStopped: true }; }
-  }
-  async stop(launch: HubLaunch, _submission: HubSubmission, reason: "pause" | "cancel" | "service-interruption", commandId: string): Promise<void> {
-    this.launches.get(launch.id)?.control.write(`${JSON.stringify({ protocolVersion: 1, type: "stop", reason, commandId })}\n`);
-  }
-  async kill(launch: HubLaunch): Promise<void> { this.launches.get(launch.id)?.child.kill("SIGKILL"); }
-  log(): string { return [...this.logs.values()].join("\n---\n"); }
-}
-
-/** A hub service on a temporary directory and socket, capturing tasks with the real intake and the given runner config. */
-async function startHub(runnerConfig: string) {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "gl-hub-rh-")); folders.push(directory);
-  const config: HubServiceConfig = {
-    directory, socket: path.join(directory, "hub.sock"), cgroupRoot: "/not-used", maxConcurrentRuns: 2, runnerConfig,
-    retry: { automatic: true, maxAutomaticResumes: 2, maxElapsedMs: 600_000, baseDelayMs: 1000, maxDelayMs: 2000 }, pollIntervalMs: 250, shutdownGraceMs: 0,
-  };
-  const driver = new ManagedChildDriver(directory, childEnvironment(directory));
-  const service = await serveHub({ config, driver, environment: { HOME: directory, PATH: process.env.PATH } });
-  services.push(service);
-  return { directory, socket: service.socket, driver };
-}
-
-async function waitForState(socket: string, id: string, states: string[], driver: ManagedChildDriver, timeoutMs = 150_000): Promise<HubSubmission & { rehearsalVerdict?: HubRehearsalVerdict }> {
-  const until = Date.now() + timeoutMs;
-  let last: (HubSubmission & { rehearsalVerdict?: HubRehearsalVerdict }) | undefined;
-  while (Date.now() < until) {
-    last = await hubRequest<HubSubmission & { rehearsalVerdict?: HubRehearsalVerdict }>("GET", `/v1/submissions/${id}`, undefined, socket);
-    if (states.includes(last.state) && last.launch === undefined) return last;
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-  throw new Error(`submission ${id} did not reach ${states.join("/")}: ${JSON.stringify(last)}\n${driver.log()}`);
-}
 
 async function helloTask(): Promise<{ dir: string; taskPath: string; runnerConfig: string }> {
   const dir = await mkdtemp(path.join(os.tmpdir(), "gl-hub-rh-task-")); folders.push(dir);
@@ -145,7 +68,7 @@ describe("rehearsal submissions through the hub", () => {
     // No supervisor config is pinned: the scenario's script is the rehearsal's supervisor.
     expect(submitted.input.runtimeConfig).toEqual({ runner: expect.objectContaining({ path: task.runnerConfig }) });
 
-    const done = await waitForState(hub.socket, submitted.id, ["succeeded", "failed", "blocked"], hub.driver);
+    const done = await waitForState(hub, submitted.id, ["succeeded", "failed", "blocked"]);
     expect(done.state, hub.driver.log()).toBe("succeeded");
     expect(done.rehearsalVerdict).toMatchObject({ verdict: "ready", convergence: true, runStatus: "succeeded", boundaries: { B1: "passed", B2: "passed", B5: "passed", B7: "passed" } });
     const stateDir = path.join(hub.directory, "runs", submitted.runId);
@@ -191,7 +114,7 @@ describe("rehearsal submissions through the hub", () => {
     const hub = await startHub(runnerConfig);
     const submitted = await hubRequest<HubSubmission>("POST", "/v1/submissions", { taskPath: fixture.taskPath, rehearsal: { scenario: "operator" } }, hub.socket);
 
-    const waiting = await waitForState(hub.socket, submitted.id, ["blocked", "succeeded", "failed"], hub.driver);
+    const waiting = await waitForState(hub, submitted.id, ["blocked", "succeeded", "failed"]);
     expect(waiting, hub.driver.log()).toMatchObject({ state: "blocked", observation: { status: "stopped", continuation: { kind: "operator" } } });
     // A final stop that waits for the graph's declared approval is the operator scenario's expectation: ready.
     expect(waiting.rehearsalVerdict).toMatchObject({ verdict: "ready", runStatus: "stopped", stopReason: TOPOLOGY_APPROVAL_STOP });
@@ -203,7 +126,7 @@ describe("rehearsal submissions through the hub", () => {
     // A rehearsal's supervisor is its script: a transition is refused; the approval is the remedy.
     await expect(hubRequest("POST", `/v1/submissions/${submitted.id}/resume`, { commandId: "c-supervisor", remedy: { supervisor: "codex" } }, hub.socket)).rejects.toThrow(/scenario's script/);
     await hubRequest("POST", `/v1/submissions/${submitted.id}/resume`, { commandId: "c-approve", remedy: { approve: TOPOLOGY_APPROVAL, inputs: { ruling: "the build stands" } } }, hub.socket);
-    const finished = await waitForState(hub.socket, submitted.id, ["succeeded", "failed", "blocked"], hub.driver);
+    const finished = await waitForState(hub, submitted.id, ["succeeded", "failed", "blocked"]);
     expect(finished.state, hub.driver.log()).toBe("succeeded");
     expect(finished.runId).toBe(submitted.runId);
 
@@ -225,6 +148,9 @@ describe("rehearsal settings on the CLI", () => {
     expect(() => submitRehearsal({ scenario: "operator" })).toThrow(/--scenario is a rehearsal setting: add --rehearsal/);
     expect(() => submitRehearsal({ commands: "run", offline: true })).toThrow(/--commands, --offline are rehearsal settings/);
     expect(() => submitRehearsal({ rehearsal: true, commands: "all" })).toThrow(/--commands must be stub or run/);
+    expect(submitRehearsal({ rehearsal: true, scenario: "design-clean", "stop-at": "Round 1" })).toEqual({ scenario: "design-clean", stopAt: "Round 1" });
+    expect(() => submitRehearsal({ "stop-at": "round1" })).toThrow(/--stop-at is a rehearsal setting: add --rehearsal/);
+    expect(() => submitRehearsal({ rehearsal: true, "stop-at": "../x" })).toThrow(/--stop-at must name a stage/);
     // hub submit refuses before it asks any hub; the socket here answers nothing.
     await expect(hubCommand(["submit", "task.yaml", "--offline", "--socket", path.join(os.tmpdir(), "gl-no-hub.sock")])).rejects.toThrow(/--offline is a rehearsal setting/);
     await expect(hubCommand(["resume", "s-x", "--rehearsal", "--socket", path.join(os.tmpdir(), "gl-no-hub.sock")])).rejects.toThrow(/--rehearsal is not valid for hub resume/);

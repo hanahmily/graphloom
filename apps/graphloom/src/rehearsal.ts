@@ -705,6 +705,20 @@ async function evaluateRehearsalState(
   });
 }
 
+/**
+ * Whether a run stopped at `stopAt` (a node id or name; docs/design-graph-topology.md §9): stopped, with that node
+ * accepted on the live path and no node after it on the path accepted. On a chain the path is a prefix of the list,
+ * so this is "complete, and the next stage not".
+ */
+export function stopOutcome(state: DurableRunState, stopAt: string): { stage: string; path: string[]; ok: boolean } {
+  const stage = state.definition.stages.find((s) => s.id === stopAt) ?? state.definition.stages.find((s) => s.name === stopAt);
+  const path = livePath(state).map((v) => v.stageId);
+  if (stage === undefined) return { stage: stopAt, path, ok: false };
+  const index = path.indexOf(stage.id);
+  const later = index < 0 ? [] : path.slice(index + 1);
+  return { stage: stage.name, path, ok: state.status === "stopped" && index >= 0 && nodeAccepted(state, stage.id) && !later.some((id) => nodeAccepted(state, id)) };
+}
+
 /** The options a rehearsal's stand-in harness is built with, kept in its scratch directory for `resume --rehearsal`. */
 export interface RehearsalHarnessOptions {
   commands?: "stub" | "run";
@@ -753,10 +767,12 @@ export const HUB_REHEARSAL_TASK = "rehearsal-task.yaml";
  */
 export async function rehearseManaged(
   taskPath: string,
-  options: RehearsalHarnessOptions & { scenario?: string; managed: ManagedRehearsal; install: InstallRecord; onRunCreated: (run: { runId: string; stateDir: string }) => void | Promise<void> },
-): Promise<{ report: RehearsalReport; runReport: RunReport; state: DurableRunState }> {
+  options: RehearsalHarnessOptions & { scenario?: string; stopAt?: string; managed: ManagedRehearsal; install: InstallRecord; onRunCreated: (run: { runId: string; stateDir: string }) => void | Promise<void> },
+): Promise<{ report: RehearsalReport; runReport: RunReport; state: DurableRunState; stopped?: RehearsalStopReport }> {
   const run = await performRehearsal(taskPath, options);
-  return { report: run.report, runReport: run.runReport!, state: await loadRunState(run.stateDir!) };
+  const state = await loadRunState(run.stateDir!);
+  // Under the submission's --stop-at, also the stop report `rehearse --stop-at` prints: its verdict is the stop's.
+  return { report: run.report, runReport: run.runReport!, state, ...(options.stopAt !== undefined ? { stopped: stopReport(state, options.stopAt) } : {}) };
 }
 
 /** A kept rehearsal run's verdict now, from the scenario and options in its scratch directory. */
@@ -879,18 +895,16 @@ export async function rehearseStopAt(
   const { keep: _keep, ...rest } = options;
   void _keep;
   const run = await performRehearsal(taskPath, { ...rest, stopAt });
-  const state = await loadRunState(run.stateDir!);
-  const stage = state.definition.stages.find((s) => s.id === stopAt) ?? state.definition.stages.find((s) => s.name === stopAt)!;
-  // Over the live path (docs/design-graph-topology.md §9): the node accepted
-  // on it, and no node after it on the path accepted. On a chain the path is
-  // a prefix of the list, so this is "complete, and the next stage not".
-  const path = livePath(state).map((v) => v.stageId);
-  const index = path.indexOf(stage.id);
-  const later = index < 0 ? [] : path.slice(index + 1);
+  return stopReport(await loadRunState(run.stateDir!), stopAt);
+}
+
+/** The report of a run rehearsed with `--stop-at <stopAt>`: where it stopped, and whether that is where it should have. */
+export function stopReport(state: DurableRunState, stopAt: string): RehearsalStopReport {
+  const { stage, path, ok } = stopOutcome(state, stopAt);
   return {
-    stoppedAt: stage.name,
+    stoppedAt: stage,
     path,
-    ok: state.status === "stopped" && index >= 0 && nodeAccepted(state, stage.id) && !later.some((id) => nodeAccepted(state, id)),
+    ok,
     runId: state.runId,
     stateDir: state.stateDir,
     status: state.status,

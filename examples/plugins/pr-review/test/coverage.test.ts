@@ -425,7 +425,7 @@ describe("coverage-measured (through the graph)", () => {
     expect(sim.jobs[at("Check the Docker sandbox images")]).toMatchObject({ stageId: "fetch", readOnly: true });
     expect(at("Measure the changed Go")).toBeGreaterThan(at("List the changed lines"));
     expect(job).toMatchObject({ kind: "command", stageId: "report", readOnly: true, checkout: { from: "candidate" } });
-    expect(job!.confinement).toMatchObject({ kind: "docker", image: BANYANDB_GO_IMAGE, readOnly: ["/plugin", "/gomodcache", "/rehearsal/tools", "/rehearsal/buf-cache"] });
+    expect(job!.confinement).toMatchObject({ kind: "docker", image: BANYANDB_GO_IMAGE, readOnly: ["/plugin", "/usr/lib", "/usr/bin", "/usr/share"] });
     expect(confinementProblem(job!.confinement)).toBeUndefined();
   });
 

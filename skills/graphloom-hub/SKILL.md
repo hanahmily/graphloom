@@ -138,11 +138,20 @@ To exercise the hub or a graph's journey with no model call, submit a
 graphloom hub submit task.yaml --rehearsal --scenario operator --commands stub --offline
 ```
 
-`--scenario`, `--commands` and `--offline` need `--rehearsal`. Its key is
-scoped apart (`rehearsal:<key>`); it takes a slot. `hub list` marks it
-`[rehearsal <scenario>: <verdict>]`; `hub list --json` has the verdict and
-each B-check under `rehearsals`. Report it; for `not-ready` quote the blocker.
-An approval stop blocks it as a real run (section 6).
+`--scenario`, `--commands`, `--offline` and `--stop-at <stage>` need
+`--rehearsal`. Its key is scoped apart (`rehearsal:<key>`); it takes a slot.
+`hub list` marks it `[rehearsal <scenario>: <verdict>]`; `hub list --json` has
+the verdict and each B-check under `rehearsals`. Report it; for `not-ready`
+quote the blocker. An approval stop blocks it as a real run (section 6).
+
+With `--offline` no GitHub is asked: every shipped scenario replays its
+recorded reads. The issue-fix scenarios are meant for `--commands run` (their
+checks read the real test output) on a task naming the issue they replay; the
+review graphs' scenarios stop at Publish with `posting not enabled`, since a
+rehearsal never posts. `--stop-at <stage>` stops the run once that stage (id
+or name) is accepted, as `graphloom rehearse --stop-at` does: the verdict is
+the stop's (`ready` when it stopped there), the submission shows `blocked`,
+and a plain `hub resume` on a yes continues it on the stand-ins.
 
 ## 3. Status
 

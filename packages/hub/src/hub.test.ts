@@ -590,6 +590,11 @@ describe("rehearsal submissions", () => {
     await expect(f.hub.submit(rehearsalRequest(undefined, { scenario: "../x" }))).rejects.toThrow(/invalid rehearsal setting scenario/);
     await expect(f.hub.submit(rehearsalRequest(undefined, { commands: "all" }))).rejects.toThrow(/invalid rehearsal setting commands/);
     await expect(f.hub.submit(rehearsalRequest(undefined, { synthesized: true }))).rejects.toThrow(/invalid rehearsal setting synthesized/);
+    await expect(f.hub.submit(rehearsalRequest(undefined, { stopAt: "../round1" }))).rejects.toThrow(/invalid rehearsal setting stopAt/);
+    // A stop point names a node by id or name, as `rehearse --stop-at` takes it.
+    const stopped = await f.hub.submit(rehearsalRequest("stop", { scenario: "happy", stopAt: "Round 1" }));
+    if ("archived" in stopped) throw new Error("unexpected tombstone");
+    expect(stopped.input.rehearsal).toEqual({ scenario: "happy", stopAt: "Round 1" });
   });
   it("refuses a supervisor transition for a rehearsal, whose supervisor is its scenario's script, but takes the other remedies", async () => {
     const f = await fixture(1);

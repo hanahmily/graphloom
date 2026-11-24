@@ -334,9 +334,11 @@ function commands(p: Pull, toolId: string | undefined): NonNullable<RehearsalSce
     // No Docker in a rehearsal: the sandbox image checks say so, and no pull request code runs anywhere (`sandbox-unavailable`).
     "sandbox-go": { exitCode: 0, stdout: `unavailable: ${REHEARSAL_NO_DOCKER}\n` },
     "sandbox-typescript": { exitCode: 0, stdout: `unavailable: ${REHEARSAL_NO_DOCKER}\n` },
-    "host-go-modcache": { exitCode: 0, stdout: "/gomodcache\n" },
-    "host-mounts-go": { exitCode: 0, stdout: "ok /rehearsal/tools\nok /rehearsal/buf-cache\n" },
-    "host-npm-cache": { exitCode: 0, stdout: "/npm-cache\n" },
+    // Host paths that exist on any Linux or macOS host and hold no workspace: the runner checks a confined job's mounts
+    // before the command stand-in answers it (`coverage-measured` runs one), and a mount that does not exist refuses the job.
+    "host-go-modcache": { exitCode: 0, stdout: "/usr/lib\n" },
+    "host-mounts-go": { exitCode: 0, stdout: "ok /usr/bin\nok /usr/share\n" },
+    "host-npm-cache": { exitCode: 0, stdout: "/usr/local\n" },
     "metrics-diff": { exitCode: 0, stdout: p.diff },
     ...(toolId !== undefined ? { [toolId]: { exitCode: 0, stdout: JSON.stringify(p.doc) } } : {}),
     "report-write": { exitCode: 0, stdout: "written\n" },

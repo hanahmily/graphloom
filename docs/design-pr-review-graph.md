@@ -3250,6 +3250,12 @@ graph over time.
   and the Report stage could not be accepted again;
   [§5.1](#51-convergence-after-a-reentry), [§6.10](#610-features-and-their-data-flow)).
   The review kit's change, shared with `pr-design-review` 0.1.7.
+- **1.1.8:** the rehearsal's `coverage-measured` scenario stubs host paths that
+  exist (`/usr/lib`, `/usr/bin`, `/usr/share`): the runner checks a confined job's
+  mounts before the command stand-in answers, and refused the made-up ones. With the
+  offline GitHub stand-in now declaring the write executors, every scenario ends at
+  Publish with `posting not enabled` offline, as it always did online
+  ([rehearsal design §4.6](design-graph-rehearsal.md#46-hermeticity-and-time)).
 
 **Where 1.0 differs from its design.** The split design (now
 [a pointer](design-pr-review-split.md)) planned a Checks stage when the profile has
