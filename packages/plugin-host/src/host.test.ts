@@ -5,7 +5,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RunView } from "@graphloom/sdk";
 import {
   createChildPluginHost,
@@ -106,13 +106,32 @@ describe("createChildPluginHost", () => {
         callbackTimeoutMs: 600_000,
       }),
     );
-    const timers = () => process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
     expect((await host.describe(ctx("op-warm"))).ok).toBe(true);
-    const before = timers();
-    expect((await host.describe(ctx("op-describe"))).ok).toBe(true);
-    expect((await host.advance(ctx("op-advance"), view())).ok).toBe(true);
+    // Track only the host's own callback timers (armed with callbackTimeoutMs), not every timer in the
+    // test process: unrelated timers starting or expiring between two process-wide counts made this flaky.
+    const armed: unknown[] = [];
+    const cleared = new Set<unknown>();
+    const realSetTimeout = globalThis.setTimeout;
+    const realClearTimeout = globalThis.clearTimeout;
+    const set = vi.spyOn(globalThis, "setTimeout").mockImplementation(((fn: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+      const handle = realSetTimeout(fn, ms, ...args);
+      if (ms === 600_000) armed.push(handle);
+      return handle;
+    }) as typeof setTimeout);
+    const clear = vi.spyOn(globalThis, "clearTimeout").mockImplementation(((handle?: Parameters<typeof clearTimeout>[0]) => {
+      cleared.add(handle);
+      realClearTimeout(handle);
+    }) as typeof clearTimeout);
+    try {
+      expect((await host.describe(ctx("op-describe"))).ok).toBe(true);
+      expect((await host.advance(ctx("op-advance"), view())).ok).toBe(true);
+    } finally {
+      set.mockRestore();
+      clear.mockRestore();
+    }
     // A timer per call left armed would keep the event loop (a CLI run) alive for the full callback timeout.
-    expect(timers()).toBe(before);
+    expect(armed.length).toBeGreaterThan(0);
+    expect(armed.filter((t) => !cleared.has(t))).toEqual([]);
   });
 
   it("reports why the plugin entry failed to load, not the error envelope's missing run id", async () => {
