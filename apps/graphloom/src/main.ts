@@ -12,14 +12,15 @@ import { createController, loadRunState, resolveStateDir, reconcileManagedRun } 
 import type { GraphRehearsal } from "@graphloom/sdk";
 import type { RunReport } from "@graphloom/controller";
 import { hubCommand, HUB_USAGE } from "./hub-cli.js";
-import { launchEndLine, managedMain, routeManagedCommand, type ManagedExecution } from "./hub-managed.js";
+import { assertManagedMode, launchEndLine, managedMain, routeManagedCommand, type ManagedExecution } from "./hub-managed.js";
+import { hubRehearsalRoot, readHubVerdict, recordHubVerdict } from "./hub-rehearsal.js";
 import { observeOwnedRun } from "./hub-observe.js";
 import { cleanupOwnedRun } from "./hub-runtime.js";
 import { approvalFlags } from "./approval-flags.js";
 import { createCliRunner } from "./cli-runner.js";
 import { harnessRepairDeps, resolveBundlePath, resolveBundlePathForResume } from "./repair-config.js";
 import { switchModelTarget } from "./switch-model.js";
-import { check, probe, recordScenario, rehearse, rehearseStopAt, replay, resumeRehearsal } from "./rehearsal.js";
+import { check, evaluateKeptRehearsal, keptRehearsalRunner, probe, recordScenario, rehearse, rehearseManaged, rehearseStopAt, replay, resumeRehearsal } from "./rehearsal.js";
 import { dispatchToOwner, installHome, recordOwnership, removeOwnershipRecord, selfInstall } from "./ownership.js";
 import { requireRunnerConfig, runnerConfigPath } from "./runner-config.js";
 import { discover, probeEnabledSupervisors } from "./discovery.js";
@@ -55,13 +56,20 @@ async function main(args = process.argv.slice(2), managed?: ManagedExecution): P
     console.log(JSON.stringify(await observeOwnedRun(args[1]!, args[2] === "--execution-only"))); return;
   }
   if (cmd === "__hub-cleanup") {
-    if (args.length !== 4 || !path.isAbsolute(args[1]!)) throw new Error("invalid owning-runtime cleanup request");
-    console.log(JSON.stringify(await cleanupOwnedRun(args[1]!, args[2]!, args[3]!))); return;
+    if ((args.length !== 4 && !(args.length === 5 && args[4] === "--rehearsal")) || !path.isAbsolute(args[1]!)) throw new Error("invalid owning-runtime cleanup request");
+    console.log(JSON.stringify(await cleanupOwnedRun(args[1]!, args[2]!, args[3]!, args[4] === "--rehearsal"))); return;
   }
   if (cmd === "__hub-reconcile") {
-    if (!managed || args.length !== 2) throw new Error("reconciliation requires a managed launch grant");
-    const runner = createCliRunner(await requireRunnerConfig());
-    console.log(JSON.stringify(await reconcileManagedRun(args[1]!, managed.grant, runner))); return;
+    if (!managed || (args.length !== 2 && !(args.length === 3 && args[2] === "--rehearsal"))) throw new Error("reconciliation requires a managed launch grant");
+    const rehearsal = args[2] === "--rehearsal";
+    await assertManagedMode(managed.grant, rehearsal);
+    // A rehearsal's reconciliation pass drains on the stand-ins its launches ran on, never the operator's harnesses.
+    const kept = rehearsal ? await keptRehearsalRunner(args[1]!, hubRehearsalRoot(managed.grant.hubStateDir, managed.grant.runId)) : undefined;
+    try {
+      const runner = kept?.runner ?? createCliRunner(await requireRunnerConfig());
+      console.log(JSON.stringify(await reconcileManagedRun(args[1]!, managed.grant, runner)));
+    } finally { kept?.restore(); }
+    return;
   }
 
   if (cmd === "version" || cmd === "--version" || cmd === "-V") {
@@ -177,6 +185,7 @@ async function main(args = process.argv.slice(2), managed?: ManagedExecution): P
   const controller = createController();
 
   if (cmd === "run") {
+    if (managed) await assertManagedMode(managed.grant, false);
     const taskPath = path.resolve(args[1] ?? "task.yaml");
     const stateRootFlag = flagValue(args, "--state-root");
     const stateRoot = stateRootFlag ? path.resolve(stateRootFlag) : undefined;
@@ -345,8 +354,11 @@ async function main(args = process.argv.slice(2), managed?: ManagedExecution): P
           },
         }
       : undefined;
+    if (managed) await assertManagedMode(managed.grant, args.includes("--rehearsal"));
     if (args.includes("--rehearsal")) {
       // A rehearsal's kept run continues on its own stand-ins (docs/design-release.md §6 step 8.7); no runner config is read.
+      // A hub rehearsal submission's scratch lives under its hub (docs/design-run-hub.md §12).
+      const rehearsalRoot = managed ? hubRehearsalRoot(managed.grant.hubStateDir, managed.grant.runId) : undefined;
       const report = await resumeRehearsal(runRef, {
         ...(stateRoot ? { stateRoot: path.resolve(stateRoot) } : {}),
         ...(upgrade !== undefined ? { upgrade } : {}),
@@ -354,8 +366,18 @@ async function main(args = process.argv.slice(2), managed?: ManagedExecution): P
         ...(args.includes("--update-executors") ? { updateExecutors: true } : {}),
         ...(args.includes("--reconciled") ? { reconciled: true } : {}),
         ...(approval !== undefined ? { approval } : {}),
+        ...(managed && rehearsalRoot !== undefined ? { managed: { grant: managed.grant, rehearsalRoot } } : {}),
       });
       console.log(JSON.stringify(report, null, 2));
+      if (managed && rehearsalRoot !== undefined) {
+        // A rehearsal interrupted before its run stopped on its own gets its verdict now; a recorded one stays.
+        if (await readHubVerdict(managed.grant.hubStateDir, managed.grant.runId) === undefined) {
+          const kept = await evaluateKeptRehearsal(report.stateDir, rehearsalRoot);
+          const verdict = await recordHubVerdict(rehearsalRoot, kept.report, kept.state, managed.grant.launchId);
+          if (verdict !== undefined) console.error(`graphloom: rehearsal verdict ${verdict.verdict}`);
+        }
+        console.error(launchEndLine(report));
+      }
       process.exitCode = report.status === "succeeded" ? 0 : 1;
       return;
     }
@@ -450,6 +472,34 @@ async function main(args = process.argv.slice(2), managed?: ManagedExecution): P
     const report = await check(taskPath);
     console.log(JSON.stringify(report, null, 2));
     process.exitCode = report.ok ? 0 : 1;
+    return;
+  }
+
+  if (cmd === "rehearse" && managed) {
+    // The initial launch of a hub rehearsal submission (docs/design-run-hub.md §12): the settings are the
+    // captured input's, the run ID and grant the hub's, and the scratch stays under the hub with the run.
+    const settings = (await assertManagedMode(managed.grant, true))!;
+    const stateRootFlag = flagValue(args, "--state-root");
+    if (args[1] === undefined || stateRootFlag === undefined) throw new Error("a managed rehearsal needs its task and --state-root");
+    const rehearsalRoot = hubRehearsalRoot(managed.grant.hubStateDir, managed.grant.runId);
+    const { report, runReport, state } = await rehearseManaged(path.resolve(args[1]), {
+      ...(settings.scenario !== undefined ? { scenario: settings.scenario } : {}),
+      ...(settings.commands !== undefined ? { commands: settings.commands } : {}),
+      ...(settings.offline === true ? { offline: true } : {}),
+      managed: { grant: managed.grant, rehearsalRoot, stateRoot: path.resolve(stateRootFlag) },
+      install: self.record,
+      onRunCreated: async ({ runId, stateDir }) => {
+        crashContext = { runId, stateDir };
+        console.error(`graphloom: rehearsal run ${runId} started; state ${stateDir}`);
+        await recordOwnership(self, { runId, stateDir });
+        await managed.created({ runId, stateDir });
+      },
+    });
+    const verdict = await recordHubVerdict(rehearsalRoot, report, state, managed.grant.launchId);
+    console.log(JSON.stringify(report, null, 2));
+    console.error(verdict !== undefined ? `graphloom: rehearsal verdict ${verdict.verdict}` : "graphloom: rehearsal verdict pending: the run was interrupted before it stopped on its own");
+    console.error(launchEndLine(runReport));
+    process.exitCode = runReport.status === "succeeded" ? 0 : 1;
     return;
   }
 
@@ -725,6 +775,12 @@ Usage:
 Run hub (docs/design-run-hub.md; graphloom hub <command> --help describes one command):
   ${HUB_USAGE.join("\n  ")}
 
+hub submit --rehearsal makes a rehearsal submission (docs/design-run-hub.md §12): the hub queues, launches,
+contains, continues, stops and retains it like any submission, but its run runs on rehearse's stand-ins (scripted
+agents and supervisor, stubbed commands; --scenario, --commands stub|run and --offline as for rehearse), with no
+provider calls. hub resume continues it as a rehearsal, at the script's next decision; hub list --json and hub
+inspect show its verdict. A real submission refuses the rehearsal settings, and never resumes as a rehearsal.
+
 session list shows a run's recorded agent sessions; session open forks one in your own terminal (Claude Code or
 Codex, under the job's confinement with the checkout read-only) and records the conversation when the agent
 exits, as an operator conversation a later open continues (--from-original starts again from the job's session).
@@ -883,7 +939,9 @@ Rehearse --stop-at <stage> keeps the rehearsal's run stopped once that stage (a
 node, by id or name) is accepted on the live path and prints how to continue it;
 a supervisor-only node is refused. Resume <stateDir> --rehearsal continues a kept
 rehearsal run on its own stand-ins (with --upgrade, on this version). Both are
-hooks for the release upgrade matrix (docs/design-release.md §6).
+hooks for the release upgrade matrix (docs/design-release.md §6). A hub rehearsal
+submission's run resumes through its hub: resume <run> --rehearsal routes there, and a
+hub run resumes as a rehearsal only when it is a rehearsal submission.
 
 For a graph that declares nodes and edges (docs/design-graph-topology.md §8),
 inspect shows the topology, the live path and its tail, every visit and an open

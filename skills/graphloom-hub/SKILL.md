@@ -1,6 +1,6 @@
 ---
 name: graphloom-hub
-description: Drive GraphLoom runs through the run hub, the operator's systemd user service that queues submissions under a concurrency limit and continues them automatically. Checks the hub is reachable (never starts it), submits a checked task with graphloom hub submit, reports status with hub list and hub inspect panels, pauses, cancels, resumes (with --approve, --decline, --reconciled, --update-plugin, --upgrade remedies the user chose), reads launch logs, sets the concurrency limit, archives finished submissions, and searches past and archived submissions with hub list filters. Every control action only on the user's yes; never diagnoses, fixes or answers a run's questions. Use when the user wants to submit, check, stop, resume or find runs on the hub.
+description: Drive GraphLoom runs through the run hub, the operator's systemd user service that queues submissions under a concurrency limit and continues them automatically. Checks the hub is reachable (never starts it), submits a checked task with graphloom hub submit, submits rehearsals (hub submit --rehearsal) that exercise the hub on stand-ins with no model calls, reports status with hub list and hub inspect panels, pauses, cancels, resumes (with --approve, --decline, --reconciled, --update-plugin, --upgrade remedies the user chose), reads launch logs, sets the concurrency limit, archives finished submissions, and searches past and archived submissions with hub list filters. Every control action only on the user's yes; never diagnoses, fixes or answers a run's questions. Use when the user wants to submit, check, stop, resume or find runs on the hub.
 ---
 
 # Drive runs through the GraphLoom hub
@@ -97,18 +97,14 @@ graphloom hub doctor --task task.yaml
 It runs the doctor's checks (agent CLIs and logins, token variables, the
 task's environment checks) inside the hub; exit 1 means a check failed there
 even when `graphloom doctor` passes in your shell. `graphloom hub status`
-also names the hub's `PATH` head, where `claude`/`codex` resolve, which token
-variables are set (never their values), and a `Warning:` line for an agent
-CLI the hub cannot find. On a failure, quote it and tell the user the
-operator refreshes the service's environment (`graphloom hub service
---capture-env`, with `--token-env-file` for tokens; the operator runs it and
-restarts the service, never you), or start this run directly with
-graphloom-run. The same holds for the agents' logins:
-Claude Code finds its login through `CLAUDE_CONFIG_DIR` (and Codex through
-`CODEX_HOME`) when the user sets one in their shell profile; the service needs
-the same value, or the run's agent jobs fail to authenticate (`401 … OAuth
-access token is invalid`). When a hub run's first agent job fails that way,
-tell the user which variable the service lacks; don't retry the run.
+names the hub's `PATH` head, where `claude`/`codex` resolve, which token
+variables are set, and a `Warning:` per missing agent CLI. On a failure,
+quote it: the operator refreshes the service's environment (`graphloom hub
+service --capture-env`, `--token-env-file` for tokens, then a restart; never
+you), or start the run directly with graphloom-run. Logins too: the service
+needs the shell's `CLAUDE_CONFIG_DIR`/`CODEX_HOME`, or agent jobs fail with
+`401 … OAuth access token is invalid`; then name the missing variable and
+don't retry.
 
 **Submit** with a key that names the work, so a retry after an uncertain
 reply never makes a second run, and record the submission beside the task:
@@ -131,6 +127,22 @@ runtime config that changes before the first start blocks the submission.
 run's state directory is `~/.local/state/graphloom/hub/runs/<runId>`
 (`$XDG_STATE_HOME`, or the hub config's `directory`, moves it); it exists once
 the run has started.
+
+### 2.1 Rehearse through the hub
+
+To exercise the hub or a graph's journey with no model call, submit a
+**rehearsal** (on a yes): queued and run like any submission, on
+`graphloom rehearse`'s stand-ins.
+
+```sh
+graphloom hub submit task.yaml --rehearsal --scenario operator --commands stub --offline
+```
+
+`--scenario`, `--commands` and `--offline` need `--rehearsal`. Its key is
+scoped apart (`rehearsal:<key>`); it takes a slot. `hub list` marks it
+`[rehearsal <scenario>: <verdict>]`; `hub list --json` has the verdict and
+each B-check under `rehearsals`. Report it; for `not-ready` quote the blocker.
+An approval stop blocks it as a real run (section 6).
 
 ## 3. Status
 
@@ -230,6 +242,8 @@ run's owning GraphLoom under the run lock:
   move the run's GraphLoom too). A gone or dangling link is refused, naming it.
   If the controller refuses the update (changed stages), the run keeps its
   pinned plugin; a plain resume never changes it.
+- A rehearsal (2.1) resumes only as a rehearsal, at its script's next
+  decision; it refuses `--supervisor`.
 - A remedy needs a drained submission with no pending command, and a run that
   initialized. A submission blocked by `initialization-failed` takes only a
   plain `hub resume`. `succeeded` and `canceled` submissions cannot resume.
@@ -310,14 +324,9 @@ flags do not cover (for example `automaticResumes` or `launch.failure`):
 graphloom hub list --state blocked --json | jq '.submissions[] | {id, automaticResumes, failureRepeats, launch}'
 ```
 
-For a hub older than these flags (`--state is not valid for hub list`), fall
-back to `graphloom hub list --json | jq '.submissions[] | select(...)'`; it
-returns only the queue, not archived submissions.
+A hub older than these flags (`--state is not valid for hub list`): use
+`graphloom hub list --json | jq '.submissions[] | select(...)'` (queue only).
 
-For one run's history, open its state: `graphloom inspect <runId> --state-root
-~/.local/state/graphloom/hub/runs` (status, stop reason, path, visits,
-remedies) and `graphloom stats <runId> --state-root
-~/.local/state/graphloom/hub/runs` (what each stage used). An archived
-entry's `stateDir` names that directory. A submission archived before the hub
-had its archive index, or evicted from it, is found only there, by run id:
-list `~/.local/state/graphloom/hub/runs/` and inspect the candidates.
+For one run's history: `graphloom inspect <runId>` and `graphloom stats
+<runId>`, each with `--state-root ~/.local/state/graphloom/hub/runs` (an
+archived entry's `stateDir`), where a run missing from the index is found.

@@ -11,6 +11,7 @@ import { boundedText, materializeHubTask } from "./hub-input.js";
 import { verifyHubExecutionInput } from "./hub-runtime.js";
 import { hubRequest } from "./hub-client.js";
 import { approvalFlags } from "./approval-flags.js";
+import { dropStandInVariables, rehearsalArgs } from "./hub-rehearsal.js";
 
 export interface ManagedExecution {
   grant: ManagedRunGrant;
@@ -116,10 +117,16 @@ export async function managedMain(args: string[], run: (argv: string[], context:
       // Suppress a newly created default supervisor config which was absent at submission.
       process.env.GRAPHLOOM_HUB_NO_SUPERVISOR = "1";
     }
+    // Stand-ins answer only inside a rehearsal launch, which sets their variables itself
+    // (rehearsal.ts); no launch keeps any it inherited from the hub's environment.
+    // The mode is the captured input's, never a client's: a real submission never runs
+    // on stand-ins, and a rehearsal submission never on real harnesses.
+    const rehearsal = submission.input.rehearsal;
+    dropStandInVariables(process.env, { keepRehearsalToken: rehearsal !== undefined });
     const command = launch.mode === "initial"
-      ? ["run", await materializeHubTask(submission.input), "--state-root", path.join(directory, "runs")]
-      : launch.mode === "reconcile" ? ["__hub-reconcile", stateDirFor(submission.runId)]
-      : ["resume", stateDirFor(submission.runId), ...remedyArgs(launch.command?.remedy)];
+      ? [rehearsal !== undefined ? "rehearse" : "run", await materializeHubTask(submission.input), "--state-root", path.join(directory, "runs"), ...(rehearsal !== undefined ? rehearsalArgs(rehearsal) : [])]
+      : launch.mode === "reconcile" ? ["__hub-reconcile", stateDirFor(submission.runId), ...(rehearsal !== undefined ? ["--rehearsal"] : [])]
+      : ["resume", stateDirFor(submission.runId), ...(rehearsal !== undefined ? ["--rehearsal"] : []), ...remedyArgs(launch.command?.remedy)];
     if (launch.mode !== "initial") { created = true; await stop(); }
     await grant.verify();
     await run(command, {
@@ -135,6 +142,18 @@ export async function managedMain(args: string[], run: (argv: string[], context:
     process.off("SIGTERM", signal); process.off("SIGINT", signal);
     channel.removeAllListeners(); channel.destroy();
   }
+}
+
+/**
+ * Refuses a managed launch whose command does not match its submission's
+ * captured mode: a rehearsal command for a real submission, or a real one for
+ * a rehearsal submission. Returns the rehearsal settings of a rehearsal.
+ */
+export async function assertManagedMode(grant: ManagedRunGrant, rehearsal: boolean): Promise<HubSubmission["input"]["rehearsal"]> {
+  const settings = (await readStoredSubmission(grant.hubStateDir, grant.submissionId)).input.rehearsal;
+  if (rehearsal && settings === undefined) throw new Error(`hub submission ${grant.submissionId} is a real submission; it never runs as a rehearsal`);
+  if (!rehearsal && settings !== undefined) throw new Error(`hub submission ${grant.submissionId} is a rehearsal submission; it runs only on its stand-ins`);
+  return settings;
 }
 
 export async function readStoredSubmission(directory: string, id: string): Promise<HubSubmission> {
@@ -188,7 +207,13 @@ export async function routeManagedCommand(cmd: string, args: string[]): Promise<
   const binding = await readManagedBinding(stateDir);
   if (!binding) return false;
   if (cmd === "delete") throw new Error("a managed run cannot be deleted; cancel/archive it through its hub first");
-  if (args.includes("--rehearsal") || args.includes("--on-stop")) throw new Error("managed resume does not accept --rehearsal or --on-stop; use hub inspect or hub watch for monitoring");
+  if (args.includes("--on-stop")) throw new Error("managed resume does not accept --on-stop; use hub inspect or hub watch for monitoring");
+  if (cmd === "resume") {
+    // A hub rehearsal resumes only as a rehearsal, and a real hub run never as one.
+    const rehearsal = (await readStoredSubmission(binding.hubStateDir, binding.submissionId).catch(() => undefined))?.input.rehearsal !== undefined;
+    if (args.includes("--rehearsal") && !rehearsal) throw new Error(`run ${binding.runId} is a real hub submission (${binding.submissionId}); it never resumes as a rehearsal: drop --rehearsal`);
+    if (!args.includes("--rehearsal") && rehearsal) throw new Error(`run ${binding.runId} is a hub rehearsal submission (${binding.submissionId}); it resumes only as a rehearsal: add --rehearsal, or use graphloom hub resume ${binding.submissionId}`);
+  }
   const endpoint = JSON.parse(await boundedText(path.join(binding.hubStateDir, "endpoint.json"), 4096)) as { hubId?: string; socket?: string };
   if (endpoint.hubId !== binding.hubId || typeof endpoint.socket !== "string" || !path.isAbsolute(endpoint.socket)) throw new Error("managed hub endpoint is unavailable; start its hub before controlling this run");
   const remedy = cmd === "resume" ? parseRemedy(args) : undefined;

@@ -56,7 +56,7 @@ export function createHubRuntime(config: HubServiceConfig, wake: () => void): { 
     const result = observed ?? await observe(launch, submission);
     if (!result.ownerGone) return result;
     try {
-      const cleanupResult = await runtimeJson<{ drained: boolean; resources: string[] }>(submission, "__hub-cleanup", [stateDir(submission), submission.runId, submission.input.runtimeConfig?.runner?.path ?? ""]);
+      const cleanupResult = await runtimeJson<{ drained: boolean; resources: string[] }>(submission, "__hub-cleanup", [stateDir(submission), submission.runId, submission.input.runtimeConfig?.runner?.path ?? "", ...(submission.input.rehearsal !== undefined ? ["--rehearsal"] : [])]);
       if (cleanupResult.drained) { samples.delete(submission.runId); processFrames.delete(submission.id); }
       return { ...result, externalStopped: cleanupResult.drained, ...(cleanupResult.drained ? {} : { reason: cleanupResult.resources.join("; ").slice(0, 1024) }) };
     } catch (error) { return { ...result, externalStopped: false, reason: `external cleanup remains unverified: ${String(error).slice(0, 900)}` }; }
@@ -202,11 +202,15 @@ function monitoredSnapshot(result: OwnedMonitorResult, submission: HubSubmission
 }
 
 /** Separate read-only-runtime command: cleanup never loads graph code or starts a job. */
-export async function cleanupOwnedRun(stateDir: string, runId: string, runnerConfigFile: string): Promise<{ drained: boolean; resources: string[] }> {
+export async function cleanupOwnedRun(stateDir: string, runId: string, runnerConfigFile: string, rehearsal = false): Promise<{ drained: boolean; resources: string[] }> {
   if (path.basename(stateDir) !== runId) throw new Error("cleanup run identity mismatch");
   const owner = await readOwnerClaim(stateDir);
   if (owner !== undefined && !isClaimStale(owner)) return { drained: false, resources: ["controller still owns the run"] };
-  const config = await loadRunnerConfig({ ...process.env, ...(runnerConfigFile ? { GRAPHLOOM_RUNNER_CONFIG: runnerConfigFile } : {}) });
+  // A rehearsal pins a runner config only when the operator has one (B2 probes it); without one, the
+  // cleanup contract of the built-in executors its stand-ins replace is checked on its own.
+  const config = rehearsal && !runnerConfigFile
+    ? { harness: "pi" as const, allowUnrestricted: true as const }
+    : await loadRunnerConfig({ ...process.env, ...(runnerConfigFile ? { GRAPHLOOM_RUNNER_CONFIG: runnerConfigFile } : {}) });
   if (!config) return { drained: false, resources: ["runner configuration unavailable for external cleanup"] };
   return releaseManagedRun(createCliRunner(config), runId, stateDir);
 }

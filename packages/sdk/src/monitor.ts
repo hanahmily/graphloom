@@ -30,6 +30,8 @@ export interface MonitorHub {
   queued: number;
   state?: string;
   observationId?: string;
+  /** A rehearsal submission's one-line summary: its settings and recorded verdict. */
+  rehearsal?: string;
 }
 
 export interface MonitorStage {

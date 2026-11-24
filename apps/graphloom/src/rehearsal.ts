@@ -10,7 +10,7 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -35,6 +35,7 @@ import {
   type ContractOutcome,
   type DurableRunState,
   type InstallRecord,
+  type ManagedRunGrant,
   type RehearsalReport,
   type ReplayReport,
   type RunReport,
@@ -586,8 +587,9 @@ export function checkProvenance(state: DurableRunState, calls: RecordedCall[]): 
  */
 async function performRehearsal(
   taskPath: string,
-  options: RehearsalHarnessOptions & { scenario?: string; stopAt?: string; install?: InstallRecord; onRunCreated?: (run: { runId: string; stateDir: string }) => void | Promise<void> } = {},
+  options: RehearsalHarnessOptions & { scenario?: string; stopAt?: string; install?: InstallRecord; onRunCreated?: (run: { runId: string; stateDir: string }) => void | Promise<void>; managed?: ManagedRehearsal } = {},
 ): Promise<RehearsalRun> {
+  const managed = options.managed;
   const absoluteTaskPath = path.resolve(taskPath);
   const taskDir = path.dirname(absoluteTaskPath);
   const intake = await intakeTask(absoluteTaskPath);
@@ -602,9 +604,12 @@ async function performRehearsal(
     throw new Error(`no scenario named ${JSON.stringify(scenarioName)}; this bundle declares: ${Object.keys(rehearsalData.scenarios).join(", ") || "(none)"}`);
   }
 
-  const rehearsalRoot = await mkdtemp(path.join(os.tmpdir(), "graphloom-rehearsal-"));
+  // A hub launch keeps its scratch beside the hub's runs, for the submission's lifetime; `rehearse` makes a temporary one.
+  const rehearsalRoot = managed !== undefined
+    ? (await mkdir(managed.rehearsalRoot, { recursive: true, mode: 0o700 }), managed.rehearsalRoot)
+    : await mkdtemp(path.join(os.tmpdir(), "graphloom-rehearsal-"));
   const scenarioPath = path.join(rehearsalRoot, "scenario.json");
-  const stateRoot = path.join(rehearsalRoot, "state");
+  const stateRoot = managed?.stateRoot ?? path.join(rehearsalRoot, "state");
   await writeFile(scenarioPath, JSON.stringify(scenario), "utf8");
   // What `resume --rehearsal` needs to continue this run on the same stand-ins.
   const harnessOptions: RehearsalHarnessOptions = {
@@ -615,7 +620,7 @@ async function performRehearsal(
   };
   await writeFile(path.join(rehearsalRoot, REHEARSAL_OPTIONS_FILE), JSON.stringify({ scenario: scenarioName, ...harnessOptions }, null, 2), "utf8");
 
-  const tempTaskPath = path.join(taskDir, `.graphloom-rehearsal-${randomUUID().slice(0, 8)}.yaml`);
+  const tempTaskPath = path.join(taskDir, managed !== undefined ? HUB_REHEARSAL_TASK : `.graphloom-rehearsal-${randomUUID().slice(0, 8)}.yaml`);
   const budgets = rehearsalBudgets(scenario.budgets);
   const budgetLines = Object.entries(budgets).map(([k, v]) => `  ${k}: ${v}`).join("\n");
   // The graph's own request text, verbatim (as a block scalar: a plugin may
@@ -636,7 +641,8 @@ async function performRehearsal(
       taskPath: tempTaskPath,
       runner: harness.runner,
       stateRoot,
-      runId: `${REHEARSAL_RUN_ID_PREFIX}${randomUUID().slice(0, 8)}`,
+      runId: managed?.grant.runId ?? `${REHEARSAL_RUN_ID_PREFIX}${randomUUID().slice(0, 8)}`,
+      ...(managed !== undefined ? { managed: managed.grant } : {}),
       // The harness the plugin's preference picks among stand-ins for all three, pinned as a live run pins it.
       selectSupervisor: async (preference) => {
         const { selection } = resolveSupervisorSelection(REHEARSAL_SUPERVISOR_CONFIG, () => ({ ok: true }), preference !== undefined ? { preference } : {});
@@ -650,41 +656,52 @@ async function performRehearsal(
       ...(options.onRunCreated !== undefined ? { onRunCreated: options.onRunCreated } : {}),
     });
     const state = await loadRunState(report.stateDir);
-    // B2 probes the operator's real, configured binaries (not this rehearsal's
-    // own stand-in runnerConfig above): the question is whether a live run
-    // would find what its adapters need, same as the gate in `run` (§3.5).
-    // Offline reads with nothing recorded fold into the same boundary: a seam
-    // this rehearsal could not fully verify, same spirit as an unreadable
-    // --help (§4.6: never a fabricated payload, the gap is reported instead).
-    const realConfig = await loadRunnerConfig().catch(() => undefined);
-    const capabilities = await probeHarnessCapabilities(realConfig);
-    const unverifiedReads = harness.offline ? readUnverifiedReads(scenarioPath) : [];
-    const B2 = unverifiedReads.length === 0
-      ? capabilities
-      : {
-          status: capabilities.status === "failed" ? "failed" as const : "unverified" as const,
-          notes: [...capabilities.notes, ...unverifiedReads.map((id) => `offline: no recorded read for ${id}`)],
-        };
-    // B3's own default (malformed agent evidence) stays canonical in the
-    // controller; the call-log cross-check needs the scenario's own sidecar
-    // file, a CLI concern, so it is computed here and merged in.
-    const baseline = checkB3(state);
-    const provenance = checkProvenance(state, readCallLog(scenarioPath));
-    const B3: BoundaryResult = {
-      status: baseline.status === "failed" || provenance.status === "failed" ? "failed" : baseline.status,
-      notes: [...baseline.notes, ...provenance.notes],
-    };
-    const evaluated = evaluateRehearsal(state, scenario, { B2, B3 }, {
-      substituted: harness.substituted,
-      notCovered: harness.stubCommands
-        ? ["the toolchain, build and tests: command jobs answered from the scenario's stubs (quick mode); rerun with --commands run for the full verdict"]
-        : [],
-    });
+    const evaluated = await evaluateRehearsalState(state, scenario, scenarioPath, harness);
     return { report: evaluated, rehearsalRoot, scenarioPath, stateDir: report.stateDir, runReport: report };
   } finally {
     harness.restore();
-    await rm(tempTaskPath, { force: true });
+    // A hub launch keeps its task: a retried initial launch intakes the same bytes.
+    if (managed === undefined) await rm(tempTaskPath, { force: true });
   }
+}
+
+/** The rehearsal's verdict over its run's state: the controller's boundary checks with the CLI's B2 and B3 merged in. */
+async function evaluateRehearsalState(
+  state: DurableRunState,
+  scenario: RehearsalScenario,
+  scenarioPath: string,
+  harness: { substituted: string[]; stubCommands: boolean; offline: boolean },
+): Promise<RehearsalReport> {
+  // B2 probes the operator's real, configured binaries (not this rehearsal's
+  // own stand-in runnerConfig above): the question is whether a live run
+  // would find what its adapters need, same as the gate in `run` (§3.5).
+  // Offline reads with nothing recorded fold into the same boundary: a seam
+  // this rehearsal could not fully verify, same spirit as an unreadable
+  // --help (§4.6: never a fabricated payload, the gap is reported instead).
+  const realConfig = await loadRunnerConfig().catch(() => undefined);
+  const capabilities = await probeHarnessCapabilities(realConfig);
+  const unverifiedReads = harness.offline ? readUnverifiedReads(scenarioPath) : [];
+  const B2 = unverifiedReads.length === 0
+    ? capabilities
+    : {
+        status: capabilities.status === "failed" ? "failed" as const : "unverified" as const,
+        notes: [...capabilities.notes, ...unverifiedReads.map((id) => `offline: no recorded read for ${id}`)],
+      };
+  // B3's own default (malformed agent evidence) stays canonical in the
+  // controller; the call-log cross-check needs the scenario's own sidecar
+  // file, a CLI concern, so it is computed here and merged in.
+  const baseline = checkB3(state);
+  const provenance = checkProvenance(state, readCallLog(scenarioPath));
+  const B3: BoundaryResult = {
+    status: baseline.status === "failed" || provenance.status === "failed" ? "failed" : baseline.status,
+    notes: [...baseline.notes, ...provenance.notes],
+  };
+  return evaluateRehearsal(state, scenario, { B2, B3 }, {
+    substituted: harness.substituted,
+    notCovered: harness.stubCommands
+      ? ["the toolchain, build and tests: command jobs answered from the scenario's stubs (quick mode); rerun with --commands run for the full verdict"]
+      : [],
+  });
 }
 
 /** The options a rehearsal's stand-in harness is built with, kept in its scratch directory for `resume --rehearsal`. */
@@ -697,6 +714,58 @@ export interface RehearsalHarnessOptions {
 
 /** Beside `scenario.json` in a rehearsal's scratch directory: the scenario name and harness options it ran with. */
 const REHEARSAL_OPTIONS_FILE = "rehearsal.json";
+
+/** What a rehearsal with `options` stands in for, as its report names it. */
+function standInSubstitutions(options: RehearsalHarnessOptions): { substituted: string[]; stubCommands: boolean; offline: boolean } {
+  const stubCommands = options.commands !== "run";
+  const offline = options.offline === true;
+  const substituted = [
+    `pi: rehearsal stand-in (${piRehearsalModule})`,
+    `claude-code: rehearsal stand-in (${claudeRehearsalStandIn})`,
+    `codex: rehearsal stand-in (${codexRehearsalStandIn})`,
+    ...(stubCommands ? [`command: rehearsal stand-in (${commandRehearsalModule}), quick mode's default`] : []),
+    ...(offline ? [`github: rehearsal stand-in (${githubRehearsalModule}), replaying recorded reads (--offline)`] : []),
+    ...(options.synthesized === true ? ["every agent reply: schema-synthesized, ignoring the scenario's own scripted replies (--synthesized)"] : []),
+    ...(options.adversarial === true ? ["every agent reply: adversarially corrupted before submission, to prove the robustness machinery is wired (--adversarial)"] : []),
+  ];
+  return { substituted, stubCommands, offline };
+}
+
+/**
+ * A hub launch of a rehearsal submission (docs/design-run-hub.md §12): the
+ * hub's grant, the submission's scratch directory under the hub
+ * (`<hub>/rehearsals/<runId>`) and the hub's state root (`<hub>/runs`).
+ */
+export interface ManagedRehearsal {
+  grant: ManagedRunGrant;
+  rehearsalRoot: string;
+  stateRoot: string;
+}
+
+/** The rehearsal's task, beside the hub's materialized launch task, kept so a retried initial launch intakes the same bytes. */
+export const HUB_REHEARSAL_TASK = "rehearsal-task.yaml";
+
+/**
+ * The initial launch of a hub rehearsal submission: `rehearse` on the hub's
+ * reserved run ID and grant, its scratch kept under the hub. Returns the
+ * rehearsal's report and the run's.
+ */
+export async function rehearseManaged(
+  taskPath: string,
+  options: RehearsalHarnessOptions & { scenario?: string; managed: ManagedRehearsal; install: InstallRecord; onRunCreated: (run: { runId: string; stateDir: string }) => void | Promise<void> },
+): Promise<{ report: RehearsalReport; runReport: RunReport; state: DurableRunState }> {
+  const run = await performRehearsal(taskPath, options);
+  return { report: run.report, runReport: run.runReport!, state: await loadRunState(run.stateDir!) };
+}
+
+/** A kept rehearsal run's verdict now, from the scenario and options in its scratch directory. */
+export async function evaluateKeptRehearsal(stateDir: string, rehearsalRoot: string): Promise<{ report: RehearsalReport; state: DurableRunState }> {
+  const scenarioPath = path.join(rehearsalRoot, "scenario.json");
+  const scenario = JSON.parse(await readFile(scenarioPath, "utf8")) as RehearsalScenario;
+  const saved = JSON.parse(await readFile(path.join(rehearsalRoot, REHEARSAL_OPTIONS_FILE), "utf8").catch(() => "{}")) as RehearsalHarnessOptions;
+  const state = await loadRunState(stateDir);
+  return { report: await evaluateRehearsalState(state, scenario, scenarioPath, standInSubstitutions(saved)), state };
+}
 
 /** The graph's own environment declarations, by id: quick mode never stubs these. */
 function environmentCommandsOf(definition: GraphDefinition): Map<string, readonly string[]> {
@@ -771,16 +840,7 @@ async function rehearsalHarness(
       environmentCommands,
       offline ? githubRehearsalModule : undefined,
     );
-    const substituted = [
-      `pi: rehearsal stand-in (${piRehearsalModule})`,
-      `claude-code: rehearsal stand-in (${claudeRehearsalStandIn})`,
-      `codex: rehearsal stand-in (${codexRehearsalStandIn})`,
-      ...(stubCommands ? [`command: rehearsal stand-in (${commandRehearsalModule}), quick mode's default`] : []),
-      ...(offline ? [`github: rehearsal stand-in (${githubRehearsalModule}), replaying recorded reads (--offline)`] : []),
-      ...(options.synthesized === true ? ["every agent reply: schema-synthesized, ignoring the scenario's own scripted replies (--synthesized)"] : []),
-      ...(options.adversarial === true ? ["every agent reply: adversarially corrupted before submission, to prove the robustness machinery is wired (--adversarial)"] : []),
-    ];
-    return { runner, substituted, stubCommands, offline, restore };
+    return { runner, ...standInSubstitutions(options), restore };
   } catch (err) {
     restore();
     throw err;
@@ -850,14 +910,18 @@ export async function rehearseStopAt(
  */
 export async function resumeRehearsal(
   runRef: string,
-  options: { stateRoot?: string; upgrade?: UpgradeRequest; updatePlugin?: boolean; updateExecutors?: boolean; reconciled?: boolean; approval?: ApprovalRequest } = {},
+  options: {
+    stateRoot?: string; upgrade?: UpgradeRequest; updatePlugin?: boolean; updateExecutors?: boolean; reconciled?: boolean; approval?: ApprovalRequest;
+    /** A hub launch: its grant, and the submission's scratch directory under the hub instead of `<scratch>/state/..`. */
+    managed?: { grant: ManagedRunGrant; rehearsalRoot: string };
+  } = {},
 ): Promise<RunReport> {
   const stateDir = await resolveStateDir(runRef, options.stateRoot);
   const raw = JSON.parse(await readFile(path.join(stateDir, "state.json"), "utf8")) as { runId?: string; definition?: GraphDefinition; supervisorEpisodes?: SupervisorEpisodeRecord[] };
-  const rehearsalRoot = path.dirname(path.dirname(stateDir));
+  const rehearsalRoot = options.managed?.rehearsalRoot ?? path.dirname(path.dirname(stateDir));
   const scenarioPath = path.join(rehearsalRoot, "scenario.json");
-  if (raw.runId === undefined || !raw.runId.startsWith(REHEARSAL_RUN_ID_PREFIX) || path.basename(path.dirname(stateDir)) !== "state" || !existsSync(scenarioPath)) {
-    throw new Error(`${stateDir} is not a kept rehearsal run (a ${REHEARSAL_RUN_ID_PREFIX}* run under <scratch>/state/ beside scenario.json); resume --rehearsal continues only those`);
+  if (raw.runId === undefined || !raw.runId.startsWith(REHEARSAL_RUN_ID_PREFIX) || (options.managed === undefined && path.basename(path.dirname(stateDir)) !== "state") || !existsSync(scenarioPath)) {
+    throw new Error(`${stateDir} is not a kept rehearsal run (a ${REHEARSAL_RUN_ID_PREFIX}* run under <scratch>/state/ beside scenario.json, or a hub rehearsal submission's run); resume --rehearsal continues only those`);
   }
   const scenario = JSON.parse(await readFile(scenarioPath, "utf8")) as RehearsalScenario;
   const saved = JSON.parse(await readFile(path.join(rehearsalRoot, REHEARSAL_OPTIONS_FILE), "utf8").catch(() => "{}")) as RehearsalHarnessOptions;
@@ -867,6 +931,7 @@ export async function resumeRehearsal(
   const harness = await rehearsalHarness(rehearsalRoot, raw.definition !== undefined ? environmentCommandsOf(raw.definition) : new Map(), saved);
   try {
     return await createController().resume({
+      ...(options.managed !== undefined ? { managed: options.managed.grant } : {}),
       runRef: stateDir,
       runner: harness.runner,
       supervisorFactory: scripted,
@@ -880,6 +945,18 @@ export async function resumeRehearsal(
   } finally {
     harness.restore();
   }
+}
+
+/**
+ * The stand-in runner of a hub rehearsal submission's run, for its managed
+ * reconciliation pass: the same stand-ins its launches run on, never the
+ * operator's real harnesses. `restore` puts this process's environment back.
+ */
+export async function keptRehearsalRunner(stateDir: string, rehearsalRoot: string): Promise<{ runner: Runner; restore: () => void }> {
+  const raw = JSON.parse(await readFile(path.join(stateDir, "state.json"), "utf8")) as { definition?: GraphDefinition };
+  const saved = JSON.parse(await readFile(path.join(rehearsalRoot, REHEARSAL_OPTIONS_FILE), "utf8")) as RehearsalHarnessOptions;
+  const harness = await rehearsalHarness(rehearsalRoot, raw.definition !== undefined ? environmentCommandsOf(raw.definition) : new Map(), saved);
+  return { runner: harness.runner, restore: harness.restore };
 }
 
 /** A rehearsal's worktree/branch live in the real repo, not its scratch root; both are removed together. */

@@ -81,6 +81,7 @@ graphloom hub service --capture-env --token-env-file ~/.config/graphloom/hub-tok
 graphloom hub status
 graphloom hub doctor --task ./tasks/fix/task.yaml
 graphloom hub submit ./tasks/fix/task.yaml --key fix-14169
+graphloom hub submit ./tasks/fix/task.yaml --rehearsal --scenario operator
 graphloom hub list
 graphloom hub list --state blocked --state failed --since 3d
 graphloom hub list --archived --repo widgets --grep "crash" --limit 20
@@ -115,6 +116,8 @@ the same task twice deliberately creates two runs. The CLI always generates and
 prints a key **before its first request** unless `--key` supplies one, and reuses
 it after an uncertain response. A new invocation gets a new key. Raw API clients
 may omit a key, but cannot safely retry an uncertain unkeyed submission.
+`--rehearsal` makes a rehearsal submission, whose run runs on stand-ins with no
+model calls ([§12](#12-rehearsal-submissions)).
 
 `pause` records a hold and requests a cooperative stop if active. It returns the
 new desired state immediately; `inspect` shows `stopping` until cleanup finishes.
@@ -157,7 +160,8 @@ it on first creation; subsequent starts use the durable value and report it.
 ### 3.1 Status and history search
 
 `graphloom hub status [--json]` reads `GET /v1/health`: hub ID, socket, the running
-hub's GraphLoom version, the limit, occupied slots, per-state submission counts,
+hub's GraphLoom version, the limit, occupied slots, per-state submission counts
+(and, apart, the rehearsal submissions' per-state counts, [§12](#12-rehearsal-submissions)),
 the archive index's size, and any fault, retention, monitoring or archive-index
 error. It is the reachability check for scripts and agent skills: exit 0 when the
 hub answers without a fault, 1 when nothing answers on the socket, 3 when it
@@ -1011,3 +1015,112 @@ where those capabilities are required, not silently skipped.
 | [Version ownership](../apps/graphloom/src/ownership.ts) | Dispatch to the installed version that owns the run |
 | [Progress](../apps/graphloom/src/progress.ts) and [statistics](../apps/graphloom/src/stats.ts) | Existing stage, budget, waiting and usage projections |
 | [Docker confinement](../packages/runner/src/sandbox-docker.ts) | Run-labelled external process cleanup; require a verifiable drainage result |
+
+## 12. Rehearsal submissions
+
+A **rehearsal submission** exercises the hub, and a graph's journey through
+it, without a model call: the hub queues, reserves, launches, contains,
+observes, continues, stops, remedies and retains it exactly as it does a real
+submission, but its managed launch runs the run on the stand-ins
+[`graphloom rehearse`](design-graph-rehearsal.md) uses: scripted agents for
+Pi, Claude Code and Codex, the scenario's scripted supervisor, quick mode's
+command stub (or the real commands with `--commands run`), and with
+`--offline` the GitHub stand-in replaying the scenario's recorded reads.
+Nothing in the scheduler, the controller or the plugin host changes for it;
+the hub never learns a plugin notion, and a plugin cannot tell a hub rehearsal
+from a `graphloom rehearse` run (both carry the `rehearsal-` run-ID prefix
+that keeps a plugin's refs under `rehearsal/<runId>/`).
+
+```sh
+graphloom hub submit task.yaml --rehearsal [--scenario <name>] [--commands stub|run] [--offline] [--key <id>]
+```
+
+### 12.1 Captured input and identity
+
+The settings are part of the captured input (`HubInput.rehearsal`:
+`scenario`, `commands`, `offline`; only what was given), so of the request
+digest and the snapshot: they are durable, immutable and checked on the wire
+(a scenario name of at most 128 safe characters, `commands` `stub` or `run`,
+`offline` true; anything else is refused). A rehearsal submission's
+idempotency key is scoped apart: the hub stores `rehearsal:<key>`, and a
+real submission's key may not start with that prefix, so a rehearsal and a
+real submission of the same task and `--key` are always two submissions,
+never a conflict. Its run ID is `rehearsal-hub-<uuid>`. Intake captures the
+runner config when there is one (B2 probes the operator's real agent CLIs
+named there) but does not require it, and pins no supervisor config: the
+scenario's script is the supervisor. `--scenario`, `--commands` and
+`--offline` without `--rehearsal` are refused by the CLI before any request.
+
+### 12.2 Launch, scope of the stand-ins, continuation
+
+The managed bootstrap reads the mode from the stored submission, never from a
+client: an initial launch runs `rehearse <launch task> --state-root <hub>/runs
+<settings>`, a resume `resume <stateDir> --rehearsal <remedies>`, and a
+reconciliation pass `__hub-reconcile <stateDir> --rehearsal`; a real
+submission gets `run`, `resume` and `__hub-reconcile` without it. Each entry
+re-reads the stored submission and refuses a command of the other mode, so a
+real submission never runs on stand-ins and a rehearsal never on the
+operator's harnesses. `graphloom resume <run> --rehearsal` on a hub run routes
+to the hub only when the run is a rehearsal submission's, and a rehearsal
+submission's run refuses a plain `graphloom resume`.
+
+The stand-ins are scoped to the rehearsal launch's own process. The launch
+writes its scratch (scenario, options, stand-in home, launchers, reply
+cursors, call log, verdict) to `<hub>/rehearsals/<runId>/`, builds the
+stand-in runner config in memory, and sets the stand-in variables
+(`GRAPHLOOM_REHEARSAL_SCENARIO`, `_HOME`, `_SYNTHESIZED`, `_ADVERSARIAL`) in
+that process only while the run executes. The hub service's environment is
+never modified. Every managed launch first drops any stand-in variable it
+inherited from the service (a real launch also drops
+`GRAPHLOOM_REHEARSAL_GITHUB_TOKEN`, which a rehearsal's online reads may use),
+so a stray variable in the service's environment cannot make a real run
+answer from a scenario. The rehearsal's task (`rehearsal-task.yaml`, the
+captured request with the rehearsal's small budgets) sits beside the
+materialized launch task and is kept, so a retried initial launch intakes the
+same bytes under the same binding. Cleanup after a launch drains the runner
+the run used: the pinned runner config when there is one, else the built-in
+executors' own cleanup contract.
+
+`hub resume` continues a rehearsal as a rehearsal: the scripted supervisor
+starts at the scenario's next unused decision, counted from the run's
+recorded supervisor episodes, as `resume --rehearsal` does
+([rehearsal design](design-graph-rehearsal.md), decided 2026-11-19).
+`--approve`, `--decline`, `--reconciled`, `--update-plugin`,
+`--update-executors` and `--upgrade` behave as for a real run;
+`--supervisor` is refused, since the supervisor is the script. Automatic
+continuation, pause, cancel, service interruption, retention and archive are
+unchanged.
+
+### 12.3 Verdict
+
+The launch evaluates the rehearsal as `rehearse` does (the controller's
+boundary checks with the CLI's B2 capability probe and B3 call-log check
+merged in) and records it once, after the first launch whose run stopped for
+its own reasons: succeeded, failed, or a stop that needs the operator, such as
+a graph's declared approval. A launch the hub or the operator interrupted
+(a pause, a scheduling yield, a crash) leaves it pending, and a later launch
+takes it. A continuation of a recorded rehearsal keeps the recorded verdict:
+for a scenario that expects an approval stop, the verdict is the stop's, and
+the approved continuation's success does not re-grade it.
+`<hub>/rehearsals/<runId>/verdict.json` holds the compact verdict (`verdict`,
+each B-check's status, the blocker, convergence, the run's status and stop
+reason, the launch and time), `report.json` the full report beside it.
+
+The hub service reads the verdict file; it is never part of the scheduler's
+snapshot or a controller observation. `hub list --json` carries
+`rehearsals.<submission>` for each listed rehearsal with a verdict, `GET
+/v1/submissions/<id>` adds `rehearsalVerdict`, the overview panel of `hub
+inspect` adds a `Rehearsal:` line (scenario, commands, offline, verdict and
+the checks that did not pass), `hub list` marks a row `[rehearsal <scenario>:
+<verdict>]`, `hub status` counts rehearsal submissions by state
+(`rehearsalCounts`), and an archive index entry keeps the settings and the
+verdict. A rehearsal takes a slot like any submission: the limit covers
+rehearsals and real runs together.
+
+| Scenario | Required result |
+| --- | --- |
+| Rehearsal of `hello`'s happy scenario through a hub | Succeeds through the real managed bootstrap; verdict `ready` recorded and shown |
+| Topology fixture's `operator` scenario | Blocks waiting on the approval with verdict `ready`; `hub resume --approve` continues with the script's next decision to `succeeded` |
+| Rehearsal and real submission of one task and key | Two submissions, two run IDs, distinct digests; each key idempotent in its own scope |
+| Rehearsal settings without `--rehearsal`; `--supervisor` on a rehearsal | Refused |
+| Stand-in variables planted in the service's environment | Absent from a real launch's environment; a rehearsal sets its own |
