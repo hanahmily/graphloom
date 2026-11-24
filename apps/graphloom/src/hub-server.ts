@@ -13,6 +13,7 @@ import { captureHubInput, inputDigest, writePrivateJsonOrText } from "./hub-inpu
 import { createHubRuntime, readSubmissionMonitor, cacheMonitor, type HubMonitorCache } from "./hub-runtime.js";
 import { withHubSnapshot } from "./hub-observe.js";
 import { HubInstallationRetention, inputReferences } from "./hub-retention.js";
+import { resolveOperatorPlugin } from "./hub-plugin.js";
 import { selfInstall } from "./ownership.js";
 import { HubEvents } from "./hub-events.js";
 import { parseListQuery, readLiveRequest, searchHub, type LiveRequest } from "./hub-history.js";
@@ -29,6 +30,8 @@ export interface HubServiceOptions {
   driver?: HubDriver;
   cache?: Map<string, HubMonitorCache>;
   captureInput?: (file: string) => Promise<HubInput>;
+  /** Tests replace how a `--update-plugin` resume resolves the operator's plugin link. */
+  resolvePlugin?: (submission: HubSubmission) => Promise<{ bundlePath: string; bundleDigest: string }>;
   observe?: (submission: HubSubmission) => Promise<MonitorSnapshot>;
   /** The environment the hub's doctor and status summary see; production: the hub process's own, which its runs inherit. */
   environment?: NodeJS.ProcessEnv;
@@ -191,7 +194,17 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
           let result: unknown;
           if (action === "pause") result = await scheduler.pause(id, command);
           else if (action === "cancel") result = await scheduler.cancel(id, command);
-          else if (action === "resume") result = await scheduler.resume(id, { ...command, ...(body.remedy !== undefined ? { remedy: object(body.remedy, "remedy") as HubResumeRemedy } : {}) });
+          else if (action === "resume") {
+            let remedy = body.remedy !== undefined ? object(body.remedy, "remedy") as HubResumeRemedy : undefined;
+            if (remedy !== undefined && Object.hasOwn(remedy, "plugin")) throw new HubHttpError("remedy.plugin is set by the hub, not a client", 400);
+            // --update-plugin follows the operator's task's plugin link to the bundle it names now (§4.2).
+            if (remedy?.updatePlugin === true) {
+              const plugin = await (options.resolvePlugin ?? resolveOperatorPlugin)(submission).catch((error: unknown) => { throw new HubHttpError(error instanceof Error ? error.message : String(error), 400); });
+              remedy = { ...remedy, plugin };
+            }
+            const resume = () => scheduler.resume(id, { ...command, ...(remedy !== undefined ? { remedy } : {}) });
+            result = retention && remedy?.plugin ? await retention.protect([remedy.plugin.bundlePath], resume) : await resume();
+          }
           else if (action === "archive") result = await scheduler.archive(id);
           else if (action === "policy") result = await scheduler.updatePolicy(id, object(body.retry, "retry") as unknown as HubRetryPolicy, { ...command, ...(body.renew === true ? { renew: true } : {}) });
           else throw new HubHttpError("unknown submission operation", 404);

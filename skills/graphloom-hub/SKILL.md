@@ -221,6 +221,15 @@ run's owning GraphLoom under the run lock:
 - `--reconciled` only after the user reconciled the worktree and external
   state; `--update-plugin`, `--update-executors`, `--upgrade`, `--supervisor`
   only for the cause triage found.
+- `--update-plugin` takes the plugin the task's `plugins/<graph>` link names
+  when the hub accepts it, as `graphloom resume --update-plugin` does. To move
+  a blocked run to a newer plugin, on the user's yes: install the newer
+  GraphLoom; repoint the link if it names the old `versions/<old>/...`
+  directory; the user restarts the hub service; then
+  `graphloom hub resume <submission> --update-plugin` (with `--upgrade` to
+  move the run's GraphLoom too). A gone or dangling link is refused, naming it.
+  If the controller refuses the update (changed stages), the run keeps its
+  pinned plugin; a plain resume never changes it.
 - A remedy needs a drained submission with no pending command, and a run that
   initialized. A submission blocked by `initialization-failed` takes only a
   plain `hub resume`. `succeeded` and `canceled` submissions cannot resume.

@@ -21,6 +21,12 @@ export interface HubDriver {
   inspect(launch: HubLaunch, submission: HubSubmission): Promise<HubExecutionObservation>;
   stop(launch: HubLaunch, submission: HubSubmission, reason: "pause" | "cancel" | "service-interruption", commandId: string): Promise<void>;
   kill(launch: HubLaunch, submission: HubSubmission): Promise<void>;
+  /**
+   * Called once a launch has drained, before its record settles: reconciles input
+   * the launch preparation changed (a plugin update). A returned bundle replaces the
+   * submission's recorded plugin; a throw blocks the submission with the reason.
+   */
+  settleInput?(launch: HubLaunch, submission: HubSubmission): Promise<{ bundlePath: string; bundleDigest: string } | undefined>;
   close?(): Promise<void>;
 }
 export interface OpenHubOptions {

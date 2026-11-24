@@ -144,6 +144,7 @@ function validateSnapshot(value: unknown): asserts value is HubSnapshot {
     if (item.key !== undefined && (typeof item.key !== "string" || Buffer.byteLength(item.key) > 256)) throw new Error("invalid idempotency key");
     for (const field of ["eligibleAt", "retryStartedAt"]) if (item[field] !== undefined && (typeof item[field] !== "string" || !Number.isFinite(Date.parse(String(item[field]))))) throw new Error("invalid hub deadline");
     for (const field of ["taskFile", "taskPath", "repoPath", "bundlePath", "runtimePath"]) if (typeof item.input[field] !== "string" || !path.isAbsolute(String(item.input[field]))) throw new Error("invalid hub input path");
+    if (item.input.pluginLink !== undefined && (typeof item.input.pluginLink !== "string" || !path.isAbsolute(item.input.pluginLink))) throw new Error("invalid hub input path");
     validateConfig({ ...(value.config as object), retry: item.retry });
     if (item.launch !== undefined) {
       const launch = item.launch;

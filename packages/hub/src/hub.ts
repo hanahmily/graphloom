@@ -364,6 +364,15 @@ export class Hub {
   }
   private async settle(id: string, observation?: HubObservation): Promise<void> {
     const before = this.get(id);
+    // The driver reconciles input it changed for this launch (a plugin update) before the record settles.
+    let inputUpdate: { bundlePath: string; bundleDigest: string } | undefined;
+    let inputFailure: string | undefined;
+    if (this.driver.settleInput) {
+      try {
+        inputUpdate = await this.driver.settleInput(copy(before.launch!), copy(before));
+        if (inputUpdate !== undefined && !validPluginBundle(inputUpdate)) throw new Error("driver returned an invalid plugin bundle");
+      } catch (error) { inputUpdate = undefined; inputFailure = `plugin reconciliation failed: ${message(error)}`.slice(0, 1024); }
+    }
     const cursor = await this.store.journal(before, { commandId: `launch:${before.launch!.id}`, digest: digest(before.launch), acceptedAt: this.stamp(), event: "settled", launch: before.launch!, ...(observation ? { observation } : {}) });
     await this.commit((next) => {
       const s = next.submissions[id]!;
@@ -374,6 +383,7 @@ export class Hub {
       delete s.blocker;
       s.updatedAt = this.stamp();
       if (observation) s.observation = observation;
+      if (inputUpdate) { s.input.bundlePath = inputUpdate.bundlePath; s.input.bundleDigest = inputUpdate.bundleDigest; }
       if (s.desiredAction !== "execute") { s.state = s.desiredAction === "hold" ? "paused" : "canceled"; return; }
       if (s.pendingCommand?.kind === "resume") { s.state = "queued"; s.queueSequence = ++next.sequence; return; }
       if (launch.phase !== "granted" && launchFailure) { s.state = "blocked"; s.blocker = launchFailure; return; }
@@ -381,6 +391,7 @@ export class Hub {
       const continuation = observation?.continuation;
       if (continuation?.kind === "complete" && observation?.status === "succeeded") { s.state = "succeeded"; return; }
       if (continuation?.kind === "terminal") { s.state = "failed"; s.blocker = continuation.cause; return; }
+      if (inputFailure) { s.state = "blocked"; s.blocker = inputFailure; return; }
       const interruptionId = launch.stopReason === "service-interruption" ? launch.stopCommandId : launch.command?.kind === "service-interruption" ? launch.command.id : undefined;
       if (interruptionId && launch.mode !== "reconcile" && continuation?.kind === "operator" && continuation.cause === "reconciliation") {
         s.state = "queued"; s.queueSequence = ++next.sequence; s.reconciliationPending = true;
@@ -507,6 +518,10 @@ function validateSubmit(request: HubSubmitRequest): void {
     bounded(request.input[key], key, 1024);
     if (!path.isAbsolute(request.input[key])) throw new Error(`${key} must be absolute`);
   }
+  if (request.input.pluginLink !== undefined) {
+    bounded(request.input.pluginLink, "pluginLink", 1024);
+    if (!path.isAbsolute(request.input.pluginLink)) throw new Error("pluginLink must be absolute");
+  }
   for (const key of ["baseCommit", "bundleDigest", "runtimeDigest"] as const) bounded(request.input[key], key, 256);
   const { task: _task, config: _config, ...metadata } = request.input;
   if (Buffer.byteLength(JSON.stringify(metadata)) > 4096) throw new Error("submission metadata exceeds 4 KiB");
@@ -520,9 +535,17 @@ function validateRemedy(remedy: HubResumeRemedy | undefined): void {
     if (booleanKeys.has(key) && typeof value === "boolean") continue;
     if (stringKeys.has(key) && typeof value === "string" && value.length > 0) continue;
     if (key === "inputs" && value && typeof value === "object" && !Array.isArray(value) && Object.values(value).every((v) => typeof v === "string")) continue;
+    if (key === "plugin" && validPluginBundle(value)) continue;
     throw new Error(`unknown or invalid resume remedy ${key}`);
   }
   if (remedy.approve && remedy.decline) throw new Error("cannot approve and decline the same resume");
+  if (remedy.plugin && remedy.updatePlugin !== true) throw new Error("a resume plugin bundle needs updatePlugin");
+}
+function validPluginBundle(value: unknown): value is { bundlePath: string; bundleDigest: string } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const entries = Object.entries(value);
+  return entries.length === 2 && entries.every(([key, item]) => (key === "bundlePath" || key === "bundleDigest") && typeof item === "string" && item.length > 0 && Buffer.byteLength(item) <= 1024 && !item.includes("\0"))
+    && path.isAbsolute((value as { bundlePath: string }).bundlePath);
 }
 function validObservation(observation: HubObservation): boolean {
   if (observation.protocolVersion !== 1 || !Number.isSafeInteger(observation.stateRevision) || observation.stateRevision < 0 || !Number.isSafeInteger(observation.progressRevision) || observation.progressRevision < 0 || !Number.isFinite(Date.parse(observation.observedAt)) || typeof observation.status !== "string" || Buffer.byteLength(JSON.stringify(observation)) > 4096) return false;

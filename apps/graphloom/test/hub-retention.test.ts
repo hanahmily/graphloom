@@ -155,6 +155,31 @@ describe("hub installation retention", () => {
     for (const version of ["1.0.0", "1.1.0", "1.2.0", "1.3.0"]) await absent(hubRetentionFile(root, hub, version));
   });
 
+  it("pins a plugin update's new version from acceptance and releases the old one once the update is recorded", async () => {
+    const root = await temporary();
+    const [runtime, oldPlugin, newPlugin] = await Promise.all(["1.0.0", "1.1.0", "1.2.0"].map((v) => input(root, v)));
+    const hub = path.join(root, "hub");
+    const run = submission(runtime!, "blocked");
+    run.input.bundlePath = oldPlugin!;
+    run.pendingCommand = { id: "update", kind: "resume", acceptedAt: run.acceptedAt, remedy: { updatePlugin: true, plugin: { bundlePath: newPlugin!, bundleDigest: "new" } } };
+    const retention = await HubInstallationRetention.open(hub, [], () => [run]);
+    await retention.protect(inputReferences(run), async () => undefined);
+    await retention.refresh();
+    for (const version of ["1.0.0", "1.1.0", "1.2.0"]) await access(hubRetentionFile(root, hub, version));
+    // The launch carries the update; both bundles stay pinned until it settles.
+    run.launch = { id: "launch", generation: 1, mode: "resume", phase: "granted", reservedAt: run.acceptedAt, automatic: false, command: run.pendingCommand };
+    delete run.pendingCommand;
+    await retention.refresh();
+    for (const version of ["1.0.0", "1.1.0", "1.2.0"]) await access(hubRetentionFile(root, hub, version));
+    // Settled: the controller accepted the update and the hub recorded the new bundle.
+    delete run.launch;
+    run.input.bundlePath = newPlugin!;
+    await retention.refresh();
+    await absent(hubRetentionFile(root, hub, "1.1.0"));
+    for (const version of ["1.0.0", "1.2.0"]) await access(hubRetentionFile(root, hub, version));
+    await retention.close();
+  });
+
   it("preserves only previously known pins when run state is missing or corrupt", async () => {
     const root = await temporary();
     const first = await input(root, "1.0.0");

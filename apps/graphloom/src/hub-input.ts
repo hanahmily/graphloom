@@ -31,6 +31,8 @@ export async function captureHubInput(taskPath: string, config: Pick<HubServiceC
     ...(intake.config !== undefined ? { config: intake.config.text, configDigest: intake.config.sha256 } : {}),
     repoPath: await realpath(intake.repoPath), baseCommit: intake.pinnedHead,
     bundlePath: await realpath(intake.bundle.bundlePath), bundleDigest: await digestExecutorSource(intake.bundle.bundlePath),
+    // Unresolved, so a later --update-plugin follows the link to the plugin the task names then.
+    pluginLink: intake.bundle.bundlePath,
     runtimePath: path.join(self.record.root, "apps", "graphloom", "dist", "main.js"),
     runtimeNode: await realpath(process.execPath), runtimeRoot: self.record.root, runtimeVersion: self.record.version,
     runtimeDigest: await runtimeDigest(self.record.root),

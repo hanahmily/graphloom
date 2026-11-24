@@ -40,8 +40,17 @@ export interface HubInput {
   taskPath: string;
   repoPath: string;
   baseCommit: string;
+  /**
+   * The bundle the run is pinned to (resolved). After a hub `--update-plugin` the
+   * controller accepted, the hub records the new bundle here.
+   */
   bundlePath: string;
   bundleDigest: string;
+  /**
+   * The operator's task's plugin link, unresolved (`<task dir>/plugins/<graph>`).
+   * A hub `--update-plugin` re-resolves it; absent on older submissions, which derive it from `taskPath`.
+   */
+  pluginLink?: string;
   runtimePath: string;
   runtimeNode?: string;
   runtimeRoot?: string;
@@ -61,6 +70,11 @@ export interface HubResumeRemedy {
   upgrade?: boolean;
   supervisor?: string;
   reason?: string;
+  /**
+   * Set by the hub service, never by a client: with `updatePlugin`, the bundle the
+   * operator's plugin link resolved to when the hub accepted the resume.
+   */
+  plugin?: { bundlePath: string; bundleDigest: string };
 }
 export type HubDesiredAction = "execute" | "hold" | "cancel";
 export type HubSchedulingState = "queued" | "starting" | "running" | "stopping" | "waiting" | "paused" | "blocked" | "succeeded" | "failed" | "canceled";
