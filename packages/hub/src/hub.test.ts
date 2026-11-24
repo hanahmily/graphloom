@@ -654,6 +654,17 @@ describe("operator commands and launch reports (campaign findings)", () => {
     expect(driver.launches).toHaveLength(launches);
   });
 
+  it("keeps an unapplied remedy when a plain resume arrives while its withdrawn launch drains", async () => {
+    const { hub, driver, a } = await blockedOnApproval();
+    await hub.resume(a.id, { commandId: "X", remedy }); await hub.tick();
+    await hub.pause(a.id);
+    await hub.resume(a.id, { commandId: "Y" });
+    expect(hub.inspect(a.id)).toMatchObject({ state: "stopping", pendingCommand: { id: "Y" }, lastResume: { commandId: "X" } });
+    end(driver, hub.inspect(a.id), waiting(), { outcome: "error", error: "managed execution grant was withdrawn", command: { id: "X", applied: false } });
+    await hub.tick(); await hub.tick();
+    expect(hub.inspect(a.id)).toMatchObject({ state: "running", launch: { automatic: false, command: { id: "X", remedy } }, lastResume: { commandId: "X", status: "launched" } });
+  });
+
   it("re-applies a held or withdrawn resume when its command ID is resent, never reporting success for nothing", async () => {
     // Held by a pause: resending the same command ID releases the hold and applies it.
     const held = await blockedOnApproval();

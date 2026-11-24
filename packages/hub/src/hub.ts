@@ -231,9 +231,12 @@ export class Hub {
           }
           // A plain resume releases a held remedy rather than replacing it: the next launch applies it.
           const keepsHeld = !remedy && !retried && s.pendingCommand?.kind === "resume" && s.pendingCommand.remedy !== undefined;
+          // Nor does it displace the remedy a draining launch carries: if the run did not
+          // apply it, settlement puts it back in place of this plain resume.
+          const draining = s.launch?.stopRequestedAt !== undefined && s.launch.command?.kind === "resume" && s.launch.command.remedy !== undefined;
           if ((!s.launch || s.launch.stopRequestedAt) && !keepsHeld) {
             s.pendingCommand = command;
-            s.lastResume = { commandId, status: "pending", at: this.stamp() };
+            if (!(draining && !remedy)) s.lastResume = { commandId, status: "pending", at: this.stamp() };
           }
         } else {
           // A pause keeps an accepted resume for the next resume; a cancel withdraws it.
