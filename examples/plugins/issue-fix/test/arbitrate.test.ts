@@ -107,6 +107,8 @@ interface Scenario {
   profile?: unknown;
   corrections?: number;
   maxSteps?: number;
+  /** `RunView.resumeCommand`, as the controller gives it for a run its launcher manages. */
+  resumeCommand?: string;
 }
 
 const digestOf = (files: Record<string, string>): string => {
@@ -232,6 +234,7 @@ function simulate(s: Scenario) {
   const identity = (r: Receipt) => (r.requirementId === "decisions-recorded" ? true : r.candidateDigest === digest());
   const view = (step: number): RunView => ({
     runId: "run",
+    ...(s.resumeCommand !== undefined ? { resumeCommand: s.resumeCommand } : {}),
     task: { request: `Fix apache/skywalking#${ISSUE}.`, repo: "../banyandb" },
     current,
     receipts: receipts.map((r) => ({ ...r, valid: r.valid && identity(r) })),
@@ -532,6 +535,15 @@ describe("a design conflict the review raises", () => {
     expect(blocker).toContain("graphloom resume run --approve design-ruling --input finding=F1 --input ruling=review-stands");
     expect(blocker).toContain("graphloom resume run --decline design-ruling");
     expect(sim.side).toMatchObject({ stageId: "arbitrate" });
+  });
+
+  it("names the run's own resume command in the blocker: a hub run's is the hub's", () => {
+    const wrong = ruling({ design: [{ source: "comment:1", quote: "nothing the thread says", says: "x" }] });
+    const sim = simulate({ ...scenario([{ output: wrong }]), resumeCommand: "graphloom hub resume s-1" });
+    const blocker = (sim.decision.action as { stop: { blocker: string } }).stop.blocker;
+    expect(blocker).toContain("Rule on it: graphloom hub resume s-1 --approve design-ruling --input finding=F1 --input ruling=review-stands");
+    expect(blocker).toContain("graphloom hub resume s-1 --decline design-ruling");
+    expect(blocker).not.toContain("graphloom resume");
   });
 
   const undecidable = ruling({ ruling: "undecidable", design: [], code: [], undecidable: { question: "Must a caller tell running at the limit from in-time?", implementation: "The thread asks for running.", review: "A caller cannot tell." } });

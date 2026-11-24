@@ -36,6 +36,13 @@ export interface ManagedRunGrant extends ManagedRunBinding {
   continuationFingerprint?: string;
   interruptionCommandId?: string;
   commandId?: string;
+  /**
+   * The command the operator runs to resume this run, as the launcher knows
+   * it (the CLI names its hub's resume command). Opaque to the controller,
+   * which only hands it to the graph (`RunView.resumeCommand`) for the
+   * blockers it writes; never persisted in the binding.
+   */
+  resumeCommand?: string;
 }
 
 const BINDING_FILE = "managed-run.json";

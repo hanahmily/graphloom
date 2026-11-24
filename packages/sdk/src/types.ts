@@ -391,6 +391,15 @@ export interface BudgetRemaining {
 
 export interface RunView {
   runId: string;
+  /**
+   * The command the operator runs to resume this run, without flags: a
+   * blocker that asks for a decision appends `--approve <id>`, `--decline
+   * <id>` or another remedy to it. `graphloom resume <runId>` for a run the
+   * operator started; the launcher's own command for one it manages (a hub
+   * run: `graphloom hub resume <submission>`). Absent from an older
+   * controller, where `graphloom resume <runId>` is meant.
+   */
+  resumeCommand?: string;
   task: TaskInputs;
   current: StageAttempt;
   receipts: Receipt[];
