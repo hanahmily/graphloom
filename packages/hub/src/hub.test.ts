@@ -40,6 +40,10 @@ class FakeDriver implements HubDriver {
   async kill(launch: HubLaunch): Promise<void> {
     if (!this.unknownCleanup) this.executions.set(launch.id, { execution: "drained", ownerGone: true, externalStopped: true });
   }
+  /** The run records a stop while its launch still lives: polling sees it, as the real driver's does. */
+  observe(s: HubSubmission, observed: HubObservation): void {
+    this.executions.set(s.launch!.id, { execution: "live", ownerGone: false, externalStopped: false, observation: observed });
+  }
   finish(s: HubSubmission, continuation: HubContinuation = { kind: "complete" }, progressRevision = 0): void {
     this.executions.set(s.launch!.id, { execution: "drained", ownerGone: true, externalStopped: true, observation: observation(continuation, progressRevision) });
   }
@@ -766,11 +770,17 @@ describe("operator commands and launch reports (campaign findings)", () => {
     expect(hub.archived()[0]).not.toHaveProperty("blocker");
   });
 
-  it("keeps the stop a refused plugin update answered visible beside the pin mismatch", async () => {
+  it("keeps the stop a refused plugin update answered visible beside the pin mismatch, and records the update refused", async () => {
     const { hub, driver, a } = await blockedOnApproval();
-    await hub.resume(a.id, { remedy: { updatePlugin: true, plugin: { bundlePath: "/plugins/hello-2", bundleDigest: "d".repeat(64) } } }); await hub.tick();
-    end(driver, hub.inspect(a.id), { ...observation({ kind: "operator", cause: "pin-drift", evidenceRefs: [] }), blocker: "plugin stages changed since run start" }, { outcome: "completed" });
+    await hub.resume(a.id, { commandId: "update", remedy: { updatePlugin: true, plugin: { bundlePath: "/plugins/hello-2", bundleDigest: "d".repeat(64) } } }); await hub.tick();
+    const drift: HubObservation = { ...observation({ kind: "operator", cause: "pin-drift", evidenceRefs: [] }), stateRevision: 2, blocker: "plugin stages changed since run start: node extra added" };
+    // The run records its pin mismatch before its launch drains, and a poll sees it first:
+    // the submission's observation is no longer the approval wait when the launch settles.
+    driver.observe(hub.inspect(a.id), drift); await hub.tick();
+    expect(hub.inspect(a.id)).toMatchObject({ state: "running", observation: { blocker: drift.blocker }, launch: { priorBlocker: waiting().blocker } });
+    end(driver, hub.inspect(a.id), drift, { outcome: "completed", command: { id: "update", applied: true } });
     await hub.tick();
-    expect(hub.inspect(a.id).blocker).toBe(`plugin update refused: plugin stages changed since run start; the run still stops on: ${waiting().blocker}`);
+    expect(hub.inspect(a.id).blocker).toBe(`plugin update refused: ${drift.blocker}; the run still stops on: ${waiting().blocker}`);
+    expect(hub.inspect(a.id).lastResume).toMatchObject({ commandId: "update", status: "refused", reason: `plugin update refused: ${drift.blocker}` });
   });
 });

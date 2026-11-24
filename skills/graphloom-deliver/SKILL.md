@@ -28,8 +28,8 @@ graphloom stats <run>
 ```
 
 A run submitted to the hub keeps its state under the hub, not the
-repository: `<run>` is `~/.local/state/graphloom/hub/runs/<runId>` (or the run
-id with `--state-root ~/.local/state/graphloom/hub/runs`); its worktree and
+repository: `<run>` is `~/.local/state/graphloom/hub/runs/<runId>` (or the
+bare run id, which a run command also looks for under the hub's runs); its worktree and
 delivered branch are in the target repository as usual, and the submission
 is `succeeded` in `graphloom hub list`.
 

@@ -382,7 +382,10 @@ run stays on its pinned plugin and the stop reason says why. The refusal
 replaces the run's recorded stop with the pin mismatch, while the stop the
 resume answered (an approval the run waits on, say) is still in force, so the
 blocker shows both: `plugin update refused: <mismatch>; the run still stops on:
-<earlier blocker>`. Any other resume,
+<earlier blocker>`, and the resume's `lastResume` is `refused` with the mismatch.
+The earlier blocker is the one recorded when the launch was reserved
+(`launch.priorBlocker`): polling replaces the submission's observation with the
+run's own pin mismatch before the launch drains. Any other resume,
 including a plain `hub resume`, keeps the recorded bundle exactly; it also
 repairs a private link an interrupted update left behind. A failure of this
 reconciliation blocks the submission with `plugin reconciliation failed: …`
@@ -1223,7 +1226,12 @@ accepted, else `not-ready` with the blocker `stop-at`; it carries no B-checks,
 names the node (`stoppedAt`), and `report.json` holds the stop report
 `rehearse --stop-at` prints. A continuation of a recorded rehearsal keeps the recorded verdict:
 for a scenario that expects an approval stop, the verdict is the stop's, and
-the approved continuation's success does not re-grade it.
+the approved continuation's success does not re-grade it, unless the scenario
+rehearses the answer the resume carried
+([rehearsal §4.4](design-graph-rehearsal.md#44-scenarios)): the scenario then
+continues with the answer's own expectation, and the answer supersedes the
+recorded verdict: it is pending again, and the launch whose run stops on its
+own records the continuation's.
 `<hub>/rehearsals/<runId>/verdict.json` holds the compact verdict (`verdict`,
 each B-check's status, the blocker, convergence, the run's status and stop
 reason, the launch and time), `report.json` the full report beside it.
@@ -1247,4 +1255,5 @@ rehearsals and real runs together.
 | Rehearsal settings without `--rehearsal`; `--supervisor` on a rehearsal | Refused |
 | Stand-in variables planted in the service's environment | Absent from a real launch's environment; a rehearsal sets its own |
 | Every scenario of every shipped graph, offline, through a hub | The recorded verdict equals the direct `rehearse` verdict, and every one is `ready` |
+| issue-fix's `arbitrate-operator`, answered with each answer its blocker names (`review-stands`, `implementation-stands`, a decline), directly and through a hub | Each continues as the scenario's answer scripts it to `succeeded`, with a `ready` verdict |
 | `--stop-at` on `hello`'s happy scenario, by id and by name | Blocks at the node with the stop's verdict, equal to `rehearse --stop-at`'s; `hub resume` continues to `succeeded` and keeps the verdict |

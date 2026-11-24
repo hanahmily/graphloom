@@ -35,6 +35,7 @@ Version 0.12.0 reads the profile's [context documents](#context-documents) once 
 Proposed for 0.18.0: [code quality gates](#code-quality-gates) on the functions a change adds or modifies (complexity, nesting, CRAP, mutation), with the metrics defined in [code quality metrics](design-code-quality-metrics.md).
 Version 0.17.0, 2026-11-19, adds [Arbitrate](#arbitrate-designed-for-0170), a supervisor-only node in which an independent arbiter, or the operator, rules on design conflicts between review and implementation, and declares the Fix⇄Review loop as edges of the [graph topology](design-graph-topology.md) (`sdkProtocol: 2`; a 0.16 run cannot move to it with `--update-plugin`).
 Version 0.17.2, 2026-11-24, records the GitHub reads every rehearsal scenario makes, so `graphloom rehearse --offline` asks no GitHub: the issue the scenarios replay (`REHEARSAL_ISSUE`, apache/skywalking#14111 in the profile's issue repository), its comments, and a stand-in text for each context document the profile names in another repository; `rehearsalRequest(config)` in the rehearsal entry is the request a rehearsal task carries. The scenarios are designed for `--commands run` ([rehearsal design §8](design-graph-rehearsal.md#8-decisions-and-open-questions)).
+Version 0.17.3, 2026-11-24, rehearses every answer `arbitrate-operator`'s blocker names: `ruling=review-stands` (back to Fix), `ruling=implementation-stands` (to Review) and a decline (to Review), each a scenario answer ([rehearsal design §4.4](design-graph-rehearsal.md#44-scenarios)) that runs to a `ready` verdict; before, only implementation-stands was scripted, and the first answer the blocker suggests exhausted the scripted supervisor.
 
 ## Purpose
 
@@ -2163,9 +2164,15 @@ Rehearsal scenarios, with the scripted supervisor's `enter` and `reenter`:
   boundary lists Review's passes and the arbiter's result as pending on the
   operator rather than as results that never minted a receipt
   ([rehearsal §4.7](design-graph-rehearsal.md#47-evaluation-and-verdict)), and the
-  verdict is `ready`. The CLI test then resumes the kept run with
-  `--approve design-ruling`; the scripted supervisor continues at its leave to
-  Review (it does not replay its `enter`), and the run succeeds.
+  verdict is `ready`. The scenario scripts the supervisor up to the stop and
+  rehearses each answer the blocker names
+  ([rehearsal §4.4](design-graph-rehearsal.md#44-scenarios)):
+  `ruling=review-stands` leaves to Fix, where the fixer fixes the confirmed
+  finding and the next pass resolves it; `ruling=implementation-stands` and a
+  decline leave to Review, whose next pass is clean. Each succeeds with a
+  `ready` verdict, resumed directly (`resume --rehearsal`) and through the hub;
+  the scripted supervisor continues at its leave (it does not replay its
+  `enter`).
 
 As implemented, `arbitrate-fixer` and `arbitrate-fixer-stands` start from a
 first round that confirms two findings, which the graph sends back to Fix

@@ -6,7 +6,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { rehearse, resumeRehearsal } from "../src/rehearsal.js";
+import { evaluateKeptRehearsal, rehearse, resumeRehearsal } from "../src/rehearsal.js";
 import { GO, useRehearsal } from "./issue-fix-rehearsal.js";
 
 const rehearsal = useRehearsal();
@@ -65,5 +65,49 @@ describe.skipIf(GO === undefined)("graphloom rehearse (L1) of issue-fix's Arbitr
     const body = (delivered?.payload as { command: { report?: { text: string } } } | undefined)?.command.report?.text ?? "";
     expect(body).toContain("## Design rulings");
     expect(body).toContain("**R1** on I1: `implementation-stands`, decided by the operator (maintainer)");
+    // The verdict judges the answer's own expectation, and the run met it.
+    const { report: verdict } = await evaluateKeptRehearsal(stateDir!, path.dirname(path.dirname(stateDir!)));
+    expect(verdict.verdict, JSON.stringify({ blocker: verdict.blocker, convergence: verdict.convergence })).toBe("ready");
+  }, 300_000);
+
+  // Each answer the blocker names (docs/design-issue-fix-graph.md, "Leaving Arbitrate"): the scenario scripts the leave
+  // that fits it, so every one runs to a ready verdict (the campaign found review-stands exhausted the script).
+  const answers = [
+    { name: "review-stands", to: "fix", approval: { approvalId: "design-ruling", decision: "approve" as const, inputs: { finding: "F1", ruling: "review-stands", note: "A caller must tell a running action past the limit apart." }, operator: "maintainer" }, body: "**R1** on I1: `review-stands`, decided by the operator (maintainer)" },
+    { name: "a decline", to: "review", approval: { approvalId: "design-ruling", decision: "decline" as const, reason: "Leave it to the maintainers.", operator: "maintainer" }, body: "Open design questions" },
+  ];
+  for (const answer of answers) {
+    it(`continues arbitrate-operator after ${answer.name}: the supervisor leaves to ${answer.to} and the run finishes ready`, async () => {
+      const env = await rehearsal.ready();
+      let stateDir: string | undefined;
+      const report = await rehearse(env.taskPath, { commands: "run", scenario: "arbitrate-operator", keep: true, onRunCreated: ({ stateDir: dir }: { stateDir: string }) => void (stateDir = dir) } as Parameters<typeof rehearse>[1]);
+      expect(report.verdict).toBe("ready");
+      const resumed = await resumeRehearsal(stateDir!, { approval: answer.approval });
+      expect(resumed.status, JSON.stringify({ stopReason: resumed.stopReason, blocker: resumed.blocker })).toBe("succeeded");
+      const episodes = (JSON.parse(await readFile(path.join(stateDir!, "state.json"), "utf8")) as { supervisorEpisodes: Array<{ proposal?: { action: { type: string; reenter?: { stageId: string } } }; admission: { outcome: string } }> }).supervisorEpisodes;
+      expect(episodes.map((r) => r.proposal?.action.type)).toEqual(["enter", "return", "reenter", "return"]);
+      expect(episodes[2]!.proposal!.action.reenter!.stageId).toBe(answer.to);
+      expect(episodes.map((r) => r.admission.outcome)).not.toContain("inadmissible");
+      const delivered = resumed.evidence.find((e) => (e.payload as { command?: { id?: string } } | undefined)?.command?.id === "deliver");
+      expect((delivered?.payload as { command: { report?: { text: string } } } | undefined)?.command.report?.text ?? "").toContain(answer.body);
+      const { report: verdict } = await evaluateKeptRehearsal(stateDir!, path.dirname(path.dirname(stateDir!)));
+      expect(verdict.verdict, JSON.stringify({ blocker: verdict.blocker, convergence: verdict.convergence })).toBe("ready");
+    }, 300_000);
+  }
+
+  it("refuses an answer arbitrate-operator does not rehearse, and leaves the scenario as it was when the run refuses a rehearsed one", async () => {
+    const env = await rehearsal.ready();
+    let stateDir: string | undefined;
+    const report = await rehearse(env.taskPath, { commands: "run", scenario: "arbitrate-operator", keep: true, onRunCreated: ({ stateDir: dir }: { stateDir: string }) => void (stateDir = dir) } as Parameters<typeof rehearse>[1]);
+    expect(report.verdict).toBe("ready");
+    const scenarioPath = path.join(path.dirname(path.dirname(stateDir!)), "scenario.json");
+    const before = await readFile(scenarioPath, "utf8");
+    await expect(resumeRehearsal(stateDir!, { approval: { approvalId: "design-ruling", decision: "approve", inputs: { finding: "F1", ruling: "neither" }, operator: "maintainer" } }))
+      .rejects.toThrow(/rehearses no such answer to design-ruling; it rehearses: --approve design-ruling --input ruling=review-stands; --approve design-ruling --input ruling=implementation-stands; --decline design-ruling/);
+    // A rehearsed answer the run refuses (an input the approval does not declare) continues nothing.
+    let answered = false;
+    await expect(resumeRehearsal(stateDir!, { onAnswer: () => { answered = true; }, approval: { approvalId: "design-ruling", decision: "approve", inputs: { finding: "F1", ruling: "review-stands", undeclared: "x" }, operator: "maintainer" } })).rejects.toThrow();
+    expect(answered).toBe(false);
+    expect(await readFile(scenarioPath, "utf8")).toBe(before);
   }, 300_000);
 });

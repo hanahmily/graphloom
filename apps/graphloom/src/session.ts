@@ -21,7 +21,6 @@ import {
   openRefusal,
   openingNote,
   recordConversation,
-  resolveStateDir,
   selectSession,
   sessionRows,
   type AgentSessionRecord,
@@ -31,6 +30,7 @@ import { BUILTIN_AGENT_EXECUTOR_ID } from "@graphloom/sdk";
 import { CODING_AGENT_RUN_ID } from "@graphloom/executor-coding-agent";
 import { agentExecutables, confineWorker, confinementUnsupported } from "@graphloom/runner";
 import { loadRunnerConfig, type RunnerConfig } from "./runner-config.js";
+import { locateRun } from "./run-ref.js";
 import {
   launcherPaths,
   probeLauncher,
@@ -98,8 +98,8 @@ function parse(rest: string[], valued: string[], flags: string[], usage: string)
 }
 
 async function loadState(runRef: string, stateRoot: string | undefined) {
-  const ref = runRef.includes("/") || runRef.includes("\\") ? path.resolve(runRef) : runRef;
-  const stateDir = await resolveStateDir(ref, stateRoot !== undefined ? path.resolve(stateRoot) : undefined).catch((err: unknown) => {
+  // A run ID under --state-root, else under the default state root, then the run hub's runs (run-ref.ts).
+  const stateDir = await locateRun(runRef, stateRoot).catch((err: unknown) => {
     throw new Refused(err instanceof Error ? err.message : String(err));
   });
   return { stateDir, state: await loadRunState(stateDir) };

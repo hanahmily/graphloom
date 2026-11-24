@@ -137,15 +137,20 @@ host_npm_cache=
 
 # ---------------------------------------------------------------- shared
 
+# The work directory (a staged clone with its node_modules, the assembly, the
+# smoke installs: gigabytes) is removed on success and on failure alike; only
+# --keep-work keeps it. What the operator needs from it is copied out first
+# (prepare --no-pr's PR body), and build's log is <out>/build.log.
 work=
 cleanup() {
   status=$?
   [ -n "$work" ] || return 0
-  if [ "$status" -ne 0 ] || [ "$keep_work" -eq 1 ]; then
+  if [ "$keep_work" -eq 1 ]; then
     echo "work directory kept: $work" >&2
   else
     chmod -R u+w "$work" 2>/dev/null || true
     rm -rf "$work"
+    if [ "$status" -ne 0 ]; then echo "work directory removed: $work (rerun with --keep-work to keep it)" >&2; fi
   fi
 }
 trap cleanup EXIT
@@ -415,10 +420,14 @@ Edit it to what an operator notices, fill in every TODO (the upgrade notes above
   push_cmd=(git push -u "$remote" "release/$tag")
   pr_cmd=(gh pr create -R "$gh_repo" --base main --head "release/$tag" --title "release: $tag" --body-file "$work/pr-body.md")
   if [ "$no_pr" = 1 ]; then
-    keep_work=1
+    # The printed commands need only the PR body: it outlives the work directory, alone.
+    body=$(mktemp "${TMPDIR:-/tmp}/graphloom-pr-body-$tag.XXXXXX")
+    cp "$work/pr-body.md" "$body"
+    pr_cmd=(gh pr create -R "$gh_repo" --base main --head "release/$tag" --title "release: $tag" --body-file "$body")
     step "release PR (not opened: --no-pr)"
     show_cmd "${push_cmd[@]}"
     show_cmd "${pr_cmd[@]}"
+    echo "PR body: $body"
   else
     step "open the release PR"
     "${push_cmd[@]}"

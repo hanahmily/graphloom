@@ -118,6 +118,8 @@ describe("rehearsal submissions through the hub", () => {
     expect(waiting, hub.driver.log()).toMatchObject({ state: "blocked", observation: { status: "stopped", continuation: { kind: "operator" } } });
     // A final stop that waits for the graph's declared approval is the operator scenario's expectation: ready.
     expect(waiting.rehearsalVerdict).toMatchObject({ verdict: "ready", runStatus: "stopped", stopReason: TOPOLOGY_APPROVAL_STOP });
+    // The blocker's command is the run's own (RunView.resumeCommand): the hub's, which `graphloom resume` would refuse.
+    expect(waiting.observation?.blocker).toContain(`Rule on it: graphloom hub resume ${submitted.id} --approve ${TOPOLOGY_APPROVAL}`);
     const stateFile = path.join(hub.directory, "runs", submitted.runId, "state.json");
     type Episodes = { status: string; supervisorEpisodes?: Array<{ proposal?: { action: { type: string } }; admission: { outcome: string } }> };
     const before = (JSON.parse(await readFile(stateFile, "utf8")) as Episodes).supervisorEpisodes ?? [];

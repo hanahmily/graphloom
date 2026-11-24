@@ -17,6 +17,7 @@ export type {
   AdversarialResult,
   GraphRehearsal,
   GraphRehearsalExport,
+  RehearsalAnswer,
   RehearsalBudgets,
   RehearsalCommandResult,
   RehearsalExpectation,
@@ -27,7 +28,9 @@ export type {
 export {
   assignmentNamesField,
   checkAssignmentFidelity,
+  continueRehearsalScenario,
   isRehearsalRunId,
+  matchRehearsalAnswer,
   mutateAdversarially,
   REHEARSAL_RUN_ID_PREFIX,
   rehearsalBranchScope,
@@ -55,6 +58,7 @@ export {
   REHEARSAL_SYNTHESIZED_ENV,
   requireScenario,
   resetRehearsalScenarioCache,
+  restartReplies,
   synthesizedRepliesOnly,
   withoutRehearsalEnv,
 } from "./rehearsal-client.js";

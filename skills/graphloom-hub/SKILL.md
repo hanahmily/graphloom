@@ -325,5 +325,6 @@ On a hub older than these flags (`--state is not valid for hub list`), use
 `graphloom hub list --json | jq '.submissions[] | select(...)'` (queue only).
 
 One run's history, also for a run missing from the index: `graphloom inspect
-<runId>` and `graphloom stats <runId>`, each with `--state-root
-~/.local/state/graphloom/hub/runs` (an archived entry's `stateDir`).
+<runId>` and `graphloom stats <runId>`; a bare run id is found under the
+hub's runs (`~/.local/state/graphloom/hub/runs`, an archived entry's
+`stateDir`) when the repository's own state root does not hold it.

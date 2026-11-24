@@ -107,6 +107,58 @@ export interface RehearsalScenario {
   /** Smaller or larger than the rehearsal defaults when the scenario needs it. */
   budgets?: RehearsalBudgets;
   expect: RehearsalExpectation;
+  /**
+   * How the scenario continues after the operator answers an approval its run
+   * stops for (`resume --rehearsal --approve|--decline`), one entry per answer
+   * it rehearses. A scenario with answers scripts `supervisor` only up to the
+   * stop; the matching answer's decisions follow the ones the run consumed.
+   */
+  answers?: RehearsalAnswer[];
+}
+
+/**
+ * One operator answer a scenario rehearses (docs/design-graph-rehearsal.md
+ * §4.4): the approval and decision it matches, and what the stand-ins and the
+ * scripted supervisor give after it. The first matching entry applies.
+ */
+export interface RehearsalAnswer {
+  /** The approval ID the graph declared. */
+  approval: string;
+  decision: "approve" | "decline";
+  /** For an approval: inputs this answer is for, each matched exactly; inputs it does not name may hold anything. */
+  inputs?: Record<string, string>;
+  /** The supervisor's decisions after the answer, following those the run consumed before it stopped. */
+  supervisor?: GraphDecision[];
+  /** Replies by contract name after the answer: a contract named here answers from its first reply again; any other continues where it was. */
+  results?: Record<string, RehearsalReply[]>;
+  /** What the run must reach after the answer; the verdict judges it against this instead of the scenario's. */
+  expect: RehearsalExpectation;
+}
+
+/** The first of `scenario`'s answers that `answer` matches, or undefined. */
+export function matchRehearsalAnswer(
+  scenario: RehearsalScenario,
+  answer: { approvalId: string; decision: "approve" | "decline"; inputs?: Record<string, string> },
+): RehearsalAnswer | undefined {
+  return (scenario.answers ?? []).find((a) =>
+    a.approval === answer.approvalId && a.decision === answer.decision
+    && Object.entries(a.inputs ?? {}).every(([name, value]) => answer.inputs?.[name] === value));
+}
+
+/**
+ * `scenario` as it continues after `answer`, the run having consumed
+ * `consumed` scripted supervisor decisions: those decisions and then the
+ * answer's, the answer's replies in place of the scenario's for each contract
+ * it names, and the answer's expectation. The answers stay: a run the answer
+ * stopped again (an approval naming another point, say) can be answered again.
+ */
+export function continueRehearsalScenario(scenario: RehearsalScenario, answer: RehearsalAnswer, consumed: number): RehearsalScenario {
+  return {
+    ...scenario,
+    results: { ...scenario.results, ...(answer.results ?? {}) },
+    supervisor: [...(scenario.supervisor ?? []).slice(0, consumed), ...(answer.supervisor ?? [])],
+    expect: answer.expect,
+  };
 }
 
 export interface GraphRehearsal {

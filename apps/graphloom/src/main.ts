@@ -13,7 +13,7 @@ import type { GraphRehearsal } from "@graphloom/sdk";
 import type { RunReport } from "@graphloom/controller";
 import { hubCommand, HUB_USAGE } from "./hub-cli.js";
 import { assertManagedMode, launchEndLine, managedMain, routeManagedCommand, type ManagedExecution } from "./hub-managed.js";
-import { hubRehearsalRoot, readHubVerdict, recordHubVerdict } from "./hub-rehearsal.js";
+import { HUB_REPORT_FILE, HUB_VERDICT_FILE, hubRehearsalRoot, readHubVerdict, recordHubVerdict } from "./hub-rehearsal.js";
 import { observeOwnedRun } from "./hub-observe.js";
 import { cleanupOwnedRun } from "./hub-runtime.js";
 import { approvalFlags } from "./approval-flags.js";
@@ -29,6 +29,7 @@ import { describeTask } from "./rehearsal.js";
 import { SANDBOX_USAGE, sandboxCommand } from "./sandbox.js";
 import { parseTaskNewArgs, taskNew, TASK_NEW_USAGE } from "./task-new.js";
 import { SESSION_USAGE, sessionCommand } from "./session.js";
+import { locateRun } from "./run-ref.js";
 import { isInteractive, runSetup, terminalPrompter } from "./setup.js";
 import { onceStopHook, parseDuration, waitForRun, type StopNotice } from "./notify.js";
 import { formatRunStats, loadRunStats } from "./stats.js";
@@ -248,7 +249,7 @@ async function main(args = process.argv.slice(2), launch?: ManagedExecution): Pr
   }
 
   if (cmd === "inspect") {
-    const runRef = requireRunRef(args[1], "inspect <stateDir|runId>");
+    const runRef = await requireRunRef(args[1], "inspect <stateDir|runId>", flagValue(args, "--state-root"));
     const stateRoot = flagValue(args, "--state-root");
     const report = await controller.inspect(
       runRef,
@@ -259,7 +260,7 @@ async function main(args = process.argv.slice(2), launch?: ManagedExecution): Pr
   }
 
   if (cmd === "stats") {
-    const runRef = requireRunRef(args[1], "stats <stateDir|runId> [--state-root <dir>] [--json]");
+    const runRef = await requireRunRef(args[1], "stats <stateDir|runId> [--state-root <dir>] [--json]", flagValue(args, "--state-root"));
     const stateRoot = flagValue(args, "--state-root");
     const stats = await loadRunStats(runRef, stateRoot ? path.resolve(stateRoot) : undefined);
     console.log(args.includes("--json") ? JSON.stringify(stats, null, 2) : formatRunStats(stats));
@@ -268,7 +269,7 @@ async function main(args = process.argv.slice(2), launch?: ManagedExecution): Pr
 
   if (cmd === "wait") {
     const usage = "wait <stateDir|runId> [--state-root <dir>] [--until stop|progress] [--since <cursor>] [--timeout <dur>] [--json]";
-    const runRef = requireRunRef(args[1], usage);
+    const runRef = await requireRunRef(args[1], usage, flagValue(args, "--state-root"));
     const stateRootFlag = flagValue(args, "--state-root");
     const stateRoot = stateRootFlag ? path.resolve(stateRootFlag) : undefined;
     const timeout = flagValue(args, "--timeout");
@@ -313,7 +314,7 @@ async function main(args = process.argv.slice(2), launch?: ManagedExecution): Pr
 
   if (cmd === "watch") {
     const usage = "watch <stateDir|runId> [--state-root <dir>] [--dir <path>] [--until report|stop] [--timeout <dur>] [--heartbeat <dur>] [--notify <command>] [--json]";
-    const runRef = requireRunRef(args[1], usage);
+    const runRef = await requireRunRef(args[1], usage, flagValue(args, "--state-root"));
     const stateRootFlag = flagValue(args, "--state-root");
     const until = flagValue(args, "--until") ?? "report";
     if (until !== "report" && until !== "stop") throw new Error(`--until must be "report" or "stop", not ${JSON.stringify(until)}`);
@@ -342,7 +343,7 @@ async function main(args = process.argv.slice(2), launch?: ManagedExecution): Pr
   }
 
   if (cmd === "stop") {
-    const runRef = requireRunRef(args[1], "stop <stateDir|runId>");
+    const runRef = await requireRunRef(args[1], "stop <stateDir|runId>", flagValue(args, "--state-root"));
     const stateRoot = flagValue(args, "--state-root");
     const report = await controller.stop(
       runRef,
@@ -353,7 +354,11 @@ async function main(args = process.argv.slice(2), launch?: ManagedExecution): Pr
   }
 
   if (cmd === "resume") {
-    const runRef = requireRunRef(args[1], "resume <stateDir|runId> [--state-root <dir>] [--supervisor <harness> [--reason <text>]] [--upgrade] [--update-plugin] [--update-executors] [--reconciled] [--approve <id> [--input <name>=<value> ...] | --decline <id> [--reason <text>]] [--rehearsal] [--on-stop <command>]");
+    const usage = "resume <stateDir|runId> [--state-root <dir>] [--supervisor <harness> [--reason <text>]] [--upgrade] [--update-plugin] [--update-executors] [--reconciled] [--approve <id> [--input <name>=<value> ...] | --decline <id> [--reason <text>]] [--rehearsal] [--on-stop <command>]";
+    if (!args[1] || args[1].startsWith("--")) await requireRunRef(args[1], usage, undefined);
+    // Looked up now, awaited where the run is needed: a run that is not found still fires the stop hook as a crash.
+    const located = requireRunRef(args[1], usage, flagValue(args, "--state-root"));
+    located.catch(() => undefined);
     const stateRoot = flagValue(args, "--state-root");
     const approval = approvalFlags(args);
     // `--upgrade` moves the run to this GraphLoom first (§5.2), and moves its ownership record with it.
@@ -370,8 +375,14 @@ async function main(args = process.argv.slice(2), launch?: ManagedExecution): Pr
     if (args.includes("--rehearsal")) {
       // A rehearsal's kept run continues on its own stand-ins (docs/design-release.md §6 step 8.7); no runner config is read.
       // A hub rehearsal submission's scratch lives under its hub (docs/design-run-hub.md §12).
+      const runRef = await located;
       const rehearsalRoot = managed ? hubRehearsalRoot(managed.grant.hubStateDir, managed.grant.runId) : undefined;
+      // An answer the scenario rehearses continues it (docs/design-graph-rehearsal.md §4.4): its verdict is judged anew,
+      // so the hub's recorded one is superseded (and pending until the continuation stops on its own).
+      let answered = false;
       const report = await resumeRehearsal(runRef, {
+        onAnswer: () => { answered = true; },
+        ...(rehearsalRoot !== undefined ? { supersedes: [path.join(rehearsalRoot, HUB_VERDICT_FILE), path.join(rehearsalRoot, HUB_REPORT_FILE)] } : {}),
         ...(stateRoot ? { stateRoot: path.resolve(stateRoot) } : {}),
         ...(upgrade !== undefined ? { upgrade } : {}),
         ...(args.includes("--update-plugin") ? { updatePlugin: true } : {}),
@@ -381,6 +392,11 @@ async function main(args = process.argv.slice(2), launch?: ManagedExecution): Pr
         ...(managed && rehearsalRoot !== undefined ? { managed: { grant: managed.grant, rehearsalRoot } } : {}),
       });
       console.log(JSON.stringify(report, null, 2));
+      if (!managed && answered) {
+        // The scenario continued with the answer: its verdict now, judged against the answer's expectation.
+        const kept = await evaluateKeptRehearsal(report.stateDir, path.dirname(path.dirname(report.stateDir)));
+        console.error(`graphloom: rehearsal verdict ${kept.report.verdict}${kept.report.blocker !== undefined ? `: ${kept.report.blocker.boundary} ${kept.report.blocker.reason.replace(/\s+/g, " ").slice(0, 300)}` : ""}`);
+      }
       if (managed && rehearsalRoot !== undefined) {
         // A rehearsal interrupted before its run stopped on its own gets its verdict now; a recorded one stays.
         if (await readHubVerdict(managed.grant.hubStateDir, managed.grant.runId) === undefined) {
@@ -394,10 +410,11 @@ async function main(args = process.argv.slice(2), launch?: ManagedExecution): Pr
       return;
     }
     const stopHook = armStopHook(args, {
-      runId: path.basename(runRef),
-      stateDir: resolveStateDir(runRef, stateRoot ? path.resolve(stateRoot) : undefined).catch(() => ""),
+      runId: path.basename(args[1]!),
+      stateDir: located.catch(() => ""),
     });
     const runnerConfig = await requireRunnerConfig(process.env, (loaded) => stopHook.useConfig(loaded.notify));
+    const runRef = await located;
     const runner = createCliRunner(runnerConfig);
     const config = managed && process.env.GRAPHLOOM_HUB_NO_SUPERVISOR === "1" ? undefined : await loadSupervisorConfig();
     const resolvedRoot = stateRoot ? path.resolve(stateRoot) : undefined;
@@ -450,7 +467,7 @@ async function main(args = process.argv.slice(2), launch?: ManagedExecution): Pr
   }
 
   if (cmd === "delete") {
-    const runRef = requireRunRef(args[1], "delete <stateDir|runId> [--state-root <dir>] [--force]");
+    const runRef = await requireRunRef(args[1], "delete <stateDir|runId> [--state-root <dir>] [--force]", flagValue(args, "--state-root"));
     const stateRoot = flagValue(args, "--state-root");
     const report = await controller.delete(runRef, {
       ...(stateRoot ? { stateRoot: path.resolve(stateRoot) } : {}),
@@ -463,7 +480,7 @@ async function main(args = process.argv.slice(2), launch?: ManagedExecution): Pr
 
   if (cmd === "switch-model") {
     const usage = "switch-model <stateDir|runId> <model> --reason <text> [--state-root <dir>]";
-    const runRef = requireRunRef(args[1], usage);
+    const runRef = await requireRunRef(args[1], usage, flagValue(args, "--state-root"));
     const reason = flagValue(args, "--reason");
     if (!args[2] || !reason) {
       console.error(`usage: graphloom ${usage}`);
@@ -563,7 +580,7 @@ async function main(args = process.argv.slice(2), launch?: ManagedExecution): Pr
   }
 
   if (cmd === "replay") {
-    const runRef = requireRunRef(args[1], "replay <stateDir|runId> [--state-root <dir>]");
+    const runRef = await requireRunRef(args[1], "replay <stateDir|runId> [--state-root <dir>]", flagValue(args, "--state-root"));
     const stateRoot = flagValue(args, "--state-root");
     const report = await replay(runRef, stateRoot ? { stateRoot: path.resolve(stateRoot) } : {});
     console.log(JSON.stringify(report, null, 2));
@@ -684,17 +701,17 @@ async function notifyCrash(err: unknown): Promise<void> {
   });
 }
 
-/** Bare run IDs stay bare so --state-root is honored; path-like refs are resolved. */
-function requireRunRef(value: string | undefined, usage: string): string {
-  if (!value) {
+/**
+ * The state directory a run-scoped command's `<stateDir|runId>` names: a run ID under --state-root when given, else
+ * under the default state root, then the run hub's runs (run-ref.ts); an operator-facing error when it is nowhere.
+ */
+async function requireRunRef(value: string | undefined, usage: string, stateRoot: string | undefined): Promise<string> {
+  if (!value || value.startsWith("--")) {
     console.error(`usage: graphloom ${usage}`);
     process.exitCode = 1;
     throw new Error(`usage: graphloom ${usage}`);
   }
-  if (value.startsWith("/") || /^[A-Za-z]:/.test(value) || value.includes("/") || value.includes("\\")) {
-    return path.resolve(value);
-  }
-  return value;
+  return locateRun(value, stateRoot);
 }
 
 /** `graphloom skills list|install|update|remove` (docs/design-agent-skills.md §3). */

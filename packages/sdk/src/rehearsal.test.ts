@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { describe, expect, it } from "vitest";
-import { assignmentNamesField, checkAssignmentFidelity, mutateAdversarially, synthesizeFromSchema } from "./rehearsal.js";
+import { assignmentNamesField, checkAssignmentFidelity, continueRehearsalScenario, matchRehearsalAnswer, mutateAdversarially, synthesizeFromSchema, type RehearsalScenario } from "./rehearsal.js";
 import { assertGraphRehearsal } from "./validate.js";
 
 describe("synthesizeFromSchema", () => {
@@ -138,5 +138,46 @@ describe("a scenario's expect.path (docs/design-graph-topology.md §9)", () => {
     expect(assertGraphRehearsal(rehearsal(["fix", "review"])).scenarios.happy?.expect.path).toEqual(["fix", "review"]);
     expect(() => assertGraphRehearsal(rehearsal("fix"))).toThrow(/path/);
     expect(() => assertGraphRehearsal(rehearsal(["fix", 3]))).toThrow(/expect\.path must list node ids/);
+  });
+});
+
+describe("a scenario's operator answers (§4.4)", () => {
+  const back = { action: { type: "return" as const, return: { summary: "back" } }, reason: "return" };
+  const enter = { action: { type: "enter" as const, enter: { stageId: "arbitrate", reason: "rule" } }, reason: "enter" };
+  const leave = (to: string) => ({ action: { type: "reenter" as const, reenter: { stageId: to, reason: `leave to ${to}` } }, reason: `leave to ${to}` });
+  const scenario: RehearsalScenario = {
+    results: { work: [{ output: "a" }, { output: "b" }], review: [{ output: "r" }] },
+    supervisor: [enter, back],
+    expect: { status: "stopped" },
+    answers: [
+      { approval: "ruling", decision: "approve", inputs: { ruling: "review-stands" }, supervisor: [leave("fix"), back], results: { work: [{ output: "fixed" }] }, expect: { status: "succeeded", path: ["fix", "review"] } },
+      { approval: "ruling", decision: "approve", inputs: { ruling: "implementation-stands" }, supervisor: [leave("review"), back], expect: { status: "succeeded" } },
+      { approval: "ruling", decision: "decline", supervisor: [leave("review"), back], expect: { status: "succeeded" } },
+    ],
+  };
+
+  it("matches the first answer whose approval, decision and named inputs agree", () => {
+    expect(matchRehearsalAnswer(scenario, { approvalId: "ruling", decision: "approve", inputs: { finding: "F1", ruling: "review-stands" } })).toBe(scenario.answers![0]);
+    expect(matchRehearsalAnswer(scenario, { approvalId: "ruling", decision: "approve", inputs: { ruling: "implementation-stands" } })).toBe(scenario.answers![1]);
+    expect(matchRehearsalAnswer(scenario, { approvalId: "ruling", decision: "decline" })).toBe(scenario.answers![2]);
+    expect(matchRehearsalAnswer(scenario, { approvalId: "ruling", decision: "approve", inputs: { ruling: "neither" } })).toBeUndefined();
+    expect(matchRehearsalAnswer(scenario, { approvalId: "other", decision: "decline" })).toBeUndefined();
+  });
+
+  it("continues with the consumed decisions, then the answer's, its replies and its expectation", () => {
+    const continued = continueRehearsalScenario(scenario, scenario.answers![0]!, 2);
+    expect(continued.supervisor).toEqual([enter, back, leave("fix"), back]);
+    expect(continued.results).toEqual({ work: [{ output: "fixed" }], review: [{ output: "r" }] });
+    expect(continued.expect).toEqual({ status: "succeeded", path: ["fix", "review"] });
+    // Answers stay: a run the answer stopped again can be answered again.
+    expect(continued.answers).toBe(scenario.answers);
+  });
+
+  it("is validated on the wire like the scenario's own data", () => {
+    expect(assertGraphRehearsal({ scenarios: { operator: scenario } }).scenarios.operator?.answers).toHaveLength(3);
+    const bad = (answer: object) => ({ scenarios: { operator: { ...scenario, answers: [answer] } } });
+    expect(() => assertGraphRehearsal(bad({ approval: "ruling", decision: "maybe", expect: { status: "succeeded" } }))).toThrow(/decision must be approve or decline/);
+    expect(() => assertGraphRehearsal(bad({ approval: "ruling", decision: "approve", inputs: { ruling: 3 }, expect: { status: "succeeded" } }))).toThrow(/inputs must map/);
+    expect(() => assertGraphRehearsal(bad({ approval: "ruling", decision: "approve" }))).toThrow(/expect/);
   });
 });

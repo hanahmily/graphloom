@@ -5,7 +5,8 @@ description: Watch a running GraphLoom run with graphloom watch, which does the 
 
 # Watch a GraphLoom run
 
-Input: the run's state directory (or run id with `--state-root`). graphloom-run
+Input: the run's state directory, or its run id (found under the repository's
+`graphloom-state`, then the hub's runs; elsewhere add `--state-root`). graphloom-run
 records it in `.graphloom-watch/run`. Below, `<run>` is that reference. Run
 every command from the task directory: `graphloom watch` keeps its cursor and
 snapshot in `.graphloom-watch/` beside the task, so nothing is reported twice.

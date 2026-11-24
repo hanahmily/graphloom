@@ -734,6 +734,20 @@ interface RehearsalScenario {
     /** How many times each executor id was invoked, read from evidence producers. */
     executorCalls?: Record<string, number>;
   };
+  /** How the scenario continues after each operator answer it rehearses (below). */
+  answers?: RehearsalAnswer[];
+}
+interface RehearsalAnswer {
+  approval: string;
+  decision: "approve" | "decline";
+  /** The inputs this answer is for, each matched exactly; others may hold anything. */
+  inputs?: Record<string, string>;
+  /** The supervisor's decisions after the answer, following those the run consumed before it stopped. */
+  supervisor?: GraphDecision[];
+  /** Replies after the answer: a contract named here answers from its first reply again. */
+  results?: Record<string, RehearsalReply[]>;
+  /** What the run must reach after the answer. */
+  expect: RehearsalScenario["expect"];
 }
 interface RehearsalReply {
   output?: unknown;
@@ -756,6 +770,25 @@ with `failTimes`/`retryAfterMs` injects the transient command failure the
 wait-budget path exists for. `expect.recovery` says which recovery entries the
 scenario meant; `expect.executorCalls` asserts the calls the graph made, not
 only the effects it left.
+
+A scenario whose run stops for an operator's approval (a final stop on a
+declared approval) rehearses each answer the stop's blocker names under
+`answers`. Its `supervisor` scripts the decisions up to the stop; `resume
+<run> --rehearsal --approve|--decline …` (directly, or a hub rehearsal
+submission's `hub resume`) picks the first answer that matches the approval
+ID, the decision and the inputs it names, and continues the scenario with it:
+the decisions the run consumed, then the answer's; the answer's replies in
+place of the scenario's for each contract it names, from their first; and the
+answer's `expect`, which the verdict then judges (the answer supersedes the
+verdict a hub recorded at the stop: it is pending again until the
+continuation stops on its own). The continued scenario replaces the kept
+run's `scenario.json`; a resume the run did not record the answer in (a
+refusal, a pin or worktree mismatch) restores it, and a run a live
+controller owns is refused before it is touched. An answer to an
+approval the scenario has answers for, but none matching, is refused
+(`invalid-remedy`) and names the answers it rehearses; an approval a scenario
+has no answers for continues the scenario as it is. L0 checks each answer's
+decisions after the scenario's against the topology, and its `expect`.
 
 One format, deliberately: a plugin's own unit simulation (banyandb-fix's
 `simulate()` today) loads the same scenario files rehearsal replays, recorded

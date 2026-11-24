@@ -190,6 +190,12 @@ export interface HubLaunch {
   command?: HubCommand;
   automatic: boolean;
   continuationFingerprint?: string;
+  /**
+   * What the run stopped on when this launch was reserved, captured then: polling
+   * replaces the submission's observation while the launch runs, so a refused remedy
+   * (a plugin update the run refused) still names the stop it answered (§3.2).
+   */
+  priorBlocker?: string;
   /** A failed launch stays authoritative through polling until its reservation drains. */
   failure?: { occurredAt: string; message: string };
   stopRequestedAt?: string;
