@@ -34,6 +34,24 @@ export function snapshotOf(state: DurableRunState, observedAt: string): MonitorS
     ...(session.summary !== undefined ? { instruction: session.summary } : {}),
     workspace: state.worktreePath, ...(typeof session.sessionRef === "string" && session.sessionRef.length > 0 ? { sessions: [session.sessionRef] } : {}),
   }));
+  // Every other job the run recorded (command jobs above all), as `stats` counts them: by the
+  // producer of its evidence, leaving out environment checks and an agent's own tool calls.
+  const recorded = new Map<string, MonitorJob>();
+  for (const record of state.evidence ?? []) {
+    const payload = record.payload !== null && typeof record.payload === "object" && !Array.isArray(record.payload) ? record.payload as Record<string, unknown> : undefined;
+    const producer = payload?.producer !== null && typeof payload?.producer === "object" ? payload.producer as Record<string, unknown> : undefined;
+    if (producer === undefined || typeof producer.operationId !== "string" || typeof producer.stageId !== "string") continue;
+    if (typeof producer.parentOperationId === "string" || payload!.environment !== undefined || jobs.some((job) => job.id === producer.operationId)) continue;
+    const job = recorded.get(producer.operationId) ?? {
+      id: producer.operationId, stageId: producer.stageId, attempt: typeof producer.attempt === "number" ? producer.attempt : 0, status: "settled",
+      label: `${typeof producer.kind === "string" ? producer.kind : "job"}${typeof producer.purpose === "string" ? ` (${producer.purpose})` : ""}`,
+      ...(typeof producer.executorId === "string" ? { executor: producer.executorId } : {}),
+      workspace: state.worktreePath, evidence: [],
+    };
+    job.evidence!.push(record.ref);
+    recorded.set(producer.operationId, job);
+  }
+  jobs.push(...recorded.values());
   const pending = state.pendingDispatch;
   if (pending !== undefined && !jobs.some((job) => job.id === pending.operationId)) jobs.push({
     id: pending.operationId, stageId: pending.stageId, attempt: state.current.attempt, status: pending.status,
@@ -64,7 +82,7 @@ export function snapshotOf(state: DurableRunState, observedAt: string): MonitorS
     schemaVersion: 1, frameId: `${state.runId}:${state.stateRevision}:${observedAt}`, observedAt,
     run: {
       id: state.runId, graph: state.definition.graphId, status: state.status, controllerRevision: String(state.stateRevision),
-      currentStage: state.current.stageId, currentAttempt: state.current.attempt, blocker: state.blocker ?? state.stopReason ?? null,
+      currentStage: state.current.stageId, currentAttempt: state.current.attempt, blocker: state.status === "succeeded" ? null : state.blocker ?? state.stopReason ?? null,
     },
     sources: [
       { id: "controller", status: "available", observedAt, revision: String(state.stateRevision) },
@@ -162,25 +180,31 @@ export function stateNotWritten(error: string | undefined): boolean {
   return error !== undefined && /ENOENT/.test(error) && /state\.json/.test(error);
 }
 
-export function withHubSnapshot(snapshot: MonitorSnapshot | undefined, submission: HubSubmission, status: HubStatus, now = new Date().toISOString(), unavailable?: string): MonitorSnapshot {
+export function withHubSnapshot(snapshot: MonitorSnapshot | undefined, submission: HubSubmission, status: HubStatus, now = new Date().toISOString(), unavailable?: string, request: { graph?: string } = {}): MonitorSnapshot {
   // While a launch is active the hub's scheduling state is current; the controller's last
   // record may predate the launch (a resumed run still reads "stopped" until its first save).
   const launching = submission.launch !== undefined && (submission.state === "starting" || submission.state === "running");
+  // With no launch active nothing runs, so the hub's state is the status: a killed
+  // controller's record still reads "running" while the submission waits or is blocked.
+  const idle = submission.launch === undefined && submission.generation > 0 && !["starting", "running", "stopping"].includes(submission.state);
   const starting = snapshot === undefined && launching && (unavailable === undefined || stateNotWritten(unavailable));
   const base: MonitorSnapshot = snapshot ?? {
     schemaVersion: 1, frameId: `${submission.id}:${now}`, observedAt: now,
-    run: { id: submission.runId, status: submission.generation === 0 && submission.launch === undefined ? "not-created" : starting ? "starting" : "unknown" }, sources: [],
+    run: { id: submission.runId, status: submission.generation === 0 && submission.launch === undefined ? "not-created" : starting ? "starting" : idle ? submission.state : "unknown" }, sources: [],
   };
-  const superseded = snapshot !== undefined && launching && snapshot.run.status !== "running" ? snapshot.run.status : undefined;
+  const superseded = snapshot !== undefined && (launching ? snapshot.run.status !== "running" : idle && snapshot.run.status !== submission.state) ? snapshot.run.status : undefined;
   const controllerDetail = starting ? "starting: run state not written yet" : unavailable ?? (submission.generation === 0 ? "run has not started" : "owning-runtime observation unavailable");
+  // An active launch supersedes the earlier stop's blocker; an idle submission keeps the run's
+  // (an approval it waits on) unless the hub has its own. A succeeded run has none.
+  const blocker = submission.state === "succeeded" ? null : submission.blocker ?? (superseded !== undefined && launching ? null : base.run.blocker ?? null);
   return {
     ...base, frameId: `${base.frameId}:hub:${submission.updatedAt}`, observedAt: now,
-    run: { ...base.run, ...(superseded !== undefined ? { status: submission.state } : {}), submissionId: submission.id, nextEligibleAt: submission.eligibleAt ?? null, blocker: submission.blocker ?? (superseded !== undefined ? null : base.run.blocker ?? null) },
+    run: { ...base.run, ...(base.run.graph === undefined && request.graph !== undefined ? { graph: request.graph } : {}), ...(superseded !== undefined ? { status: submission.state } : {}), submissionId: submission.id, nextEligibleAt: submission.eligibleAt ?? null, blocker },
     sources: [
       ...base.sources.map((source) => {
         const marked = unavailable !== undefined && source.status === "available" ? { ...source, status: "stale" as const, detail: unavailable } : source;
         return superseded !== undefined && source.id === "controller"
-          ? { ...marked, detail: `${marked.detail ? `${marked.detail}; ` : ""}last recorded ${superseded}; the hub's launch is ${submission.state}` }
+          ? { ...marked, detail: `${marked.detail ? `${marked.detail}; ` : ""}last recorded ${superseded}; ${launching ? `the hub's launch is ${submission.state}` : `no launch is active; the hub's submission is ${submission.state}`}` }
           : marked;
       }),
       ...(snapshot === undefined ? [{ id: "controller", status: "unavailable" as const, observedAt: null, detail: controllerDetail }] : []),

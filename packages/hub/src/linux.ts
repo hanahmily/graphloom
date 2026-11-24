@@ -4,7 +4,7 @@
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { createWriteStream, constants } from "node:fs";
-import { access, mkdir, readFile, realpath, rmdir, statfs, writeFile } from "node:fs/promises";
+import { access, appendFile, mkdir, readFile, realpath, rmdir, statfs, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Duplex, Readable } from "node:stream";
 import type { HubLaunch, HubProcessIdentity, HubSubmission } from "@graphloom/sdk";
@@ -189,6 +189,10 @@ export function createLinuxHubDriver(options: LinuxHubDriverOptions): HubDriver 
     async kill(launch, submission) {
       if (await populated(launch)) await writeFile(path.join(cgroup(launch), "cgroup.kill"), "1");
       await options.cleanup(launch, submission);
+    },
+    async appendLog(launch, submission, line) {
+      const file = path.join(options.directory, "submissions", submission.id, "logs", `${path.basename(cgroup(launch))}.stderr.log`);
+      await appendFile(file, `${line.replace(/[\r\n]+/g, " ").slice(0, 2048)}\n`, { mode: 0o600 });
     },
     async close() {
       for (const child of children.values()) child.control.destroy();

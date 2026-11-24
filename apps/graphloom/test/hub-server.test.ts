@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { createHash } from "node:crypto";
-import { readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, utimes, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { HubHealth, HubInput, HubStatus, HubSubmission, MonitorSnapshot } from "@graphloom/sdk";
@@ -51,6 +51,37 @@ describe("hub Unix service with an injected execution driver", () => {
     const paused = await hubRequest<HubSubmission>("POST", route, { commandId: "pause-once" }, socket);
     const repeated = await hubRequest<HubSubmission>("POST", route, { commandId: "pause-once" }, socket);
     expect(paused.desiredAction).toBe("hold"); expect(repeated.desiredAction).toBe("hold");
+  });
+
+  it("reads the active launch's log while it runs, not an older launch's", async () => {
+    const { service, socket, directory, driver } = await socketEnvironment(cleanups, 1);
+    const item = await hubRequest<HubSubmission>("POST", "/v1/submissions", { taskPath: "/tasks/a.yaml" }, socket);
+    await service.hub.tick();
+    const first = service.hub.inspect(item.id).launch!.id;
+    const logs = path.join(directory, "submissions", item.id, "logs");
+    await mkdir(logs, { recursive: true });
+    await writeFile(path.join(logs, `${first}.stderr.log`), `graphloom: run ${item.runId} stopped: waiting on approval\n`);
+    driver.executions.set(first, { execution: "drained", ownerGone: true, externalStopped: true, observation: { protocolVersion: 1, observedAt: new Date().toISOString(), stateRevision: 1, progressRevision: 0, status: "stopped", continuation: { kind: "operator", cause: "approval", evidenceRefs: [] } } });
+    await service.hub.tick();
+    await hubRequest("POST", `/v1/submissions/${item.id}/resume`, {}, socket); await service.hub.tick();
+    const second = service.hub.inspect(item.id).launch!.id;
+    await writeFile(path.join(logs, `${second}.stderr.log`), `graphloom: run ${item.runId} resuming (launch ${second}, generation 2)\n`);
+    // The older log was written last; the active launch's is still the one shown.
+    await utimes(path.join(logs, `${first}.stderr.log`), new Date(Date.now() + 60_000), new Date(Date.now() + 60_000));
+    const page = await hubRequest<{ launchId: string; text: string }>("GET", `/v1/submissions/${item.id}/logs`, undefined, socket);
+    expect(page).toMatchObject({ launchId: second, text: expect.stringContaining("resuming") });
+    // Once nothing runs, the latest log written is shown again.
+    driver.complete(service.hub.inspect(item.id)); await service.hub.tick();
+    expect((await hubRequest<{ launchId: string }>("GET", `/v1/submissions/${item.id}/logs`, undefined, socket)).launchId).toBe(first);
+  });
+
+  it("names the captured task's graph and the hub's state in the overview before the run's state exists", async () => {
+    const { service, socket } = await socketEnvironment(cleanups, 1, undefined, fakeInput, undefined, async () => { throw new Error("ENOENT: no such file or directory, open '/hub/runs/x/state.json'"); });
+    const item = await hubRequest<HubSubmission>("POST", "/v1/submissions", { taskPath: "/tasks/a.yaml" }, socket);
+    await service.hub.tick();
+    await service.hub.pause(item.id); await service.hub.tick();
+    const snapshot = await hubRequest<MonitorSnapshot>("GET", `/v1/submissions/${item.id}/snapshot`, undefined, socket);
+    expect(snapshot.run).toMatchObject({ graph: "hello", status: "paused" });
   });
 
   it("returns read-only snapshots and rejects unknown fields before effects", async () => {

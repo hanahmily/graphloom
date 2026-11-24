@@ -7,6 +7,7 @@ import path from "node:path";
 import { beginManagedCommand, checkManagedCommand, finishManagedCommand, markManagedExecutionStarted, managedCommandApplied, authorizeManagedRun, authorizeManagedStop, authorizeManagedResume, assertManagedRunner, assertAutomaticContinuation, releaseManagedRun, type ManagedRunGrant } from "./managed.js";
 import {
   emptyCaseFile,
+  RequestRefusedError,
   type BudgetRemaining,
   type GraphDefinition,
   type GraphPlugin,
@@ -677,7 +678,7 @@ export function createController(): Controller {
       let state: DurableRunState =
         request.upgrade !== undefined ? (undefined as unknown as DurableRunState) : await loadCurrentFormat(stateDir, stateFormats);
       if (request.approval !== undefined && request.upgrade === undefined && (state.status === "succeeded" || state.status === "failed") && !(request.managed?.commandId !== undefined && await managedCommandApplied(stateDir, request.managed.commandId))) {
-        throw new Error(approvalRefusal(state, request.approval)!);
+        throw new RequestRefusedError(approvalRefusal(state, request.approval)!, "invalid-remedy");
       }
       if (request.upgrade === undefined && (state.status === "succeeded" || state.status === "failed")) {
         // A crash after the finished state was saved can leave them behind.
@@ -750,7 +751,7 @@ export function createController(): Controller {
               applySupervisorPin(current, request.supervisorPin);
               if (request.approval === undefined) return;
               const problem = approvalRefusal(current, request.approval);
-              if (problem !== undefined) throw new Error(problem);
+              if (problem !== undefined) throw new RequestRefusedError(problem, "invalid-remedy");
               // Reads the declared files the way the resume will; the result is discarded.
               await applyApproval(current, request.approval);
             },
@@ -760,13 +761,13 @@ export function createController(): Controller {
         state = await loadCurrentFormat(stateDir, stateFormats);
         if (state.status === "succeeded" || state.status === "failed") {
           // After an upgrade the state was loaded only now: a decision on a finished run is still refused.
-          if (request.approval !== undefined) throw new Error(approvalRefusal(state, request.approval)!);
+          if (request.approval !== undefined) throw new RequestRefusedError(approvalRefusal(state, request.approval)!, "invalid-remedy");
           return;
         }
         assertAutomaticContinuation(state, request.managed);
         // Refused before anything changes: an undeclared, unavailable or misplaced decision records nothing.
         const approvalProblem = request.approval !== undefined ? approvalRefusal(state, request.approval) : undefined;
-        if (approvalProblem !== undefined) throw new Error(approvalProblem);
+        if (approvalProblem !== undefined) throw new RequestRefusedError(approvalProblem, "invalid-remedy");
         // No controller owns the run now: whatever sandbox a stopped job left behind is stale.
         if (request.managed === undefined) await request.runner.releaseRun?.(state.runId).catch(() => undefined);
         // Evidence belongs to the stop being resumed; any stop from here on is a new one.

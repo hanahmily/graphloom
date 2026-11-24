@@ -121,6 +121,54 @@ export interface HubCommand {
   acceptedAt: string;
   remedy?: HubResumeRemedy;
 }
+/**
+ * Why a managed launch refused its request before changing the run
+ * (docs/design-run-hub.md §6.1): a structured cause, never read from text.
+ * Retrying the same request is refused the same way, so the hub blocks at once.
+ */
+export type HubRefusalCause = "invalid-task" | "invalid-scenario" | "invalid-remedy" | "upgrade-refused";
+/**
+ * A request refused before it changed the run, with its structured cause: a
+ * managed launch reports it as a refusal the hub does not retry.
+ */
+export class RequestRefusedError extends Error {
+  constructor(message: string, readonly refusal: HubRefusalCause) {
+    super(message);
+    this.name = "RequestRefusedError";
+  }
+}
+/**
+ * What a managed launch reports about its own end, written to
+ * `<hub>/submissions/<s>/launches/<launchId>.json` before it exits
+ * (docs/design-run-hub.md §6.1). A report, never authority: drainage is still
+ * verified, and a launch that was killed writes none.
+ */
+export interface HubLaunchReport {
+  protocolVersion: 1;
+  launchId: string;
+  generation: number;
+  /** `completed`: the command returned a run report; `refused`: it refused its request with a structured cause; `error`: it failed otherwise. */
+  outcome: "completed" | "refused" | "error";
+  refusal?: { cause: HubRefusalCause; reason: string };
+  /** The failure's message, for display only (an `error` outcome). */
+  error?: string;
+  /** The operator command the launch carried, and whether the run applied it. */
+  command?: { id: string; applied: boolean };
+  endedAt: string;
+}
+/**
+ * What became of a submission's latest operator resume (docs/design-run-hub.md §3.2).
+ * `pending`: accepted, not yet launched (or held by a pause); `launched`: the
+ * current launch carries it; `applied`: the run took it; `refused`: the run
+ * refused it (`reason`); `withdrawn`: it ended unapplied, and resending the
+ * same command ID applies it.
+ */
+export interface HubResumeOutcome {
+  commandId: string;
+  status: "pending" | "launched" | "applied" | "refused" | "withdrawn";
+  reason?: string;
+  at: string;
+}
 export interface HubLaunch {
   id: string;
   generation: number;
@@ -163,6 +211,10 @@ export interface HubSubmission {
   pendingCommand?: HubCommand;
   observation?: HubObservation;
   blocker?: string;
+  /** The latest operator resume and what became of it. */
+  lastResume?: HubResumeOutcome;
+  /** The last failure an automatic retry answered: its cause and, when known, what the launch reported. */
+  lastFailure?: string;
   /** True until the next reservation; a planned service recovery does not spend failure allowance. */
   automaticPending?: boolean;
   reconciliationPending?: boolean;

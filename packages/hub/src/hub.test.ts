@@ -6,8 +6,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import type { HubContinuation, HubLaunch, HubObservation, HubSubmission } from "@graphloom/sdk";
-import { assertHubGrant, openHub } from "./hub.js";
+import type { HubContinuation, HubLaunch, HubLaunchReport, HubObservation, HubSubmission } from "@graphloom/sdk";
+import { assertHubGrant, openHub, submissionBlocker } from "./hub.js";
 import type { Hub } from "./hub.js";
 import type { HubDriver, HubExecutionObservation, HubSubmitRequest } from "./types.js";
 
@@ -25,7 +25,9 @@ class FakeDriver implements HubDriver {
   prepareFailure = false;
   unknownCleanup = false;
   settleInput?: NonNullable<HubDriver["settleInput"]>;
+  logs: string[] = [];
   async probe(): Promise<void> {}
+  async appendLog(_launch: HubLaunch, _submission: HubSubmission, line: string): Promise<void> { this.logs.push(line); }
   async prepare(launch: HubLaunch, submission: HubSubmission) {
     this.launches.push({ launch, submission });
     if (this.prepareFailure) throw new Error("pinned runtime unavailable");
@@ -423,7 +425,7 @@ describe("bounded continuation and fairness", () => {
   it("blocks provider reset outside the retry window and rechecks deadline before admission", async () => {
     const f = await fixture(); const a = await accepted(f.hub); await f.hub.tick();
     f.driver.finish(f.hub.inspect(a.id), { ...retry(), kind: "automatic", cause: "provider-cooldown", fingerprint: "quota", stateRevision: 1, notBefore: new Date(300000).toISOString() });
-    await f.hub.tick(); expect(f.hub.inspect(a.id).blocker).toMatch(/retry deadline/);
+    await f.hub.tick(); expect(f.hub.inspect(a.id).blocker).toMatch(/retry window/);
     await f.hub.resume(a.id); await f.hub.tick(); f.driver.finish(f.hub.inspect(a.id), retry("new")); await f.hub.tick();
     await f.hub.setLimit(0); f.advance(100001); await f.hub.tick(); await f.hub.setLimit(1); await f.hub.tick();
     expect(f.hub.inspect(a.id).state).toBe("blocked");
@@ -608,5 +610,141 @@ describe("rehearsal submissions", () => {
     await f.hub.cancel(created.id);
     await f.hub.archive(created.id);
     expect(f.hub.archived()).toEqual([expect.objectContaining({ key: "rehearsal:arch", rehearsal: { scenario: "operator" } })]);
+  });
+});
+
+describe("operator commands and launch reports (campaign findings)", () => {
+  const approval: HubContinuation = { kind: "operator", cause: "approval", evidenceRefs: [] };
+  const waiting = (blocker = "waiting on approval ruling: graphloom resume --approve ruling --input ruling=<text>"): HubObservation => ({ ...observation(approval), blocker });
+  /** The launch drains, reporting its end as a managed launch does (or not at all, when killed). */
+  const end = (driver: FakeDriver, s: HubSubmission, observed: HubObservation | undefined, report?: Partial<HubLaunchReport>) => {
+    const launch = s.launch!;
+    driver.executions.set(launch.id, {
+      execution: "drained", ownerGone: true, externalStopped: true, ...(observed ? { observation: observed } : {}),
+      ...(report ? { report: { protocolVersion: 1, launchId: launch.id, generation: launch.generation, outcome: "completed", endedAt: new Date(0).toISOString(), ...report } as HubLaunchReport } : {}),
+    });
+  };
+  const remedy = { approve: "ruling", inputs: { ruling: "approve it" } };
+  async function blockedOnApproval() {
+    const f = await fixture(); const a = await accepted(f.hub); await f.hub.tick();
+    end(f.driver, f.hub.inspect(a.id), waiting(), { outcome: "completed" }); await f.hub.tick();
+    expect(f.hub.inspect(a.id).state).toBe("blocked");
+    return { ...f, a };
+  }
+
+  it("keeps an approval a pause withdrew before the run applied it: the next plain resume applies it", async () => {
+    const { hub, driver, a } = await blockedOnApproval();
+    await hub.resume(a.id, { commandId: "X", remedy }); await hub.tick();
+    expect(hub.inspect(a.id)).toMatchObject({ state: "running", launch: { command: { id: "X", remedy } }, lastResume: { commandId: "X", status: "launched" } });
+    await hub.pause(a.id);
+    expect(hub.inspect(a.id).state).toBe("stopping");
+    end(driver, hub.inspect(a.id), waiting(), { outcome: "error", error: "managed execution grant was withdrawn", command: { id: "X", applied: false } });
+    await hub.tick();
+    expect(hub.inspect(a.id)).toMatchObject({ state: "paused", pendingCommand: { id: "X", remedy }, lastResume: { commandId: "X", status: "pending" } });
+    // The held approval is not answered from the record: retrying it applies it.
+    expect(await hub.knownCommand(a.id, "X")).toBe(false);
+    await hub.resume(a.id); await hub.tick();
+    expect(hub.inspect(a.id)).toMatchObject({ state: "running", launch: { automatic: false, command: { id: "X", remedy } } });
+    end(driver, hub.inspect(a.id), observation({ kind: "complete" }), { command: { id: "X", applied: true } }); await hub.tick();
+    expect(hub.inspect(a.id)).toMatchObject({ state: "succeeded", lastResume: { commandId: "X", status: "applied" } });
+    // Now a retry is answered from the record and starts nothing.
+    const launches = driver.launches.length;
+    expect(await hub.knownCommand(a.id, "X")).toBe(true);
+    await hub.resume(a.id, { commandId: "X", remedy }); await hub.tick();
+    expect(driver.launches).toHaveLength(launches);
+  });
+
+  it("re-applies a held or withdrawn resume when its command ID is resent, never reporting success for nothing", async () => {
+    // Held by a pause: resending the same command ID releases the hold and applies it.
+    const held = await blockedOnApproval();
+    await held.hub.resume(held.a.id, { commandId: "X", remedy }); await held.hub.tick();
+    await held.hub.pause(held.a.id);
+    end(held.driver, held.hub.inspect(held.a.id), waiting(), { outcome: "error", error: "managed execution grant was withdrawn", command: { id: "X", applied: false } });
+    await held.hub.tick();
+    await held.hub.resume(held.a.id, { commandId: "X", remedy }); await held.hub.tick();
+    expect(held.hub.inspect(held.a.id)).toMatchObject({ state: "running", desiredAction: "execute", launch: { command: { id: "X", remedy } } });
+    // Withdrawn by a crash before the run applied it: the record says so, and the retry applies it.
+    const crashed = await blockedOnApproval();
+    await crashed.hub.resume(crashed.a.id, { commandId: "Y", remedy }); await crashed.hub.tick();
+    end(crashed.driver, crashed.hub.inspect(crashed.a.id), undefined);
+    await crashed.hub.tick();
+    expect(crashed.hub.inspect(crashed.a.id)).toMatchObject({ state: "waiting", lastResume: { commandId: "Y", status: "withdrawn", reason: expect.stringContaining("resend the same command ID") } });
+    expect(crashed.hub.inspect(crashed.a.id).pendingCommand).toBeUndefined();
+    await crashed.hub.resume(crashed.a.id, { commandId: "Y", remedy }); await crashed.hub.tick();
+    expect(crashed.hub.inspect(crashed.a.id)).toMatchObject({ state: "running", launch: { automatic: false, command: { id: "Y", remedy } }, lastResume: { commandId: "Y", status: "launched" } });
+    // A different request under the same ID is still a conflict.
+    await expect(crashed.hub.resume(crashed.a.id, { commandId: "Y" })).rejects.toThrow(/conflicts/);
+  });
+
+  it("blocks with the run's refusal of a remedy, keeps the earlier stop visible, and still takes a corrected one", async () => {
+    const { hub, driver, a } = await blockedOnApproval();
+    await hub.resume(a.id, { commandId: "wrong", remedy: { approve: "not-an-approval" } }); await hub.tick();
+    const reason = 'graph hello declares no approval "not-an-approval"; it declares ruling';
+    end(driver, hub.inspect(a.id), waiting(), { outcome: "refused", refusal: { cause: "invalid-remedy", reason }, command: { id: "wrong", applied: false } });
+    await hub.tick();
+    expect(hub.inspect(a.id)).toMatchObject({ state: "blocked", lastResume: { commandId: "wrong", status: "refused", reason } });
+    expect(hub.inspect(a.id).blocker).toBe(`resume refused: ${reason}; the run still stops on: ${waiting().blocker}`);
+    // The refusal is the record's answer: resending it starts nothing.
+    const launches = driver.launches.length;
+    await hub.resume(a.id, { commandId: "wrong", remedy: { approve: "not-an-approval" } }); await hub.tick();
+    expect(driver.launches).toHaveLength(launches);
+    await hub.resume(a.id, { commandId: "right", remedy }); await hub.tick();
+    expect(hub.inspect(a.id)).toMatchObject({ state: "running", launch: { command: { id: "right", remedy } } });
+  });
+
+  it("blocks a launch refused for a deterministic cause at once, with the cause, and never retries it", async () => {
+    const { hub, driver, advance } = await fixture(); const a = await accepted(hub); await hub.tick();
+    const intake: HubObservation = { protocolVersion: 1, observedAt: new Date(0).toISOString(), stateRevision: 0, progressRevision: 0, status: "initialization-failed", continuation: { kind: "automatic", cause: "initialization-failed", fingerprint: "intake", stateRevision: 0 } };
+    end(driver, hub.inspect(a.id), intake, { outcome: "refused", refusal: { cause: "invalid-scenario", reason: 'no scenario named "nope"; this bundle declares: happy' } });
+    await hub.tick(); advance(1000); await hub.tick();
+    expect(hub.inspect(a.id)).toMatchObject({ state: "blocked", blocker: 'launch refused: no scenario named "nope"; this bundle declares: happy', automaticResumes: 0 });
+    expect(driver.launches).toHaveLength(1);
+    // Still recoverable: a plain manual retry runs the initial launch again.
+    await hub.resume(a.id); await hub.tick();
+    expect(hub.inspect(a.id)).toMatchObject({ state: "running", launch: { mode: "initial", automatic: false } });
+  });
+
+  it("names the retry limit reached and the last cause when automatic retries stop", async () => {
+    const crash = (stateRevision: number): HubContinuation => ({ kind: "automatic", cause: "controller-crash", fingerprint: "crash", stateRevision });
+    const repeated = await fixture(); const a = await accepted(repeated.hub); await repeated.hub.tick();
+    for (let i = 0; i < 3; i++) {
+      end(repeated.driver, repeated.hub.inspect(a.id), observation(crash(1))); await repeated.hub.tick(); repeated.advance(100); await repeated.hub.tick();
+    }
+    expect(repeated.hub.inspect(a.id).blocker).toBe("automatic retry stopped: the same failure repeated 3 times without accepted progress; last cause: controller-crash: the launch ended without reporting its end (killed or crashed)");
+    const allowance = await fixture(); const b = await accepted(allowance.hub);
+    await allowance.hub.updatePolicy(b.id, { ...b.retry, maxAutomaticResumes: 1 }); await allowance.hub.tick();
+    for (const fingerprint of ["one", "two"]) {
+      end(allowance.driver, allowance.hub.inspect(b.id), observation({ kind: "automatic", cause: "transient-launch", fingerprint, stateRevision: 1 }), { outcome: "error", error: `spawn git ENOENT (${fingerprint})` });
+      await allowance.hub.tick(); allowance.advance(100); await allowance.hub.tick();
+    }
+    expect(allowance.hub.inspect(b.id).blocker).toBe("automatic retry stopped: retry allowance used (1/1 automatic resumes); last cause: transient-launch: spawn git ENOENT (two)");
+  });
+
+  it("closes the log of a launch that ended without reporting its end, and only that one", async () => {
+    const { hub, driver, a } = await blockedOnApproval();
+    expect(driver.logs).toEqual([]);
+    await hub.resume(a.id); await hub.tick();
+    end(driver, hub.inspect(a.id), observation({ kind: "automatic", cause: "controller-crash", fingerprint: "crash", stateRevision: 2 }));
+    await hub.tick();
+    expect(driver.logs).toHaveLength(1);
+    expect(driver.logs[0]).toMatch(new RegExp(`^graphloom: run ${a.runId} waiting: the launch ended without reporting its end; the hub settled it; next attempt at `));
+  });
+
+  it("records no blocker for a succeeded submission, whatever its completion stop said", async () => {
+    const { hub, driver } = await fixture(); const a = await accepted(hub); await hub.tick();
+    end(driver, hub.inspect(a.id), { ...observation({ kind: "complete" }), blocker: "none" }); await hub.tick();
+    const done = hub.inspect(a.id);
+    expect(done.state).toBe("succeeded");
+    expect(submissionBlocker(done)).toBeUndefined();
+    await hub.archive(a.id);
+    expect(hub.archived()[0]).not.toHaveProperty("blocker");
+  });
+
+  it("keeps the stop a refused plugin update answered visible beside the pin mismatch", async () => {
+    const { hub, driver, a } = await blockedOnApproval();
+    await hub.resume(a.id, { remedy: { updatePlugin: true, plugin: { bundlePath: "/plugins/hello-2", bundleDigest: "d".repeat(64) } } }); await hub.tick();
+    end(driver, hub.inspect(a.id), { ...observation({ kind: "operator", cause: "pin-drift", evidenceRefs: [] }), blocker: "plugin stages changed since run start" }, { outcome: "completed" });
+    await hub.tick();
+    expect(hub.inspect(a.id).blocker).toBe(`plugin update refused: plugin stages changed since run start; the run still stops on: ${waiting().blocker}`);
   });
 });

@@ -10,6 +10,7 @@ import { livePath, loadRunState, nodeAccepted, type DurableRunState, type VisitR
 import type { HubStatus, HubSubmission } from "@graphloom/sdk";
 import { projectPanels, renderPanels } from "@graphloom/monitor";
 import { observeOwnedRun, snapshotOf, withHubSnapshot } from "../src/hub-observe.js";
+import { runStats } from "../src/stats.js";
 
 const fixture = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures/stats/395ec998-6e4");
 const observedAt = "2026-11-20T12:00:00.000Z";
@@ -75,7 +76,12 @@ describe("owning-runtime monitoring projection", () => {
     const before = structuredClone(run);
     const snapshot = snapshotOf(run, observedAt);
     expect(snapshot.stages?.find(stage => stage.id === "review")).toMatchObject({ status: "running", accepted: true, attempt: 9 });
-    expect(snapshot.jobs).toHaveLength(run.agentSessions!.length);
+    // Every job the run recorded, as stats counts them (the usage panel's jobs), command jobs included.
+    const counted = runStats(run).stages.reduce((sum, stage) => sum + stage.jobs.total, 0);
+    expect(snapshot.jobs).toHaveLength(counted);
+    expect(snapshot.jobs!.filter(job => job.label?.startsWith("command"))).toHaveLength(runStats(run).stages.reduce((sum, stage) => sum + stage.jobs.command, 0));
+    expect(snapshot.jobs!.filter(job => job.label?.startsWith("command")).length).toBeGreaterThan(0);
+    expect(snapshot.jobs!.find(job => job.label?.startsWith("command"))).toMatchObject({ status: "settled", evidence: [expect.any(String)] });
     for (const session of run.agentSessions!) expect(snapshot.jobs?.find(job => job.id === session.operationId)).toMatchObject({ stageId: session.stageId, attempt: session.attempt, status: session.status });
     expect(snapshot.jobs?.some(job => job.attempt === 9)).toBe(false);
     expect(run).toEqual(before);
@@ -201,10 +207,28 @@ describe("hub/frame composition", () => {
     expect(report.output).toContain("Status: starting");
     expect(report.output).toContain("starting: run state not written yet");
     expect(report.output).not.toContain("ENOENT");
-    // Without a launch, or for another failure, the honest answer stays unknown.
+    // For another failure during a launch, the honest answer stays unknown.
     expect(withHubSnapshot(undefined, item, hub(item), hubAt, "owning runtime timed out").run.status).toBe("unknown");
+    // With no launch active nothing runs: the hub's state is the status, and the graph is the captured task's.
     item.state = "blocked"; delete item.launch;
-    expect(withHubSnapshot(undefined, item, hub(item), hubAt, enoent).run.status).toBe("unknown");
+    expect(withHubSnapshot(undefined, item, hub(item), hubAt, enoent, { graph: "hello" }).run).toMatchObject({ status: "blocked", graph: "hello" });
+  });
+
+  it("never says running with nothing running: a killed controller's record yields to the hub's state", async () => {
+    const run = await state(); run.status = "running"; delete run.blocker; delete run.stopReason;
+    const owned = snapshotOf(run, observedAt);
+    const item = submission(); item.runId = run.runId; item.generation = 2;
+    for (const hubState of ["waiting", "paused", "blocked", "queued"] as const) {
+      item.state = hubState;
+      if (hubState === "blocked") item.blocker = "automatic retry stopped: the same failure repeated 3 times without accepted progress; last cause: controller-crash";
+      else delete item.blocker;
+      const merged = withHubSnapshot(owned, item, hub(item), hubAt);
+      expect(merged.run.status).toBe(hubState);
+      expect(merged.run.blocker).toBe(item.blocker ?? null);
+      const report = await renderPanels(projectPanels(merged, { kinds: ["overview"] }), { format: "text", width: 160, noColor: true });
+      expect(report.output).toContain(`Status: ${hubState}`);
+      expect(report.output).not.toContain("Status: running");
+    }
   });
 
   it("prefers the hub's state while a launch is active over the controller's record from before it", async () => {
@@ -214,9 +238,11 @@ describe("hub/frame composition", () => {
     const merged = withHubSnapshot(owned, item, hub(item), hubAt);
     expect(merged.run).toMatchObject({ status: "running", blocker: null });
     expect(merged.sources.find(source => source.id === "controller")?.detail).toContain("last recorded stopped; the hub's launch is running");
-    // Once the launch is over, the controller's record is the status again.
+    // Once the launch is over, the hub's state is the status, and the run's blocker is shown again.
     item.state = "blocked"; delete item.launch;
-    expect(withHubSnapshot(owned, item, hub(item), hubAt).run.status).toBe("stopped");
+    const idle = withHubSnapshot(owned, item, hub(item), hubAt);
+    expect(idle.run).toMatchObject({ status: "blocked", blocker: "the earlier stop" });
+    expect(idle.sources.find(source => source.id === "controller")?.detail).toContain("last recorded stopped; no launch is active; the hub's submission is blocked");
     // A running controller needs no reconciliation.
     run.status = "running"; item.state = "running"; item.launch = launch("resume");
     expect(withHubSnapshot(snapshotOf(run, observedAt), item, hub(item), hubAt).sources.find(source => source.id === "controller")?.detail ?? "").not.toContain("last recorded");

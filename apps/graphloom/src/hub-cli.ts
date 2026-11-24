@@ -14,7 +14,7 @@ import { hubRequest } from "./hub-client.js";
 import { captureLoginEnvironment, dropInPath, environmentDropIn, tokenEnvFileText, tokensDropIn, writeOwnerOnly, type CapturedEnvironment, type HubDoctorResult } from "./hub-environment.js";
 import { formatDoctor } from "./doctor.js";
 import { loadRunnerConfig } from "./runner-config.js";
-import { HUB_LIST_LIMIT_MAX, HUB_STATES, listQuery, type HubListFilter } from "./hub-history.js";
+import { blockerOf, HUB_LIST_LIMIT_MAX, HUB_STATES, listQuery, type HubListFilter } from "./hub-history.js";
 import { serveHub, type HubLogPage } from "./hub-server.js";
 import type { HubEventPage } from "./hub-events.js";
 import { parseRemedy } from "./hub-managed.js";
@@ -308,8 +308,8 @@ export function pointInTime(value: string, now: number, name: string): string {
 export function formatHubSearch(status: HubStatus): string {
   const one = (value: string) => safeText(value).replace(/\s+/g, " ").trim();
   const rows = [
-    ...status.submissions.map((item) => ({ at: item.acceptedAt, id: item.id, state: item.state, runId: item.runId, graph: status.summaries?.[item.id]?.graph, line: status.summaries?.[item.id]?.firstLine, blocker: item.blocker ?? item.observation?.blocker, archived: false, rehearsal: item.input.rehearsal !== undefined ? status.rehearsals?.[item.id]?.verdict ?? "pending" : undefined })),
-    ...(status.archived ?? []).map((entry) => ({ at: entry.acceptedAt, id: entry.id, state: entry.state, runId: entry.runId, graph: entry.graph, line: entry.request?.firstLine, blocker: entry.blocker, archived: true, rehearsal: entry.rehearsal !== undefined ? entry.rehearsalVerdict ?? "pending" : undefined })),
+    ...status.submissions.map((item) => ({ at: item.acceptedAt, id: item.id, state: item.state, runId: item.runId, graph: status.summaries?.[item.id]?.graph, line: status.summaries?.[item.id]?.firstLine, blocker: blockerOf(item), archived: false, rehearsal: item.input.rehearsal !== undefined ? status.rehearsals?.[item.id]?.verdict ?? "pending" : undefined })),
+    ...(status.archived ?? []).map((entry) => ({ at: entry.acceptedAt, id: entry.id, state: entry.state, runId: entry.runId, graph: entry.graph, line: entry.request?.firstLine, blocker: entry.state === "succeeded" ? undefined : entry.blocker, archived: true, rehearsal: entry.rehearsal !== undefined ? entry.rehearsalVerdict ?? "pending" : undefined })),
   ].sort((a, b) => Date.parse(b.at) - Date.parse(a.at) || b.id.localeCompare(a.id));
   const matched = status.matched ?? rows.length;
   return [`Hub ${status.hubId} · ${rows.length === matched ? `${matched}` : `${rows.length} of ${matched}`} matching submission${matched === 1 ? "" : "s"}`,

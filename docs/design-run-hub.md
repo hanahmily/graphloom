@@ -132,7 +132,9 @@ resume: approval inputs, reconciliation acknowledgement, and plugin, executor or
 product upgrades. They are stored as a typed, single-use command and applied by
 the owning CLI under the run lock. `--update-plugin` follows the operator's task's
 plugin link to the bundle it names at acceptance ([§4.2](#42-moving-a-run-to-a-newer-plugin)). Automatic resume supplies none of these.
-Replies distinguish an accepted command from a completed run transition.
+Replies distinguish an accepted command from a completed run transition; what
+became of the latest resume is in the submission's `lastResume`
+([§3.2](#32-what-became-of-a-resume)).
 
 Example configuration:
 
@@ -220,6 +222,37 @@ graph, request digest and request first line, archive matches in `archived`, and
 captured task once (they are immutable) to know its graph and request; an
 unreadable task matches no graph and no request text.
 
+### 3.2 What became of a resume
+
+An accepted resume is never dropped silently. The submission's `lastResume`
+records the latest one by command ID with its status:
+
+| Status | Meaning |
+| --- | --- |
+| `pending` | Accepted, waiting for a slot, or held by a pause; the next launch carries it |
+| `launched` | The current launch carries it |
+| `applied` | The run took it: the launch returned a run report, or the controller recorded the command applied under the run lock |
+| `refused` | The run refused it before changing anything (`reason`, [§6.1](#61-a-launchs-report-of-its-end)) |
+| `withdrawn` | It ended unapplied (`reason`): a cancel, a crash, a service interruption, a failed plugin reconciliation |
+
+A pause keeps an accepted resume. A pause that lands before the launch carrying
+a resume applied it (the launch's grant is withdrawn) puts the command back as
+the submission's pending command; so does a launch that never started its run,
+or a plain resume accepted while the launch drained. The next resume releases
+the hold and its launch applies the held command: a plain `hub resume` does not
+replace a held remedy, while a new remedy replaces it. A withdrawn command is
+not kept, since the next launch may be an automatic continuation, which carries
+no remedy.
+
+A retried command ID with a different request is a conflict. A retry of the
+same request is answered from the record, except for a resume the run never
+applied: one held by a pause, or withdrawn. Its retry applies it (the hub
+queues it again; `--update-plugin` resolves the plugin link again), so a
+retry never reports success for a command that did nothing. A refused resume
+is answered from the record with its reason: the same request is refused the
+same way, and a corrected remedy needs a new command ID. The controller's own
+per-command record keeps a reapplied command from applying twice.
+
 ## 4. Submission inputs and durable state
 
 Submission captures task bytes, config bytes, canonical repository and bundle
@@ -294,7 +327,8 @@ original task path, the submission's request digest, the request's own SHA-256
 and first nonblank line (at most 200 characters), acceptance, settlement (the
 terminal record's last update) and archive times, the final state, the run's
 state directory (`<hub directory>/runs/<runId>`) and the last blocker (at most
-512 characters). Graph, request and state directory come from the captured task
+512 characters; none for a succeeded submission, whatever its completion stop
+recorded). Graph, request and state directory come from the captured task
 and the hub runtime; when they cannot be read the entry omits them and the
 archive still proceeds. An entry that still exceeds 16 KiB keeps only its
 identity, times, state and clipped paths.
@@ -344,7 +378,11 @@ link. If the controller accepted the update, the hub records the new bundle as
 the submission's plugin, and retention releases the old version's pin unless
 something else (for example the captured runtime) still references it. If it
 refused, the hub points the private link back at the recorded bundle, so the
-run stays on its pinned plugin and the stop reason says why. Any other resume,
+run stays on its pinned plugin and the stop reason says why. The refusal
+replaces the run's recorded stop with the pin mismatch, while the stop the
+resume answered (an approval the run waits on, say) is still in force, so the
+blocker shows both: `plugin update refused: <mismatch>; the run still stops on:
+<earlier blocker>`. Any other resume,
 including a plain `hub resume`, keeps the recorded bundle exactly; it also
 repairs a private link an interrupted update left behind. A failure of this
 reconciliation blocks the submission with `plugin reconciliation failed: …`
@@ -491,6 +529,33 @@ and the binding reconciled under both locks; deletion does not bypass ownership.
 Older runtimes without this protocol cannot manage bound runs. This is lifecycle
 coordination for trusted users, not a security boundary against the owning account.
 
+### 6.1 A launch's report of its end
+
+A managed launch that gets its grant writes how it ended to
+`<hub>/submissions/<s>/launches/<launchId>.json` before it exits
+(`HubLaunchReport`): `completed` when its command returned a run report,
+`refused` when it refused its request before changing the run, `error` for any
+other failure (its message, for display only), and, for a launch that carried an
+operator command, whether the run applied it. It is a report, never authority:
+drainage is still verified as above, the hub reads it only once the controller
+owner is gone, and one that names another launch or generation is ignored. A
+killed launch writes none.
+
+A refusal has a structured cause, the error's type, never its text:
+`RequestRefusedError` with `invalid-remedy` (an approval or decline the run
+refuses: an undeclared approval ID, an input that does not fit, a finished run)
+or `invalid-scenario` (a rehearsal scenario the bundle does not declare),
+`IntakeError` (`invalid-task`: the task, its config or the bundle manifest) and
+`UpgradeRefusedError` (`upgrade-refused`). Retrying the same request is refused
+the same way, so the hub does not retry it: the submission blocks at once with
+`launch refused: <reason>` (an initial launch) or `resume refused: <reason>;
+the run still stops on: <earlier blocker>` (a resume, whose run is unchanged),
+and the resume's `lastResume` is `refused`. The submission stays recoverable: a
+corrected remedy under a new command ID applies, and a plain `hub resume`
+retries an initial launch (captured input is immutable, so a refused task or
+scenario needs a new submission). Any other failure follows the continuation
+rules of §7.
+
 ## 7. Automatic continuation
 
 The controller currently exposes stop retryability, quota/retry timing, and
@@ -538,7 +603,14 @@ Every failure-driven automatic resume spends one of the submission's five defaul
 durably before launch. The default backoff is 30 seconds, doubling to 30 minutes,
 with nonnegative jitter up to 20%. A provider `notBefore` is a lower bound and is
 never shortened by the backoff cap. Three repetitions of one failure fingerprint
-without accepted progress block further automatic resumes. Neither progress nor
+without accepted progress block further automatic resumes. The blocker names the
+limit reached and the last cause, for example `automatic retry stopped: retry
+allowance used (5/5 automatic resumes); last cause: initialization-failed: <the
+launch's error>`, or `the same failure repeated 3 times without accepted
+progress`, or the elapsed retry window; the cause is the continuation's, with
+the launch's reported error, the run's blocker, or `the launch ended without
+reporting its end (killed or crashed)`. A launch's refusal (§6.1) is never
+retried. Neither progress nor
 a daemon restart resets the total attempt count or 24-hour retry window. A manual
 resume does not replenish these limits; renewal is an explicit policy change.
 No hub policy increases the controller's remaining budgets.
@@ -617,9 +689,29 @@ state not written yet`, not `unknown` and the read error. While a launch is
 starting or running and the controller's last record says otherwise (a
 resumed run reads `stopped` until its first save), the overview shows the
 hub's state, the controller source notes `last recorded <status>`, and the
-earlier blocker is not repeated. Each managed launch ends its stderr log
-(`hub logs`) with `graphloom: run <id> <status>[: <stop reason>][; blocker:
-<blocker>][ (retryable|final)]`.
+earlier blocker is not repeated. With no launch active nothing runs, so the
+overview's status is the hub's (`waiting`, `paused`, `blocked`, `queued`,
+`succeeded`...), never a killed controller's last `running`; the controller
+source notes `last recorded <status>; no launch is active`, and the blocker is
+the hub's, else the run's (an approval it waits on). Before the run's state
+exists, the overview's graph is the captured task's. A succeeded submission has
+no blocker in any view: plugins often record `none` on their completion stop.
+The jobs panel lists every job the run recorded, as `stats` counts them (the
+usage panel's jobs): agent sessions, and command and other jobs by the producer
+of their evidence (`settled`, with their evidence), leaving out environment
+checks and an agent's own tool calls.
+
+Each managed launch starts its stderr log (`hub logs`) with `graphloom: run <id>
+starting|resuming|resuming automatically|reconciling (launch <launchId>,
+generation <n>)[: <remedy flags>]` and ends it with `graphloom: run <id>
+<status>[: <stop reason>][; blocker: <blocker>][ (retryable|final)]`; a launch
+that refused or failed ends it with `graphloom: run <id> refused: <reason>
+(final)` or `graphloom: run <id> error: <message>`. When a launch ends without
+reporting its end (§6.1: killed, or crashed), the hub appends the closing line
+as it settles it: `graphloom: run <id> <hub state>: the launch ended without
+reporting its end; the hub settled it[; blocker: …|; next attempt at …]`.
+`hub logs` without `--launch` reads the active launch's log while one runs,
+else the latest written.
 
 Read failures retain the last observation with a stale marker. Silence reports
 possible lack of progress; it never proves death or authorizes a replacement.
@@ -976,6 +1068,9 @@ Test observable admission and process behavior, not just queue implementation.
 | Repeated transient failure across daemon restarts | Durable backoff, repetition and total limits eventually block |
 | Same idempotency key with same/different payload | Same submission/conflict respectively, including lost response |
 | Crash after operator remedy applies but before hub acknowledgement | Command result reconciles without applying remedy twice |
+| Pause lands right after a remedy resume is accepted | The remedy is held and applies on the next resume, or a retry of its command ID applies it; never reported applied when it was not |
+| A remedy or launch input the run refuses (wrong approval ID, unknown scenario) | Blocked at once with the refusal and the earlier stop, not retried; a corrected command still applies |
+| Automatic retries run out | The blocker names the limit reached and the last cause |
 | Task/config/base/bundle changes while queued | Captured inputs used or explicit drift blocker; no silent substitution |
 | Slow log reader, disk full, corrupt/newer snapshot | Bounded memory; no unpersisted launch; explicit health failure |
 | Admission capacity filled with existing runs active | Pause, cancel, drainage and settlement still persist within reserved capacity |

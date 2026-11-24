@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
-import type { HubArchiveEntry, HubConfig, HubInput, HubLaunch, HubObservation, HubProcessIdentity, HubSubmission } from "@graphloom/sdk";
+import type { HubArchiveEntry, HubConfig, HubInput, HubLaunch, HubLaunchReport, HubObservation, HubProcessIdentity, HubSubmission } from "@graphloom/sdk";
 
 export interface HubExecutionObservation {
   execution: "live" | "drained" | "uncertain";
@@ -9,6 +9,8 @@ export interface HubExecutionObservation {
   ownerGone: boolean;
   externalStopped: boolean;
   observation?: HubObservation;
+  /** What the launch reported about its own end (docs/design-run-hub.md §6.1); absent when it wrote nothing (it was killed). */
+  report?: HubLaunchReport;
   reason?: string;
 }
 export interface HubDriver {
@@ -27,6 +29,11 @@ export interface HubDriver {
    * submission's recorded plugin; a throw blocks the submission with the reason.
    */
   settleInput?(launch: HubLaunch, submission: HubSubmission): Promise<{ bundlePath: string; bundleDigest: string } | undefined>;
+  /**
+   * Appends one line to the launch's stderr log: the hub closes the log of a launch
+   * that ended without reporting its end (docs/design-run-hub.md §8).
+   */
+  appendLog?(launch: HubLaunch, submission: HubSubmission, line: string): Promise<void>;
   close?(): Promise<void>;
 }
 export interface OpenHubOptions {

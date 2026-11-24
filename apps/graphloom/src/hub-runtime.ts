@@ -15,6 +15,7 @@ import { loadRunnerConfig } from "./runner-config.js";
 import type { OwnedMonitorResult } from "./hub-observe.js";
 import { observeInitialization } from "./hub-initialization.js";
 import { preparePluginLink, settlePluginLink } from "./hub-plugin.js";
+import { readLaunchReport } from "./hub-launch-report.js";
 import { selfInstall, type SelfInstall } from "./ownership.js";
 
 const exec = promisify(execFile);
@@ -50,7 +51,9 @@ export function createHubRuntime(config: HubServiceConfig, wake: () => void): { 
     const frame: MonitorSnapshot = { schemaVersion: 1, frameId: launch.id, observedAt: new Date().toISOString(), run: { id: submission.runId, status: "unknown" }, sources: [] };
     await addProcessMetrics(frame, launch, samples, config.cgroupRoot);
     processFrames.set(submission.id, frame);
-    return { ownerGone, externalStopped: false, ...(observation !== undefined ? { observation } : {}) };
+    // A launch that ended reports how (§6.1); the hub reads it only once the controller is gone.
+    const report = ownerGone ? await readLaunchReport(config.directory, submission.id, launch) : undefined;
+    return { ownerGone, externalStopped: false, ...(observation !== undefined ? { observation } : {}), ...(report !== undefined ? { report } : {}) };
   };
   const cleanup = async (launch: HubLaunch, submission: HubSubmission, observed?: Awaited<ReturnType<typeof observe>>) => {
     const result = observed ?? await observe(launch, submission);

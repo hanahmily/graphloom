@@ -19,6 +19,9 @@ import { runtimeDigest } from "../src/hub-input.js";
 import { selfInstall } from "../src/ownership.js";
 import { launchEndLine, parseRemedy, remedyArgs } from "../src/hub-managed.js";
 import { observeInitialization } from "../src/hub-initialization.js";
+import { readLaunchReport, refusalOf } from "../src/hub-launch-report.js";
+import { IntakeError, UpgradeRefusedError } from "@graphloom/controller";
+import { RequestRefusedError } from "@graphloom/sdk";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const exec = promisify(execFile);
@@ -31,7 +34,7 @@ afterEach(async () => {
   await new Promise((resolve) => setTimeout(resolve, 20));
   await Promise.all(folders.splice(0).map((folder) => rm(folder, { recursive: true, force: true })));
 });
-async function fixture(mode: HubLaunch["mode"] = "initial", actualRun = false, actualMain = false, failInitialStateWrite = false) {
+async function fixture(mode: HubLaunch["mode"] = "initial", actualRun = false, actualMain = false, failInitialStateWrite = false, body = "await context.grant.verify();", command?: HubLaunch["command"]) {
   const directory = await mkdtemp(path.join(tmpdir(), "graphloom-bootstrap-")); folders.push(directory);
   const repo = path.join(directory, "repo"); await mkdir(repo);
   for (const args of [["init", "-q"], ["config", "user.name", "Test"], ["config", "user.email", "test@example.com"], ["config", "commit.gpgsign", "false"]]) await exec("git", args, { cwd: repo });
@@ -63,10 +66,12 @@ async function fixture(mode: HubLaunch["mode"] = "initial", actualRun = false, a
   await hub.tick();
   const submission = hub.inspect(result.id);
   const snapshotFile = path.join(hubDirectory, "scheduler.json");
-  const snapshot = JSON.parse(await readFile(snapshotFile, "utf8")); snapshot.submissions[submission.id].launch.mode = mode; await writeFile(snapshotFile, JSON.stringify(snapshot));
+  const snapshot = JSON.parse(await readFile(snapshotFile, "utf8")); snapshot.submissions[submission.id].launch.mode = mode;
+  if (command !== undefined) snapshot.submissions[submission.id].launch.command = command;
+  await writeFile(snapshotFile, JSON.stringify(snapshot));
   const marker = path.join(directory, "callback.json"); const active = path.join(directory, "active");
   const script = path.join(directory, "bootstrap.mjs");
-  await writeFile(script, `import { writeFile } from 'node:fs/promises';\nimport { managedMain } from ${JSON.stringify(pathToFileURL(path.join(root, "apps/graphloom/dist/hub-managed.js")).href)};\nimport { createController } from ${JSON.stringify(pathToFileURL(path.join(root, "packages/controller/dist/index.js")).href)};\nimport { createScriptedRunner } from ${JSON.stringify(pathToFileURL(path.join(root, "packages/runner/dist/index.js")).href)};\nprocess.stdout.write('ready\\n');\ntry { await managedMain(${JSON.stringify([hubDirectory, submission.id])}, async (argv, context) => {\nawait writeFile(${JSON.stringify(marker)}, JSON.stringify({argv, grant:context.grant}));\n${actualRun ? `const runner = {...createScriptedRunner({jobs:[async (_job, ctx) => { await writeFile(${JSON.stringify(active)}, 'active'); await new Promise(resolve => { if(ctx.signal?.aborted) resolve(); else ctx.signal?.addEventListener('abort',()=>resolve(),{once:true}); }); return {status:'failed',summary:'fixture interrupted'}; }]}), managed:{async check(){},async drain(){return {drained:true,resources:[]};}}};\nawait createController().run({taskPath:argv[1],stateRoot:${JSON.stringify(path.join(hubDirectory, "runs"))},runId:context.grant.runId,managed:context.grant,onRunCreated:context.created,runner});` : "await context.grant.verify();"}\n}); } catch(error) { process.stderr.write(error.message+'\\n'); process.exitCode=1; }`);
+  await writeFile(script, `import { writeFile } from 'node:fs/promises';\nimport { managedMain } from ${JSON.stringify(pathToFileURL(path.join(root, "apps/graphloom/dist/hub-managed.js")).href)};\nimport { createController } from ${JSON.stringify(pathToFileURL(path.join(root, "packages/controller/dist/index.js")).href)};\nimport { createScriptedRunner } from ${JSON.stringify(pathToFileURL(path.join(root, "packages/runner/dist/index.js")).href)};\nimport { RequestRefusedError } from ${JSON.stringify(pathToFileURL(path.join(root, "packages/sdk/dist/index.js")).href)};\nprocess.stdout.write('ready\\n');\ntry { await managedMain(${JSON.stringify([hubDirectory, submission.id])}, async (argv, context) => {\nawait writeFile(${JSON.stringify(marker)}, JSON.stringify({argv, grant:context.grant}));\n${actualRun ? `const runner = {...createScriptedRunner({jobs:[async (_job, ctx) => { await writeFile(${JSON.stringify(active)}, 'active'); await new Promise(resolve => { if(ctx.signal?.aborted) resolve(); else ctx.signal?.addEventListener('abort',()=>resolve(),{once:true}); }); return {status:'failed',summary:'fixture interrupted'}; }]}), managed:{async check(){},async drain(){return {drained:true,resources:[]};}}};\nawait createController().run({taskPath:argv[1],stateRoot:${JSON.stringify(path.join(hubDirectory, "runs"))},runId:context.grant.runId,managed:context.grant,onRunCreated:context.created,runner});` : body}\n}); } catch(error) { process.stderr.write(error.message+'\\n'); process.exitCode=1; }`);
   const argv = actualMain ? [path.join(root, "apps/graphloom/dist/main.js"), "__hub-managed", hubDirectory, submission.id] : [script];
   const failpoint = path.join(directory, "fail-initial-state.mjs");
   if (failInitialStateWrite) await writeFile(failpoint, String.raw`
@@ -195,6 +200,43 @@ describe("managed CLI fd3 bootstrap", () => {
       expect(state.managedContinuation).toMatchObject({ cause: "service-interruption", interruptionCommandId: stopId });
       expect(state.status).toBe("stopped");
     }
+  });
+});
+
+describe("a managed launch's report of its own end (docs/design-run-hub.md §6.1)", () => {
+  const approve = (id: string): HubLaunch["command"] => ({ id, kind: "resume", acceptedAt: new Date().toISOString(), remedy: { approve: "not-an-approval", inputs: { ruling: "yes" } } });
+  it("reports a refused remedy with its structured cause, and the hub blocks on it with the reason", async () => {
+    const reason = 'graph hello declares no approval "not-an-approval"; it declares ruling';
+    const f = await fixture("resume", false, false, false, `throw new RequestRefusedError(${JSON.stringify(reason)}, "invalid-remedy");`, approve("cmd-wrong"));
+    f.send(f.grant);
+    const result = await f.done; expect(result.code).toBe(1);
+    // The log starts with what the launch runs and ends with how it ended.
+    const lines = result.stderr.trim().split("\n");
+    expect(lines[0]).toBe(`graphloom: run ${f.submission.runId} resuming (launch ${f.grant.launchId}, generation 1): --approve not-an-approval --input ruling=yes`);
+    expect(lines).toContain(`graphloom: run ${f.submission.runId} refused: ${reason} (final)`);
+    const report = await readLaunchReport(f.hubDirectory, f.submission.id, { id: f.grant.launchId, generation: 1 });
+    expect(report).toMatchObject({ outcome: "refused", refusal: { cause: "invalid-remedy", reason }, command: { id: "cmd-wrong", applied: false } });
+    f.driver.inspect = async () => ({ execution: "drained", ownerGone: true, externalStopped: true, ...(report ? { report } : {}) });
+    await f.hub.tick();
+    expect(f.hub.inspect(f.submission.id)).toMatchObject({ state: "blocked", blocker: `launch refused: ${reason}` });
+  });
+  it("reports any other failure as an error, and a resume the run never applied as not applied", async () => {
+    const f = await fixture("resume", false, false, false, "await context.grant.verify();", approve("cmd-held"));
+    // The pause lands as the launch starts (written beside the live hub, which keeps the fixture's command on the launch).
+    const stored = JSON.parse(await readFile(f.snapshotFile, "utf8")); stored.submissions[f.submission.id].desiredAction = "hold"; await writeFile(f.snapshotFile, JSON.stringify(stored));
+    f.send(f.grant);
+    const result = await f.done; expect(result).toMatchObject({ code: 1, stderr: expect.stringContaining(`graphloom: run ${f.submission.runId} error: managed launch grant is absent, stale, or withdrawn`) });
+    const report = await readLaunchReport(f.hubDirectory, f.submission.id, { id: f.grant.launchId, generation: 1 });
+    expect(report).toMatchObject({ outcome: "error", error: "managed launch grant is absent, stale, or withdrawn", command: { id: "cmd-held", applied: false } });
+    expect(report).not.toHaveProperty("refusal");
+    // A report for another launch is not this one's.
+    expect(await readLaunchReport(f.hubDirectory, f.submission.id, { id: f.grant.launchId, generation: 2 })).toBeUndefined();
+  });
+  it("classifies refusals by error type, never by message text", () => {
+    expect(refusalOf(new RequestRefusedError("no scenario named \"x\"", "invalid-scenario"))).toEqual({ cause: "invalid-scenario", reason: "no scenario named \"x\"" });
+    expect(refusalOf(new IntakeError("task.yaml must declare graph, repo, and request"))).toMatchObject({ cause: "invalid-task" });
+    expect(refusalOf(new UpgradeRefusedError("older release"))).toMatchObject({ cause: "upgrade-refused" });
+    expect(refusalOf(new Error("no scenario named \"x\"; this bundle declares: happy"))).toBeUndefined();
   });
 });
 

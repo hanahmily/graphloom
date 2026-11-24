@@ -5,8 +5,9 @@ import { randomUUID } from "node:crypto";
 import { Socket } from "node:net";
 import path from "node:path";
 import { assertHubGrant } from "@graphloom/hub";
-import { createController, readManagedBinding, resolveStateDir, type ManagedRunGrant } from "@graphloom/controller";
-import type { HubResumeRemedy, HubSubmission } from "@graphloom/sdk";
+import { createController, managedCommandApplied, readManagedBinding, resolveStateDir, type ManagedRunGrant } from "@graphloom/controller";
+import type { HubLaunch, HubLaunchReport, HubResumeRemedy, HubSubmission } from "@graphloom/sdk";
+import { refusalOf, writeLaunchReport } from "./hub-launch-report.js";
 import { boundedText, materializeHubTask } from "./hub-input.js";
 import { verifyHubExecutionInput } from "./hub-runtime.js";
 import { hubRequest } from "./hub-client.js";
@@ -94,49 +95,71 @@ export async function managedMain(args: string[], run: (argv: string[], context:
     const submission = await readStoredSubmission(directory, id);
     const launch = submission.launch;
     if (!launch || message.hubId !== submission.hubId || message.submissionId !== id || message.runId !== submission.runId || message.launchId !== launch.id || message.generation !== launch.generation) throw new Error("managed start grant does not match its reservation");
-    if (launch.automatic && launch.command?.remedy !== undefined) throw new Error("automatic managed continuation cannot carry operator remedies");
-    grant = {
-      protocolVersion: 1, hubId: submission.hubId, hubStateDir: directory, submissionId: id,
-      runId: submission.runId, generation: launch.generation, launchId: launch.id,
-      automatic: launch.automatic,
-      ...(launch.continuationFingerprint !== undefined ? { continuationFingerprint: launch.continuationFingerprint } : {}),
-      ...(launch.command !== undefined ? { commandId: launch.command.id, ...(launch.command.kind === "service-interruption" ? { interruptionCommandId: launch.command.id } : {}) } : {}),
-      verify: async () => {
-        if (closed || pendingStop) throw new Error("managed execution grant was withdrawn");
-        await assertHubGrant(directory, grant!);
-      },
-    };
-    await grant.verify();
-    await verifyHubExecutionInput(submission, {
-      initial: launch.mode === "initial", upgrade: launch.command?.remedy?.upgrade === true, requireCurrent: true,
-    });
-    const pinned = submission.input.runtimeConfig;
-    if (pinned?.runner) process.env.GRAPHLOOM_RUNNER_CONFIG = pinned.runner.path;
-    if (pinned?.supervisor) process.env.GRAPHLOOM_SUPERVISOR_CONFIG = pinned.supervisor.path;
-    else {
-      // Suppress a newly created default supervisor config which was absent at submission.
-      process.env.GRAPHLOOM_HUB_NO_SUPERVISOR = "1";
+    // From here the launch reports how it ended (docs/design-run-hub.md §6.1): refused, failed, or completed.
+    let ended: Pick<HubLaunchReport, "outcome" | "refusal" | "error"> = { outcome: "completed" };
+    try {
+      if (launch.automatic && launch.command?.remedy !== undefined) throw new Error("automatic managed continuation cannot carry operator remedies");
+      grant = {
+        protocolVersion: 1, hubId: submission.hubId, hubStateDir: directory, submissionId: id,
+        runId: submission.runId, generation: launch.generation, launchId: launch.id,
+        automatic: launch.automatic,
+        ...(launch.continuationFingerprint !== undefined ? { continuationFingerprint: launch.continuationFingerprint } : {}),
+        ...(launch.command !== undefined ? { commandId: launch.command.id, ...(launch.command.kind === "service-interruption" ? { interruptionCommandId: launch.command.id } : {}) } : {}),
+        verify: async () => {
+          if (closed || pendingStop) throw new Error("managed execution grant was withdrawn");
+          await assertHubGrant(directory, grant!);
+        },
+      };
+      await grant.verify();
+      await verifyHubExecutionInput(submission, {
+        initial: launch.mode === "initial", upgrade: launch.command?.remedy?.upgrade === true, requireCurrent: true,
+      });
+      const pinned = submission.input.runtimeConfig;
+      if (pinned?.runner) process.env.GRAPHLOOM_RUNNER_CONFIG = pinned.runner.path;
+      if (pinned?.supervisor) process.env.GRAPHLOOM_SUPERVISOR_CONFIG = pinned.supervisor.path;
+      else {
+        // Suppress a newly created default supervisor config which was absent at submission.
+        process.env.GRAPHLOOM_HUB_NO_SUPERVISOR = "1";
+      }
+      // Stand-ins answer only inside a rehearsal launch, which sets their variables itself
+      // (rehearsal.ts); no launch keeps any it inherited from the hub's environment.
+      // The mode is the captured input's, never a client's: a real submission never runs
+      // on stand-ins, and a rehearsal submission never on real harnesses.
+      const rehearsal = submission.input.rehearsal;
+      dropStandInVariables(process.env, { keepRehearsalToken: rehearsal !== undefined });
+      const remedies = remedyArgs(launch.command?.remedy);
+      const command = launch.mode === "initial"
+        ? [rehearsal !== undefined ? "rehearse" : "run", await materializeHubTask(submission.input), "--state-root", path.join(directory, "runs"), ...(rehearsal !== undefined ? rehearsalArgs(rehearsal) : [])]
+        : launch.mode === "reconcile" ? ["__hub-reconcile", stateDirFor(submission.runId), ...(rehearsal !== undefined ? ["--rehearsal"] : [])]
+        : ["resume", stateDirFor(submission.runId), ...(rehearsal !== undefined ? ["--rehearsal"] : []), ...remedies];
+      // Every launch's log starts with what it runs, so `hub logs` shows the current launch at once (§8).
+      console.error(launchStartLine({ runId: submission.runId, launchId: launch.id, generation: launch.generation, mode: launch.mode, automatic: launch.automatic, remedies }));
+      if (launch.mode !== "initial") { created = true; await stop(); }
+      await grant.verify();
+      await run(command, {
+        grant,
+        async created(value) {
+          created = true;
+          if (!closed) channel.write(`${JSON.stringify({ protocolVersion: 1, type: "created", ...value, launchId: launch.id, generation: launch.generation })}\n`);
+          await stop();
+        },
+      });
+    } catch (error) {
+      const refusal = refusalOf(error);
+      const reason = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, " ").trim().slice(0, 1024) || "unknown error";
+      ended = refusal !== undefined ? { outcome: "refused", refusal } : { outcome: "error", error: reason };
+      // The launch's log ends with how it ended, like a run's last line (§8).
+      console.error(launchEndLine({ runId: submission.runId, status: refusal !== undefined ? "refused" : "error", stopReason: reason, ...(refusal !== undefined ? { stopRetryable: false } : {}) }));
+      throw error;
+    } finally {
+      const commandId = launch.command?.id;
+      const applied = commandId === undefined ? undefined
+        : ended.outcome === "completed" || await managedCommandApplied(stateDirFor(submission.runId), commandId).catch(() => false);
+      await writeLaunchReport(directory, id, {
+        protocolVersion: 1, launchId: launch.id, generation: launch.generation, ...ended,
+        ...(commandId !== undefined ? { command: { id: commandId, applied: applied === true } } : {}), endedAt: new Date().toISOString(),
+      }).catch((error: unknown) => console.error(`managed launch report: ${error instanceof Error ? error.message : String(error)}`));
     }
-    // Stand-ins answer only inside a rehearsal launch, which sets their variables itself
-    // (rehearsal.ts); no launch keeps any it inherited from the hub's environment.
-    // The mode is the captured input's, never a client's: a real submission never runs
-    // on stand-ins, and a rehearsal submission never on real harnesses.
-    const rehearsal = submission.input.rehearsal;
-    dropStandInVariables(process.env, { keepRehearsalToken: rehearsal !== undefined });
-    const command = launch.mode === "initial"
-      ? [rehearsal !== undefined ? "rehearse" : "run", await materializeHubTask(submission.input), "--state-root", path.join(directory, "runs"), ...(rehearsal !== undefined ? rehearsalArgs(rehearsal) : [])]
-      : launch.mode === "reconcile" ? ["__hub-reconcile", stateDirFor(submission.runId), ...(rehearsal !== undefined ? ["--rehearsal"] : [])]
-      : ["resume", stateDirFor(submission.runId), ...(rehearsal !== undefined ? ["--rehearsal"] : []), ...remedyArgs(launch.command?.remedy)];
-    if (launch.mode !== "initial") { created = true; await stop(); }
-    await grant.verify();
-    await run(command, {
-      grant,
-      async created(value) {
-        created = true;
-        if (!closed) channel.write(`${JSON.stringify({ protocolVersion: 1, type: "created", ...value, launchId: launch.id, generation: launch.generation })}\n`);
-        await stop();
-      },
-    });
     if (!closed) channel.write(`${JSON.stringify({ protocolVersion: 1, type: "settled", runId: submission.runId, launchId: launch.id, generation: launch.generation })}\n`);
   } finally {
     process.off("SIGTERM", signal); process.off("SIGINT", signal);
@@ -224,6 +247,12 @@ export async function routeManagedCommand(cmd: string, args: string[]): Promise<
   const result = await hubRequest("POST", `/v1/submissions/${binding.submissionId}/${cmd === "stop" ? "pause" : "resume"}`, { commandId, ...(remedy !== undefined ? { remedy } : {}) }, endpoint.socket);
   console.log(JSON.stringify(result, null, 2));
   return true;
+}
+
+/** The first line a managed launch writes to its stderr log: which launch of which run, and what it runs. */
+export function launchStartLine(launch: { runId: string; launchId: string; generation: number; mode: HubLaunch["mode"]; automatic: boolean; remedies: string[] }): string {
+  const what = launch.mode === "initial" ? "starting" : launch.mode === "reconcile" ? "reconciling" : launch.automatic ? "resuming automatically" : "resuming";
+  return `graphloom: run ${launch.runId} ${what} (launch ${launch.launchId}, generation ${launch.generation})${launch.remedies.length > 0 ? `: ${launch.remedies.join(" ").replace(/\s+/g, " ").slice(0, 1000)}` : ""}`;
 }
 
 /**

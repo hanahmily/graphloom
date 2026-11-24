@@ -94,6 +94,13 @@ describe("Linux managed launch adapter with an emulated cgroup filesystem", () =
     await eventually(async () => expect((await f.driver.inspect(f.launch, f.submission)).execution).toBe("drained"));
     await expect(readFile(path.join(launchCgroupPath(cgroups.root, f.launch.id), "cgroup.procs"))).rejects.toMatchObject({ code: "ENOENT" });
   });
+  it("appends the hub's closing line to a launch's stderr log as one line", async () => {
+    const f = await fixture();
+    const logs = path.join(f.directory, "submissions", f.submission.id, "logs"); await mkdir(logs, { recursive: true });
+    const file = path.join(logs, `${f.launch.id}.stderr.log`); await writeFile(file, "graphloom: run run-1 started\n");
+    await f.driver.appendLog!(f.launch, f.submission, "graphloom: run run-1 waiting: the launch ended\nwithout reporting its end");
+    expect(await readFile(file, "utf8")).toBe("graphloom: run run-1 started\ngraphloom: run run-1 waiting: the launch ended without reporting its end\n");
+  });
   it("passes the existing execution observation to cleanup without a second observation", async () => {
     const f = await fixture();
     const observation = { ownerGone: true, externalStopped: false };
