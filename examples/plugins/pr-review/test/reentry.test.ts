@@ -6,7 +6,9 @@ import { describe, expect, it } from "vitest";
 import { attemptEvidence, noteAttempt, readAttempts, type AttemptState } from "../src/kit/attempt.js";
 import { advancePullRequest } from "../src/graph.js";
 import { REVIEW_SCHEMA_NAME } from "../src/review.js";
-import { REVIEWED, assignmentOf, scenarioWith, simulate, viewOf, type Simulation } from "./support.js";
+import { analyze, evidencePull, reportFlowOf } from "../src/kit/analysis.js";
+import { diagramsOf, measurementsOf, outputsOf } from "../src/validators.js";
+import { REVIEWED, assignmentOf, candidateEvidence, profileOf, scenarioWith, simulate, viewOf, type Reentry, type Simulation } from "./support.js";
 
 /** The correctness reviewer's first pass of the review-layer scenario with one comment on a file outside the review's scope, which the deterministic rules refuse. */
 const PROBLEM = /is not a file in the review's scope/;
@@ -170,4 +172,55 @@ describe("the attempt scoping of evidence", () => {
     const stamped = advancePullRequest(viewOf(sim, { evidence: sim.evidence.map((e) => ({ ...e, generation: 1 })), generation: 1 }));
     expect(stamped.action).toEqual(plain.action);
   });
+});
+
+/**
+ * The feature-data-flow scenario with a diagram job that draws differently in each attempt of the Report stage: the first
+ * attempt's drawing, then (after the run is sent back to Report) a second one that only adds an empty rectangle to each
+ * document, so both pass every check.
+ */
+const redrawn = (html: string): string => html.replace("</svg>", '<rect x="0" y="0" width="1" height="1" fill="#ffffff"/></svg>');
+const twoDrawings = () =>
+  scenarioWith("feature-data-flow", (sc) => {
+    const first = sc.results["diagrams-v1"]![0]!.output as { diagrams: Array<{ id: string; html: string }> };
+    sc.results["diagrams-v1"] = [{ output: first }, { output: { diagrams: first.diagrams.map((d) => ({ ...d, html: redrawn(d.html) })) } }];
+  });
+
+describe("the Report stage reentered after its diagram job drew in an earlier attempt", () => {
+  // As in the live run hub-bad193fb (pr-design-review from 0.1.6, the same kit): the validator replayed the first attempt's drawings
+  // while the graph wrote the latest, so report.json never recomputed and the Report stage could not be accepted again.
+  const wroteReport = (job: JobSpec): boolean => ((job.input as { commands?: Array<{ id: string }> } | undefined)?.commands ?? []).some((c) => c.id === "report-write");
+  const cases: Array<[string, Reentry]> = [
+    ["a reentry with the candidate unchanged", { stageId: "report", afterJob: wroteReport }],
+    ["a resume with a plugin update", { stageId: "report", afterJob: wroteReport, resume: { pluginRoot: "/plugin-updated" } }],
+  ];
+  for (const [name, reentry] of cases) {
+    it(`writes the latest attempt's drawings, which the validator recomputes byte for byte: ${name}`, () => {
+      const sim = simulate({ through: "review", scenario: twoDrawings(), reentries: [reentry], maxSteps: 900 });
+      expect(sim.final).toMatchObject({ action: { stop: { reason: REVIEWED } } });
+      expect(sim.jobs.filter((j) => j.resultSchema === "diagrams-v1")).toHaveLength(2);
+      const written = JSON.parse(sim.written!.json) as { diagrams: { features: Record<string, { via: string; svg?: string }> } };
+      const drawings = Object.values(written.diagrams.features);
+      expect(drawings.length).toBeGreaterThan(0);
+      for (const d of drawings) expect(d).toMatchObject({ via: "diagram-design", svg: expect.stringContaining('width="1" height="1"') });
+      // The validator, which also sees the first attempt's drawing, recomputes the bytes the graph wrote.
+      const profile = profileOf();
+      const digest = sim.receipts.at(-1)!.candidateDigest!;
+      const lastState = [...sim.decisions].reverse().find((d) => d.privateState !== undefined)?.privateState;
+      const of = (evidence: EvidenceRecord[]) => {
+        const pr = evidencePull(evidence, profile)!;
+        const a = analyze(evidence, profile, pr);
+        if (a.state !== "ready") throw new Error(a.state);
+        const flow = reportFlowOf(evidence, a.analysis);
+        if (flow.state !== "done") throw new Error(flow.state);
+        return { drawn: diagramsOf(evidence, flow), json: outputsOf(evidence, profile, pr, a.analysis, flow, measurementsOf(evidence, a.analysis, profile)).json };
+      };
+      const validator = of(candidateEvidence(sim.evidence, digest));
+      const graph = of(attemptEvidence(sim.evidence, digest, readAttempts(lastState)));
+      expect(validator.drawn).toEqual(graph.drawn);
+      expect(validator.json).toBe(sim.written!.json);
+      expect(graph.json).toBe(sim.written!.json);
+      expect(sim.receipts.filter((r) => r.stageId === "report" && r.valid).map((r) => r.requirementId).sort()).toEqual(["change-report", "claims-checked", "measurements", "review-context"]);
+    });
+  }
 });

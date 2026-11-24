@@ -7,13 +7,15 @@
  * then judges each drawing: the skill's own `self_check.py` and `verify-geometry.py` in a confined command job, the
  * inertness of the document and of the `<svg>` the report embeds, and the label rule (every visible text is a label
  * of the data the job was given). One correction goes back to the same session; a drawing that still fails is drawn by
- * the plugin instead, with a note. The graph and the validators ask the same function, `diagramFlow`, over the same evidence.
+ * the plugin instead, with a note. The graph and the validators ask the same function, `diagramFlow`, over the same evidence,
+ * and it reads only the runs of the stage's latest attempt (`latestAttemptRuns`), which the graph and a validator both see whole.
  */
 import { MAX_EXECUTOR_INPUT_BYTES, type EnvironmentCommand, type EvidenceRecord } from "@graphloom/sdk";
 import { commandFits } from "./bounds.js";
 import type { FinalFeature } from "./briefing.js";
 import { documentProblems, embeddedSvg, labelProblems, parseSvg, stylesFor, textNodes } from "./diagramsvg.js";
 import { clip } from "./escape.js";
+import { latestAttemptRuns } from "./attempt.js";
 import { agentRuns, commandRuns, outputTail, succeeded, type AgentRun } from "./evidence.js";
 import { feedbackBlock, UNTRUSTED_PREAMBLE, untrusted } from "./prompts.js";
 import type { FileSpill, Fitted } from "./fit.js";
@@ -355,7 +357,9 @@ export function diagramFlow(evidence: readonly EvidenceRecord[], input: DiagramI
   };
   for (const id of overflow) set(id, { via: "plugin", note: `drawn by the plugin: this report has more diagrams than one diagram job takes (at most ${MAX_DIAGRAMS}, and ${MAX_DIAGRAM_DATA_CHARS} characters of data), and the diagram job draws the first ${drawn.length} (the features' data flows, then the lifecycle entries in report order)` });
   if (drawn.length === 0) return { state: "resolved", doc, refs: [] };
-  const runs = agentRuns(evidence, DIAGRAMS_SCHEMA_NAME).slice(0, MAX_DIAGRAM_ATTEMPTS);
+  // The drawing and its correction of the stage's latest attempt, never an earlier attempt's: the graph no longer sees those, a
+  // validator still does, and both must judge the same runs (design §5.1).
+  const runs = latestAttemptRuns(agentRuns(evidence, DIAGRAMS_SCHEMA_NAME)).slice(0, MAX_DIAGRAM_ATTEMPTS);
   const checks = commandRuns(evidence).filter((r) => r.command.id.startsWith(`${DIAGRAM_CHECK}-`));
   // The graph knows the plugin's directory from its environment check; a validator, which sees the checks that ran, reads the mount they were given.
   const mount = pluginRoot !== undefined ? skillMount(pluginRoot) : checks[0]?.command.argv[4];

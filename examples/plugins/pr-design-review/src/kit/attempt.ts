@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import type { EvidenceRecord, RunView } from "@graphloom/sdk";
-import { isObject, producer } from "./evidence.js";
+import { isObject, producer, type Producer } from "./evidence.js";
 
 /**
  * What the graph remembers between calls (the run's private state): for each stage it has seen reentered, the
@@ -67,4 +67,18 @@ export function attemptEvidence(evidence: readonly EvidenceRecord[], digest: str
     const began = stage !== undefined ? state.stages[stage]?.generation : undefined;
     return began === undefined || e.generation >= began;
   });
+}
+
+/**
+ * The runs of one job that the latest attempt of its stage made: those of the newest run's stage and attempt, oldest first
+ * (`producer.attempt`, which the controller records on every job's evidence). A flow that reads a job's runs by position
+ * (the first drawing, then its one correction) reads them through this, so the graph, which no longer sees what an earlier
+ * attempt made (`attemptEvidence`), and a validator, which sees every result of the candidate, pick the same runs (design
+ * §5.1). Runs recorded without an attempt (by an older controller) count as one attempt of their own.
+ */
+export function latestAttemptRuns<T extends { producer: Producer }>(runs: readonly T[]): T[] {
+  const last = runs.at(-1);
+  if (last === undefined) return [];
+  const at = (r: T): number | undefined => (Number.isInteger(r.producer.attempt) ? r.producer.attempt : undefined);
+  return runs.filter((r) => r.producer.stageId === last.producer.stageId && at(r) === at(last));
 }

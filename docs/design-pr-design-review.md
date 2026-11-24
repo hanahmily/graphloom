@@ -1,6 +1,6 @@
 # PR design review graph (`pr-design-review`)
 
-Status: implemented, `pr-design-review` 0.1.6 (`examples/plugins/pr-design-review`).
+Status: implemented, `pr-design-review` 0.1.7 (`examples/plugins/pr-design-review`).
 This is round 1 of a pull request's review: the design-level review. Round 2, the
 detail review, is the [PR-review graph](design-pr-review-graph.md) (`pr-review`
 1.x). The two graphs are independent plugins that share the review kit
@@ -615,3 +615,11 @@ and `large-artifacts` exercise the shared report. The design review's own:
   `report.json` was never written); single-command writes, the ledger write and
   the diagram check use the guard's own check too
   ([PR review §6.6](design-pr-review-graph.md#66-output)).
+- **0.1.7:** the diagram flow reads the diagram job's runs of the Report stage's
+  latest attempt, not the stage's first two runs, so after a reentry or a resume
+  that sends the run back to Report the `change-report` validator judges the
+  drawings the graph wrote and `report.json` recomputes (apache/skywalking-banyandb#1487:
+  the validator replayed the first attempt's drawing and the Report stage could not
+  be accepted again); and the answers' replay clears an earlier attempt's revision
+  when a new attempt answers afresh
+  ([PR review §5.1](design-pr-review-graph.md#51-convergence-after-a-reentry)).
