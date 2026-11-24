@@ -1229,8 +1229,9 @@ for a scenario that expects an approval stop, the verdict is the stop's, and
 the approved continuation's success does not re-grade it, unless the scenario
 rehearses the answer the resume carried
 ([rehearsal §4.4](design-graph-rehearsal.md#44-scenarios)): the scenario then
-continues with the answer's own expectation, and the launch replaces the
-verdict with the continuation's.
+continues with the answer's own expectation, and the answer supersedes the
+recorded verdict: it is pending again, and the launch whose run stops on its
+own records the continuation's.
 `<hub>/rehearsals/<runId>/verdict.json` holds the compact verdict (`verdict`,
 each B-check's status, the blocker, convergence, the run's status and stop
 reason, the launch and time), `report.json` the full report beside it.

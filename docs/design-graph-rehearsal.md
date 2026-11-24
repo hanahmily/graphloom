@@ -779,9 +779,12 @@ submission's `hub resume`) picks the first answer that matches the approval
 ID, the decision and the inputs it names, and continues the scenario with it:
 the decisions the run consumed, then the answer's; the answer's replies in
 place of the scenario's for each contract it names, from their first; and the
-answer's `expect`, which the verdict then judges (the hub replaces the
-verdict it recorded at the stop). The continued scenario replaces the kept
-run's `scenario.json`, and a refused resume restores it. An answer to an
+answer's `expect`, which the verdict then judges (the answer supersedes the
+verdict a hub recorded at the stop: it is pending again until the
+continuation stops on its own). The continued scenario replaces the kept
+run's `scenario.json`; a resume the run did not record the answer in (a
+refusal, a pin or worktree mismatch) restores it, and a run a live
+controller owns is refused before it is touched. An answer to an
 approval the scenario has answers for, but none matching, is refused
 (`invalid-remedy`) and names the answers it rehearses; an approval a scenario
 has no answers for continues the scenario as it is. L0 checks each answer's

@@ -13,7 +13,7 @@ import type { GraphRehearsal } from "@graphloom/sdk";
 import type { RunReport } from "@graphloom/controller";
 import { hubCommand, HUB_USAGE } from "./hub-cli.js";
 import { assertManagedMode, launchEndLine, managedMain, routeManagedCommand, type ManagedExecution } from "./hub-managed.js";
-import { hubRehearsalRoot, readHubVerdict, recordHubVerdict } from "./hub-rehearsal.js";
+import { HUB_REPORT_FILE, HUB_VERDICT_FILE, hubRehearsalRoot, readHubVerdict, recordHubVerdict } from "./hub-rehearsal.js";
 import { observeOwnedRun } from "./hub-observe.js";
 import { cleanupOwnedRun } from "./hub-runtime.js";
 import { approvalFlags } from "./approval-flags.js";
@@ -377,10 +377,12 @@ async function main(args = process.argv.slice(2), launch?: ManagedExecution): Pr
       // A hub rehearsal submission's scratch lives under its hub (docs/design-run-hub.md §12).
       const runRef = await located;
       const rehearsalRoot = managed ? hubRehearsalRoot(managed.grant.hubStateDir, managed.grant.runId) : undefined;
-      // An answer the scenario rehearses continues it (docs/design-graph-rehearsal.md §4.4): its verdict is judged anew.
+      // An answer the scenario rehearses continues it (docs/design-graph-rehearsal.md §4.4): its verdict is judged anew,
+      // so the hub's recorded one is superseded (and pending until the continuation stops on its own).
       let answered = false;
       const report = await resumeRehearsal(runRef, {
         onAnswer: () => { answered = true; },
+        ...(rehearsalRoot !== undefined ? { supersedes: [path.join(rehearsalRoot, HUB_VERDICT_FILE), path.join(rehearsalRoot, HUB_REPORT_FILE)] } : {}),
         ...(stateRoot ? { stateRoot: path.resolve(stateRoot) } : {}),
         ...(upgrade !== undefined ? { upgrade } : {}),
         ...(args.includes("--update-plugin") ? { updatePlugin: true } : {}),
@@ -396,11 +398,10 @@ async function main(args = process.argv.slice(2), launch?: ManagedExecution): Pr
         console.error(`graphloom: rehearsal verdict ${kept.report.verdict}${kept.report.blocker !== undefined ? `: ${kept.report.blocker.boundary} ${kept.report.blocker.reason.replace(/\s+/g, " ").slice(0, 300)}` : ""}`);
       }
       if (managed && rehearsalRoot !== undefined) {
-        // A rehearsal interrupted before its run stopped on its own gets its verdict now; a recorded one stays,
-        // unless this launch answered an approval the scenario rehearses.
-        if (answered || await readHubVerdict(managed.grant.hubStateDir, managed.grant.runId) === undefined) {
+        // A rehearsal interrupted before its run stopped on its own gets its verdict now; a recorded one stays.
+        if (await readHubVerdict(managed.grant.hubStateDir, managed.grant.runId) === undefined) {
           const kept = await evaluateKeptRehearsal(report.stateDir, rehearsalRoot);
-          const verdict = await recordHubVerdict(rehearsalRoot, kept.report, kept.state, managed.grant.launchId, undefined, { replace: answered });
+          const verdict = await recordHubVerdict(rehearsalRoot, kept.report, kept.state, managed.grant.launchId);
           if (verdict !== undefined) console.error(`graphloom: rehearsal verdict ${verdict.verdict}`);
         }
         console.error(launchEndLine(report));
