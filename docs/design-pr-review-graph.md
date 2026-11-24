@@ -341,6 +341,23 @@ evidence, made before any flow reads it:
   a superseded check back from that record, only when it is missing and belongs to the
   same candidate. Without it, a reentry to Fetch with the candidate unchanged would wait
   at the report checker forever.
+- **A flow that reads a job's runs by position reads the latest attempt's.** The
+  validators have no private state, so they still see an earlier attempt's agent
+  results. A flow that replays its runs, where the latest result clears an earlier
+  one, ends where the graph's does. A flow that takes a job's runs by their place
+  (the diagram job's drawing and its one correction, [§6.10](#610-features-and-their-data-flow))
+  takes only the runs of the latest attempt of the job's stage, by the attempt the
+  controller records on each job's evidence (`producer.attempt`, `latestAttemptRuns`
+  in `kit/attempt.ts`): the graph and a validator then pick the same runs, whatever
+  else either one sees. Runs an older controller recorded without an attempt count
+  as one attempt of their own. Before `pr-review` 1.1.7 and `pr-design-review`
+  0.1.7 the diagram flow took the stage's first two runs, which a validator found in
+  the first attempt while the graph, which no longer saw them, drew again; the
+  written `report.json` then never recomputed, and the Report stage could not be
+  accepted after a reentry or a resume that sent the run back to it
+  (apache/skywalking-banyandb#1487). A replay's own state is that of the latest
+  result too: an answer that is not a revision clears what an earlier attempt's
+  revision left, so a validator does not take that revision for the new answer's.
 
 The validators are unchanged. They see the candidate's evidence and replay a stage's
 flow over it, where a later passing result clears an earlier failure, so a fresh
@@ -1269,7 +1286,13 @@ plugin's own SVG is only the fallback:
 - **One correction.** The problems of the diagrams that failed go back to the
   same session once, which returns the whole set again; a diagram that still
   fails after it is drawn by the plugin instead. The latest attempt that passed
-  stands. The run never stops for a diagram: the appendix says "drawn by the
+  stands. The drawing and its correction are the diagram job's runs of the Report
+  stage's latest attempt ([§5.1](#51-convergence-after-a-reentry)): after a
+  reentry or a resume that sends the run back to Report, the graph draws again,
+  and the validators judge those runs, never the drawings of an earlier attempt
+  they still see. A check is looked up by its id and its exact argv, which carries
+  the document and the skill's mount, so a check of another document or of an
+  older plugin directory never stands for it. The run never stops for a diagram: the appendix says "drawn by the
   plugin: the diagram-design drawing failed its checks (<reason>)" beside it, and
   `review.html` puts it in the tooltip of the diagram's caption.
 - **What is embedded.** The plugin never copies the model's markup. It reads the
@@ -3219,6 +3242,14 @@ graph over time.
   single-command writes, the ledger write, the diagram check and the repro command
   are measured by the guard's own check too ([§6.6](#66-output)). The review kit's
   change, shared with `pr-design-review` 0.1.6.
+- **1.1.7:** the diagram flow reads the diagram job's runs of the Report stage's
+  latest attempt (`producer.attempt`), not the stage's first two runs, so after a
+  reentry or a resume that sends the run back to Report the validators judge the
+  drawings the graph wrote and `report.json` recomputes (apache/skywalking-banyandb#1487:
+  the validator replayed the first attempt's drawing, fell back to the plugin's,
+  and the Report stage could not be accepted again;
+  [§5.1](#51-convergence-after-a-reentry), [§6.10](#610-features-and-their-data-flow)).
+  The review kit's change, shared with `pr-design-review` 0.1.7.
 
 **Where 1.0 differs from its design.** The split design (now
 [a pointer](design-pr-review-split.md)) planned a Checks stage when the profile has

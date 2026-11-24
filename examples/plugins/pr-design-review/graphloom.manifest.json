@@ -1,6 +1,6 @@
 {
   "graphId": "pr-design-review",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "sdkProtocol": 1,
   "taskConfig": "required",
   "entryPoints": {
@@ -16,10 +16,10 @@
     "vitest": "^4.1.12"
   },
   "digests": {
-    "sourceTree": "58af9d2be6208e16706b56018c41be4a45518bab31b510fdd4e06d1c9ce9f367",
+    "sourceTree": "d4e4e58e606ca165a0d64281c3084b720cf25b9221aee23d4e0539e155de99ed",
     "packageLock": "6abe1ee61ea10688f7d8ae11564051daae1d0265442a48530dd14bbc87667461",
     "files": {
-      "package.json": "9767c14fa56037e513fc709ee3596a7df94aa0418d84ac974e081f0824d952e2",
+      "package.json": "3996288a6d40217f268bd213fa9bb218f025abc19cdd1ec1d3020a7b8abe7875",
       "package-lock.json": "6abe1ee61ea10688f7d8ae11564051daae1d0265442a48530dd14bbc87667461",
       "tsconfig.json": "d166142bd5d917d1eb7d3011cf6423c652f30e2989881deec6147a997bf41597",
       "profiles/banyandb.json": "2de57656d7dcaf2b1543306ad5a597e0f71a87d9109ce9a5a241b5fb88e89201",
@@ -51,7 +51,7 @@
       "vendor/diagram-design/references/type-state.md": "9c8ed85762d5bbb3672907bc1664ebf94bcc72850efbacf33d5ee12731053122",
       "vendor/diagram-design/scripts/self_check.py": "444851f6e53f83d50920381df17cdd5f1b7a23cfba9c0ddda27786d78e53e2de",
       "vendor/diagram-design/scripts/verify-geometry.py": "33fb89edbdc8b9cf625a388ba47147bf46ec9e8ae84b7110e240de165732001f",
-      "src/answers.ts": "f89a9248b3bba76060fc32fad1034469a35547478c9ad30073d359989b096f3b",
+      "src/answers.ts": "9a4679175db0dec325acd7bfe702d44c5cbce39cdd1a3bd801c8f0e976b1f1ff",
       "src/designledger.ts": "da6399799ee770c6a8879a5badf8541266fc89f94dcad534b7836288d7a26fd0",
       "src/designvalidators.ts": "82800d783f8b36475e8776a639bd5e6538eb97343f14daa09787c76b10cb3dbc",
       "src/graph.ts": "75b381eda2c9286952b72f69eccb7a227339f5dbec748bb67e2db52faaa194f2",
@@ -62,7 +62,7 @@
       "src/kit/answertext.ts": "6bea1ec706ae22d177b3d76f4a747c33fe406d22b5a73a5ea3277fd1726db2a3",
       "src/kit/areas.ts": "660a2790e2d233fd9a6583ea6e81eaf099b5e14ec1e1bb41362e1a73b896982a",
       "src/kit/aspects.ts": "cea71f510465491c265c464d83d833158bf448308970b15b69397bbf1e26b9ce",
-      "src/kit/attempt.ts": "78b14efbaa07ad82ceec25ed9a994aefdc9509c71d303f0c2735f13766c2ed61",
+      "src/kit/attempt.ts": "67c02d810e3e3b262aa7c0f38f89929720ced00dcbdb0beed78817fa324f040d",
       "src/kit/basetree.ts": "09f12dd8efb9acd20a48a62ae029f8c05b676c4eaa77bdfdabe18f283b425450",
       "src/kit/bounds.ts": "22951122d81178bbb988d2f45837e0f0408a11100aa7fa66273ff19a48e77abb",
       "src/kit/briefing.ts": "50628794c7cf1a33975036ada92e80f76f99516f2f02ea1a4b8601ea22534d5f",
@@ -74,12 +74,12 @@
       "src/kit/constants.ts": "17292f94ebf541672d0d3e752917cd44593fae0d3816fa3e9f461b79f2bfcddb",
       "src/kit/coverage.ts": "b53f130e90c1e5b1f40eb0fc585e621d0b415548bbbd1d1d266469ad97624e16",
       "src/kit/detectors.ts": "84a4f0045cc3639c0e4494101341ee4697400c2367c80d838fc8cff609a2f3ba",
-      "src/kit/diagrams.ts": "72196619a9a2b7b260ed60d15617b3403dbe4f2f575bcc2279d0869a3601c385",
+      "src/kit/diagrams.ts": "5c0f90766c29146ca09d25d3b6c810eabc867990027a363ea4926cb4bf4824b8",
       "src/kit/diagramsvg.ts": "0d009642547214308d68ae86aad68cb984b10886342afdf53b743a544d54c965",
       "src/kit/digest.ts": "3e80216d831ae9b9e42927ece8c2e8e766afd2c05de906d17e8420d629f9139d",
       "src/kit/dive.ts": "009c82e0b3bd7009abdef84ff64b4863b1865310450fd2c2f6f566d4575edb0b",
       "src/kit/escape.ts": "f18f0893148c2b62a2a0cf98d3b99bd5311d411348040742e9871bd060da0609",
-      "src/kit/evidence.ts": "8ac679d44549e11f94b9b226b394faebfaee72cd9a68cd377132286bfcf60366",
+      "src/kit/evidence.ts": "0abf96c514781c1e1abf5b53012dbe8d9f657252f8e03022f8bf47dbe5f5f7f5",
       "src/kit/fit.ts": "71f7e1484bf1abc6b73441a230a7fad5d268a2164723c23ff09ea87437b07bba",
       "src/kit/flow.ts": "079592a90ae779b5b8c036c37f26f3551e34530b5e4eef4e94a1656e3f463d6d",
       "src/kit/flowlayout.ts": "18175cd7867230794ee384eeae0719ce29b61cb32004f471d6b9c932013dcc94",
@@ -148,7 +148,7 @@
       "src/round1.ts": "feb6b4f6f6c7cf629c270ff60bef96f38f0955a671c19af60dcb906ce6216ce1",
       "src/searchview.ts": "1f213dde12e0d2fb888a1819e81f6e72e415482320166f41d895d30e69cc2c95",
       "src/validators.ts": "a5423bbc0129366aff593b2afd00f13fc42f5b98d581fbfbdc06150763387bba",
-      "src/version.ts": "2425f03c36ec2ef3dbf7bb35c0056ab18a5e3cf916ac117a257f012202c1dd35",
+      "src/version.ts": "584b17d94ea1aeb495c55d2e48c8ee572bffaf3cb417dc8e44ebd66d5b471528",
       "src/visual.ts": "662bf5dbf7a5e5900eabdd70877df2d250be0a1ced8b10acfd117e118125e6be",
       "test/command-bounds.test.ts": "b0dade20e78958cb40e28e16e8c42a8b46f0ac8905315df315c1a3e5d9d41087",
       "test/graph.test.ts": "555bfbea11fe773ce9269777e9a4dcc8acd67715200c7ec913eea22535f54e04",
@@ -163,9 +163,9 @@
       "test/profile.test.ts": "c1de7488d78d2710ce21b23eaef2f05b88bf2bec9247db6b1f650023955cdd32",
       "test/publish.test.ts": "baec72ba1506aafbdb57247833fe916a524b30b7333fb3458be7e13510f4e2a8",
       "test/questions.test.ts": "38aa1bcaefb8cf3e9debeed842255c84cb5d356bb7e54aa4a36b138140945030",
-      "test/reentry.test.ts": "cc098d35a44b5d5ee8a9ad62c52e33632a17d4185c05d08d24f6336b68dc99dd",
+      "test/reentry.test.ts": "bec3b9d1a38f8f5617f23efa388ecbd19f34fa5737eace1f3d0586eb7f176dcb",
       "test/round1.test.ts": "4ea0a6f0bbd684a328a38a5bb0eced305acaacb3f47b5c848f991536871878d9",
-      "test/support.ts": "828af0598e47899dec8af220d760455c44862dfe88a5d7d5fed27ea494079770"
+      "test/support.ts": "64478aabac468ad83a95dccf88412d5d7eced4e5f1ba7369b0bca99be471fdfb"
     }
   }
 }

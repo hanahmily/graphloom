@@ -679,7 +679,9 @@ export function answersFlow(evidence: readonly EvidenceRecord[], ctx: AnswerCont
       idNotes = new Map(revision ? idNotes : []);
       for (const [id, n] of parsed.notes) idNotes.set(id, [...(idNotes.get(id) ?? []), ...n]);
       if (!revision) original = new Map(merged);
-      if (revision) revised = true;
+      // A first answer (an attempt's own, after a reentry) starts over: a revision an earlier attempt made, which a validator
+      // still sees and the graph does not, is not this answer's revision.
+      revised = revision;
       pending = undefined;
       reading = undefined;
       checkTries = 0;

@@ -94,10 +94,20 @@ interface Options {
    * Reentries a supervisor would make, one per `supervise` decision of the graph, in order: the run goes on with a new
    * generation, the stage's attempt advanced, the receipts of that stage and every later one invalid, and, when the
    * candidate changed (a repair wrote into the worktree), a new workspace digest. Every record also carries its generation.
+   * A `resume` is the operator's resume that sends the run back to the stage (the controller's `sendBackTo`): it discards the
+   * graph's private state, and with a plugin update (`pluginRoot`) the environment check records the new plugin directory.
+   * With `afterJob`, the reentry comes right after the first job it matches instead of at a `supervise` decision.
    */
-  reentries?: Array<{ stageId: string; changesCandidate?: boolean }>;
+  reentries?: Reentry[];
   /** Change a job's recorded result before the graph sees it. */
   tamper?: (job: JobSpec, evidence: EvidenceRecord[]) => EvidenceRecord[] | undefined;
+}
+
+export interface Reentry {
+  stageId: string;
+  changesCandidate?: boolean;
+  resume?: { pluginRoot?: string };
+  afterJob?: (job: JobSpec) => boolean;
 }
 
 const environment = (id: string, out: string): EvidenceRecord => ({
@@ -167,6 +177,26 @@ function* simulationSteps(options: Options = {}): Generator<undefined, Simulatio
   const attempts = new Map<string, number>();
   const reentries = [...(options.reentries ?? [])];
   let privateState: string | undefined;
+  const reenter = (reentry: Reentry): void => {
+    generation += 1;
+    attempts.set(reentry.stageId, (attempts.get(reentry.stageId) ?? 1) + 1);
+    current = { stageId: reentry.stageId, attempt: attempts.get(reentry.stageId)! };
+    const from = definition.stages.findIndex((st) => st.id === reentry.stageId);
+    const later = new Set(definition.stages.slice(from).map((st) => st.id));
+    for (const r of receipts) if (later.has(r.stageId)) r.valid = false;
+    if (reentry.changesCandidate === true) {
+      // A receipt rests on the workspace it was issued for, so a change to it makes every receipt stale.
+      for (const r of receipts) r.valid = false;
+      digest = `dr${generation}`;
+      workDigest = `dw${generation}`;
+    }
+    if (reentry.resume !== undefined) {
+      privateState = undefined;
+      // A resume runs the environment checks again, for the live candidate; after a plugin update they name the new directory.
+      const root = reentry.resume.pluginRoot;
+      if (root !== undefined) evidence.push({ ...environment("plugin-root", `${root}\n`), ref: `env-plugin-root-g${generation}`, candidateDigest: digest, generation });
+    }
+  };
   for (let step = 0; step < (options.maxSteps ?? 60); step += 1) {
     yield;
     // Through Answers only: the stages up to Answers are accepted, and the run would decide round 1 next.
@@ -202,20 +232,9 @@ function* simulationSteps(options: Options = {}): Generator<undefined, Simulatio
     decisions.push(decision);
     const action = decision.action;
     if (decision.privateState !== undefined) privateState = decision.privateState;
-    const reentry = action.type === "supervise" ? reentries.shift() : undefined;
+    const reentry = action.type === "supervise" && reentries[0]?.afterJob === undefined ? reentries.shift() : undefined;
     if (reentry !== undefined) {
-      generation += 1;
-      attempts.set(reentry.stageId, (attempts.get(reentry.stageId) ?? 1) + 1);
-      current = { stageId: reentry.stageId, attempt: attempts.get(reentry.stageId)! };
-      const from = definition.stages.findIndex((st) => st.id === reentry.stageId);
-      const later = new Set(definition.stages.slice(from).map((st) => st.id));
-      for (const r of receipts) if (later.has(r.stageId)) r.valid = false;
-      if (reentry.changesCandidate === true) {
-        // A receipt rests on the workspace it was issued for, so a change to it makes every receipt stale.
-        for (const r of receipts) r.valid = false;
-        digest = `dr${generation}`;
-        workDigest = `dw${generation}`;
-      }
+      reenter(reentry);
       continue;
     }
     if (action.type === "stop" || action.type === "supervise") return { decisions, jobs, evidence, receipts, final: decision, github, ...(written !== undefined ? { written } : {}), ...(qa !== undefined ? { qa } : {}) };
@@ -248,7 +267,9 @@ function* simulationSteps(options: Options = {}): Generator<undefined, Simulatio
     if (action.type !== "dispatch") throw new Error(`unexpected ${action.type}`);
     const job = action.job;
     jobs.push(job);
-    const producer = { operationId: `op${(n += 1)}`, stageId: job.stageId, purpose: job.purpose, readOnly: job.readOnly === true, kind: job.kind, ...(job.executor !== undefined ? { executorId: job.executor.id } : {}) };
+    // As the controller stamps it (loop.ts producerAttempt): the current stage's attempt, else the stage's latest.
+    const producerAttempt = job.stageId === current.stageId ? current.attempt : (attempts.get(job.stageId) ?? 1);
+    const producer = { operationId: `op${(n += 1)}`, stageId: job.stageId, attempt: producerAttempt, purpose: job.purpose, readOnly: job.readOnly === true, kind: job.kind, ...(job.executor !== undefined ? { executorId: job.executor.id } : {}) };
     if (job.purpose === "work") {
       lastWork = producer.operationId;
       // A job that changes the worktree changes the workspace digest, and its own evidence carries the new one.
@@ -317,6 +338,7 @@ function* simulationSteps(options: Options = {}): Generator<undefined, Simulatio
       evidence.push(record);
       sessions.push({ operationId: producer.operationId, stageId: job.stageId, attempt: 1, generation: 1, dispatchKey: job.jobId ?? `${job.purpose}:${CODING_AGENT.id}`, executorId: CODING_AGENT.id, status: "ok", sessionRef: `claude-${producer.operationId}`, settledAt: `2026-01-01T00:00:${String(sessions.length % 60).padStart(2, "0")}.000Z` });
     }
+    if (reentries[0]?.afterJob?.(job) === true) reenter(reentries.shift()!);
   }
   throw new Error("the simulation did not settle");
 }

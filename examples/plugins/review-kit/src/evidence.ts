@@ -8,6 +8,8 @@ import { CODING_AGENT } from "./constants.js";
 export interface Producer {
   operationId: string;
   stageId: string;
+  /** The attempt of its stage the job ran in, which the controller records on job evidence (absent on records of older controllers). */
+  attempt?: number;
   purpose: string;
   readOnly: boolean;
   kind: string;
