@@ -16,8 +16,8 @@ export const MAX_JOB_COMMANDS = 16;
 export const MAX_ARGV = 64;
 /** Characters (UTF-16 units) one argv string may hold. */
 export const MAX_ARG_CHARS = 4_096;
-/** A command id. */
-export const COMMAND_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
+/** A command id: the executor's own pattern, the one its input shape publishes (upper case allowed: `search-S1`). */
+export const COMMAND_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 /** Bytes of a job's serialized input left for what is not a command (env, flags), so a packed job still fits. */
 export const JOB_INPUT_RESERVE_BYTES = 8_192;
 /** The longest path the graph passes to a command as one argument: well under `MAX_ARG_CHARS`, so a rename's two paths fit too. */
@@ -53,8 +53,9 @@ export function fitJob(commands: readonly EnvironmentCommand[]): EnvironmentComm
 /**
  * Why a job the graph is about to dispatch would be rejected by the command executor before it runs, or undefined when
  * it would not (or is not a built-in command job): the kit's bounds and the input's serialized size. The input shape
- * the executor declares in the run view is not applied: it describes the input for an agent, and a JSON Schema
- * `pattern` cannot carry the executor's case-insensitive id rule, so `search-S1`, which the executor takes, would fail it.
+ * the executor declares in the run view is not applied: it describes the input for an agent, and before
+ * `executor-command` 0.1.4 its id pattern lacked the validator's case-insensitive flag (a JSON Schema `pattern` carries
+ * none), so `search-S1`, which the executor takes, failed it; an install may still run such an executor.
  */
 export function commandJobProblem(job: JobSpec): string | undefined {
   if (job.kind !== "command" || (job.executor !== undefined && job.executor.id !== BUILTIN_COMMAND_EXECUTOR_ID)) return undefined;

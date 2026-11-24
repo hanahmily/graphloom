@@ -145,7 +145,8 @@ function generatedChecks(): EnvironmentCommand[] {
       id: ENV_PLUGIN_ROOT,
       argv: ["sh", "-c", 'r=${GRAPHLOOM_PLUGIN_ROOT:-}; [ -n "$r" ] || { echo "GRAPHLOOM_PLUGIN_ROOT is not set: GraphLoom sets it to the plugin\'s directory for environment checks" >&2; exit 127; }; cd "$r" && pwd -P'],
     },
-    { id: "go-root", argv: ["sh", "-c", "go env GOROOT 2>/dev/null || true"] },
+    // An inherited GOROOT naming a toolchain go cannot find stops go; the root go finds for itself is the one to bind then.
+    { id: "go-root", argv: ["sh", "-c", "go env GOROOT 2>/dev/null || (unset GOROOT; go env GOROOT) 2>/dev/null || true"] },
   ];
 }
 

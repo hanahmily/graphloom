@@ -26,7 +26,7 @@ interface BasePlugin {
 }
 
 interface Plugin {
-  staticCommand(batch: { id: string; language: "go" | "typescript"; paths: string[] }, hunks: Map<string, Array<{ start: number; end: number }>>, root: string, generated: string[], node: string): { id: string; argv: string[] };
+  staticCommand(batch: { id: string; language: "go" | "typescript"; paths: string[] }, hunks: Map<string, Array<{ start: number; end: number }>>, root: string, generated: string[], node: string, goBin?: string): { id: string; argv: string[] };
   FLAGS_DOC: unknown;
   REHEARSAL_HEAD_FILES: Record<string, string>;
 }
@@ -89,6 +89,37 @@ describe.skipIf(unsupported !== undefined || GO === undefined)("the static metri
     expect(outcome.exitCode).toBe(0);
     expect(JSON.parse(outcome.report!.text)).toEqual(plugin.FLAGS_DOC);
     expect(await readFile(path.join(work, "banyand/cmd/server/flags.go"), "utf8")).toBe(plugin.REHEARSAL_HEAD_FILES["banyand/cmd/server/flags.go"]);
+  }, 180_000);
+
+  it("measures the head with an inherited GOROOT of another toolchain that the sandbox does not bind (the operator's shell exports one)", async () => {
+    const goRoot = spawnSync("go", ["env", "GOROOT"], { encoding: "utf8" }).stdout.trim();
+    const hunks = new Map([["banyand/cmd/server/flags.go", [{ start: 14, end: 17 }]]]);
+    const command = plugin.staticCommand({ id: "static-go-1", language: "go", paths: ["banyand/cmd/server/flags.go"] }, hunks, bundle, [], process.execPath, path.join(goRoot, "bin", "go"));
+    // Inside the sandbox an unbound GOROOT reads as missing, as the hidden home's /home/<user>/go1.26.9 did.
+    const unbound = path.join(dir, "no-such-go1.26.9");
+    const job: JobSpec = {
+      stageId: "report",
+      kind: "command",
+      purpose: "diagnostic",
+      readOnly: true,
+      instruction: "Measure",
+      input: { commands: [command], continueOnFailure: true, env: { GOROOT: unbound, GOPATH: path.join(unbound, "path"), GOMODCACHE: path.join(unbound, "mod"), GOTOOLCHAIN: "go1.99.0", GOFLAGS: "-mod=mod", GOWORK: path.join(unbound, "go.work") } },
+      confinement: { kind: "bwrap", network: false, mask: [], binds: [{ path: bundle, readOnly: true }, { path: goRoot, readOnly: true }] },
+    };
+    const ctx: JobContext = {
+      runId: "r3",
+      operationId: "op-3",
+      generation: 1,
+      worktreePath: work,
+      artifactDir: path.join(dir, "artifacts3"),
+      confinement: { scratchDir: path.join(dir, "scratch3"), writablePaths: [work] },
+    };
+    const result = await runner.runJob(job, ctx);
+    expect(result.status, result.summary).toBe("ok");
+    const outcome = (result.evidence![0]!.payload as { command: { exitCode: number; stderrTail: string; report?: { text: string } } }).command;
+    expect(outcome.stderrTail).toBe("");
+    expect(outcome.exitCode).toBe(0);
+    expect(JSON.parse(outcome.report!.text)).toEqual(plugin.FLAGS_DOC);
   }, 180_000);
 
   it("measures a modified function's file at the base: git show reads the base, the same tool measures it, the worktree (the head) is unchanged", async () => {

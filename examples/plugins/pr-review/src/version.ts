@@ -11,4 +11,4 @@ export const GRAPH_ID = "pr-review";
  * Fetch, Report, Review, Draft and Publish; round 1 is pr-design-review.
  * Checks arrive with a later version.
  */
-export const GRAPH_VERSION = "1.1.4";
+export const GRAPH_VERSION = "1.1.5";
