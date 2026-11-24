@@ -6,7 +6,8 @@ import { createConnection } from "node:net";
 import { chmod, lstat, mkdir, open, readdir, unlink } from "node:fs/promises";
 import path from "node:path";
 import { openHub, type Hub, type HubDriver } from "@graphloom/hub";
-import type { HubHealth, HubInput, HubResumeRemedy, HubRetryPolicy, HubSubmission, MonitorSnapshot } from "@graphloom/sdk";
+import type { HubHealth, HubInput, HubRehearsal, HubRehearsalVerdict, HubResumeRemedy, HubRetryPolicy, HubStatus, HubSubmission, MonitorSnapshot } from "@graphloom/sdk";
+import { parseRehearsalSettings, readHubVerdict, rehearsalLine } from "./hub-rehearsal.js";
 import { object, integer, type HubServiceConfig } from "./hub-config.js";
 import { HubHttpError, readJson } from "./hub-client.js";
 import { captureHubInput, inputDigest, writePrivateJsonOrText } from "./hub-input.js";
@@ -29,7 +30,7 @@ export interface HubServiceOptions {
   /** Tests replace effects at the driver seam, never through a production CLI flag. */
   driver?: HubDriver;
   cache?: Map<string, HubMonitorCache>;
-  captureInput?: (file: string) => Promise<HubInput>;
+  captureInput?: (file: string, rehearsal?: HubRehearsal) => Promise<HubInput>;
   /** Tests replace how a `--update-plugin` resume resolves the operator's plugin link. */
   resolvePlugin?: (submission: HubSubmission) => Promise<{ bundlePath: string; bundleDigest: string }>;
   observe?: (submission: HubSubmission) => Promise<MonitorSnapshot>;
@@ -60,7 +61,21 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
   };
   const describeArchive = async (submission: HubSubmission) => {
     const { summary } = await liveRequest(submission);
-    return { ...(summary.graph !== undefined ? { graph: summary.graph } : {}), request: summary, stateDir: path.join(config.directory, "runs", submission.runId) };
+    const verdict = submission.input.rehearsal !== undefined ? await readHubVerdict(config.directory, submission.runId) : undefined;
+    return {
+      ...(summary.graph !== undefined ? { graph: summary.graph } : {}), request: summary, stateDir: path.join(config.directory, "runs", submission.runId),
+      ...(verdict !== undefined ? { rehearsalVerdict: verdict.verdict } : {}),
+    };
+  };
+  /** A list reply with each rehearsal submission's recorded verdict (§12.3), read from beside its run. */
+  const withRehearsals = async (status: HubStatus): Promise<HubStatus> => {
+    const rehearsals: Record<string, HubRehearsalVerdict> = {};
+    for (const item of status.submissions) {
+      if (item.input.rehearsal === undefined) continue;
+      const verdict = await readHubVerdict(config.directory, item.runId);
+      if (verdict !== undefined) rehearsals[item.id] = verdict;
+    }
+    return Object.keys(rehearsals).length > 0 ? { ...status, rehearsals } : status;
   };
   try { hub = await openHub({ directory: config.directory, config, driver: options.driver ?? runtime!.driver, describeArchive }); }
   catch (error) { await retention?.close().catch(() => undefined); throw error; }
@@ -106,7 +121,11 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
       await pending;
     }
     const current = cache.get(submission.id);
-    return withHubSnapshot(current?.snapshot, submission, scheduler.list(), new Date().toISOString(), current?.error);
+    const snapshot = withHubSnapshot(current?.snapshot, submission, scheduler.list(), new Date().toISOString(), current?.error);
+    if (submission.input.rehearsal !== undefined && snapshot.hub !== undefined) {
+      snapshot.hub.rehearsal = rehearsalLine(submission.input.rehearsal, await readHubVerdict(config.directory, submission.runId));
+    }
+    return snapshot;
   };
   let version: string | undefined;
   try { version = selfInstall().record.version; } catch { version = undefined; }
@@ -119,10 +138,14 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
       if (request.method === "GET" && url.pathname === "/v1/health") {
         const status = scheduler.list();
         const counts: HubHealth["counts"] = {};
-        for (const item of status.submissions) counts[item.state] = (counts[item.state] ?? 0) + 1;
+        const rehearsalCounts: HubHealth["rehearsalCounts"] = {};
+        for (const item of status.submissions) {
+          counts[item.state] = (counts[item.state] ?? 0) + 1;
+          if (item.input.rehearsal !== undefined) rehearsalCounts[item.state] = (rehearsalCounts[item.state] ?? 0) + 1;
+        }
         const summary = await summarizeHubEnvironment(environment, config).catch((error: unknown) => ({ pathHead: [], pathEntries: 0, tools: [], variables: [], warnings: [], error: String(error).slice(0, 1024) }));
         const health: HubHealth = {
-          ...status, socket: config.socket, ...(version !== undefined ? { version } : {}), counts, archivedEntries: scheduler.archived().length, environment: summary,
+          ...status, socket: config.socket, ...(version !== undefined ? { version } : {}), counts, rehearsalCounts, archivedEntries: scheduler.archived().length, environment: summary,
           ...(scheduler.archiveIndexError ? { archiveIndexError: scheduler.archiveIndexError } : {}),
           ...((monitoringError || historyError) ? { monitoringError: (monitoringError ?? historyError)! } : {}), ...(retentionError ? { retentionError } : {}), closing,
         };
@@ -133,17 +156,22 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
         if (request.method === "GET") {
           const filter = parseListQuery(url.searchParams);
           const status = scheduler.list();
-          if (filter === undefined) return respond(response, 200, status);
+          if (filter === undefined) return respond(response, 200, await withRehearsals(status));
           const live = new Map<string, LiveRequest>();
           for (const item of status.submissions) live.set(item.id, await liveRequest(item));
-          return respond(response, 200, searchHub(status, scheduler.archived(), live, filter));
+          return respond(response, 200, await withRehearsals(searchHub(status, scheduler.archived(), live, filter)));
         }
         if (request.method === "POST") {
-          const body = await payload(request, ["taskPath", "key"]);
+          const body = await payload(request, ["taskPath", "key", "rehearsal"]);
           const file = text(body.taskPath, "taskPath");
           if (!path.isAbsolute(file)) throw new HubHttpError("taskPath must be absolute on the hub's machine", 400);
           const key = body.key === undefined ? undefined : text(body.key, "key", 256);
-          const input = await (options.captureInput?.(file) ?? captureHubInput(file, config));
+          // A rehearsal submission (§12): its settings are part of the captured input, so of its digest and key scope.
+          let rehearsal: HubRehearsal | undefined;
+          try { rehearsal = body.rehearsal === undefined ? undefined : parseRehearsalSettings(body.rehearsal); }
+          catch (error) { throw new HubHttpError(error instanceof Error ? error.message : String(error), 400); }
+          const captured = await (options.captureInput?.(file, rehearsal) ?? captureHubInput(file, config, process.env, rehearsal));
+          const input: HubInput = rehearsal !== undefined ? { ...captured, rehearsal } : captured;
           const submit = () => scheduler.submit({ input, requestDigest: inputDigest(input), ...(key !== undefined ? { key } : {}) });
           const result = retention ? await retention.protect(inputReferences({ input }), submit) : await submit();
           await capture();
@@ -183,7 +211,10 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
         }
         const submission = scheduler.inspect(id);
         if (request.method === "GET") {
-          if (action === undefined) return respond(response, 200, submission);
+          if (action === undefined) {
+            const verdict = submission.input.rehearsal !== undefined ? await readHubVerdict(config.directory, submission.runId) : undefined;
+            return respond(response, 200, verdict !== undefined ? { ...submission, rehearsalVerdict: verdict } : submission);
+          }
           if (action === "snapshot") return respond(response, 200, await monitor(submission));
           if (action === "logs") return respond(response, 200, await readLogs(config.directory, submission.id, url.searchParams));
         }

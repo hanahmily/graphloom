@@ -2,6 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 export type * from "./hub.js";
+export { HUB_REHEARSAL_KEY_PREFIX } from "./hub.js";
 export type * from "./monitor.js";
 
 export type {

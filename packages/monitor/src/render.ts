@@ -36,6 +36,7 @@ async function panelLines(panel: MonitorPanel, width: number, fallbackReasons: s
         { text: `Blocker: ${run.blocker ?? 'none reported'}`, tone: run.blocker ? 'warning' : 'neutral' },
         { text: `Next eligible: ${run.nextEligibleAt ?? 'not reported'}` },
         { text: hub ? `Hub slots: ${hub.occupied}/${hub.limit}; queued: ${hub.queued}; state: ${hub.state ?? 'unknown'}; observation: ${hub.observationId ?? 'unknown'}` : 'Hub: unmanaged or unavailable' },
+        ...(hub?.rehearsal ? [{ text: `Rehearsal: ${hub.rehearsal}`, tone: /verdict not-ready/.test(hub.rehearsal) ? 'warning' as const : 'neutral' as const }] : []),
       ];
     }
     case 'topology': {

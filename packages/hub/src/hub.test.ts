@@ -562,3 +562,51 @@ describe("archive index", () => {
     expect(hub.archived().map((entry) => entry.key)).toEqual(["y"]);
   });
 });
+
+describe("rehearsal submissions", () => {
+  const rehearsalRequest = (key?: string, rehearsal: Record<string, unknown> = { scenario: "operator" }): HubSubmitRequest => {
+    const base = request(key);
+    return { ...base, requestDigest: createHash("sha256").update("rehearsal task").digest("hex"), input: { ...base.input, rehearsal } as HubSubmitRequest["input"] };
+  };
+  it("scopes a rehearsal's key apart from a real submission's, so the same key never collides", async () => {
+    const f = await fixture(0);
+    const real = await accepted(f.hub, "fix-1");
+    const rehearsal = await f.hub.submit(rehearsalRequest("fix-1"));
+    if ("archived" in rehearsal) throw new Error("unexpected tombstone");
+    expect(rehearsal.id).not.toBe(real.id);
+    expect(rehearsal).toMatchObject({ key: "rehearsal:fix-1", input: { rehearsal: { scenario: "operator" } } });
+    expect(rehearsal.runId).toMatch(/^rehearsal-hub-[a-f0-9-]{36}$/);
+    expect(real.runId).toMatch(/^hub-[a-f0-9-]{36}$/);
+    // Each key still answers its own request idempotently.
+    expect((await f.hub.submit(rehearsalRequest("fix-1"))).id).toBe(rehearsal.id);
+    expect((await f.hub.submit(request("fix-1"))).id).toBe(real.id);
+    // The rehearsal scope's prefix is not a real submission's to take.
+    await expect(f.hub.submit(request("rehearsal:fix-1"))).rejects.toThrow(/reserved for rehearsal submissions/);
+  });
+  it("refuses unknown or invalid rehearsal settings", async () => {
+    const f = await fixture(0);
+    await expect(f.hub.submit(rehearsalRequest(undefined, { scenario: "../x" }))).rejects.toThrow(/invalid rehearsal setting scenario/);
+    await expect(f.hub.submit(rehearsalRequest(undefined, { commands: "all" }))).rejects.toThrow(/invalid rehearsal setting commands/);
+    await expect(f.hub.submit(rehearsalRequest(undefined, { synthesized: true }))).rejects.toThrow(/invalid rehearsal setting synthesized/);
+  });
+  it("refuses a supervisor transition for a rehearsal, whose supervisor is its scenario's script, but takes the other remedies", async () => {
+    const f = await fixture(1);
+    const created = await f.hub.submit(rehearsalRequest());
+    if ("archived" in created) throw new Error("unexpected tombstone");
+    await f.hub.tick();
+    f.driver.finish(f.hub.inspect(created.id), { kind: "operator", cause: "approval", evidenceRefs: [] });
+    await f.hub.tick();
+    expect(f.hub.inspect(created.id).state).toBe("blocked");
+    await expect(f.hub.resume(created.id, { remedy: { supervisor: "codex" } })).rejects.toThrow(/scenario's script/);
+    const resumed = await f.hub.resume(created.id, { remedy: { approve: "ruling", inputs: { ruling: "stands" } } });
+    expect(resumed).toMatchObject({ state: "queued", pendingCommand: { remedy: { approve: "ruling" } } });
+  });
+  it("records a rehearsal's settings in its archive entry", async () => {
+    const f = await fixture(0);
+    const created = await f.hub.submit(rehearsalRequest("arch"));
+    if ("archived" in created) throw new Error("unexpected tombstone");
+    await f.hub.cancel(created.id);
+    await f.hub.archive(created.id);
+    expect(f.hub.archived()).toEqual([expect.objectContaining({ key: "rehearsal:arch", rehearsal: { scenario: "operator" } })]);
+  });
+});

@@ -8,7 +8,7 @@ import { realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { projectPanels, renderPanels, type ChatRenderer, type MonitorFormat } from "@graphloom/monitor";
-import type { HubEnvironmentSummary, HubHealth, HubSchedulingState, HubStatus, HubSubmission, HubRetryPolicy, MonitorPanelKind, MonitorSnapshot, PanelSelection } from "@graphloom/sdk";
+import type { HubEnvironmentSummary, HubHealth, HubRehearsal, HubSchedulingState, HubStatus, HubSubmission, HubRetryPolicy, MonitorPanelKind, MonitorSnapshot, PanelSelection } from "@graphloom/sdk";
 import { hubPaths, integer, loadHubConfig } from "./hub-config.js";
 import { hubRequest } from "./hub-client.js";
 import { captureLoginEnvironment, dropInPath, environmentDropIn, tokenEnvFileText, tokensDropIn, writeOwnerOnly, type CapturedEnvironment, type HubDoctorResult } from "./hub-environment.js";
@@ -25,7 +25,7 @@ export const HUB_USAGE = [
   "graphloom hub service [--config <file>] [--capture-env] [--token-env-file <file> [--write-token]] [--write]",
   "graphloom hub status [--json] [--socket <path>]",
   "graphloom hub doctor [--task <task.yaml>] [--json] [--socket <path>]",
-  "graphloom hub submit <task.yaml> [--key <id>] [--socket <path>]",
+  "graphloom hub submit <task.yaml> [--key <id>] [--rehearsal [--scenario <name>] [--commands <stub|run>] [--offline]] [--socket <path>]",
   "graphloom hub list [--state <state> ...] [--graph <id>] [--repo <path|text>] [--key <text>] [--since <iso|duration>] [--until <iso|duration>] [--grep <text>] [--limit <n>] [--archived] [--json] [--socket <path>]",
   "graphloom hub inspect <submission> [--panel <overview|topology|stages|jobs|activity|job|usage|output>] [--format <text|ansi|markdown|json>] [--chat-renderer <auto|plain|katex>] [--job <operation-id>|--follow-current] [--attempt <n>] [--stage <stage>] [--width <columns>] [--cursor <cursor>] [--page-size <n>]",
   "graphloom hub watch [<submission>] [--panel <kind>] [--job <operation-id>|--follow-current] [--attempt <n>] [--stage <stage>] [--plain|--json] [--since <cursor>] [--once]",
@@ -43,7 +43,7 @@ const HUB_HELP: Record<string, string> = {
   service: "Prints a systemd user unit for the hub; installs nothing.\n--capture-env prints the drop-in graphloom-hub.service.d/environment.conf instead: PATH, Go's variables,\nCLAUDE_CONFIG_DIR, CODEX_HOME, LANG, LC_ALL, the proxies and GraphLoom's own non-secret settings\n(GRAPHLOOM_DISABLE_AUTOUPDATE, the harness CLIs and models, ...) from a clean login shell of $SHELL.\n--token-env-file <file> prints the drop-in tokens.conf (EnvironmentFile=-<file>); the file holds the runner\nconfig's github.tokenEnv, from that variable or gh auth token, owner-only (0600); --write-token adds\ngithub.writeTokenEnv. --write writes the drop-ins (and the token file) instead; nothing is written without it.\nOnly names are printed, never a token. Re-run after a shell profile, toolchain or gh auth change.",
   doctor: "Runs graphloom doctor's checks (with --task, the task's too) inside the running hub's environment:\nwhat its runs find, not what your shell has. Exit 0 no check failed, 1 one did or the hub is unreachable.",
   status: "Reports whether the hub is reachable and healthy: id, socket, version, limit, slot and state counts, faults,\nand its environment (PATH head, where the agent CLIs resolve, which token variables are set; names only).\nExit 0 healthy, 1 unreachable, 3 faulted or shutting down.",
-  submit: "Submits a task to the queue; the same --key and task return the same submission.",
+  submit: "Submits a task to the queue; the same --key and task return the same submission.\n--rehearsal makes a rehearsal submission: queued, launched, contained, continued and stopped like any other,\nbut its run runs on graphloom rehearse's stand-ins (scripted agents and supervisor, stubbed commands,\nno provider calls). --scenario names the bundle's scenario (default happy), --commands stub|run and\n--offline are rehearse's; all three need --rehearsal. Its key is scoped apart from real submissions';\nhub resume continues it as a rehearsal, and hub list/inspect show its verdict once recorded.",
   list: "Lists submissions in queue order. Any filter, --limit or --archived searches instead, newest first:\n--state is repeatable (any of); --repo is an exact path (starting with /, . or ~) or a substring;\n--key is a substring; --since/--until bound acceptance time by an ISO time or a duration ago\n(90s, 10m, 2h, 3d, 1w); --grep is case-insensitive text in the request or the blocker (an archived\nentry keeps only the request's first line); --archived adds the archive index.",
   inspect: "Renders a submission's monitoring panels. --stage narrows to one stage's neighbourhood;\n--follow-current selects the current stage's running job (instead of --job).",
   watch: "Live view of all submissions or one; never exits without --once.",
@@ -58,8 +58,8 @@ const HUB_HELP: Record<string, string> = {
 const PANELS: MonitorPanelKind[] = ["overview", "topology", "stages", "jobs", "activity", "job", "usage", "output"];
 const FORMATS: MonitorFormat[] = ["text", "ansi", "markdown", "json"];
 const RENDERERS: ChatRenderer[] = ["auto", "plain", "katex"];
-const valueFlags = ["task", "token-env-file", "config", "socket", "key", "format", "chat-renderer", "job", "attempt", "stage", "cursor", "page-size", "width", "since", "until", "graph", "repo", "grep", "limit", "stream", "launch", "command-id", "approve", "decline", "reason", "supervisor", "automatic", "max-automatic-resumes", "max-elapsed-ms", "base-delay-ms", "max-delay-ms"];
-const booleanFlags = ["capture-env", "write-token", "write", "json", "plain", "once", "follow", "reconciled", "upgrade", "update-plugin", "update-executors", "follow-current", "renew", "archived", "help"];
+const valueFlags = ["task", "token-env-file", "config", "socket", "key", "format", "chat-renderer", "job", "attempt", "stage", "cursor", "page-size", "width", "since", "until", "graph", "repo", "grep", "limit", "stream", "launch", "command-id", "approve", "decline", "reason", "supervisor", "automatic", "max-automatic-resumes", "max-elapsed-ms", "base-delay-ms", "max-delay-ms", "scenario", "commands"];
+const booleanFlags = ["capture-env", "write-token", "write", "json", "plain", "once", "follow", "reconciled", "upgrade", "update-plugin", "update-executors", "follow-current", "renew", "archived", "rehearsal", "offline", "help"];
 const repeatable = ["panel", "input", "state"];
 
 export async function hubCommand(args: string[]): Promise<number> {
@@ -81,7 +81,7 @@ export async function hubCommand(args: string[]): Promise<number> {
     return command || yes("help") ? 0 : 2;
   }
   const allowed: Record<string, string[]> = {
-    serve: ["config", "socket"], service: ["config", "capture-env", "token-env-file", "write-token", "write"], doctor: ["task", "json", "socket"], submit: ["key", "socket"], status: ["json", "socket"], limit: ["socket"],
+    serve: ["config", "socket"], service: ["config", "capture-env", "token-env-file", "write-token", "write"], doctor: ["task", "json", "socket"], submit: ["key", "socket", "rehearsal", "scenario", "commands", "offline"], status: ["json", "socket"], limit: ["socket"],
     list: ["json", "socket", "state", "graph", "repo", "key", "since", "until", "grep", "limit", "archived"],
     pause: ["command-id", "socket"], cancel: ["command-id", "socket"], archive: ["command-id", "socket"],
     resume: ["command-id", "socket", "reconciled", "approve", "input", "decline", "reason", "upgrade", "update-plugin", "update-executors", "supervisor"],
@@ -137,9 +137,11 @@ export async function hubCommand(args: string[]): Promise<number> {
   }
   if (command === "submit") {
     const file = path.resolve(need());
+    const rehearsal = submitRehearsal(values);
     const key = flag("key") ?? randomUUID();
-    console.error(`submission key: ${key}`);
-    console.log(JSON.stringify(await hubRequest("POST", "/v1/submissions", { taskPath: file, key }, socket), null, 2));
+    // The hub scopes a rehearsal's key apart from real submissions' (it stores it as rehearsal:<key>).
+    console.error(`submission key: ${key}${rehearsal !== undefined ? " (a rehearsal submission)" : ""}`);
+    console.log(JSON.stringify(await hubRequest("POST", "/v1/submissions", { taskPath: file, key, ...(rehearsal !== undefined ? { rehearsal } : {}) }, socket), null, 2));
     return 0;
   }
   if (command === "status") return hubStatus(socket, yes("json"));
@@ -235,10 +237,35 @@ export async function hubCommand(args: string[]): Promise<number> {
   throw new Error(`unknown hub command ${command}`);
 }
 
+/**
+ * `hub submit`'s rehearsal settings (docs/design-run-hub.md §12), or undefined for a real submission.
+ * --scenario, --commands and --offline are rehearsal-only: a real submission refuses them.
+ */
+export function submitRehearsal(values: Record<string, string | boolean | string[] | undefined>): HubRehearsal | undefined {
+  const scenario = typeof values.scenario === "string" ? values.scenario : undefined;
+  const commands = typeof values.commands === "string" ? values.commands : undefined;
+  const offline = values.offline === true;
+  if (values.rehearsal !== true) {
+    const given = [scenario !== undefined ? "--scenario" : "", commands !== undefined ? "--commands" : "", offline ? "--offline" : ""].filter(Boolean);
+    if (given.length > 0) throw new Error(`${given.join(", ")} ${given.length === 1 ? "is a rehearsal setting" : "are rehearsal settings"}: add --rehearsal to make a rehearsal submission, or drop ${given.length === 1 ? "it" : "them"} for a real one`);
+    return undefined;
+  }
+  if (commands !== undefined && commands !== "stub" && commands !== "run") throw new Error("--commands must be stub or run");
+  if (scenario !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(scenario)) throw new Error("--scenario must name a scenario (letters, digits, '.', '_' or '-', at most 128)");
+  return { ...(scenario !== undefined ? { scenario } : {}), ...(commands !== undefined ? { commands: commands as "stub" | "run" } : {}), ...(offline ? { offline: true } : {}) };
+}
+
+/** A rehearsal submission's marker in `hub list`: its scenario and recorded verdict. */
+function rehearsalMark(item: HubSubmission, status: HubStatus): string {
+  if (item.input.rehearsal === undefined) return "";
+  const verdict = status.rehearsals?.[item.id]?.verdict;
+  return `  [rehearsal ${item.input.rehearsal.scenario ?? "happy"}: ${verdict ?? "verdict pending"}]`;
+}
+
 export function formatHubList(status: HubStatus): string {
   return [`Hub ${status.hubId} · occupied ${status.occupiedSlots}/${status.maxConcurrentRuns}${status.occupiedSlots > status.maxConcurrentRuns ? " · new starts held" : ""}`,
     ...(status.fault ? [`Fault: ${safeText(status.fault)}`] : []),
-    ...status.submissions.map((item) => `${item.id}  ${item.state.padEnd(10)}  ${item.runId}${item.blocker ? `  ${safeText(item.blocker).replace(/\s+/g, " ")}` : ""}`),
+    ...status.submissions.map((item) => `${item.id}  ${item.state.padEnd(10)}  ${item.runId}${rehearsalMark(item, status)}${item.blocker ? `  ${safeText(item.blocker).replace(/\s+/g, " ")}` : ""}`),
     ...(status.submissions.length ? [] : ["No submissions."]),
   ].join("\n");
 }
@@ -281,13 +308,13 @@ export function pointInTime(value: string, now: number, name: string): string {
 export function formatHubSearch(status: HubStatus): string {
   const one = (value: string) => safeText(value).replace(/\s+/g, " ").trim();
   const rows = [
-    ...status.submissions.map((item) => ({ at: item.acceptedAt, id: item.id, state: item.state, runId: item.runId, graph: status.summaries?.[item.id]?.graph, line: status.summaries?.[item.id]?.firstLine, blocker: item.blocker ?? item.observation?.blocker, archived: false })),
-    ...(status.archived ?? []).map((entry) => ({ at: entry.acceptedAt, id: entry.id, state: entry.state, runId: entry.runId, graph: entry.graph, line: entry.request?.firstLine, blocker: entry.blocker, archived: true })),
+    ...status.submissions.map((item) => ({ at: item.acceptedAt, id: item.id, state: item.state, runId: item.runId, graph: status.summaries?.[item.id]?.graph, line: status.summaries?.[item.id]?.firstLine, blocker: item.blocker ?? item.observation?.blocker, archived: false, rehearsal: item.input.rehearsal !== undefined ? status.rehearsals?.[item.id]?.verdict ?? "pending" : undefined })),
+    ...(status.archived ?? []).map((entry) => ({ at: entry.acceptedAt, id: entry.id, state: entry.state, runId: entry.runId, graph: entry.graph, line: entry.request?.firstLine, blocker: entry.blocker, archived: true, rehearsal: entry.rehearsal !== undefined ? entry.rehearsalVerdict ?? "pending" : undefined })),
   ].sort((a, b) => Date.parse(b.at) - Date.parse(a.at) || b.id.localeCompare(a.id));
   const matched = status.matched ?? rows.length;
   return [`Hub ${status.hubId} · ${rows.length === matched ? `${matched}` : `${rows.length} of ${matched}`} matching submission${matched === 1 ? "" : "s"}`,
     ...(status.fault ? [`Fault: ${safeText(status.fault)}`] : []),
-    ...rows.map((row) => [row.at, row.id, `${row.state}${row.archived ? " (archived)" : ""}`.padEnd(21), row.runId, row.graph ?? "-", row.line ? one(row.line) : "-", ...(row.blocker ? [`blocker: ${one(row.blocker)}`] : [])].join("  ")),
+    ...rows.map((row) => [row.at, row.id, `${row.state}${row.archived ? " (archived)" : ""}`.padEnd(21), row.runId, row.graph ?? "-", row.line ? one(row.line) : "-", ...(row.rehearsal !== undefined ? [`rehearsal: ${row.rehearsal}`] : []), ...(row.blocker ? [`blocker: ${one(row.blocker)}`] : [])].join("  ")),
     ...(rows.length ? [] : ["No matching submissions."]),
   ].join("\n");
 }
@@ -319,12 +346,19 @@ export function formatHubStatus(health: HubHealth, socket: string): string {
     `Socket: ${health.socket ?? socket}`,
     `Limit ${health.maxConcurrentRuns} · occupied ${health.occupiedSlots}/${health.maxConcurrentRuns}${health.occupiedSlots > health.maxConcurrentRuns ? " · new starts held" : ""} · queued ${counts.queued ?? 0}`,
     `Submissions: ${health.submissions.length}${states.length ? ` (${states.join(", ")})` : ""}${health.archivedEntries !== undefined ? ` · archive index ${health.archivedEntries}` : ""}`,
+    ...rehearsalCountLine(health.rehearsalCounts),
     ...(health.fault ? [`Fault: ${safeText(health.fault)}`] : []),
     ...(health.retentionError ? [`Retention error: ${safeText(health.retentionError)}`] : []),
     ...(health.monitoringError ? [`Monitoring error: ${safeText(health.monitoringError)}`] : []),
     ...(health.archiveIndexError ? [`Archive index error: ${safeText(health.archiveIndexError)}`] : []),
     ...(health.environment ? environmentLines(health.environment) : []),
   ].join("\n");
+}
+/** The rehearsal submissions among the counts, when there are any. */
+function rehearsalCountLine(counts: HubHealth["rehearsalCounts"]): string[] {
+  const states = HUB_STATES.filter((state) => counts?.[state]).map((state) => `${state} ${counts![state]}`);
+  const total = HUB_STATES.reduce((sum, state) => sum + (counts?.[state] ?? 0), 0);
+  return total > 0 ? [`Rehearsals: ${total} (${states.join(", ")}); they run on stand-ins and count against the limit like any submission`] : [];
 }
 /** The hub's environment, names only: the PATH head, where each tool resolves, which variables are set. */
 function environmentLines(env: HubEnvironmentSummary): string[] {

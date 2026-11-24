@@ -4,7 +4,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { mkdir, readFile } from "node:fs/promises";
-import type { HubArchiveEntry, HubArchivedSubmission, HubConfig, HubContinuation, HubObservation, HubResumeRemedy, HubRetryPolicy, HubStatus, HubSubmission } from "@graphloom/sdk";
+import { HUB_REHEARSAL_KEY_PREFIX } from "@graphloom/sdk";
+import type { HubArchiveEntry, HubArchivedSubmission, HubConfig, HubContinuation, HubObservation, HubRehearsal, HubResumeRemedy, HubRetryPolicy, HubStatus, HubSubmission } from "@graphloom/sdk";
 import { acquireHubLock } from "./lock.js";
 import { HubArchiveIndex } from "./archive.js";
 import { assertCapacity, durableWrite, HubStore, syncDirectory, validateConfig } from "./store.js";
@@ -127,6 +128,8 @@ export class Hub {
     return this.enqueue(async () => {
       if (this.closing) throw new Error("hub is shutting down");
       validateSubmit(request);
+      // A rehearsal's key lives in its own scope: a rehearsal and a real submission of one task never meet.
+      if (request.key !== undefined && request.input.rehearsal !== undefined) request.key = `${HUB_REHEARSAL_KEY_PREFIX}${request.key}`;
       if (request.key !== undefined) {
         const existing = Object.values(this.snapshot.submissions).find((s) => s.key === request.key) ?? this.snapshot.tombstones.find((s) => s.key === request.key);
         if (existing) {
@@ -139,7 +142,8 @@ export class Hub {
       const { task, config, ...metadata } = request.input;
       const stored = { ...metadata, taskFile: path.join(directory, "task.yaml"), ...(config === undefined ? {} : { configFile: path.join(directory, "config.json") }) };
       const submission: HubSubmission = {
-        id, runId: `hub-${randomUUID()}`, hubId: this.snapshot.hubId, acceptedAt: this.stamp(), updatedAt: this.stamp(), requestDigest: request.requestDigest, contentDigest: canonicalDigest(request.input),
+        // A rehearsal's run carries the rehearsal run-ID prefix, so a plugin keeps its refs in the rehearsal namespace.
+        id, runId: `${request.input.rehearsal !== undefined ? "rehearsal-" : ""}hub-${randomUUID()}`, hubId: this.snapshot.hubId, acceptedAt: this.stamp(), updatedAt: this.stamp(), requestDigest: request.requestDigest, contentDigest: canonicalDigest(request.input),
         ...(request.key === undefined ? {} : { key: request.key }), input: stored, desiredAction: "execute", state: "queued", queueSequence: this.snapshot.sequence + 1,
         generation: 0, automaticResumes: 0, retry: copy(this.snapshot.config.retry), failureRepeats: 0, progressRevision: 0, journalBytes: 0,
       };
@@ -189,6 +193,8 @@ export class Hub {
       }
       if (submission.desiredAction === "cancel") throw new Error("canceled submissions cannot be resumed or changed");
       if (submission.state === "succeeded") throw new Error("completed submissions cannot be restarted");
+      // A rehearsal's supervisor is the scenario's script: there is no harness to move it to.
+      if (kind === "resume" && remedy?.supervisor !== undefined && submission.input.rehearsal !== undefined) throw new Error("a rehearsal submission's supervisor is its scenario's script; --supervisor applies to real submissions only");
       if (kind === "resume" && remedy && incompleteInitialization(submission)) throw new Error("resume remedies cannot be applied before initialization; retry without a remedy");
       if (kind === "resume" && remedy && (submission.launch || submission.pendingCommand)) throw new Error("a remedy needs a drained submission with no pending command");
       const command = { id: commandId, kind, acceptedAt: this.stamp(), ...(remedy ? { remedy: copy(remedy) } : {}) };
@@ -260,7 +266,7 @@ export class Hub {
       if (this.fault) throw new Error(`hub persistence fault: ${this.fault}`);
       // History first: a crash before the snapshot commits leaves an index entry for a
       // still-live submission, which searches skip; the reverse would lose the entry.
-      let described: Pick<HubArchiveEntry, "graph" | "request" | "stateDir"> = {};
+      let described: Pick<HubArchiveEntry, "graph" | "request" | "stateDir" | "rehearsalVerdict"> = {};
       try { described = await this.options.describeArchive?.(copy(s)) ?? {}; } catch { described = {}; }
       const blocker = s.blocker ?? s.observation?.blocker;
       await this.archiveIndex.add({
@@ -271,6 +277,8 @@ export class Hub {
         acceptedAt: s.acceptedAt, settledAt: s.updatedAt, archivedAt: this.stamp(), state: s.state as HubArchiveEntry["state"],
         ...(described.stateDir !== undefined ? { stateDir: described.stateDir } : {}),
         ...(blocker ? { blocker } : {}),
+        ...(s.input.rehearsal !== undefined ? { rehearsal: s.input.rehearsal } : {}),
+        ...(described.rehearsalVerdict !== undefined ? { rehearsalVerdict: described.rehearsalVerdict } : {}),
       });
       await this.commit((next) => { delete next.submissions[s.id]; next.tombstones.push(tombstone); });
       return tombstone;
@@ -520,6 +528,7 @@ function bounded(value: unknown, label: string, limit: number): asserts value is
 function validateSubmit(request: HubSubmitRequest): void {
   if (!/^[a-f0-9]{64}$/.test(request.requestDigest)) throw new Error("requestDigest must be SHA-256");
   if (request.key !== undefined) bounded(request.key, "idempotency key", 256);
+  if (request.key !== undefined && request.input?.rehearsal === undefined && request.key.startsWith(HUB_REHEARSAL_KEY_PREFIX)) throw new Error(`idempotency key prefix ${HUB_REHEARSAL_KEY_PREFIX} is reserved for rehearsal submissions`);
   if (!request.input || typeof request.input !== "object") throw new Error("submission input is required");
   bounded(request.input.task, "task bytes", 2 * 1024 * 1024);
   if (request.input.config !== undefined) bounded(request.input.config, "config bytes", 2 * 1024 * 1024);
@@ -532,8 +541,18 @@ function validateSubmit(request: HubSubmitRequest): void {
     if (!path.isAbsolute(request.input.pluginLink)) throw new Error("pluginLink must be absolute");
   }
   for (const key of ["baseCommit", "bundleDigest", "runtimeDigest"] as const) bounded(request.input[key], key, 256);
+  if (request.input.rehearsal !== undefined) validateRehearsal(request.input.rehearsal);
   const { task: _task, config: _config, ...metadata } = request.input;
   if (Buffer.byteLength(JSON.stringify(metadata)) > 4096) throw new Error("submission metadata exceeds 4 KiB");
+}
+function validateRehearsal(value: unknown): asserts value is HubRehearsal {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("rehearsal settings must be an object");
+  for (const [key, item] of Object.entries(value)) {
+    if (key === "scenario" && typeof item === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(item)) continue;
+    if (key === "commands" && (item === "stub" || item === "run")) continue;
+    if (key === "offline" && item === true) continue;
+    throw new Error(`unknown or invalid rehearsal setting ${key}`);
+  }
 }
 function validateRemedy(remedy: HubResumeRemedy | undefined): void {
   if (!remedy) return;

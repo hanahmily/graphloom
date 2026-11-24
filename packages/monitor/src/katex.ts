@@ -21,6 +21,7 @@ export function mathSummary(panel: MonitorPanel, options: RenderOptions): { math
       add(`Status: ${run.status}`, toneFor(run.status));
       add(`Stage: ${run.currentStage ?? 'unknown'} / attempt ${run.currentAttempt ?? 'unknown'}`);
       if (hub) add(`Slots: ${hub.occupied}/${hub.limit}; queued: ${hub.queued}`, hub.queued ? 'warning' : 'active');
+      if (hub?.rehearsal) add(`Rehearsal: ${hub.rehearsal}`);
       if (run.blocker) add('Blocker: see details', 'warning');
       break;
     }

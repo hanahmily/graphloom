@@ -43,7 +43,7 @@ export interface OpenHubOptions {
    * request, read by the caller from the captured task, and the run's state directory.
    * A failure leaves those fields out; it never blocks the archive.
    */
-  describeArchive?: (submission: HubSubmission) => Promise<Pick<HubArchiveEntry, "graph" | "request" | "stateDir">>;
+  describeArchive?: (submission: HubSubmission) => Promise<Pick<HubArchiveEntry, "graph" | "request" | "stateDir" | "rehearsalVerdict">>;
   /** Tests shrink the archive index's retention bounds. */
   archiveIndexBounds?: { entries: number; bytes: number };
 }

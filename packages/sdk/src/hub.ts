@@ -58,6 +58,42 @@ export interface HubInput {
   runtimeDigest: string;
   runtimeConfig?: { runner?: { path: string; digest: string }; supervisor?: { path: string; digest: string } };
   configDigest?: string;
+  /**
+   * Present on a rehearsal submission only (docs/design-run-hub.md §12): its run
+   * runs on `graphloom rehearse`'s stand-ins, never on a real model. Part of the
+   * captured input, so of the request digest and the idempotency key's scope.
+   */
+  rehearsal?: HubRehearsal;
+}
+/** A rehearsal submission's settings: what `graphloom rehearse` takes for one run. */
+export interface HubRehearsal {
+  /** The bundle's scenario; `happy` when absent. */
+  scenario?: string;
+  /** Quick mode (`stub`, the default) answers command jobs from the scenario; `run` runs them. */
+  commands?: "stub" | "run";
+  /** Replays the scenario's recorded GitHub reads instead of asking GitHub. */
+  offline?: boolean;
+}
+/** The idempotency-key scope of a rehearsal submission: a rehearsal and a real submission never share a key. */
+export const HUB_REHEARSAL_KEY_PREFIX = "rehearsal:";
+/**
+ * A rehearsal submission's recorded verdict (docs/design-run-hub.md §12.3), written
+ * by its managed launch beside the run: the rehearsal's own evaluation, with each
+ * boundary check's status.
+ */
+export interface HubRehearsalVerdict {
+  verdict: "ready" | "not-ready" | "inconclusive";
+  /** Each boundary check (B1 to B10) and its status. */
+  boundaries: Record<string, "passed" | "failed" | "unverified" | "unexercised">;
+  blocker?: { boundary: string; reason: string };
+  /** Whether the run met the scenario's expectation. */
+  convergence: boolean;
+  /** The run's status and stop reason when the verdict was taken. */
+  runStatus: string;
+  stopReason?: string;
+  /** The launch that took it, and when. */
+  launchId: string;
+  evaluatedAt: string;
 }
 export type HubStoredInput = Omit<HubInput, "task" | "config"> & { taskFile: string; configFile?: string };
 export interface HubResumeRemedy {
@@ -165,6 +201,9 @@ export interface HubArchiveEntry {
   /** The run's state directory, when the hub runtime knows it. */
   stateDir?: string;
   blocker?: string;
+  /** A rehearsal submission's settings and its verdict, when one was recorded. */
+  rehearsal?: HubRehearsal;
+  rehearsalVerdict?: HubRehearsalVerdict["verdict"];
 }
 export interface HubStatus {
   hubId: string;
@@ -178,6 +217,8 @@ export interface HubStatus {
   archived?: HubArchiveEntry[];
   /** Search replies only: matches before `limit` applied. */
   matched?: number;
+  /** Each listed rehearsal submission's recorded verdict, by submission id. */
+  rehearsals?: Record<string, HubRehearsalVerdict>;
 }
 /** `GET /v1/health`: the hub's status with aggregate counts and service health. */
 export interface HubHealth extends HubStatus {
@@ -185,6 +226,8 @@ export interface HubHealth extends HubStatus {
   version?: string;
   socket?: string;
   counts?: Partial<Record<HubSchedulingState, number>>;
+  /** The rehearsal submissions among `counts`, by state (docs/design-run-hub.md §12). */
+  rehearsalCounts?: Partial<Record<HubSchedulingState, number>>;
   archivedEntries?: number;
   archiveIndexError?: string;
   monitoringError?: string;

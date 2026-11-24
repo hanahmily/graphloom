@@ -1180,6 +1180,14 @@ Decided 2026-11-19, after issue-fix 0.17.0's `arbitrate-operator` scenario
   resumed `arbitrate-operator` run used to replay its `enter` and pass only
   because the controller rejected it; it now continues with the leave.
 
+Decided 2026-11-24: the run hub takes rehearsal submissions
+(`graphloom hub submit --rehearsal [--scenario] [--commands] [--offline]`,
+[run hub §12](design-run-hub.md#12-rehearsal-submissions)). The hub queues
+and launches them as any submission; the managed launch runs this design's
+`rehearse` (and, on `hub resume`, `resume --rehearsal`) on the hub's run ID
+and grant, with its scratch kept under the hub instead of `$TMPDIR`, and
+records the verdict once the run stops on its own.
+
 Not borrowed from that earlier orchestrator, on purpose: its edge-coverage generation builds one
 case per branch from a workflow's declarative predicates and gates on 100%.
 GraphLoom graphs are TypeScript — `advance()` is code, not data — so coverage

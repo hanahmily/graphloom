@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { intakeTask, parseTaskYaml } from "@graphloom/controller";
 import { digestExecutorSource } from "@graphloom/runner";
-import type { HubInput, HubStoredInput } from "@graphloom/sdk";
+import type { HubInput, HubRehearsal, HubStoredInput } from "@graphloom/sdk";
 import { stableHash } from "@graphloom/sdk";
 import type { HubServiceConfig } from "./hub-config.js";
 import { runnerConfigPath } from "./runner-config.js";
@@ -16,7 +16,7 @@ import { selfInstall } from "./ownership.js";
 const MAX_TASK_BYTES = 256 * 1024;
 
 /** Read-only intake: no graph callback, worktree, rehearsal or provider is run here. */
-export async function captureHubInput(taskPath: string, config: Pick<HubServiceConfig, "runnerConfig" | "supervisorConfig">, env: NodeJS.ProcessEnv = process.env): Promise<HubInput> {
+export async function captureHubInput(taskPath: string, config: Pick<HubServiceConfig, "runnerConfig" | "supervisorConfig">, env: NodeJS.ProcessEnv = process.env, rehearsal?: HubRehearsal): Promise<HubInput> {
   const absolute = await realpath(taskPath);
   const task = await boundedText(absolute, MAX_TASK_BYTES);
   const intake = await intakeTask(absolute);
@@ -24,8 +24,10 @@ export async function captureHubInput(taskPath: string, config: Pick<HubServiceC
   const self = selfInstall();
   const runnerPath = config.runnerConfig ?? runnerConfigPath(env).file;
   const supervisorPath = config.supervisorConfig ?? env.GRAPHLOOM_SUPERVISOR_CONFIG ?? path.join(env.HOME ?? os.homedir(), ".config", "graphloom", "supervisor.json");
-  const runner = await configReference(runnerPath, true);
-  const supervisor = await configReference(supervisorPath, config.supervisorConfig !== undefined || env.GRAPHLOOM_SUPERVISOR_CONFIG !== undefined);
+  // A rehearsal runs on stand-ins: its runner config only tells B2 which real agent CLIs to probe,
+  // and its supervisor is the scenario's script, so neither is required and no supervisor config is pinned.
+  const runner = await configReference(runnerPath, rehearsal === undefined);
+  const supervisor = rehearsal !== undefined ? undefined : await configReference(supervisorPath, config.supervisorConfig !== undefined || env.GRAPHLOOM_SUPERVISOR_CONFIG !== undefined);
   return {
     task, taskDigest: createHash("sha256").update(task).digest("hex"), taskPath: absolute,
     ...(intake.config !== undefined ? { config: intake.config.text, configDigest: intake.config.sha256 } : {}),
@@ -37,6 +39,7 @@ export async function captureHubInput(taskPath: string, config: Pick<HubServiceC
     runtimeNode: await realpath(process.execPath), runtimeRoot: self.record.root, runtimeVersion: self.record.version,
     runtimeDigest: await runtimeDigest(self.record.root),
     runtimeConfig: { ...(runner !== undefined ? { runner } : {}), ...(supervisor !== undefined ? { supervisor } : {}) },
+    ...(rehearsal !== undefined ? { rehearsal } : {}),
   };
 }
 
