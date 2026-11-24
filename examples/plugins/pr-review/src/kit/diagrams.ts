@@ -10,6 +10,7 @@
  * the plugin instead, with a note. The graph and the validators ask the same function, `diagramFlow`, over the same evidence.
  */
 import { MAX_EXECUTOR_INPUT_BYTES, type EnvironmentCommand, type EvidenceRecord } from "@graphloom/sdk";
+import { commandFits } from "./bounds.js";
 import type { FinalFeature } from "./briefing.js";
 import { documentProblems, embeddedSvg, labelProblems, parseSvg, stylesFor, textNodes } from "./diagramsvg.js";
 import { clip } from "./escape.js";
@@ -262,7 +263,7 @@ export function diagramCheckCommand(attempt: number, k: number, html: string, mo
   const chunks = writeChunks(html);
   const id = diagramCheckId(attempt, k);
   const command: EnvironmentCommand = { id, argv: ["sh", "-c", DIAGRAM_CHECK_SCRIPT, id, mount, String(chunks.length), ...chunks] };
-  return command.argv.length <= 64 && Buffer.byteLength(JSON.stringify({ commands: [command] }), "utf8") <= MAX_EXECUTOR_INPUT_BYTES - 4_096 ? command : undefined;
+  return commandFits(command) ? command : undefined;
 }
 
 /** The commands of one job: as many as fit one executor input, in order (at least one). */

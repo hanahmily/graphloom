@@ -13,6 +13,7 @@
  * (`publish.ts`, `ledger-published`).
  */
 import type { EnvironmentCommand, EvidenceRecord } from "@graphloom/sdk";
+import { commandFits } from "./bounds.js";
 import { parseLedger, type Ledger } from "./commands.js";
 import { COMMAND, LEDGER_DESIGN_JSON_FILE, LEDGER_DESIGN_MD_FILE, LEDGER_JSON_FILE, LEDGER_MD_FILE, LEDGER_MOVED, LEDGER_REVIEW_JSON_FILE, LEDGER_REVIEW_MD_FILE, NECESSITY_JSON, PART_BASE, QA_JSON, REPORT_JSON, ledgerRef } from "./constants.js";
 import { commandRuns, isObject, reportText, succeeded, type CommandRun } from "./evidence.js";
@@ -23,7 +24,6 @@ import { LEDGER_V1, LEDGER_V2, migratedDesignMarkdown, migratedTrees, migrateV1,
 
 /** The schema a ledger of 0.21 to 0.26 has; a v2 ledger's top-level `ledger.json` has `LEDGER_V2`. */
 export const LEDGER_SCHEMA = LEDGER_V1;
-const MAX_COMMAND_BYTES = 200_000;
 /** Characters of the prior ledger's registry one command prints (a command report holds 65,536 bytes). */
 const PRIOR_CHUNK = 30_000;
 
@@ -112,8 +112,8 @@ export function ledgerWriteCommand(pr: PullRequest, old: string, baseline: strin
   const parts = writeChunks(json);
   const md = writeChunks(markdown);
   const argv = ["sh", "-c", WRITE, COMMAND.ledgerWrite, ledgerRef(pr.owner, pr.repo, pr.number), old, ledgerMessage(pr, graph), "design", baseline, topLedgerJson(pr), ...migArgs(migration), String(parts.length), ...parts, ...md];
-  if (argv.length > 64 || Buffer.byteLength(JSON.stringify(argv), "utf8") > MAX_COMMAND_BYTES) return undefined;
-  return { id: COMMAND.ledgerWrite, argv };
+  const command: EnvironmentCommand = { id: COMMAND.ledgerWrite, argv };
+  return commandFits(command) ? command : undefined;
 }
 
 /**
@@ -196,7 +196,7 @@ export function reviewLedgerWriteCommands(pr: PullRequest, old: string, baseline
   const parts = writeChunks(json);
   const md = writeChunks(markdown);
   const argv = [...head, String(parts.length), ...parts, ...md];
-  if (argv.length <= 64 && Buffer.byteLength(JSON.stringify(argv), "utf8") <= MAX_COMMAND_BYTES) return { parts: migrated, write: { id: COMMAND.reviewLedgerWrite, argv } };
+  if (commandFits({ id: COMMAND.reviewLedgerWrite, argv })) return { parts: migrated, write: { id: COMMAND.reviewLedgerWrite, argv } };
   const own = [...partCommands(PART_BASE.ledgerJson, LEDGER_JSON_FILE, json), ...partCommands(PART_BASE.ledgerMd, LEDGER_MD_FILE, markdown)];
   return { parts: [...migrated, ...own], write: { id: COMMAND.reviewLedgerWrite, argv: [...head, "files", LEDGER_JSON_FILE, LEDGER_MD_FILE, sha256(json), sha256(markdown)] } };
 }

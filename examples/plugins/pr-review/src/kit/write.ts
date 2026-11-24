@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
-import { MAX_EXECUTOR_INPUT_BYTES, type EnvironmentCommand } from "@graphloom/sdk";
+import type { EnvironmentCommand } from "@graphloom/sdk";
+import { commandFits } from "./bounds.js";
 import { COMMAND, NECESSITY_JSON, QA_JSON, REPORT_JSON, REVIEW_DIR, REVIEW_MD } from "./constants.js";
 
 /**
@@ -13,9 +14,6 @@ import { COMMAND, NECESSITY_JSON, QA_JSON, REPORT_JSON, REVIEW_DIR, REVIEW_MD } 
 
 /** UTF-16 units per argv element; the command executor allows 4,096 characters. */
 const CHUNK = 4_000;
-/** Argv elements the executor allows (64) less the shell, `-c`, the script, the id and the count. */
-const MAX_CHUNKS = 59;
-const MAX_COMMAND_INPUT_BYTES = MAX_EXECUTOR_INPUT_BYTES - 4_096;
 
 /** Chunks that never split a surrogate pair, so each argv element stays valid text. */
 export function writeChunks(text: string): string[] {
@@ -31,8 +29,6 @@ export function writeChunks(text: string): string[] {
   return chunks;
 }
 
-const inputBytes = (command: EnvironmentCommand): number => Buffer.byteLength(JSON.stringify({ commands: [command] }), "utf8");
-
 const script = (jsonFile: string): string =>
   'set -eu; n="$1"; shift; json=""; while [ "$n" -gt 0 ]; do json="$json$1"; shift; n=$((n - 1)); done; md=""; for part in "$@"; do md="$md$part"; done; ' +
   `mkdir -p ${REVIEW_DIR}; printf '*\\n' > ${REVIEW_DIR}/.gitignore; ` +
@@ -40,15 +36,16 @@ const script = (jsonFile: string): string =>
   `printf '%s' "$md" > ${REVIEW_MD}.tmp; mv ${REVIEW_MD}.tmp ${REVIEW_MD}; echo written`;
 
 /**
- * The command that writes a JSON file and `review.md` together, or undefined when the two do not fit one command
- * (the caller then writes each as a bounded multi-part artifact, `partCommands`).
+ * The command that writes a JSON file and `review.md` together, or undefined when the two do not fit one command as
+ * the dispatch guard measures it (`commandFits`: argv count and lengths, bytes once JSON-escaped); the caller then
+ * writes each as a bounded multi-part artifact (`partCommands`).
  */
 function fileWriteCommand(id: string, jsonFile: string, json: string, markdown: string): EnvironmentCommand | undefined {
   const parts = writeChunks(json);
   const md = writeChunks(markdown);
   const sh = script(jsonFile);
   const command: EnvironmentCommand = { id, argv: ["sh", "-c", sh, id, String(parts.length), ...parts, ...md] };
-  return command.argv.length - 5 <= MAX_CHUNKS && inputBytes(command) <= MAX_COMMAND_INPUT_BYTES ? command : undefined;
+  return commandFits(command) ? command : undefined;
 }
 
 /** The command that writes `report.json` and `review.md`. */
@@ -80,7 +77,7 @@ const jsonScript = (jsonFile: string): string =>
 export function necessityWriteCommand(json: string): EnvironmentCommand | undefined {
   const parts = writeChunks(json);
   const command: EnvironmentCommand = { id: COMMAND.necessityWrite, argv: ["sh", "-c", jsonScript(NECESSITY_JSON), COMMAND.necessityWrite, String(parts.length), ...parts] };
-  return command.argv.length - 5 <= MAX_CHUNKS && inputBytes(command) <= MAX_COMMAND_INPUT_BYTES ? command : undefined;
+  return commandFits(command) ? command : undefined;
 }
 
 const recordScript =
@@ -97,7 +94,7 @@ const recordScript =
 export function recordCommand(id: string, dir: string, json: string): EnvironmentCommand | undefined {
   const parts = writeChunks(json);
   const command: EnvironmentCommand = { id, argv: ["sh", "-c", recordScript, id, `${REVIEW_DIR}/${dir}/${id}.json`, String(parts.length), ...parts] };
-  return command.argv.length <= 64 && inputBytes(command) <= MAX_COMMAND_INPUT_BYTES ? command : undefined;
+  return commandFits(command) ? command : undefined;
 }
 
 /** The JSON a record command's argv wrote. */
