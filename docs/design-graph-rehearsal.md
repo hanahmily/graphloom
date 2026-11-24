@@ -1221,7 +1221,13 @@ each graph's `happy`, the full tier every scenario).
 - pr-review's `coverage-measured` stubbed host paths that exist on no host;
   the runner checks a confined job's mounts before the command stand-in
   answers, and refused it. The stubs name paths that exist on any Linux or
-  macOS host and hold no workspace.
+  macOS host and hold no workspace. The same check needs the profile's pinned
+  Go sandbox image in the local store (`docker image inspect`), which the
+  scenario's `sandbox-go: ready` stub presumes: on a host without it the
+  scenario is `not-ready` (B5, recovery after the refused job), as a real run
+  would be. The CLI suite's rehearsal task puts a `docker` stand-in on `PATH`
+  that reports the profile's images present and refuses anything else, so the
+  verdict does not depend on what the host has pulled.
 - issue-fix's scenarios are designed for `--commands run`, not quick mode: Fix
   judges RED and GREEN from the regression test's `go test -json` report on
   the base and on the candidate checkout, and the findings ledger

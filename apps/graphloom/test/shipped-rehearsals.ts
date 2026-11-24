@@ -50,6 +50,48 @@ async function issueFixTools(dir: string): Promise<string> {
   return bin;
 }
 
+/**
+ * A `docker` stand-in for a profile whose sandbox images a scenario says are present (pr-review's `coverage-measured`
+ * stubs the sandbox check `ready`). With `--commands stub` no container starts, but the runner still checks a
+ * docker-confined job for real before the command stand-in answers it: the image must be in the local store
+ * (`docker image inspect`), or the job is refused and the scenario ends in recovery. The real check depends on what
+ * the host has pulled (the pinned Go image is on a developer's machine, not on a fresh CI runner), so the task
+ * environment answers it: the profile's pinned images are present, the daemon is rootful, no container of the run
+ * exists, and anything else, `docker run` above all, fails loudly.
+ */
+async function dockerStandIn(dir: string, images: readonly string[]): Promise<string> {
+  const bin = path.join(dir, "docker-bin");
+  await mkdir(bin, { recursive: true });
+  const known = images.map((image) => `  ${JSON.stringify(image)}) echo sha256:${"0".repeat(64)}; exit 0 ;;`);
+  const script = [
+    "#!/bin/sh",
+    '# docker stand-in (apps/graphloom/test/shipped-rehearsals.ts): the scenario\'s sandbox images are present; nothing runs.',
+    'case "$1 $2" in',
+    '"image inspect")',
+    '  for image; do :; done',
+    '  case "$image" in',
+    ...known,
+    "  esac",
+    '  echo "Error: No such image: $image" >&2; exit 1 ;;',
+    'esac',
+    'case "$1" in',
+    'info) echo \'["name=seccomp,profile=builtin"]\'; exit 0 ;;',
+    "ps|kill|rm) exit 0 ;;",
+    "esac",
+    'echo "docker stand-in: refused: docker $*" >&2',
+    "exit 1",
+    "",
+  ].join("\n");
+  await writeFile(path.join(bin, "docker"), script, { mode: 0o755 });
+  return bin;
+}
+
+/** The pinned images of a review profile's metrics sandboxes. */
+function sandboxImages(config: unknown): string[] {
+  const sandbox = (config as { metrics?: { sandbox?: Record<string, { image?: unknown }> } }).metrics?.sandbox ?? {};
+  return Object.values(sandbox).flatMap((s) => (typeof s.image === "string" ? [s.image] : []));
+}
+
 /** The scenario names the plugin's built rehearsal entry declares for `config`. */
 async function scenarioNames(graph: string, config?: unknown): Promise<string[]> {
   const module = (await import(pathToFileURL(path.join(exampleBundle(graph), "dist", "rehearsal.js")).href)) as { rehearsal: { scenarios: object } | ((config: unknown) => { scenarios: object }) };
@@ -104,6 +146,7 @@ export async function shippedTask(scope: TestScope, graph: ShippedGraph): Promis
     });
     dir = env.dir;
     taskPath = env.taskPath;
+    bins.push(await dockerStandIn(dir, sandboxImages(config)));
   }
   // B2 probes the operator's agent CLIs named in the runner config: fakes that answer it, never a real login.
   const agents = await writeFakeCodingAgents(dir);
