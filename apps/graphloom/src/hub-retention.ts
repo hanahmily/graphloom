@@ -5,7 +5,7 @@ import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { access, mkdir, open, readdir, realpath, rename, rmdir, unlink } from "node:fs/promises";
 import path from "node:path";
-import type { HubInput, HubSubmission } from "@graphloom/sdk";
+import type { HubCommand, HubInput, HubSubmission } from "@graphloom/sdk";
 
 const versionPattern = /^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/;
 const hubKey = (directory: string) => createHash("sha256").update(path.resolve(directory)).digest("hex");
@@ -143,9 +143,11 @@ export class HubInstallationRetention {
   }
 }
 
-export function inputReferences(submission: { input: Pick<HubInput, "runtimePath" | "bundlePath" | "runtimeNode" | "runtimeRoot"> }): string[] {
+/** Captured input, plus the plugin an accepted `--update-plugin` moves to until its launch settles. */
+export function inputReferences(submission: { input: Pick<HubInput, "runtimePath" | "bundlePath" | "runtimeNode" | "runtimeRoot">; pendingCommand?: HubCommand; launch?: { command?: HubCommand } }): string[] {
   const { input } = submission;
-  return [input.runtimePath, input.bundlePath, ...(input.runtimeNode ? [input.runtimeNode] : []), ...(input.runtimeRoot ? [input.runtimeRoot] : [])];
+  const plugins = [submission.pendingCommand, submission.launch?.command].flatMap((command) => command?.remedy?.plugin ? [command.remedy.plugin.bundlePath] : []);
+  return [input.runtimePath, input.bundlePath, ...plugins, ...(input.runtimeNode ? [input.runtimeNode] : []), ...(input.runtimeRoot ? [input.runtimeRoot] : [])];
 }
 
 /**

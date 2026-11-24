@@ -24,6 +24,7 @@ class FakeDriver implements HubDriver {
   grants: string[] = [];
   prepareFailure = false;
   unknownCleanup = false;
+  settleInput?: NonNullable<HubDriver["settleInput"]>;
   async probe(): Promise<void> {}
   async prepare(launch: HubLaunch, submission: HubSubmission) {
     this.launches.push({ launch, submission });
@@ -325,6 +326,44 @@ describe("bounded continuation and fairness", () => {
     await expect(hub.resume(a.id, { remedy: { reconciled: true } })).rejects.toThrow(/before initialization/);
     await hub.resume(a.id); await hub.tick();
     expect(hub.inspect(a.id)).toMatchObject({ state: "running", automaticResumes: 0, launch: { mode: "initial", automatic: false } });
+  });
+  it("carries a plugin update's bundle to the launch and records the driver's settled input", async () => {
+    const { hub, driver, directory } = await fixture(); const a = await accepted(hub); await hub.tick();
+    driver.finish(hub.inspect(a.id), { kind: "operator", cause: "pin-drift", evidenceRefs: [] });
+    await hub.tick();
+    const plugin = { bundlePath: "/plugins/hello-2", bundleDigest: "d".repeat(64) };
+    await expect(hub.resume(a.id, { remedy: { plugin } })).rejects.toThrow(/needs updatePlugin/);
+    await expect(hub.resume(a.id, { remedy: { updatePlugin: true, plugin: { ...plugin, bundlePath: "relative" } } })).rejects.toThrow(/invalid resume remedy plugin/);
+    await expect(hub.resume(a.id, { remedy: { updatePlugin: true, plugin: { ...plugin, extra: "x" } as typeof plugin } })).rejects.toThrow(/invalid resume remedy plugin/);
+    const settled: string[] = [];
+    driver.settleInput = async (launch) => { settled.push(launch.id); return launch.command?.remedy?.plugin; };
+    await hub.resume(a.id, { remedy: { updatePlugin: true, plugin } }); await hub.tick();
+    const launch = hub.inspect(a.id).launch!;
+    expect(launch.command?.remedy).toEqual({ updatePlugin: true, plugin });
+    expect(hub.inspect(a.id).input.bundlePath).toBe("/plugins/hello");
+    driver.finish(hub.inspect(a.id), { kind: "operator", cause: "pin-drift", evidenceRefs: [] });
+    await hub.tick();
+    expect(settled).toEqual([launch.id]);
+    expect(hub.inspect(a.id)).toMatchObject({ state: "blocked", input: { bundlePath: plugin.bundlePath, bundleDigest: plugin.bundleDigest } });
+    // The recorded bundle survives a restart; a failing reconciliation blocks with its reason.
+    await hub.close({ graceMs: 0 });
+    const reopened = await openHub({ directory, driver, autoPoll: false, config: { maxConcurrentRuns: 1 } }); hubs.push(reopened);
+    expect(reopened.inspect(a.id).input.bundlePath).toBe(plugin.bundlePath);
+    driver.settleInput = async () => { throw new Error("link unreadable"); };
+    await reopened.resume(a.id); await reopened.tick();
+    driver.finish(reopened.inspect(a.id), retry());
+    await reopened.tick();
+    expect(reopened.inspect(a.id)).toMatchObject({ state: "blocked", blocker: "plugin reconciliation failed: link unreadable", input: { bundlePath: plugin.bundlePath } });
+    // A resume accepted while the launch drained does not start another launch past the failure.
+    await reopened.resume(a.id); await reopened.tick();
+    const launches = driver.launches.length;
+    await reopened.pause(a.id); await reopened.resume(a.id);
+    expect(reopened.inspect(a.id).pendingCommand?.kind).toBe("resume");
+    driver.finish(reopened.inspect(a.id), retry("other"));
+    await reopened.tick(); await reopened.tick();
+    expect(reopened.inspect(a.id)).toMatchObject({ state: "blocked", blocker: "plugin reconciliation failed: link unreadable" });
+    expect(reopened.inspect(a.id).pendingCommand).toBeUndefined();
+    expect(driver.launches).toHaveLength(launches);
   });
   it("puts a ready retry behind already queued work without blocking it while waiting", async () => {
     const { hub, driver, advance } = await fixture();

@@ -169,13 +169,19 @@ export class Hub {
   }
   pause(id: string, options: { commandId?: string } = {}): Promise<HubSubmission> { return this.command(id, "pause", options.commandId); }
   cancel(id: string, options: { commandId?: string } = {}): Promise<HubSubmission> { return this.command(id, "cancel", options.commandId); }
+  /** Whether this submission already recorded `commandId`; a retried command is answered from the record. */
+  knownCommand(id: string, commandId: string): Promise<boolean> {
+    return this.enqueue(async () => (await this.store.command(this.get(id), commandId)) !== undefined);
+  }
   resume(id: string, options: { commandId?: string; remedy?: HubResumeRemedy } = {}): Promise<HubSubmission> { return this.command(id, "resume", options.commandId, options.remedy); }
   private command(id: string, kind: "pause" | "cancel" | "resume", commandId: string = randomUUID(), remedy?: HubResumeRemedy): Promise<HubSubmission> {
     return this.enqueue(async () => {
       bounded(commandId, "command id", 256);
       validateRemedy(remedy);
       const submission = this.get(id);
-      const requestDigest = canonicalDigest({ kind, remedy });
+      // The hub-resolved plugin bundle is not part of the client's request: a retried command ID matches without it.
+      const { plugin: _plugin, ...requested } = remedy ?? {};
+      const requestDigest = canonicalDigest({ kind, remedy: remedy === undefined ? undefined : requested });
       const previous = await this.store.command(submission, commandId);
       if (previous) {
         if (previous.digest !== requestDigest) throw new Error("command ID conflicts with a different command");
@@ -364,6 +370,15 @@ export class Hub {
   }
   private async settle(id: string, observation?: HubObservation): Promise<void> {
     const before = this.get(id);
+    // The driver reconciles input it changed for this launch (a plugin update) before the record settles.
+    let inputUpdate: { bundlePath: string; bundleDigest: string } | undefined;
+    let inputFailure: string | undefined;
+    if (this.driver.settleInput) {
+      try {
+        inputUpdate = await this.driver.settleInput(copy(before.launch!), copy(before));
+        if (inputUpdate !== undefined && !validPluginBundle(inputUpdate)) throw new Error("driver returned an invalid plugin bundle");
+      } catch (error) { inputUpdate = undefined; inputFailure = `plugin reconciliation failed: ${message(error)}`.slice(0, 1024); }
+    }
     const cursor = await this.store.journal(before, { commandId: `launch:${before.launch!.id}`, digest: digest(before.launch), acceptedAt: this.stamp(), event: "settled", launch: before.launch!, ...(observation ? { observation } : {}) });
     await this.commit((next) => {
       const s = next.submissions[id]!;
@@ -374,7 +389,12 @@ export class Hub {
       delete s.blocker;
       s.updatedAt = this.stamp();
       if (observation) s.observation = observation;
+      if (inputUpdate) { s.input.bundlePath = inputUpdate.bundlePath; s.input.bundleDigest = inputUpdate.bundleDigest; }
       if (s.desiredAction !== "execute") { s.state = s.desiredAction === "hold" ? "paused" : "canceled"; return; }
+      // An unreconciled plugin input admits no further launch, not even an already accepted resume; only a completed run ignores it.
+      if (inputFailure && !(observation?.continuation?.kind === "complete" && observation.status === "succeeded")) {
+        delete s.pendingCommand; s.state = "blocked"; s.blocker = inputFailure; return;
+      }
       if (s.pendingCommand?.kind === "resume") { s.state = "queued"; s.queueSequence = ++next.sequence; return; }
       if (launch.phase !== "granted" && launchFailure) { s.state = "blocked"; s.blocker = launchFailure; return; }
       if (launch.phase !== "granted") { s.state = "queued"; s.queueSequence = ++next.sequence; return; }
@@ -507,6 +527,10 @@ function validateSubmit(request: HubSubmitRequest): void {
     bounded(request.input[key], key, 1024);
     if (!path.isAbsolute(request.input[key])) throw new Error(`${key} must be absolute`);
   }
+  if (request.input.pluginLink !== undefined) {
+    bounded(request.input.pluginLink, "pluginLink", 1024);
+    if (!path.isAbsolute(request.input.pluginLink)) throw new Error("pluginLink must be absolute");
+  }
   for (const key of ["baseCommit", "bundleDigest", "runtimeDigest"] as const) bounded(request.input[key], key, 256);
   const { task: _task, config: _config, ...metadata } = request.input;
   if (Buffer.byteLength(JSON.stringify(metadata)) > 4096) throw new Error("submission metadata exceeds 4 KiB");
@@ -520,9 +544,17 @@ function validateRemedy(remedy: HubResumeRemedy | undefined): void {
     if (booleanKeys.has(key) && typeof value === "boolean") continue;
     if (stringKeys.has(key) && typeof value === "string" && value.length > 0) continue;
     if (key === "inputs" && value && typeof value === "object" && !Array.isArray(value) && Object.values(value).every((v) => typeof v === "string")) continue;
+    if (key === "plugin" && validPluginBundle(value)) continue;
     throw new Error(`unknown or invalid resume remedy ${key}`);
   }
   if (remedy.approve && remedy.decline) throw new Error("cannot approve and decline the same resume");
+  if (remedy.plugin && remedy.updatePlugin !== true) throw new Error("a resume plugin bundle needs updatePlugin");
+}
+function validPluginBundle(value: unknown): value is { bundlePath: string; bundleDigest: string } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const entries = Object.entries(value);
+  return entries.length === 2 && entries.every(([key, item]) => (key === "bundlePath" || key === "bundleDigest") && typeof item === "string" && item.length > 0 && Buffer.byteLength(item) <= 1024 && !item.includes("\0"))
+    && path.isAbsolute((value as { bundlePath: string }).bundlePath);
 }
 function validObservation(observation: HubObservation): boolean {
   if (observation.protocolVersion !== 1 || !Number.isSafeInteger(observation.stateRevision) || observation.stateRevision < 0 || !Number.isSafeInteger(observation.progressRevision) || observation.progressRevision < 0 || !Number.isFinite(Date.parse(observation.observedAt)) || typeof observation.status !== "string" || Buffer.byteLength(JSON.stringify(observation)) > 4096) return false;

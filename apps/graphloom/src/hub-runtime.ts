@@ -14,6 +14,7 @@ import { createCliRunner } from "./cli-runner.js";
 import { loadRunnerConfig } from "./runner-config.js";
 import type { OwnedMonitorResult } from "./hub-observe.js";
 import { observeInitialization } from "./hub-initialization.js";
+import { preparePluginLink, settlePluginLink } from "./hub-plugin.js";
 import { selfInstall, type SelfInstall } from "./ownership.js";
 
 const exec = promisify(execFile);
@@ -62,6 +63,7 @@ export function createHubRuntime(config: HubServiceConfig, wake: () => void): { 
   };
   const driver = createLinuxHubDriver({
     directory: config.directory, cgroupRoot: config.cgroupRoot, onWake: wake, observe, cleanup,
+    settleInput: settlePluginLink,
     async command(launch, submission) {
       const command = await verifyHubExecutionInput(submission, { initial: launch.mode === "initial", upgrade: launch.command?.remedy?.upgrade === true });
       const key = JSON.stringify(command);
@@ -72,6 +74,8 @@ export function createHubRuntime(config: HubServiceConfig, wake: () => void): { 
         if (value.runtime?.root !== command.root || value.runtime.version !== command.version) throw new Error("selected executable does not match the run's runtime identity");
         capabilities.add(key);
       }
+      // Before the child starts: an accepted --update-plugin moves the run's private plugin link.
+      await preparePluginLink(launch, submission);
       return { ...command, args: [...command.args, "__hub-managed", config.directory, submission.id], cwd: config.directory, env: { ...process.env } };
     },
   });

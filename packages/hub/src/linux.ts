@@ -35,6 +35,8 @@ export interface LinuxHubDriverOptions {
   cleanup(launch: HubLaunch, submission: HubSubmission, observed?: RuntimeObservation): Promise<RuntimeObservation>;
   maxLogBytes?: number;
   onWake?(): void;
+  /** See HubDriver.settleInput. */
+  settleInput?: NonNullable<HubDriver["settleInput"]>;
 }
 interface Child { process: ChildProcess; control: Duplex; error?: string; }
 const CONTROL_LIMIT = 16 * 1024;
@@ -112,6 +114,7 @@ export function createLinuxHubDriver(options: LinuxHubDriverOptions): HubDriver 
   }
   return {
     probe,
+    ...(options.settleInput ? { settleInput: options.settleInput } : {}),
     async prepare(launch, submission) {
       const directory = cgroup(launch);
       await mkdir(directory); // An existing generation is never reused for a second child.

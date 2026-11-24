@@ -127,7 +127,8 @@ finish. Lowering a limit never kills an existing run.
 `hub resume` also accepts explicit operator remedies already supported by ordinary
 resume: approval inputs, reconciliation acknowledgement, and plugin, executor or
 product upgrades. They are stored as a typed, single-use command and applied by
-the owning CLI under the run lock. Automatic resume supplies none of these.
+the owning CLI under the run lock. `--update-plugin` follows the operator's task's
+plugin link to the bundle it names at acceptance ([§4.2](#42-moving-a-run-to-a-newer-plugin)). Automatic resume supplies none of these.
 Replies distinguish an accepted command from a completed run transition.
 
 Example configuration:
@@ -307,6 +308,43 @@ earlier are not listed, and their runs remain findable only by run ID under
 `<hub directory>/runs/`. An unreadable or foreign index is renamed aside to
 `archive-index.json.damaged-<time>`, the hub starts with an empty index and
 reports `archiveIndexError` in health, and admission continues.
+
+### 4.2 Moving a run to a newer plugin
+
+Submission records the plugin twice: the bundle the run is pinned to (resolved,
+`bundlePath`/`bundleDigest`) and the operator's task's plugin link, unresolved
+(`pluginLink`, `<task dir>/plugins/<graph>`; submissions made before it existed
+derive it from the task path). The run reads its plugin through the hub's
+private link `submissions/<s>/plugins/<graph>`, which the controller pins as the
+bundle path and which names the recorded bundle.
+
+`hub resume <s> --update-plugin` does what `graphloom resume --update-plugin`
+does from the task directory: it takes the plugin the operator's task names
+now. At acceptance the hub resolves the operator's link and refuses, with the
+reason, a link that is gone, points nowhere, or names no bundle of the run's
+graph; the reply names the link to repoint. The resolved bundle and its digest
+travel with the single-use command (a client cannot supply them; a retried command
+ID is answered from the record without resolving again), and the hub
+pins that bundle's installed version before acknowledging. Before the launch
+starts its child, the hub checks the bundle has not changed since acceptance and
+points the private link at it; the owning CLI then applies `--update-plugin`
+under the run lock with the core's rules unchanged (same graph, unchanged
+stages and topology, protocol level; see the core design's plugin update).
+With `--upgrade` the same resolution applies: install the newer GraphLoom,
+repoint the task's link at its plugin if the link names a version directory,
+restart the hub service, then `hub resume <s> --update-plugin --upgrade`.
+
+When the launch drains, the hub compares the run's plugin pin (manifest and entry
+digests) with the bundle at the private
+link. If the controller accepted the update, the hub records the new bundle as
+the submission's plugin, and retention releases the old version's pin unless
+something else (for example the captured runtime) still references it. If it
+refused, the hub points the private link back at the recorded bundle, so the
+run stays on its pinned plugin and the stop reason says why. Any other resume,
+including a plain `hub resume`, keeps the recorded bundle exactly; it also
+repairs a private link an interrupted update left behind. A failure of this
+reconciliation blocks the submission with `plugin reconciliation failed: …`
+(unless the run succeeded), dropping a resume accepted while the launch drained.
 
 ## 5. Concurrency contract
 
@@ -885,7 +923,9 @@ acknowledging a submission, then release references only from an authoritative
 queue/owner snapshot. A launch retains its inputs until drainage, even when its
 scheduling label is terminal. Queued, waiting, paused, blocked and failed runs
 remain resumable and retain their captured inputs, current owning runtime, plugin
-and executor pins across daemon shutdown. Drained succeeded/canceled submissions
+and executor pins across daemon shutdown. A pending or launched `--update-plugin`
+also retains the bundle it moves to; once the hub records it (§4.2), the
+replaced bundle is no longer a captured input. Drained succeeded/canceled submissions
 and archived submissions release their hub pins; normal run ownership records
 continue to protect retained run artifacts. Shutdown releases the daemon's own
 runtime reference when no remaining submission needs it. Missing or unreadable
