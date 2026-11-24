@@ -562,6 +562,7 @@ export function createController(): Controller {
             runner: request.runner,
             validators,
             managed: request.managed !== undefined,
+            ...(request.managed?.resumeCommand !== undefined ? { resumeCommand: request.managed.resumeCommand } : {}),
             shouldStop: async () =>
               (await sessionStop(session)) ||
               (stopAfter !== undefined && acceptedOnPath(await loadRunState(session.stateDir), stopAfter)),
@@ -929,7 +930,7 @@ export function createController(): Controller {
               ...state,
               status: "stopped",
               stopReason: QUOTA_RECONCILE_STOP_REASON,
-              blocker: boundText(`job ${owed.operationId} (stage ${owed.stageId}) may have had effects before the usage limit; reconcile it, then \`graphloom resume --reconciled\`: ${owed.reason}`),
+              blocker: boundText(`job ${owed.operationId} (stage ${owed.stageId}) may have had effects before the usage limit; reconcile it, then \`${request.managed?.resumeCommand ?? `graphloom resume ${state.runId}`} --reconciled\`: ${owed.reason}`),
             };
             if (supervisorPinChanged) await beforeManagedMutation();
             await saveRunState(state);
@@ -1153,6 +1154,7 @@ export function createController(): Controller {
           runner: request.runner,
           validators,
           managed: request.managed !== undefined,
+          ...(request.managed?.resumeCommand !== undefined ? { resumeCommand: request.managed.resumeCommand } : {}),
           shouldStop: () => sessionStop(session!),
           revisionBridge,
           ...(supervisor !== undefined ? { supervisor } : {}),

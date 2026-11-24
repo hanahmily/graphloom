@@ -63,7 +63,13 @@ die() {
   if [ "$auto" = 1 ] && [ -n "$home" ]; then record_failure "$*"; fi
   exit 1
 }
+
+# usage [0]: the usage lines; on stdout and exit 0 when asked for (--help), else on stderr and exit 2.
 usage() {
+  if [ "${1:-2}" = 0 ]; then
+    sed -n '7,12p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0
+  fi
   sed -n '7,12p' "$0" | sed 's/^# \{0,1\}//' >&2
   exit 2
 }
@@ -119,7 +125,7 @@ parse_args() {
       --dry-run) dry_run=1; shift ;;
       --force) force=1; shift ;;
       --purge-config) purge_config=1; shift ;;
-      -h | --help) usage ;;
+      -h | --help) usage 0 ;;
       -*) warn "unknown option $1"; usage ;;
       *)
         if [ -n "$positional" ]; then warn "unexpected argument $1"; usage; fi

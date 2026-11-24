@@ -46,8 +46,10 @@ import {
   supervisorRestore,
 } from "./supervisor-config.js";
 
-async function main(args = process.argv.slice(2), managed?: ManagedExecution): Promise<void> {
+async function main(args = process.argv.slice(2), launch?: ManagedExecution): Promise<void> {
   const cmd = args[0];
+  // The operator resumes a hub run through its hub, so the blockers its graph writes name that command (RunView.resumeCommand).
+  const managed = launch === undefined ? undefined : { ...launch, grant: { ...launch.grant, resumeCommand: `graphloom hub resume ${launch.grant.submissionId}` } };
   if (cmd === "hub") { process.exitCode = await hubCommand(args.slice(1)); return; }
   if (cmd === "__hub-capabilities") { console.log(JSON.stringify({ managedProtocol: 1, executionObservation: 1, monitorSchema: 1, runtime: selfInstall().record })); return; }
   if (cmd === "__hub-managed") { await managedMain(args.slice(1), main); return; }
@@ -70,6 +72,16 @@ async function main(args = process.argv.slice(2), managed?: ManagedExecution): P
       console.log(JSON.stringify(await reconcileManagedRun(args[1]!, managed.grant, runner)));
     } finally { kept?.restore(); }
     return;
+  }
+
+  // `graphloom <command> --help` (or -h) prints that command's usage and runs nothing.
+  if (cmd !== undefined && !OWN_HELP.has(cmd) && args.slice(1).some((a) => a === "--help" || a === "-h")) {
+    const usage = commandUsage(cmd);
+    if (usage !== undefined) {
+      console.log(usage);
+      process.exitCode = 0;
+      return;
+    }
   }
 
   if (cmd === "version" || cmd === "--version" || cmd === "-V") {
@@ -744,7 +756,32 @@ function flagValue(args: string[], name: string): string | undefined {
 }
 
 function printHelp(): void {
-  console.log(`graphloom — TypeScript harness
+  console.log(helpText());
+}
+
+/** Commands whose own handler answers `--help` (`graphloom hub <command> --help` describes one hub command). */
+const OWN_HELP: ReadonlySet<string> = new Set(["hub"]);
+
+/**
+ * `graphloom <command> --help` (or `-h`) for a command `graphloom --help`
+ * lists: that command's usage lines from the help, or undefined when the
+ * command is not one of them (an unknown command still says so).
+ */
+function commandUsage(cmd: string): string | undefined {
+  // The usage blocks only ("Usage:", "Run hub (...):", ...): a heading line ending in ":" through the next blank line.
+  const usageLines: string[] = [];
+  let inBlock = false;
+  for (const line of helpText().split("\n")) {
+    if (line.trim() === "") inBlock = false;
+    else if (!line.startsWith(" ") && line.endsWith(":")) inBlock = true;
+    else if (inBlock) usageLines.push(line.trim());
+  }
+  const lines = usageLines.filter((line) => line === `graphloom ${cmd}` || line.startsWith(`graphloom ${cmd} `));
+  return lines.length > 0 ? `Usage:\n${lines.map((line) => `  ${line}`).join("\n")}` : undefined;
+}
+
+function helpText(): string {
+  return `graphloom — TypeScript harness
 
 Usage:
   graphloom run <task.yaml> [--state-root <dir>] [--supervisor <harness>] [--on-stop <command>]
@@ -1033,7 +1070,7 @@ provider/model for Pi, the model name (or claude-code/<name>, codex/<name>)
 for Claude Code and Codex, each one the operator configured. doctor probes
 each enabled harness; stats shows supervisor use (episodes, turns, provider
 calls, tokens where the harness reports them) per harness.
-`);
+`;
 }
 
 function crash(err: unknown): void {

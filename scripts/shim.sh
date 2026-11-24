@@ -50,6 +50,10 @@ case "${1:-}" in
         exit 2
         ;;
       list | use | rollback | prune | uninstall) ;;
+      -h | --help)
+        echo "usage: graphloom self list | use <version> | rollback | prune [--dry-run] [--force] | uninstall [--purge-config]"
+        exit 0
+        ;;
       *)
         echo "usage: graphloom self list | use <version> | rollback | prune [--dry-run] [--force] | uninstall [--purge-config]" >&2
         exit 2

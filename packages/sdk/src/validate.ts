@@ -649,6 +649,7 @@ export function assertRunView(value: unknown): RunView {
   requireNumber(obj, "generation");
   requireNumber(obj, "stateRevision");
   requireString(obj, "activeVersion");
+  if (obj["resumeCommand"] !== undefined) requireString(obj, "resumeCommand");
   if (obj["agentSessions"] !== undefined) assertAgentSessions(requireArray(obj, "agentSessions"));
   if (obj["repairAuthority"] !== undefined) assertRepairAuthority(obj["repairAuthority"]);
   if (obj["resume"] !== undefined) {
