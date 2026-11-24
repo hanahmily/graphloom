@@ -323,7 +323,8 @@ does from the task directory: it takes the plugin the operator's task names
 now. At acceptance the hub resolves the operator's link and refuses, with the
 reason, a link that is gone, points nowhere, or names no bundle of the run's
 graph; the reply names the link to repoint. The resolved bundle and its digest
-travel with the single-use command (a client cannot supply them), and the hub
+travel with the single-use command (a client cannot supply them; a retried command
+ID is answered from the record without resolving again), and the hub
 pins that bundle's installed version before acknowledging. Before the launch
 starts its child, the hub checks the bundle has not changed since acceptance and
 points the private link at it; the owning CLI then applies `--update-plugin`
@@ -333,7 +334,8 @@ With `--upgrade` the same resolution applies: install the newer GraphLoom,
 repoint the task's link at its plugin if the link names a version directory,
 restart the hub service, then `hub resume <s> --update-plugin --upgrade`.
 
-When the launch drains, the hub compares the run's plugin pin with the private
+When the launch drains, the hub compares the run's plugin pin (manifest and entry
+digests) with the bundle at the private
 link. If the controller accepted the update, the hub records the new bundle as
 the submission's plugin, and retention releases the old version's pin unless
 something else (for example the captured runtime) still references it. If it

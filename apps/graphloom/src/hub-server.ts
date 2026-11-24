@@ -198,7 +198,8 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
             let remedy = body.remedy !== undefined ? object(body.remedy, "remedy") as HubResumeRemedy : undefined;
             if (remedy !== undefined && Object.hasOwn(remedy, "plugin")) throw new HubHttpError("remedy.plugin is set by the hub, not a client", 400);
             // --update-plugin follows the operator's task's plugin link to the bundle it names now (§4.2).
-            if (remedy?.updatePlugin === true) {
+            // A retried command ID is answered from the hub's record, never resolved again.
+            if (remedy?.updatePlugin === true && !(commandId !== undefined && await scheduler.knownCommand(id, commandId))) {
               const plugin = await (options.resolvePlugin ?? resolveOperatorPlugin)(submission).catch((error: unknown) => { throw new HubHttpError(error instanceof Error ? error.message : String(error), 400); });
               remedy = { ...remedy, plugin };
             }

@@ -41,6 +41,7 @@ export {
   resolveBundleRehearsalEntry,
   resolveStateDir,
 } from "./controller.js";
+export { readInstalledBundlePin } from "./pin.js";
 export type { DurableRunState, RunStatus, IntakePin, SupervisorOutcomeRecord, TaskConfigPin, VersionRecord } from "./controller.js";
 export type { ContractOutcome } from "./controller.js";
 export type { SupervisorChoice, SupervisorFactory, SupervisorFactoryContext } from "./controller.js";

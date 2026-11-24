@@ -169,13 +169,19 @@ export class Hub {
   }
   pause(id: string, options: { commandId?: string } = {}): Promise<HubSubmission> { return this.command(id, "pause", options.commandId); }
   cancel(id: string, options: { commandId?: string } = {}): Promise<HubSubmission> { return this.command(id, "cancel", options.commandId); }
+  /** Whether this submission already recorded `commandId`; a retried command is answered from the record. */
+  knownCommand(id: string, commandId: string): Promise<boolean> {
+    return this.enqueue(async () => (await this.store.command(this.get(id), commandId)) !== undefined);
+  }
   resume(id: string, options: { commandId?: string; remedy?: HubResumeRemedy } = {}): Promise<HubSubmission> { return this.command(id, "resume", options.commandId, options.remedy); }
   private command(id: string, kind: "pause" | "cancel" | "resume", commandId: string = randomUUID(), remedy?: HubResumeRemedy): Promise<HubSubmission> {
     return this.enqueue(async () => {
       bounded(commandId, "command id", 256);
       validateRemedy(remedy);
       const submission = this.get(id);
-      const requestDigest = canonicalDigest({ kind, remedy });
+      // The hub-resolved plugin bundle is not part of the client's request: a retried command ID matches without it.
+      const { plugin: _plugin, ...requested } = remedy ?? {};
+      const requestDigest = canonicalDigest({ kind, remedy: remedy === undefined ? undefined : requested });
       const previous = await this.store.command(submission, commandId);
       if (previous) {
         if (previous.digest !== requestDigest) throw new Error("command ID conflicts with a different command");

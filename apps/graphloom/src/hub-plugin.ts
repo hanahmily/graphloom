@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
-import { createHash, randomUUID } from "node:crypto";
-import { lstat, open, readFile, readlink, realpath, rename, stat, symlink, unlink } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { lstat, open, readlink, realpath, rename, stat, symlink, unlink } from "node:fs/promises";
 import path from "node:path";
-import { parseTaskYaml } from "@graphloom/controller";
+import { parseTaskYaml, readInstalledBundlePin, type IntakePin } from "@graphloom/controller";
 import { digestExecutorSource } from "@graphloom/runner";
 import type { HubLaunch, HubStoredInput, HubSubmission } from "@graphloom/sdk";
 import { boundedText } from "./hub-input.js";
@@ -112,21 +112,24 @@ export async function settlePluginLink(_launch: HubLaunch, submission: HubSubmis
   return undefined;
 }
 
+/** True when the bundle at the run's pinned path (the private link) is exactly the run's pin: manifest and entry. */
 async function linkMatchesRunPin(link: string, submission: HubSubmission): Promise<boolean> {
-  const pinned = await runPinManifestDigest(submission);
-  if (pinned === undefined) return false;
-  try { return createHash("sha256").update(await readFile(path.join(link, "graphloom.manifest.json"), "utf8"), "utf8").digest("hex") === pinned; }
-  catch { return false; }
+  const pinned = await runBundlePin(submission);
+  if (pinned === undefined || path.resolve(pinned.bundlePath) !== path.resolve(link)) return false;
+  try {
+    const installed = await readInstalledBundlePin(pinned);
+    return installed.manifestDigest === pinned.manifestDigest && installed.entryDigest === pinned.entryDigest;
+  } catch { return false; }
 }
 
-async function runPinManifestDigest(submission: HubSubmission): Promise<string | undefined> {
+async function runBundlePin(submission: HubSubmission): Promise<IntakePin["bundle"] | undefined> {
   const hub = path.dirname(path.dirname(path.dirname(submission.input.taskFile)));
-  let state: { runId?: unknown; intake?: { bundle?: { manifestDigest?: unknown } } };
+  let state: { runId?: unknown; intake?: { bundle?: IntakePin["bundle"] } };
   try { state = JSON.parse(await boundedText(path.join(hub, "runs", submission.runId, "state.json"), 64 * 1024 * 1024)) as typeof state; }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
   if (state.runId !== submission.runId) throw new Error("managed run identity does not match its submission");
-  const digest = state.intake?.bundle?.manifestDigest;
-  return typeof digest === "string" ? digest : undefined;
+  const bundle = state.intake?.bundle;
+  return bundle !== undefined && typeof bundle.bundlePath === "string" && typeof bundle.manifestDigest === "string" && typeof bundle.entryDigest === "string" ? bundle : undefined;
 }
 
 async function exists(file: string): Promise<boolean> {

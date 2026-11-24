@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { digestExecutorSource } from "@graphloom/runner";
+import { readInstalledBundlePin, type IntakePin } from "@graphloom/controller";
 import type { HubInput, HubLaunch, HubSubmission } from "@graphloom/sdk";
 import type { HubServiceConfig } from "../src/hub-config.js";
 import { hubRequest } from "../src/hub-client.js";
@@ -27,16 +28,20 @@ class PluginLinkDriver extends SocketTestDriver {
   settleInput = settlePluginLink;
   /** The fake controller stops the run for an operator decision, with `manifest` as its plugin pin. */
   async stopWithPin(hub: string, submission: HubSubmission, manifest: string): Promise<void> {
-    await writeRunPin(hub, submission.runId, manifest);
+    await writeRunPin(hub, submission, manifest);
     this.executions.set(submission.launch!.id, { execution: "drained", ownerGone: true, externalStopped: true,
       observation: { protocolVersion: 1, observedAt: new Date().toISOString(), stateRevision: 1, progressRevision: 1, status: "stopped", continuation: { kind: "operator", cause: "pin-drift", evidenceRefs: [] }, blocker: "needs the operator" } });
   }
 }
 
-async function writeRunPin(hub: string, runId: string, manifest: string): Promise<void> {
+/** The controller's pin of `bundle`, at the run's bundle path (the hub's private link), as intake records it. */
+async function writeRunPin(hub: string, submission: HubSubmission, bundle: string): Promise<void> {
+  const { runId } = submission;
   await mkdir(path.join(hub, "runs", runId), { recursive: true });
-  const manifestDigest = createHash("sha256").update(await readFile(path.join(manifest, "graphloom.manifest.json"), "utf8"), "utf8").digest("hex");
-  await writeFile(path.join(hub, "runs", runId, "state.json"), JSON.stringify({ runId, intake: { bundle: { bundlePath: "unused", manifestDigest } } }));
+  const manifestRaw = await readFile(path.join(bundle, "graphloom.manifest.json"), "utf8");
+  const pin = await readInstalledBundlePin({ graphId: "hello", version: "0", sdkProtocol: 1, bundlePath: bundle, manifestRaw, manifestDigest: "", entryDigest: "", digests: {} } as unknown as IntakePin["bundle"]);
+  const privateLink = path.join(hub, "submissions", submission.id, "plugins", "hello");
+  await writeFile(path.join(hub, "runs", runId, "state.json"), JSON.stringify({ runId, intake: { bundle: { ...pin, bundlePath: privateLink } } }));
 }
 
 /** Two installed GraphLoom versions, each with the `hello` plugin, and an operator task linking one. */
@@ -46,7 +51,7 @@ async function installation() {
   const plugin = async (version: string) => {
     const directory = path.join(root, "install", "versions", version, "examples", "plugins", "hello");
     await mkdir(directory, { recursive: true });
-    await writeFile(path.join(directory, "graphloom.manifest.json"), JSON.stringify({ graphId: "hello", version, sdkProtocol: 1, entry: "index.js" }));
+    await writeFile(path.join(directory, "graphloom.manifest.json"), JSON.stringify({ graphId: "hello", version: "0.1.0", sdkProtocol: 1, entryPoints: { createGraph: "./index.js" } }));
     await writeFile(path.join(directory, "index.js"), `export const version = ${JSON.stringify(version)};\n`);
     return directory;
   };
@@ -138,6 +143,35 @@ describe("hub resume --update-plugin", () => {
     expect(current.state).toBe("blocked");
     expect(current.input.bundlePath).toBe(v1);
     expect(await realpath(privateLink)).toBe(v1);
+  });
+
+  it("detects a refused update whose plugin shares the pinned manifest but not its entry", async () => {
+    const { v1, v2, operatorLink, privateLink, directory, driver, service, id } = await installation();
+    // Same manifest bytes in both versions; only the entry module differs.
+    expect(await readFile(path.join(v2, "graphloom.manifest.json"), "utf8")).toBe(await readFile(path.join(v1, "graphloom.manifest.json"), "utf8"));
+    await unlink(operatorLink);
+    await symlink(v2, operatorLink, "dir");
+    await hubRequest("POST", `/v1/submissions/${id}/resume`, { remedy: { updatePlugin: true } }, service.socket);
+    await service.hub.tick();
+    expect(await realpath(privateLink)).toBe(v2);
+    await driver.stopWithPin(directory, service.hub.inspect(id), v1);
+    await service.hub.tick();
+    expect(service.hub.inspect(id).input.bundlePath).toBe(v1);
+    expect(await realpath(privateLink)).toBe(v1);
+  });
+
+  it("answers a retried --update-plugin command from its record, even after the link moved or vanished", async () => {
+    const { v2, operatorLink, service, id } = await installation();
+    await unlink(operatorLink);
+    await symlink(v2, operatorLink, "dir");
+    const route = `/v1/submissions/${id}/resume`;
+    const first = await hubRequest<HubSubmission>("POST", route, { commandId: "update-once", remedy: { updatePlugin: true } }, service.socket);
+    await unlink(operatorLink);
+    const again = await hubRequest<HubSubmission>("POST", route, { commandId: "update-once", remedy: { updatePlugin: true } }, service.socket);
+    const command = (item: HubSubmission) => item.pendingCommand ?? item.launch?.command;
+    expect(command(again)).toEqual(command(first));
+    expect(command(again)?.remedy?.plugin?.bundlePath).toBe(v2);
+    await expect(hubRequest("POST", route, { commandId: "update-once", remedy: { updatePlugin: true, upgrade: true } }, service.socket)).rejects.toMatchObject({ status: 409 });
   });
 
   it("refuses with a reason when the operator's plugin link is dangling or gone, and rejects a client-chosen bundle", async () => {
