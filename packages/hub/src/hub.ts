@@ -5,7 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { mkdir, readFile } from "node:fs/promises";
 import { HUB_REHEARSAL_KEY_PREFIX } from "@graphloom/sdk";
-import type { HubArchiveEntry, HubArchivedSubmission, HubConfig, HubContinuation, HubObservation, HubRehearsal, HubResumeRemedy, HubRetryPolicy, HubStatus, HubSubmission } from "@graphloom/sdk";
+import type { HubArchiveEntry, HubArchivedSubmission, HubCommand, HubConfig, HubContinuation, HubLaunchReport, HubObservation, HubRehearsal, HubResumeRemedy, HubRetryPolicy, HubStatus, HubSubmission } from "@graphloom/sdk";
 import { acquireHubLock } from "./lock.js";
 import { HubArchiveIndex } from "./archive.js";
 import { assertCapacity, durableWrite, HubStore, syncDirectory, validateConfig } from "./store.js";
@@ -173,9 +173,16 @@ export class Hub {
   }
   pause(id: string, options: { commandId?: string } = {}): Promise<HubSubmission> { return this.command(id, "pause", options.commandId); }
   cancel(id: string, options: { commandId?: string } = {}): Promise<HubSubmission> { return this.command(id, "cancel", options.commandId); }
-  /** Whether this submission already recorded `commandId`; a retried command is answered from the record. */
+  /**
+   * Whether this submission already recorded `commandId` and answers a retry from the
+   * record. A resume the run never applied (withdrawn, or held by a pause) is not
+   * answered from the record: its retry applies it (docs/design-run-hub.md §3.2).
+   */
   knownCommand(id: string, commandId: string): Promise<boolean> {
-    return this.enqueue(async () => (await this.store.command(this.get(id), commandId)) !== undefined);
+    return this.enqueue(async () => {
+      const submission = this.get(id);
+      return (await this.store.command(submission, commandId)) !== undefined && !reapplicable(submission, commandId);
+    });
   }
   resume(id: string, options: { commandId?: string; remedy?: HubResumeRemedy } = {}): Promise<HubSubmission> { return this.command(id, "resume", options.commandId, options.remedy); }
   private command(id: string, kind: "pause" | "cancel" | "resume", commandId: string = randomUUID(), remedy?: HubResumeRemedy): Promise<HubSubmission> {
@@ -187,18 +194,28 @@ export class Hub {
       const { plugin: _plugin, ...requested } = remedy ?? {};
       const requestDigest = canonicalDigest({ kind, remedy: remedy === undefined ? undefined : requested });
       const previous = await this.store.command(submission, commandId);
+      // A retried command is answered from the record, unless it is a resume the run never
+      // applied: then the retry applies it, never reporting success for nothing (§3.2).
+      let retried = false;
       if (previous) {
         if (previous.digest !== requestDigest) throw new Error("command ID conflicts with a different command");
-        return this.inspect(id);
+        if (kind !== "resume" || !reapplicable(submission, commandId)) return this.inspect(id);
+        retried = true;
       }
       if (submission.desiredAction === "cancel") throw new Error("canceled submissions cannot be resumed or changed");
       if (submission.state === "succeeded") throw new Error("completed submissions cannot be restarted");
       // A rehearsal's supervisor is the scenario's script: there is no harness to move it to.
       if (kind === "resume" && remedy?.supervisor !== undefined && submission.input.rehearsal !== undefined) throw new Error("a rehearsal submission's supervisor is its scenario's script; --supervisor applies to real submissions only");
       if (kind === "resume" && remedy && incompleteInitialization(submission)) throw new Error("resume remedies cannot be applied before initialization; retry without a remedy");
-      if (kind === "resume" && remedy && (submission.launch || submission.pendingCommand)) throw new Error("a remedy needs a drained submission with no pending command");
-      const command = { id: commandId, kind, acceptedAt: this.stamp(), ...(remedy ? { remedy: copy(remedy) } : {}) };
-      const cursor = await this.store.journal(submission, { commandId, digest: requestDigest, acceptedAt: command.acceptedAt });
+      // A resume held by a pause is replaced by a new remedy; any other pending command is not.
+      const held = submission.desiredAction === "hold" && !submission.launch ? submission.pendingCommand : undefined;
+      if (kind === "resume" && remedy && (submission.launch || (submission.pendingCommand && submission.pendingCommand !== held))) throw new Error("a remedy needs a drained submission with no pending command");
+      // A retried held command keeps its identity; its remedy is the retry's (the same request,
+      // with the plugin bundle the hub resolved again for an --update-plugin).
+      const command: HubCommand = retried && submission.pendingCommand?.id === commandId
+        ? { ...copy(submission.pendingCommand), ...(remedy ? { remedy: copy(remedy) } : {}) }
+        : { id: commandId, kind, acceptedAt: this.stamp(), ...(remedy ? { remedy: copy(remedy) } : {}) };
+      const cursor = retried ? submission.journalBytes : await this.store.journal(submission, { commandId, digest: requestDigest, acceptedAt: command.acceptedAt });
       await this.commit((next) => {
         const s = next.submissions[submission.id]!;
         s.journalBytes = cursor;
@@ -214,9 +231,21 @@ export class Hub {
             delete s.eligibleAt;
             delete s.automaticPending;
           }
-          if (!s.launch || s.launch.stopRequestedAt) s.pendingCommand = command;
+          // A plain resume releases a held remedy rather than replacing it: the next launch applies it.
+          const keepsHeld = !remedy && !retried && s.pendingCommand?.kind === "resume" && s.pendingCommand.remedy !== undefined;
+          // Nor does it displace the remedy a draining launch carries: if the run did not
+          // apply it, settlement puts it back in place of this plain resume.
+          const draining = s.launch?.stopRequestedAt !== undefined && s.launch.command?.kind === "resume" && s.launch.command.remedy !== undefined;
+          if ((!s.launch || s.launch.stopRequestedAt) && !keepsHeld) {
+            s.pendingCommand = command;
+            if (!(draining && !remedy)) s.lastResume = { commandId, status: "pending", at: this.stamp() };
+          }
         } else {
-          delete s.pendingCommand;
+          // A pause keeps an accepted resume for the next resume; a cancel withdraws it.
+          if (kind === "cancel" || s.pendingCommand?.kind !== "resume") {
+            if (s.pendingCommand?.kind === "resume" && s.lastResume?.commandId === s.pendingCommand.id) s.lastResume = { commandId: s.pendingCommand.id, status: "withdrawn", reason: "the submission was canceled before a launch applied it", at: this.stamp() };
+            delete s.pendingCommand;
+          }
           delete s.automaticPending;
           delete s.eligibleAt;
           if (s.launch) {
@@ -268,7 +297,7 @@ export class Hub {
       // still-live submission, which searches skip; the reverse would lose the entry.
       let described: Pick<HubArchiveEntry, "graph" | "request" | "stateDir" | "rehearsalVerdict"> = {};
       try { described = await this.options.describeArchive?.(copy(s)) ?? {}; } catch { described = {}; }
-      const blocker = s.blocker ?? s.observation?.blocker;
+      const blocker = submissionBlocker(s);
       await this.archiveIndex.add({
         archived: true, id: s.id, runId: s.runId, ...(s.key ? { key: s.key } : {}),
         ...(described.graph !== undefined ? { graph: described.graph } : {}),
@@ -315,7 +344,7 @@ export class Hub {
       }
       const observation = result.observation;
       if (result.execution === "drained" && result.ownerGone && result.externalStopped) {
-        await this.settle(s.id, observation);
+        await this.settle(s.id, observation, validReport(result.report, s) ? result.report : undefined);
       } else {
         await this.commit((next) => {
           const current = next.submissions[s.id]!;
@@ -346,7 +375,7 @@ export class Hub {
       const candidate = Object.values(this.snapshot.submissions).filter((s) => s.state === "queued" && s.desiredAction === "execute" && !s.launch && this.ready(s)).sort((a, b) => a.queueSequence - b.queueSequence)[0];
       if (!candidate) break;
       if (candidate.automaticPending && !this.retryAllowed(candidate)) {
-        await this.commit((next) => { const s = next.submissions[candidate.id]!; s.state = "blocked"; s.blocker = "automatic retry allowance or elapsed deadline exhausted"; });
+        await this.commit((next) => { const s = next.submissions[candidate.id]!; s.state = "blocked"; s.blocker = this.exhausted(s); });
         continue;
       }
       await this.launch(candidate.id);
@@ -374,9 +403,21 @@ export class Hub {
     catch (error) { await this.blockLaunch(id, `stop request failed; reservation retained: ${message(error)}`); }
   }
   private retryAllowed(s: HubSubmission): boolean {
-    return s.retry.automatic && s.automaticResumes < s.retry.maxAutomaticResumes && s.failureRepeats < 3 && (!s.retryStartedAt || this.now() < Date.parse(s.retryStartedAt) + s.retry.maxElapsedMs);
+    return this.retryLimit(s) === undefined;
   }
-  private async settle(id: string, observation?: HubObservation): Promise<void> {
+  /** Which automatic-retry limit `s` has reached, in words, or undefined while retries remain. */
+  private retryLimit(s: HubSubmission): string | undefined {
+    if (!s.retry.automatic) return "automatic retry is off for this submission";
+    if (s.automaticResumes >= s.retry.maxAutomaticResumes) return `retry allowance used (${s.automaticResumes}/${s.retry.maxAutomaticResumes} automatic resumes)`;
+    if (s.failureRepeats >= 3) return `the same failure repeated ${s.failureRepeats} times without accepted progress`;
+    if (s.retryStartedAt && this.now() >= Date.parse(s.retryStartedAt) + s.retry.maxElapsedMs) return `retry window of ${duration(s.retry.maxElapsedMs)} since ${s.retryStartedAt} elapsed`;
+    return undefined;
+  }
+  /** The blocker of a submission whose automatic retries stopped: the limit reached and the last cause. */
+  private exhausted(s: HubSubmission, limit = this.retryLimit(s) ?? "automatic retry stopped"): string {
+    return `automatic retry stopped: ${limit}${s.lastFailure ? `; last cause: ${s.lastFailure}` : ""}`.slice(0, 1024);
+  }
+  private async settle(id: string, observation?: HubObservation, report?: HubLaunchReport): Promise<void> {
     const before = this.get(id);
     // The driver reconciles input it changed for this launch (a plugin update) before the record settles.
     let inputUpdate: { bundlePath: string; bundleDigest: string } | undefined;
@@ -388,24 +429,53 @@ export class Hub {
       } catch (error) { inputUpdate = undefined; inputFailure = `plugin reconciliation failed: ${message(error)}`.slice(0, 1024); }
     }
     const cursor = await this.store.journal(before, { commandId: `launch:${before.launch!.id}`, digest: digest(before.launch), acceptedAt: this.stamp(), event: "settled", launch: before.launch!, ...(observation ? { observation } : {}) });
+    // What the run stopped on before this launch: a refused remedy leaves it in force (§3.2).
+    const earlier = before.observation?.status !== "succeeded" ? before.observation?.blocker : undefined;
     await this.commit((next) => {
       const s = next.submissions[id]!;
       const launch = s.launch!;
       const launchFailure = launch.failure?.message;
+      const granted = launch.phase === "granted";
+      const refusal = granted && report?.outcome === "refused" ? report.refusal : undefined;
+      // The operator resume this launch carried, and whether the run applied it (§3.2).
+      const resume = launch.command?.kind === "resume" ? launch.command : undefined;
+      const applied = resume !== undefined && report?.command?.id === resume.id && report.command.applied;
       s.journalBytes = cursor;
       delete s.launch;
       delete s.blocker;
       s.updatedAt = this.stamp();
       if (observation) s.observation = observation;
       if (inputUpdate) { s.input.bundlePath = inputUpdate.bundlePath; s.input.bundleDigest = inputUpdate.bundleDigest; }
+      if (resume !== undefined && s.lastResume?.commandId === resume.id) {
+        if (refusal) s.lastResume = { commandId: resume.id, status: "refused", reason: refusal.reason.slice(0, 512), at: this.stamp() };
+        else if (applied) s.lastResume = { commandId: resume.id, status: "applied", at: this.stamp() };
+        // Not applied: a pause keeps it for the next resume, and so do a plain resume accepted
+        // while this launch drained and a launch that never started its run. Anything else
+        // withdraws it, and resending its command ID applies it. Never dropped silently.
+        else if (s.desiredAction === "hold" || (s.desiredAction === "execute" && !inputFailure && ((!granted && !launchFailure) || (s.pendingCommand?.kind === "resume" && s.pendingCommand.remedy === undefined)))) {
+          s.pendingCommand = resume;
+          s.lastResume = { commandId: resume.id, status: "pending", reason: s.desiredAction === "hold" ? "the launch was withdrawn before the run applied it; held by the pause, it applies on the next resume" : "the launch ended before the run applied it; the next launch applies it", at: this.stamp() };
+        } else {
+          const why = s.desiredAction === "cancel" ? "the submission was canceled" : inputFailure ?? launchFailure ?? report?.error ?? "the launch ended";
+          s.lastResume = { commandId: resume.id, status: "withdrawn", reason: `not applied: ${why}; resend the same command ID to apply it`.slice(0, 512), at: this.stamp() };
+        }
+      }
       if (s.desiredAction !== "execute") { s.state = s.desiredAction === "hold" ? "paused" : "canceled"; return; }
       // An unreconciled plugin input admits no further launch, not even an already accepted resume; only a completed run ignores it.
       if (inputFailure && !(observation?.continuation?.kind === "complete" && observation.status === "succeeded")) {
         delete s.pendingCommand; s.state = "blocked"; s.blocker = inputFailure; return;
       }
+      // A refusal is deterministic: the same request is refused again, so it blocks at once with
+      // the reason, and the run stays as it was (a corrected resume still applies).
+      if (refusal) {
+        delete s.pendingCommand;
+        s.state = "blocked";
+        s.blocker = `${resume ? "resume" : "launch"} refused: ${refusal.reason.slice(0, 600)}${earlier && earlier !== refusal.reason ? `; the run still stops on: ${earlier}` : ""}`.slice(0, 1024);
+        return;
+      }
       if (s.pendingCommand?.kind === "resume") { s.state = "queued"; s.queueSequence = ++next.sequence; return; }
-      if (launch.phase !== "granted" && launchFailure) { s.state = "blocked"; s.blocker = launchFailure; return; }
-      if (launch.phase !== "granted") { s.state = "queued"; s.queueSequence = ++next.sequence; return; }
+      if (!granted && launchFailure) { s.state = "blocked"; s.blocker = launchFailure; return; }
+      if (!granted) { s.state = "queued"; s.queueSequence = ++next.sequence; return; }
       const continuation = observation?.continuation;
       if (continuation?.kind === "complete" && observation?.status === "succeeded") { s.state = "succeeded"; return; }
       if (continuation?.kind === "terminal") { s.state = "failed"; s.blocker = continuation.cause; return; }
@@ -416,7 +486,15 @@ export class Hub {
         delete s.automaticPending;
         return;
       }
-      if (continuation?.kind === "operator") { s.state = "blocked"; s.blocker = observation?.blocker ?? continuation.cause; return; }
+      if (continuation?.kind === "operator") {
+        s.state = "blocked";
+        const blocker = observation?.blocker ?? continuation.cause;
+        // A refused plugin update replaces the run's stop with the pin mismatch; the stop it
+        // answered (an approval it waits on, say) is still in force, so both are shown.
+        s.blocker = (resume?.remedy?.updatePlugin && continuation.cause === "pin-drift" && earlier && earlier !== blocker
+          ? `plugin update refused: ${blocker.slice(0, 500)}; the run still stops on: ${earlier}` : blocker).slice(0, 1024);
+        return;
+      }
       const planned = interruptionId && continuation?.kind === "automatic" && continuation.cause === "service-interruption" && continuation.interruptionCommandId === interruptionId;
       if (planned) {
         s.state = "queued"; s.queueSequence = ++next.sequence;
@@ -425,29 +503,39 @@ export class Hub {
         delete s.automaticPending;
         return;
       }
+      // Without a report and without a recorded stop, the launch was killed or crashed.
+      const unreported = !report && (!continuation || (continuation.kind === "automatic" && ["controller-crash", "initialization-failed"].includes(continuation.cause))) ? "the launch ended without reporting its end (killed or crashed)" : undefined;
       if (!continuation || continuation.kind !== "automatic" || continuation.cause === "service-interruption") {
         // Read-only inspection cannot establish crash safety. Reconciliation stays inside a slot.
         if (!observation) {
           s.reconciliationPending = true;
-          this.scheduleRetry(s, { kind: "automatic", cause: "controller-crash", fingerprint: `unobserved:${s.runId}`, stateRevision: s.observation?.stateRevision ?? 0 }, observation);
+          this.scheduleRetry(s, { kind: "automatic", cause: "controller-crash", fingerprint: `unobserved:${s.runId}`, stateRevision: s.observation?.stateRevision ?? 0 }, observation, report?.error ?? unreported);
         } else { s.state = "blocked"; s.blocker = "owning controller did not authorize automatic continuation"; }
         return;
       }
-      this.scheduleRetry(s, continuation, observation);
+      this.scheduleRetry(s, continuation, observation, report?.error ?? unreported);
     });
     this.rememberDeadline(this.get(id));
+    // A launch that ended without reporting its end (killed, or crashed) gets its log's closing line from the hub (§8).
+    if (before.launch!.phase === "granted" && report === undefined && this.driver.appendLog) {
+      const after = this.get(id);
+      const line = `graphloom: run ${after.runId} ${after.state}: the launch ended without reporting its end; the hub settled it${after.blocker ? `; blocker: ${after.blocker}` : after.eligibleAt ? `; next attempt at ${after.eligibleAt}` : ""}`;
+      await this.driver.appendLog(copy(before.launch!), copy(after), line).catch(() => undefined);
+    }
   }
-  private scheduleRetry(s: HubSubmission, continuation: Extract<HubContinuation, { kind: "automatic" }>, observation?: HubObservation): void {
+  private scheduleRetry(s: HubSubmission, continuation: Extract<HubContinuation, { kind: "automatic" }>, observation?: HubObservation, detail?: string): void {
     if (observation && observation.progressRevision > s.progressRevision) { s.failureRepeats = 0; delete s.failureFingerprint; s.progressRevision = observation.progressRevision; }
     s.failureRepeats = s.failureFingerprint === continuation.fingerprint ? s.failureRepeats + 1 : 1;
     s.failureFingerprint = continuation.fingerprint;
     s.retryStartedAt ??= this.stamp();
-    if (!this.retryAllowed(s)) { s.state = "blocked"; s.blocker = "automatic retry allowance, repeated fingerprint, or elapsed deadline exhausted"; return; }
+    const cause = detail ?? observation?.blocker;
+    s.lastFailure = `${continuation.cause}${cause ? `: ${cause}` : ""}`.replace(/\s+/g, " ").slice(0, 512);
+    if (!this.retryAllowed(s)) { s.state = "blocked"; s.blocker = this.exhausted(s); return; }
     const delay = Math.min(s.retry.maxDelayMs, s.retry.baseDelayMs * 2 ** Math.min(s.automaticResumes, 30));
     const jitter = delay * Math.min(1, Math.max(0, this.random())) * 0.2;
     const notBefore = continuation.notBefore ? Date.parse(continuation.notBefore) : 0;
     const eligible = Math.max(this.now() + delay + jitter, notBefore + (notBefore ? 1000 + 1000 * Math.max(0, Math.min(1, this.random())) : 0));
-    if (eligible >= Date.parse(s.retryStartedAt) + s.retry.maxElapsedMs) { s.state = "blocked"; s.blocker = "continuation time exceeds the retry deadline"; return; }
+    if (eligible >= Date.parse(s.retryStartedAt) + s.retry.maxElapsedMs) { s.state = "blocked"; s.blocker = this.exhausted(s, `the next attempt (${new Date(eligible).toISOString()}) falls after the retry window of ${duration(s.retry.maxElapsedMs)} since ${s.retryStartedAt}`); return; }
     s.eligibleAt = new Date(eligible).toISOString();
     s.state = "waiting";
     s.automaticPending = true;
@@ -468,6 +556,7 @@ export class Hub {
         ...(automatic && s.observation?.continuation?.kind === "automatic" ? { continuationFingerprint: s.observation.continuation.fingerprint } : automatic && s.failureFingerprint ? { continuationFingerprint: s.failureFingerprint } : {}),
       };
       if (failureDriven) s.automaticResumes++;
+      if (s.pendingCommand?.kind === "resume" && s.lastResume?.commandId === s.pendingCommand.id) s.lastResume = { commandId: s.pendingCommand.id, status: "launched", at: this.stamp() };
       delete s.pendingCommand; delete s.automaticPending; delete s.reconciliationPending; delete s.eligibleAt;
       s.state = "starting";
     });
@@ -522,6 +611,31 @@ export class Hub {
   }
 }
 
+/**
+ * A submission's blocker: the hub's own, else the run's last recorded one. A succeeded
+ * submission has none, whatever its completion stop recorded (plugins often say "none").
+ */
+export function submissionBlocker(s: HubSubmission): string | undefined {
+  if (s.state === "succeeded") return undefined;
+  return s.blocker ?? (s.observation?.status === "succeeded" ? undefined : s.observation?.blocker);
+}
+/** Whether a retried resume `commandId` was never applied, so its retry applies it (§3.2). */
+function reapplicable(s: HubSubmission, commandId: string): boolean {
+  const last = s.lastResume;
+  return last?.commandId === commandId && (last.status === "withdrawn" || (last.status === "pending" && s.desiredAction === "hold"));
+}
+/** A launch report the driver returned for this exact launch, bounded; anything else is ignored. */
+function validReport(report: HubLaunchReport | undefined, s: HubSubmission): report is HubLaunchReport {
+  if (report === undefined || !s.launch || report.launchId !== s.launch.id || report.generation !== s.launch.generation) return false;
+  if (!["completed", "refused", "error"].includes(report.outcome) || Buffer.byteLength(JSON.stringify(report)) > 4096) return false;
+  return report.outcome !== "refused" || (typeof report.refusal?.reason === "string" && report.refusal.reason.length > 0);
+}
+function duration(ms: number): string {
+  if (ms % 86400000 === 0) return `${ms / 86400000}d`;
+  if (ms % 3600000 === 0) return `${ms / 3600000}h`;
+  if (ms % 60000 === 0) return `${ms / 60000}m`;
+  return `${Math.round(ms / 1000)}s`;
+}
 function bounded(value: unknown, label: string, limit: number): asserts value is string {
   if (typeof value !== "string" || value.length === 0 || Buffer.byteLength(value) > limit || value.includes("\0")) throw new Error(`invalid ${label}`);
 }

@@ -4,6 +4,7 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { parseTaskYaml } from "@graphloom/controller";
+import { submissionBlocker } from "@graphloom/hub";
 import type { HubArchiveEntry, HubRequestSummary, HubSchedulingState, HubStatus, HubSubmission } from "@graphloom/sdk";
 import { boundedText } from "./hub-input.js";
 
@@ -122,7 +123,8 @@ export function searchHub(status: HubStatus, archive: readonly HubArchiveEntry[]
   };
 }
 
-function blockerOf(item: HubSubmission): string | undefined { return item.blocker ?? item.observation?.blocker; }
+/** A live submission's blocker, none for a succeeded one. */
+export function blockerOf(item: HubSubmission): string | undefined { return submissionBlocker(item); }
 
 /** The request summary and text of a captured task; never throws (unreadable means no graph, empty request). */
 export async function readLiveRequest(taskFile: string): Promise<LiveRequest> {

@@ -200,7 +200,8 @@ function continuationFingerprint(state: DurableRunState, cause: string): string 
 export function managedObservation(state: DurableRunState): HubObservation {
   return { protocolVersion: 1, observedAt: new Date().toISOString(), stateRevision: state.stateRevision,
     progressRevision: state.receipts.length, status: state.status, continuation: observeContinuation(state),
-    ...(state.blocker !== undefined ? { blocker: state.blocker } : {}) };
+    // A succeeded run has no blocker, whatever its completion stop recorded (often "none").
+    ...(state.blocker !== undefined && state.status !== "succeeded" ? { blocker: state.blocker } : {}) };
 }
 
 /** Reconcile existing dispatch journals in a reservation, without loading graph code or executing a job. */

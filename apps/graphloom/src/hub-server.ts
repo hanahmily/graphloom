@@ -121,7 +121,9 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
       await pending;
     }
     const current = cache.get(submission.id);
-    const snapshot = withHubSnapshot(current?.snapshot, submission, scheduler.list(), new Date().toISOString(), current?.error);
+    // Before the run's state exists, its graph is the captured task's.
+    const graph = current?.snapshot?.run.graph === undefined ? (await liveRequest(submission)).summary.graph : undefined;
+    const snapshot = withHubSnapshot(current?.snapshot, submission, scheduler.list(), new Date().toISOString(), current?.error, graph !== undefined ? { graph } : {});
     if (submission.input.rehearsal !== undefined && snapshot.hub !== undefined) {
       snapshot.hub.rehearsal = rehearsalLine(submission.input.rehearsal, await readHubVerdict(config.directory, submission.runId));
     }
@@ -216,7 +218,7 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
             return respond(response, 200, verdict !== undefined ? { ...submission, rehearsalVerdict: verdict } : submission);
           }
           if (action === "snapshot") return respond(response, 200, await monitor(submission));
-          if (action === "logs") return respond(response, 200, await readLogs(config.directory, submission.id, url.searchParams));
+          if (action === "logs") return respond(response, 200, await readLogs(config.directory, submission.id, url.searchParams, submission.launch?.id));
         }
         if (request.method === "POST") {
           const body = await payload(request, action === "resume" ? ["commandId", "remedy"] : action === "policy" ? ["commandId", "retry", "renew"] : ["commandId"]);
@@ -315,7 +317,8 @@ async function removeStaleSocket(socket: string): Promise<void> {
 }
 
 export interface HubLogPage { launchId: string | null; stream: string; offset: number; nextOffset: number; text: string; capped: boolean; }
-async function readLogs(directory: string, id: string, query: URLSearchParams): Promise<HubLogPage> {
+/** A launch's log page: the requested launch's, else the active launch's, else the latest one written. */
+async function readLogs(directory: string, id: string, query: URLSearchParams, active?: string): Promise<HubLogPage> {
   const stream = query.get("stream") ?? "stderr";
   if (!["stdout", "stderr"].includes(stream)) throw new Error("log stream must be stdout or stderr");
   const offset = integer(Number(query.get("offset") ?? 0), "offset");
@@ -325,7 +328,8 @@ async function readLogs(directory: string, id: string, query: URLSearchParams): 
   candidates.sort((a, b) => b.at - a.at || a.name.localeCompare(b.name));
   const requested = query.get("launch");
   if (requested !== null && !/^l-[a-f0-9-]{36}$/.test(requested)) throw new Error("invalid launch ID");
-  const launchId = requested ?? candidates[0]?.name.split(".")[0] ?? null;
+  const current = active !== undefined && candidates.some((item) => item.name === `${active}.${stream}.log`) ? active : undefined;
+  const launchId = requested ?? current ?? candidates[0]?.name.split(".")[0] ?? null;
   if (launchId === null) return { launchId, stream, offset, nextOffset: offset, text: "", capped: false };
   const handle = await open(path.join(logs, `${launchId}.${stream}.log`), "r");
   try {

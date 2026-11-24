@@ -75,6 +75,7 @@ import {
   type RehearsalReply,
   type RehearsalScenario,
 } from "@graphloom/sdk";
+import { RequestRefusedError } from "@graphloom/sdk";
 import {
   claudeRehearsalStandIn,
   CODING_AGENT_RUN_ID,
@@ -601,7 +602,7 @@ async function performRehearsal(
     expect: { status: "succeeded" },
   };
   if (rehearsalData !== undefined && rehearsalData.scenarios[scenarioName] === undefined) {
-    throw new Error(`no scenario named ${JSON.stringify(scenarioName)}; this bundle declares: ${Object.keys(rehearsalData.scenarios).join(", ") || "(none)"}`);
+    throw new RequestRefusedError(`no scenario named ${JSON.stringify(scenarioName)}; this bundle declares: ${Object.keys(rehearsalData.scenarios).join(", ") || "(none)"}`, "invalid-scenario");
   }
 
   // A hub launch keeps its scratch beside the hub's runs, for the submission's lifetime; `rehearse` makes a temporary one.

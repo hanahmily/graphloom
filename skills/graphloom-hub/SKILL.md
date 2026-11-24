@@ -191,9 +191,9 @@ graphloom hub logs <submission>
 graphloom hub logs <submission> --stream stdout
 ```
 
-The latest launch's stderr (default) or stdout, bounded; `--launch <id>` names
-an earlier launch. `--follow` keeps streaming and never exits: suggest it to
-the user for their terminal, do not run it as a tool call.
+The running (else latest) launch's stderr (default) or stdout, bounded;
+`--launch <id>` names an earlier one. `--follow` keeps streaming and never
+exits: suggest it to the user for their terminal, not as a tool call.
 
 ## 5. Stop: pause or cancel
 
@@ -249,14 +249,16 @@ run's owning GraphLoom under the run lock:
   plain `hub resume`. `succeeded` and `canceled` submissions cannot resume.
 
 The reply is the accepted command, not the result; follow it with
-`hub list` or graphloom-watch. `graphloom resume` on a hub run is routed to
+`hub list` or graphloom-watch; `lastResume` says what became of it (`refused`
+gives the run's reason; a pause keeps an unapplied one for the next resume).
+`graphloom resume` on a hub run is routed to
 the hub too, and refuses `--on-stop`.
 
 **Retry allowance.** Automatic resumes are bounded per submission (default 5
 in 24 hours; three identical failures without progress block). A submission
-blocked with `automatic retry allowance ... exhausted` stays blocked until the
-user decides. Renewing it is a policy change, only after the cause is known
-(graphloom-triage) and on the user's yes:
+blocked with `automatic retry stopped: <limit>; last cause: <cause>` stays so
+until the user decides. Renewing it is a policy change, only after the cause
+is known (graphloom-triage) and on the user's yes:
 
 ```sh
 graphloom hub policy <submission> --renew
@@ -299,8 +301,6 @@ graphloom hub list --state blocked --state failed
 graphloom hub list --repo widgets --since 3d
 graphloom hub list --repo . --limit 10
 graphloom hub list --graph issue-fix --grep "flaky test" --archived
-graphloom hub list --key fix-widgets-42 --archived
-graphloom hub list --since 2026-11-01 --until 2026-11-08 --archived --limit 50
 ```
 
 | Flag | Matches |
