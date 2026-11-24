@@ -63,6 +63,20 @@ describe("managed controller", () => {
     return { ...env, controller, state: stopped, plugin, managed, commandFiles };
   }
 
+  it("hands the graph the launcher's resume command for its blockers, and graphloom resume <runId> without one", async () => {
+    const seen: Array<string | undefined> = [];
+    const env = await stoppedRun();
+    const plugin = () => createScriptedGraph({ definition: env.state.definition, advances: [(view) => { seen.push(view.resumeCommand); return stop({ reason: "fixture pause", blocker: `${view.resumeCommand} --approve publish` }, "pause"); }] });
+    const managed = { ...env.managed, resumeCommand: "graphloom hub resume submission" };
+    const report = await env.controller.resume({ runRef: env.stateDir, managed, runner: runner([]), plugin: plugin(), validators: {} });
+    expect(seen).toEqual(["graphloom hub resume submission"]);
+    expect(report.blocker).toBe("graphloom hub resume submission --approve publish");
+    // Never persisted with the binding: the next launch states its own.
+    expect(await readManagedBinding(env.stateDir)).not.toHaveProperty("resumeCommand");
+    await env.controller.resume({ runRef: env.stateDir, managed: { ...env.managed, generation: 3, launchId: "resume-3", commandId: "remedy-2" }, runner: runner([]), plugin: plugin(), validators: {} });
+    expect(seen).toEqual(["graphloom hub resume submission", "graphloom resume managed"]);
+  });
+
   it("keeps invalid approval preflight retryable under the same command ID", async () => {
     const env = await stoppedRun();
     const request = { runRef: env.stateDir, managed: env.managed, runner: runner([]), approval: { approvalId: "missing", decision: "approve" as const } };

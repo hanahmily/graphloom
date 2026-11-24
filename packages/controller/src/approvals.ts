@@ -41,6 +41,10 @@ export const MAX_APPROVAL_REASON = 1_000;
  * resume changes anything: the run is stopped (an approval answers a stop),
  * the graph declared the id, and an approval the graph marks `unavailable`
  * is refused with the graph's own message (a decline still records).
+ * Deliberately not checked (docs/design-typescript-core.md §17): whether the
+ * stop waits for this approval, and whether every declared input was given.
+ * A stop names no approval and inputs are optional; the graph judges the
+ * record from its evidence, as it judges any other.
  */
 export function approvalRefusal(state: DurableRunState, request: ApprovalRequest): string | undefined {
   if (state.status === "succeeded" || state.status === "failed") {

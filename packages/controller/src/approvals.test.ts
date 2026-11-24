@@ -90,6 +90,21 @@ describe("approval decisions", () => {
     expect(none.evidence.at(-1)!.payload).not.toHaveProperty("inputs");
   });
 
+  it("records an approval on a stop that waits for something else, and one giving only some declared inputs: the graph judges them (core §17)", async () => {
+    // The issue-fix shape: design-ruling declares finding, ruling and note; the run stopped on something unrelated.
+    const state = await stateWith(
+      [{ id: "design-ruling", inputs: [{ name: "finding", pattern: "[FI][0-9]+" }, { name: "ruling", pattern: "implementation-stands|review-stands" }, { name: "note" }] }],
+      { stopReason: "budget exhausted", blocker: "the corrections budget is spent" },
+    );
+    const request = { approvalId: "design-ruling", decision: "approve" as const, operator: "m", inputs: { finding: "F1" } };
+    expect(approvalRefusal(state, request)).toBeUndefined();
+    const next = await applyApproval(state, request);
+    expect(next.evidence.at(-1)!.payload as OperatorApprovalPayload).toMatchObject({ approvalId: "design-ruling", decision: "approve", inputs: { finding: "F1" } });
+    // What is still refused: an input the approval does not declare, or one that misses its pattern.
+    expect(approvalRefusal(state, { ...request, inputs: { finding: "F1", verdict: "x" } })).toMatch(/declares no input "verdict"/);
+    expect(approvalRefusal(state, { ...request, inputs: { finding: "F1", ruling: "maybe" } })).toMatch(/does not match the declared pattern/);
+  });
+
   it("refuses a declared file that is missing, not a regular file, a link out of the worktree, or past 256 KiB together", async () => {
     const state = await stateWith([{ id: "p", files: ["a.md"] }]);
     await expect(applyApproval(state, { approvalId: "p", decision: "approve" })).rejects.toThrow(/does not exist/);

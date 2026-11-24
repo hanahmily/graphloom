@@ -1950,6 +1950,28 @@ graphloom resume <run> --approve review-layer --input areas=A3,A17,A18
 - `graphloom --help` names `--input`; the `graphloom-run` skill tells an agent to
   ask the user for the values.
 
+**What the controller does not check, by design.** It records an approval of a
+declared id on any stopped run, whether or not the stop was waiting for that
+approval, and an approve that gives only some of the declared inputs (inputs
+are values the operator *may* give; a declaration has no "required"). A stop
+names no approval it waits for: which decision answers which stop, and what an
+incomplete answer means, is the graph's reading of its evidence, a plugin notion
+the controller does not learn. The graph decides on the record: it may act on it,
+ignore it, or stop again saying why (issue-fix's `design-ruling` validator fails
+an approval that names no finding or no ruling, and its Arbitrate stops again
+when the approval names another finding than the one waiting). Like any approval,
+the record lifts a final stop so the graph sees it (§8); the latest approve wins.
+
+**The command a blocker names.** A graph's blocker that asks for a decision
+names the run's own resume command, `RunView.resumeCommand`, followed by
+`--approve <id> …` or `--decline <id>`: `graphloom resume <runId>` for a run the
+operator started, and the launcher's command for a run it manages. The
+controller takes it, opaque, from the managed launch grant
+(`ManagedRunGrant.resumeCommand`); the CLI sets it to
+`graphloom hub resume <submission>` for a hub run, real or rehearsal, which
+`graphloom resume` refuses. The controller's own reconcile blocker uses the same
+command.
+
 ## 18. Run hub
 
 The [run hub design](design-run-hub.md) extends local standalone execution with

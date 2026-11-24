@@ -65,7 +65,7 @@ const repeatable = ["panel", "input", "state"];
 export async function hubCommand(args: string[]): Promise<number> {
   const parsed = parseArgs({ args, allowPositionals: true, strict: true, tokens: true, options: {
     ...Object.fromEntries(valueFlags.map((name) => [name, { type: "string" as const }])),
-    ...Object.fromEntries(booleanFlags.map((name) => [name, { type: "boolean" as const }])),
+    ...Object.fromEntries(booleanFlags.map((name) => [name, { type: "boolean" as const, ...(name === "help" ? { short: "h" } : {}) }])),
     ...Object.fromEntries(repeatable.map((name) => [name, { type: "string" as const, multiple: true as const }])),
   } });
   const values: Record<string, string | boolean | string[] | undefined> = parsed.values;

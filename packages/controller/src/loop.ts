@@ -158,6 +158,8 @@ function chargeableRemaining(budgets: DurableRunState["budgets"]): number {
 
 export interface LoopDeps {
   managed?: boolean;
+  /** The launcher's command for resuming this run (`RunView.resumeCommand`); absent, `graphloom resume <runId>`. */
+  resumeCommand?: string;
   managedInterruptionId?: string;
   managedDisconnect?: boolean;
   managedStateDir?: string;
@@ -566,7 +568,7 @@ async function runNormalLoopSteps(
         // version are marked stale here, and the last proposal's settlement
         // becomes an attempt, written by the controller, not the model.
         const executors = executorViews(state);
-        const view = { ...toRunView(state), ...(executors !== undefined ? { executors } : {}) };
+        const view = { ...toRunView(state, { resumeCommand: deps.resumeCommand }), ...(executors !== undefined ? { executors } : {}) };
         // The graph's nodes, for a graph that declares edges: the prompt's topology section reads them with view.topology.
         const nodes = supervisorNodes(state);
         const lastSettlement = settleProposal(state);
@@ -1106,7 +1108,7 @@ async function runNormalLoopSteps(
         }
         // A graph may check the input it composes against the limits an executor declares.
         const declared = executorViews(state);
-        const view = { ...toRunView(state), ...(declared !== undefined ? { executors: declared } : {}) };
+        const view = { ...toRunView(state, { resumeCommand: deps.resumeCommand }), ...(declared !== undefined ? { executors: declared } : {}) };
         const advanced = await advanceWithEvidence(deps.host, state, view, {
           runId: state.runId,
           operationId: `adv-${state.stateRevision}-${step}`,
@@ -1918,9 +1920,10 @@ function mapHostFailureCode(
  * `inline` is for a read-only consumer whose evidence is already hydrated (replay): the records are sent as they
  * are, with no safety-valve externalization, so building the view never writes into the run's evidence store.
  */
-export function toRunView(state: DurableRunState, options: { inline?: boolean } = {}): RunView {
+export function toRunView(state: DurableRunState, options: { inline?: boolean; resumeCommand?: string | undefined } = {}): RunView {
   const view: RunView = {
     runId: state.runId,
+    resumeCommand: options.resumeCommand ?? `graphloom resume ${state.runId}`,
     task: {
       request: state.intake.task.request,
       repo: state.intake.task.repo,

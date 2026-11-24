@@ -602,14 +602,63 @@ export function resolveUnderBase(baseDir: string, relative: string, label: strin
   return resolved;
 }
 
+/**
+ * A one-line scalar's value as YAML reads it: a double-quoted scalar has its
+ * escapes decoded (YAML 1.2 §5.7: `\"`, `\\`, `\n`, `\t`, `\uXXXX`, ...), a
+ * single-quoted one has `''` read as `'`, and a plain scalar is taken as is.
+ * A quoted scalar YAML would refuse (an unknown escape, a quote left
+ * unescaped inside) is refused, never passed on with its backslashes.
+ */
 function unquote(value: string): string {
-  if (
-    (value.startsWith('"') && value.endsWith('"')) ||
-    (value.startsWith("'") && value.endsWith("'"))
-  ) {
-    return value.slice(1, -1);
+  if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
+    return unescapeDoubleQuoted(value.slice(1, -1));
+  }
+  if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) {
+    const inner = value.slice(1, -1);
+    if (inner.replace(/''/g, "").includes("'")) {
+      throw new IntakeError(`single-quoted scalar has an unescaped ' (write it as ''): ${value}`);
+    }
+    return inner.replace(/''/g, "'");
   }
   return value;
+}
+
+/** YAML 1.2 §5.7's one-character escapes, by the character after the backslash. */
+const YAML_SIMPLE_ESCAPES: Readonly<Record<string, string>> = {
+  "0": "\0", a: "\x07", b: "\b", t: "\t", "\t": "\t", n: "\n", v: "\v", f: "\f", r: "\r", e: "\x1b",
+  " ": " ", '"': '"', "/": "/", "\\": "\\", N: "\u0085", _: " ", L: " ", P: " ",
+};
+/** YAML 1.2 §5.7's hex escapes and their digit counts. */
+const YAML_HEX_ESCAPES: Readonly<Record<string, number>> = { x: 2, u: 4, U: 8 };
+
+function unescapeDoubleQuoted(inner: string): string {
+  let out = "";
+  for (let i = 0; i < inner.length; i += 1) {
+    const ch = inner[i]!;
+    if (ch === '"') throw new IntakeError(`double-quoted scalar has an unescaped " (write it as \\"): "${inner}"`);
+    if (ch !== "\\") {
+      out += ch;
+      continue;
+    }
+    const next = inner[i + 1];
+    if (next === undefined) throw new IntakeError(`double-quoted scalar ends in a lone \\: "${inner}"`);
+    const simple = Object.hasOwn(YAML_SIMPLE_ESCAPES, next) ? YAML_SIMPLE_ESCAPES[next] : undefined;
+    if (simple !== undefined) {
+      out += simple;
+      i += 1;
+      continue;
+    }
+    const width = Object.hasOwn(YAML_HEX_ESCAPES, next) ? YAML_HEX_ESCAPES[next] : undefined;
+    const hex = width === undefined ? "" : inner.slice(i + 2, i + 2 + width);
+    if (width === undefined || !new RegExp(`^[0-9A-Fa-f]{${width}}$`).test(hex)) {
+      throw new IntakeError(`double-quoted scalar has an invalid escape \\${next}: "${inner}"`);
+    }
+    const code = Number.parseInt(hex, 16);
+    if (code > 0x10ffff) throw new IntakeError(`double-quoted scalar escapes a code point out of range \\${next}${hex}: "${inner}"`);
+    out += String.fromCodePoint(code);
+    i += 1 + width;
+  }
+  return out;
 }
 
 async function assertExists(p: string, _kind: "file" | "directory"): Promise<void> {

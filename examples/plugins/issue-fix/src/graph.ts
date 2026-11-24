@@ -177,7 +177,7 @@ import { arbiterInstruction, arbiterRevisionInstruction } from "./arbiter.js";
 import { cleanRun, codeReview, finalRun, implementerRecord, latestImplementerRecord, plannerRecord, reportText, validatorById, verifiedChecks } from "./validators.js";
 
 export const GRAPH_ID = "issue-fix";
-export const GRAPH_VERSION = "0.17.0";
+export const GRAPH_VERSION = "0.17.1";
 
 /** Graph bookkeeping; everything else is read back from recorded evidence. */
 export interface FixPrivateState {
@@ -1110,13 +1110,15 @@ function arbiterDocuments(view: RunView, profile: Profile): ContextDocument[] {
 function operatorStop(view: RunView, arb: Arbitration, point: Finding | undefined, why: string, undecided?: Undecidable, refs: string[] = []): GraphDecision {
   const id = arb.point ?? point?.id ?? "F?";
   const cases = undecided ?? (point !== undefined ? pointCases(arb.ledger, point) : { question: `Does ${issueIdOf(id)} hold against the project's design?`, implementation: "", review: "" });
+  // The run's own resume command: `graphloom hub resume <submission>` for a hub run, which `graphloom resume` refuses.
+  const resume = view.resumeCommand ?? `graphloom resume ${view.runId}`;
   const blocker = [
     `${why}. The design point is ${issueIdOf(id)}.`,
     `Question: ${clip(cases.question, 800)}`,
     `The implementation's case: ${clip(cases.implementation, 1_200)}`,
     `The review's case: ${clip(cases.review, 1_200)}`,
-    `Rule on it: graphloom resume ${view.runId} --approve ${DESIGN_RULING_APPROVAL} --input finding=${id} --input ruling=review-stands --input note="…" (or ruling=implementation-stands)`,
-    `Or leave it open, as an open design question in the pull request: graphloom resume ${view.runId} --decline ${DESIGN_RULING_APPROVAL} --reason "…"`,
+    `Rule on it: ${resume} --approve ${DESIGN_RULING_APPROVAL} --input finding=${id} --input ruling=review-stands --input note="…" (or ruling=implementation-stands)`,
+    `Or leave it open, as an open design question in the pull request: ${resume} --decline ${DESIGN_RULING_APPROVAL} --reason "…"`,
   ].join("\n");
   return stop({ reason: "design ruling needs the operator", blocker, evidenceRefs: refs, retryable: false }, `wait for the operator's design ruling on ${issueIdOf(id)}`);
 }
