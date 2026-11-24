@@ -119,6 +119,16 @@ task) in the task repository, and writes `task.yaml`
 ([§16](#16-preparing-a-task-graphloom-task-new)). Writing the file by hand
 stays valid.
 
+Every command that takes a run (`inspect`, `stats`, `wait`, `watch`, `stop`,
+`resume`, `delete`, `replay`, `switch-model`, `session`) takes its state
+directory or its run ID. A run ID is looked up under `--state-root` when given;
+otherwise under the default state root of the repository the command runs in
+(`<repo>/graphloom-state`), then under the run hub's runs directory
+(`<hub directory>/runs`, [run hub](design-run-hub.md)). A run found nowhere is
+refused with the places looked in and how to name it instead (its state
+directory, or `--state-root`). The lookup is the CLI's: the controller is
+handed the state directory found.
+
 These are target interfaces. Relative paths resolve from the task file. `hello`
 selects an operator-installed bundle at `plugins/hello/` beside that file. Reject
 path traversal. Installation and dependency preparation are separate from run

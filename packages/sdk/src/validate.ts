@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
-import type { GraphRehearsal, RehearsalExpectation, RehearsalReply, RehearsalScenario } from "./rehearsal.js";
+import type { GraphRehearsal, RehearsalAnswer, RehearsalExpectation, RehearsalReply, RehearsalScenario } from "./rehearsal.js";
 import { topologyProblem } from "./topology.js";
 import { GRAPH_BUDGET_KEYS, PROTOCOL_VERSION, SUPERVISOR_HARNESSES, type GraphAction, type GraphDecision, type GraphDefinition, type RunView, type ValidationInput, type ValidationResult, type WireRequest, type WireResponse } from "./types.js";
 
@@ -215,7 +215,31 @@ function assertRehearsalScenario(value: unknown, label: string): RehearsalScenar
   }
   if (obj["budgets"] !== undefined) asObject(obj["budgets"], `${label}.budgets`);
   assertRehearsalExpectation(obj["expect"], `${label}.expect`);
+  if (obj["answers"] !== undefined) {
+    for (const [i, raw] of requireArray(obj, "answers").entries()) assertRehearsalAnswer(raw, `${label}.answers[${i}]`);
+  }
   return obj as unknown as RehearsalScenario;
+}
+
+function assertRehearsalAnswer(value: unknown, label: string): RehearsalAnswer {
+  const obj = asObject(value, label);
+  requireString(obj, "approval");
+  const decision = requireString(obj, "decision");
+  if (decision !== "approve" && decision !== "decline") throw new WireValidationError("malformed", `${label}.decision must be approve or decline`);
+  if (obj["inputs"] !== undefined && !Object.values(asObject(obj["inputs"], `${label}.inputs`)).every((v) => typeof v === "string")) {
+    throw new WireValidationError("malformed", `${label}.inputs must map input names to strings`);
+  }
+  if (obj["supervisor"] !== undefined) {
+    for (const decision of requireArray(obj, "supervisor")) assertGraphDecision(decision);
+  }
+  if (obj["results"] !== undefined) {
+    const results = asObject(obj["results"], `${label}.results`);
+    for (const name of Object.keys(results)) {
+      requireArray(results, name).forEach((reply, i) => assertRehearsalReply(reply, `${label}.results[${JSON.stringify(name)}][${i}]`));
+    }
+  }
+  assertRehearsalExpectation(obj["expect"], `${label}.expect`);
+  return obj as unknown as RehearsalAnswer;
 }
 
 function assertRehearsalReply(value: unknown, label: string): RehearsalReply {

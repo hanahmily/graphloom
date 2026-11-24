@@ -127,6 +127,19 @@ export function nextReply(scenario: RehearsalScenario, contractName: string | un
   return replies[index];
 }
 
+/**
+ * Restarts the replies of `contracts` from their first in the rehearsal whose
+ * scenario file is `scenarioFile`: a continued scenario (an operator's
+ * answer) replaced their replies. Called between launches, never while a
+ * stand-in answers.
+ */
+export function restartReplies(scenarioFile: string, contracts: readonly string[]): void {
+  const file = sidecarFile(scenarioFile, "cursors.json");
+  const cursors = readJson<Record<string, number>>(file, {});
+  for (const name of contracts) delete cursors[name];
+  writeFileSync(file, JSON.stringify(cursors), "utf8");
+}
+
 /** Isolated HOME-rooted directory for this stand-in's own state, so it never touches an operator's real login or config. */
 export function rehearsalHomeDir(child: string): string | undefined {
   const root = process.env[REHEARSAL_HOME_ENV];

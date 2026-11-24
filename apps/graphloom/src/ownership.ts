@@ -24,7 +24,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { isReleaseVersion, resolveStateDir, type InstallRecord } from "@graphloom/controller";
+import { isReleaseVersion, type InstallRecord } from "@graphloom/controller";
+import { locateRun } from "./run-ref.js";
 import { installRoot, versionInfo } from "./version.js";
 
 /** Set on a dispatched child to the version it was sent to, so a version that does not own the run cannot bounce it again. */
@@ -175,12 +176,12 @@ export async function dispatchToOwner(cmd: string, args: readonly string[], self
   if (!RUN_SCOPED_COMMANDS.has(cmd)) return undefined;
   const ref = args[1];
   if (ref === undefined || ref.startsWith("--")) return undefined;
-  const runRef = ref.startsWith("/") || ref.includes("/") ? path.resolve(ref) : ref;
   const stateRoot = flag(args, "--state-root");
   let stateDir: string;
   let raw: { runId?: string; install?: InstallRecord; intake?: { bundle?: { bundlePath?: string } } };
   try {
-    stateDir = await resolveStateDir(runRef, stateRoot !== undefined ? path.resolve(stateRoot) : undefined);
+    // Found where the command itself finds it (run-ref.ts), so a run ID names the same run here as there.
+    stateDir = await locateRun(ref, stateRoot);
     raw = JSON.parse(await readFile(path.join(stateDir, "state.json"), "utf8")) as typeof raw;
   } catch {
     // No readable run here: the command reports that itself.

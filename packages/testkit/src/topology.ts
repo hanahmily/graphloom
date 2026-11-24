@@ -131,7 +131,9 @@ export function advance(view) {
     if (done === undefined) return work(side.stageId);
     if (done.ruling === "undecidable" && operatorRuling(view.evidence) === undefined) {
       // A final stop that waits for the declared approval: how a node waits for the operator.
-      const blocker = \`The arbiter could not decide: \${done.summary}\\nRule on it: graphloom resume \${view.runId} --approve \${APPROVAL} --input ruling="…"\`;
+      // The run's own resume command: \`graphloom hub resume <submission>\` for a hub run, which \`graphloom resume\` refuses.
+      const resume = view.resumeCommand ?? \`graphloom resume \${view.runId}\`;
+      const blocker = \`The arbiter could not decide: \${done.summary}\\nRule on it: \${resume} --approve \${APPROVAL} --input ruling="…"\`;
       return stop({ reason: ${JSON.stringify(TOPOLOGY_APPROVAL_STOP)}, blocker, retryable: false }, "wait for the operator's ruling");
     }
     return validate({ stageId: side.stageId }, \`validate \${side.stageId}\`);

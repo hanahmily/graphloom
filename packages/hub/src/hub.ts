@@ -430,7 +430,10 @@ export class Hub {
     }
     const cursor = await this.store.journal(before, { commandId: `launch:${before.launch!.id}`, digest: digest(before.launch), acceptedAt: this.stamp(), event: "settled", launch: before.launch!, ...(observation ? { observation } : {}) });
     // What the run stopped on before this launch: a refused remedy leaves it in force (§3.2).
-    const earlier = before.observation?.status !== "succeeded" ? before.observation?.blocker : undefined;
+    // Captured when the launch was reserved: polling has since replaced the observation with
+    // the launch's own (a pin mismatch, say). Launches reserved before that field existed fall
+    // back to the observation, which is right when no poll saw the launch's own stop.
+    const earlier = before.launch!.priorBlocker ?? (before.observation?.status !== "succeeded" ? before.observation?.blocker : undefined);
     await this.commit((next) => {
       const s = next.submissions[id]!;
       const launch = s.launch!;
@@ -440,6 +443,10 @@ export class Hub {
       // The operator resume this launch carried, and whether the run applied it (§3.2).
       const resume = launch.command?.kind === "resume" ? launch.command : undefined;
       const applied = resume !== undefined && report?.command?.id === resume.id && report.command.applied;
+      // A plugin update the run refused: it ran to the pin check and stopped on the mismatch.
+      // The command did not take effect, whatever the launch reported.
+      const pluginRefused = granted && resume?.remedy?.updatePlugin === true && observation?.continuation?.kind === "operator" && observation.continuation.cause === "pin-drift"
+        ? (observation.blocker ?? "the run refused the plugin update") : undefined;
       s.journalBytes = cursor;
       delete s.launch;
       delete s.blocker;
@@ -448,6 +455,7 @@ export class Hub {
       if (inputUpdate) { s.input.bundlePath = inputUpdate.bundlePath; s.input.bundleDigest = inputUpdate.bundleDigest; }
       if (resume !== undefined && s.lastResume?.commandId === resume.id) {
         if (refusal) s.lastResume = { commandId: resume.id, status: "refused", reason: refusal.reason.slice(0, 512), at: this.stamp() };
+        else if (pluginRefused) s.lastResume = { commandId: resume.id, status: "refused", reason: `plugin update refused: ${pluginRefused}`.slice(0, 512), at: this.stamp() };
         else if (applied) s.lastResume = { commandId: resume.id, status: "applied", at: this.stamp() };
         // Not applied: a pause keeps it for the next resume, and so do a plain resume accepted
         // while this launch drained and a launch that never started its run. Anything else
@@ -491,8 +499,8 @@ export class Hub {
         const blocker = observation?.blocker ?? continuation.cause;
         // A refused plugin update replaces the run's stop with the pin mismatch; the stop it
         // answered (an approval it waits on, say) is still in force, so both are shown.
-        s.blocker = (resume?.remedy?.updatePlugin && continuation.cause === "pin-drift" && earlier && earlier !== blocker
-          ? `plugin update refused: ${blocker.slice(0, 500)}; the run still stops on: ${earlier}` : blocker).slice(0, 1024);
+        s.blocker = (pluginRefused !== undefined
+          ? `plugin update refused: ${blocker.slice(0, 500)}${earlier && earlier !== blocker ? `; the run still stops on: ${earlier}` : ""}` : blocker).slice(0, 1024);
         return;
       }
       const planned = interruptionId && continuation?.kind === "automatic" && continuation.cause === "service-interruption" && continuation.interruptionCommandId === interruptionId;
@@ -549,10 +557,12 @@ export class Hub {
       // The controller still reconciles existing effects before applying that remedy.
       const mode = incompleteInitialization(s) ? "initial" : s.reconciliationPending ? s.pendingCommand?.kind === "resume" ? "resume" : "reconcile" : s.observation ? "resume" : "initial";
       s.generation++;
+      const priorBlocker = s.observation?.status !== "succeeded" ? s.observation?.blocker : undefined;
       s.launch = {
         id: `l-${randomUUID()}`, generation: s.generation, mode,
         phase: "reserved", reservedAt: this.stamp(), automatic,
         ...(s.pendingCommand ? { command: s.pendingCommand } : {}),
+        ...(priorBlocker ? { priorBlocker: priorBlocker.slice(0, 1024) } : {}),
         ...(automatic && s.observation?.continuation?.kind === "automatic" ? { continuationFingerprint: s.observation.continuation.fingerprint } : automatic && s.failureFingerprint ? { continuationFingerprint: s.failureFingerprint } : {}),
       };
       if (failureDriven) s.automaticResumes++;

@@ -72,10 +72,11 @@ import {
   type RecordedCall,
   type RehearsalCommandResult,
   type RehearsalExpectation,
+  type RehearsalAnswer,
   type RehearsalReply,
   type RehearsalScenario,
 } from "@graphloom/sdk";
-import { RequestRefusedError } from "@graphloom/sdk";
+import { continueRehearsalScenario, matchRehearsalAnswer, RequestRefusedError, restartReplies } from "@graphloom/sdk";
 import {
   claudeRehearsalStandIn,
   CODING_AGENT_RUN_ID,
@@ -407,6 +408,14 @@ export function scenarioTopologyProblems(definition: GraphDefinition, name: stri
     const last = path.at(-1);
     if (scenario.expect.status === "succeeded" && last !== undefined && !topology.terminal.includes(last)) {
       problems.push(`${where} ends at ${last}, which is not terminal (${topology.terminal.join(", ")}); a run succeeds only at a terminal node`);
+    }
+  }
+  // Each operator answer the scenario rehearses: its decisions follow the scenario's, its expectation replaces the scenario's.
+  const seen = new Set(problems);
+  for (const [i, answer] of (scenario.answers ?? []).entries()) {
+    const continued: RehearsalScenario = { results: scenario.results, supervisor: [...decisions, ...(answer.supervisor ?? [])], expect: answer.expect };
+    for (const problem of scenarioTopologyProblems(definition, `${name} (answers[${i}]: --${answer.decision} ${answer.approval})`, continued)) {
+      if (!seen.has(problem)) { seen.add(problem); problems.push(problem); }
     }
   }
   return problems;
@@ -929,6 +938,8 @@ export async function resumeRehearsal(
     stateRoot?: string; upgrade?: UpgradeRequest; updatePlugin?: boolean; updateExecutors?: boolean; reconciled?: boolean; approval?: ApprovalRequest;
     /** A hub launch: its grant, and the submission's scratch directory under the hub instead of `<scratch>/state/..`. */
     managed?: { grant: ManagedRunGrant; rehearsalRoot: string };
+    /** Called once the approval matched an answer the scenario rehearses and the scenario continued with it. */
+    onAnswer?: (answer: RehearsalAnswer) => void;
   } = {},
 ): Promise<RunReport> {
   const stateDir = await resolveStateDir(runRef, options.stateRoot);
@@ -938,11 +949,31 @@ export async function resumeRehearsal(
   if (raw.runId === undefined || !raw.runId.startsWith(REHEARSAL_RUN_ID_PREFIX) || (options.managed === undefined && path.basename(path.dirname(stateDir)) !== "state") || !existsSync(scenarioPath)) {
     throw new Error(`${stateDir} is not a kept rehearsal run (a ${REHEARSAL_RUN_ID_PREFIX}* run under <scratch>/state/ beside scenario.json, or a hub rehearsal submission's run); resume --rehearsal continues only those`);
   }
-  const scenario = JSON.parse(await readFile(scenarioPath, "utf8")) as RehearsalScenario;
-  const saved = JSON.parse(await readFile(path.join(rehearsalRoot, REHEARSAL_OPTIONS_FILE), "utf8").catch(() => "{}")) as RehearsalHarnessOptions;
+  const scenarioText = await readFile(scenarioPath, "utf8");
+  let scenario = JSON.parse(scenarioText) as RehearsalScenario;
+  const saved = JSON.parse(await readFile(path.join(rehearsalRoot, REHEARSAL_OPTIONS_FILE), "utf8").catch(() => "{}")) as RehearsalHarnessOptions & { scenario?: string };
   // The script continues where the run left it: one decision per decide() call the run recorded, never from the first again.
   const start = scriptedDecisionsConsumed(raw.supervisorEpisodes);
-  const scripted = async () => createScriptedSupervisor({ decisions: scenario.supervisor ?? [], start });
+  // An operator's answer the scenario rehearses continues it as the answer scripts (§4.4); the scenario file
+  // the stand-ins and the verdict read becomes the continued one, so both follow the answer.
+  const cursorsPath = `${scenarioPath}.cursors.json`;
+  const cursorsText = await readFile(cursorsPath, "utf8").catch(() => undefined);
+  let continued = false;
+  if (options.approval !== undefined && (scenario.answers ?? []).some((a) => a.approval === options.approval!.approvalId)) {
+    const answer = matchRehearsalAnswer(scenario, options.approval);
+    if (answer === undefined) {
+      const rehearsed = (scenario.answers ?? []).filter((a) => a.approval === options.approval!.approvalId)
+        .map((a) => `--${a.decision} ${a.approval}${Object.entries(a.inputs ?? {}).map(([name, value]) => ` --input ${name}=${value}`).join("")}`);
+      throw new RequestRefusedError(`scenario ${JSON.stringify(saved.scenario ?? "?")} rehearses no such answer to ${options.approval.approvalId}; it rehearses: ${rehearsed.join("; ")}`, "invalid-remedy");
+    }
+    scenario = continueRehearsalScenario(scenario, answer, start);
+    await writeFile(scenarioPath, JSON.stringify(scenario), "utf8");
+    restartReplies(scenarioPath, Object.keys(answer.results ?? {}));
+    continued = true;
+    options.onAnswer?.(answer);
+  }
+  const decisions = scenario.supervisor ?? [];
+  const scripted = async () => createScriptedSupervisor({ decisions, start });
   const harness = await rehearsalHarness(rehearsalRoot, raw.definition !== undefined ? environmentCommandsOf(raw.definition) : new Map(), saved);
   try {
     return await createController().resume({
@@ -957,6 +988,14 @@ export async function resumeRehearsal(
       ...(options.reconciled === true ? { reconciled: true } : {}),
       ...(options.approval !== undefined ? { approval: options.approval } : {}),
     });
+  } catch (error) {
+    // A refused resume leaves the run as it was, and so the scenario it rehearses.
+    if (continued && error instanceof RequestRefusedError) {
+      await writeFile(scenarioPath, scenarioText, "utf8");
+      if (cursorsText !== undefined) await writeFile(cursorsPath, cursorsText, "utf8");
+      else await rm(cursorsPath, { force: true });
+    }
+    throw error;
   } finally {
     harness.restore();
   }

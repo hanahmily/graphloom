@@ -11,7 +11,7 @@
  */
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { chmod, copyFile, cp, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -40,6 +40,11 @@ async function tempDir(): Promise<string> {
   const dir = await realpath(await mkdtemp(path.join(os.tmpdir(), "gl-release-publish-")));
   dirs.push(dir);
   return dir;
+}
+
+/** release.sh's work directories left under `tmp` (its TMPDIR). */
+function workDirs(tmp: string): string[] {
+  return readdirSync(tmp).filter((name) => /^graphloom-release-[A-Za-z0-9]{6}$/.test(name));
 }
 
 const sha256 = (bytes: Buffer | string) => createHash("sha256").update(bytes).digest("hex");
@@ -572,6 +577,14 @@ describe("release.sh prepare (§6 steps 1-2)", () => {
     expect(r.status).toBe(1);
     expect(r.stderr).toContain("the 0.1.0 section still has a TODO marker");
     expect(fx.git("rev-parse", "--abbrev-ref", "HEAD")).toBe("main");
+    // A failure removes the work directory too, saying how to keep it; --keep-work keeps it.
+    expect(r.stderr).toMatch(/work directory removed: .*\(rerun with --keep-work to keep it\)/);
+    expect(workDirs(fx.base)).toEqual([]);
+    r = fx.releaseSh(["prepare", "0.1.0", "--no-pr", "--keep-work", "--node-dir", fx.nodeDir]);
+    expect(r.status).toBe(1);
+    const kept = workDirs(fx.base);
+    expect(kept).toHaveLength(1);
+    expect(r.stderr).toContain(`work directory kept: ${path.join(fx.base, kept[0]!)}`);
   }, 60_000);
 
   it("bumps, refreshes lockfiles and manifests, commits on release/v<version>, gates the commit in a staged clone, and prints the PR commands", async () => {
@@ -616,6 +629,14 @@ describe("release.sh prepare (§6 steps 1-2)", () => {
     expect(r.stdout).toContain(`git push -u origin release/v0.1.0`);
     expect(r.stdout).toMatch(/gh pr create -R stub\/graphloom --base main --head release\/v0\.1\.0 --title release:\\ v0\.1\.0 --body-file /);
     expect(fx.ghCalls().some((c) => c.startsWith("pr create"))).toBe(false);
+    // The printed command's PR body outlives the work directory, alone: the work directory itself is gone.
+    const body = /^PR body: (.+)$/m.exec(r.stdout)?.[1];
+    expect(body).toBeDefined();
+    expect(r.stdout).toContain(`--body-file ${body}`);
+    expect(path.dirname(body!)).toBe(fx.base);
+    expect(readFileSync(body!, "utf8")).toContain("Release v0.1.0: lockstep versions");
+    expect(workDirs(fx.base)).toEqual([]);
+    expect(r.stderr).not.toContain("work directory kept");
     expect(spawnSync("git", ["ls-remote", "--heads", fx.remote, "release/v0.1.0"], { encoding: "utf8" }).stdout).toBe("");
   }, 120_000);
 
@@ -768,6 +789,26 @@ async function releasableFixture(): Promise<Fixture> {
   fx.git("push", "-q", "origin", "main");
   return fx;
 }
+
+describe("release.sh build's work directory (§6 R5)", () => {
+  it("is removed when the build fails, naming --keep-work, and kept only with --keep-work; the log stays in <out>", async () => {
+    const fx = await makeFixture();
+    // The fixture's product version is 0.0.0: the build stages the commit, then refuses 0.9.9.
+    const out = path.join(fx.base, "out");
+    let r = fx.releaseSh(["build", "0.9.9", "--unsigned", "--out", out]);
+    expect(r.status).toBe(1);
+    const said = r.stdout + r.stderr;
+    expect(said).toContain("the product version at");
+    expect(said).toMatch(/work directory removed: .*\(rerun with --keep-work to keep it\)/);
+    expect(workDirs(fx.base)).toEqual([]);
+    expect(readFileSync(path.join(out, "build.log"), "utf8")).toContain("is 0.0.0, not 0.9.9");
+    const kept = path.join(fx.base, "out-kept");
+    r = fx.releaseSh(["build", "0.9.9", "--unsigned", "--out", kept, "--keep-work"]);
+    expect(r.status).toBe(1);
+    expect(workDirs(fx.base)).toHaveLength(1);
+    expect(r.stdout + r.stderr).toContain("work directory kept: ");
+  }, 60_000);
+});
 
 const ASSET_NAMES = ["graphloom-0.1.0-linux-x64.tar.gz", "graphloom-sdk-0.1.0.tgz", "release.json", "install.sh", "SHA256SUMS", "SHA256SUMS.sig"];
 

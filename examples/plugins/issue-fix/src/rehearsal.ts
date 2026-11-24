@@ -26,11 +26,11 @@
  * the live run's own worktree the moment it succeeded — the real bytes an
  * agent actually wrote, not a guess at them.
  */
-import type { GraphDecision, GraphRehearsal, RehearsalExpectation, RehearsalScenario } from "@graphloom/sdk";
+import type { GraphDecision, GraphRehearsal, RehearsalAnswer, RehearsalExpectation, RehearsalScenario } from "@graphloom/sdk";
 import { exampleBenchReport } from "./bench.js";
 import { createHash } from "node:crypto";
 import { parseProfile, type Profile } from "./profile.js";
-import { ARBITRATE_STAGE, FIX_STAGE, REVIEW_STAGE } from "./constants.js";
+import { ARBITRATE_STAGE, DESIGN_RULING_APPROVAL, FIX_STAGE, REVIEW_STAGE } from "./constants.js";
 import { descriptionOf, ISSUES_FILE, ISSUES_SCHEMA, severityOf, titleOf } from "./issues.js";
 
 const CHANGES_AFTER = "# Changes by Version\n\n## 0.12.0\n\n### Bug Fixes\n\n- Report long-running scheduled actions (e.g. backups) as `running` instead of incorrectly logging them as `timed out`.\n- Older fix.\n\n## 0.11.0\n\n- Old.\n";
@@ -268,7 +268,7 @@ function arbitrationScenarios(): GraphRehearsal["scenarios"] {
   const record = GO_IMPLEMENTATION!.output as Record<string, unknown>;
   const implementation = (effects: Array<{ path: string; bytes: string }>) => ({ output: record, effects: [...effects, { path: "CHANGES.md", bytes: CHANGES_AFTER }] });
   const designLevel = { finding: "F1", verdict: "confirmed", reason: "The code reports running at the limit; whether a caller must be able to tell is a design question.", quotes: [{ path: "pkg/timestamp/scheduler.go", line: 8, text: "if running {" }], designLevel: true, designBasis: "Whether the status string must distinguish a running action at the limit is the issue's design decision, not a code defect.", ruling: "" };
-  const reviewRaised = (arbiter: unknown, supervisor: GraphDecision[], expect: RehearsalExpectation): RehearsalScenario => ({
+  const reviewRaised = (arbiter: unknown, supervisor: GraphDecision[], expect: RehearsalExpectation, answers?: RehearsalAnswer[]): RehearsalScenario => ({
     results: {
       "decision-record-v2": [GO_PLAN!, GO_IMPLEMENTATION!],
       "code-review-v2": [
@@ -282,6 +282,7 @@ function arbitrationScenarios(): GraphRehearsal["scenarios"] {
     },
     supervisor,
     expect,
+    ...(answers !== undefined ? { answers } : {}),
   });
   const IMPLEMENTATION_STANDS = {
     finding: "F1",
@@ -390,6 +391,27 @@ function arbitrationScenarios(): GraphRehearsal["scenarios"] {
   const testWithNegative = SCHEDULER_TEST.replace('\t\t{"under limit"', '\t\t{"negative minutes", -1, false, "ok"},\n\t\t{"under limit"');
   const RULED_I2 = { actor: "fixer", from: "open", to: "fixed", note: "The test table covers a negative elapsed time (pkg/timestamp/scheduler_test.go:14)." };
 
+  // The operator's three answers to arbitrate-operator's undecided point, as its blocker names them
+  // (docs/design-issue-fix-graph.md, "Leaving Arbitrate"): review-stands sends Fix back, where the
+  // fixer fixes the confirmed finding and the next pass resolves it; implementation-stands and a
+  // decline leave to Review, whose next pass is clean.
+  const settled = { status: "succeeded" as const, receipts: [FIX_STAGE, REVIEW_STAGE, ARBITRATE_STAGE], path: [FIX_STAGE, REVIEW_STAGE], recovery: ["supervise", "supervisor_node_settled"] };
+  const operatorAnswers: RehearsalAnswer[] = [
+    {
+      approval: DESIGN_RULING_APPROVAL,
+      decision: "approve",
+      inputs: { ruling: "review-stands" },
+      supervisor: [leave(FIX_STAGE), BACK],
+      results: {
+        "decision-record-v2": [implementation([{ path: "pkg/timestamp/scheduler.go", bytes: corrected }, { path: "pkg/timestamp/scheduler_test.go", bytes: SCHEDULER_TEST }])],
+        "code-review-v2": [{ output: clean([resolved("I1")]) }],
+      },
+      expect: settled,
+    },
+    { approval: DESIGN_RULING_APPROVAL, decision: "approve", inputs: { ruling: "implementation-stands" }, supervisor: [leave(REVIEW_STAGE), BACK], expect: settled },
+    { approval: DESIGN_RULING_APPROVAL, decision: "decline", supervisor: [leave(REVIEW_STAGE), BACK], expect: settled },
+  ];
+
   return {
     "arbitrate-review": reviewRaised(IMPLEMENTATION_STANDS, [SUPERVISE_ENTER, BACK, leave(REVIEW_STAGE), BACK], {
       status: "succeeded",
@@ -411,8 +433,10 @@ function arbitrationScenarios(): GraphRehearsal["scenarios"] {
           review: "A caller reading the status during a long backup cannot tell it is past the limit.",
         },
       },
-      [SUPERVISE_ENTER, BACK, leave(REVIEW_STAGE), BACK],
+      // Up to the stop; each answer the blocker names scripts the leave it fits (answers below).
+      [SUPERVISE_ENTER, BACK],
       { status: "stopped", stopReason: "design ruling needs the operator", path: [FIX_STAGE, REVIEW_STAGE], recovery: ["supervise"] },
+      operatorAnswers,
     ),
     "arbitrate-fixer": fixerRaised(
       REVIEW_STANDS,

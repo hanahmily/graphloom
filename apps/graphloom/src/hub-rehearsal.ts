@@ -78,6 +78,10 @@ export function parseRehearsalSettings(value: unknown): HubRehearsal {
  * is the stop's, as `rehearse --stop-at` judges it: ready exactly when the run
  * stopped once that node was accepted, with no node after it accepted. That
  * stop is an operator stop, the run's own end here, not an interruption.
+ *
+ * With `replace`, a recorded verdict is replaced: the launch answered an
+ * approval the scenario rehearses, so the scenario continued with the answer's
+ * own expectation, and the verdict judges that (docs/design-graph-rehearsal.md §4.4).
  */
 export async function recordHubVerdict(
   rehearsalRoot: string,
@@ -85,9 +89,10 @@ export async function recordHubVerdict(
   state: DurableRunState,
   launchId: string,
   stopped?: RehearsalStopReport,
+  options: { replace?: boolean } = {},
 ): Promise<HubRehearsalVerdict | undefined> {
   const existing = await readVerdictFile(path.join(rehearsalRoot, HUB_VERDICT_FILE));
-  if (existing !== undefined) return existing;
+  if (existing !== undefined && options.replace !== true) return existing;
   const continuation = managedObservation(state).continuation;
   if (continuation?.kind === "automatic" || (continuation?.kind === "operator" && continuation.cause === "operator-stop" && stopped?.ok !== true)) return undefined;
   const run = {

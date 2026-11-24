@@ -1666,8 +1666,9 @@ runs steps 3 to 8 on `<rev>`, which defaults to `HEAD`. It publishes nothing.
     working tree.
   - The assets go to `<out>`, by default `release-out/<version>/`, which Git
     ignores and which must be empty. The whole log is `<out>/build.log`. The
-    work directory is removed on success, and kept on failure or with
-    `--keep-work`.
+    work directory (gigabytes: the staged clone with its dependencies, the
+    assembly, the smoke installs) is removed on success and on failure alike;
+    only `--keep-work` keeps it, for every subcommand that takes it.
   - `prepare` and `publish` exit 2 and name phase R5.
 - **Assets.** R1 produces `graphloom-<v>-linux-x64.tar.gz`,
   `graphloom-sdk-<v>.tgz`, `release.json`, and an unsigned `SHA256SUMS` over
@@ -1834,7 +1835,9 @@ runs steps 3 to 8 on `<rev>`, which defaults to `HEAD`. It publishes nothing.
     previous format and a committed fixture in that format. A changed
     `sdkProtocol` needs a breaking release.
   - It pushes the branch and runs `gh pr create`. `--no-pr` prints both
-    commands instead and keeps the work directory with the PR body.
+    commands instead, with the PR body copied out of the work directory to
+    a small file of its own (`$TMPDIR/graphloom-pr-body-v<version>.XXXXXX`,
+    printed as `PR body: <path>`); the work directory is removed as usual.
 - **`build` signing.** A signed build needs the commit's
   `release/allowed_signers` with a `graphloom-release
   namespaces="graphloom-release,…"` line. Before the gate, it signs a probe
