@@ -1,6 +1,6 @@
 {
   "graphId": "pr-design-review",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "sdkProtocol": 1,
   "taskConfig": "required",
   "entryPoints": {
@@ -16,10 +16,10 @@
     "vitest": "^4.1.12"
   },
   "digests": {
-    "sourceTree": "d4e4e58e606ca165a0d64281c3084b720cf25b9221aee23d4e0539e155de99ed",
+    "sourceTree": "051b887e8153bb853d842c6b9e8aa569606f0fdb37ddcc455247d72215da31bf",
     "packageLock": "6abe1ee61ea10688f7d8ae11564051daae1d0265442a48530dd14bbc87667461",
     "files": {
-      "package.json": "3996288a6d40217f268bd213fa9bb218f025abc19cdd1ec1d3020a7b8abe7875",
+      "package.json": "addaa5f22de1b152b164b53b032308e8a22b5266bbbee821b3529ad143932262",
       "package-lock.json": "6abe1ee61ea10688f7d8ae11564051daae1d0265442a48530dd14bbc87667461",
       "tsconfig.json": "d166142bd5d917d1eb7d3011cf6423c652f30e2989881deec6147a997bf41597",
       "profiles/banyandb.json": "2de57656d7dcaf2b1543306ad5a597e0f71a87d9109ce9a5a241b5fb88e89201",
@@ -143,12 +143,12 @@
       "src/rehearsal-fixtures.ts": "c1c7a0b6920efa76191d85aaea020bb87aecdbdad997a6a03ed8346e460ad285",
       "src/rehearsal-large.ts": "5e3e6bd09118e6952c877ef91e1868498f11ac5b05199c54193cc51b63daa211",
       "src/rehearsal-qa.ts": "982b70f9238daed791a93ea78856cace2589e44945703ffb949167851a4457c8",
-      "src/rehearsal.ts": "df55ca54c45027dbdc8d935246192a66b40595c8fc5dc1be42bd48e33ce9600c",
+      "src/rehearsal.ts": "d572387651a8c359d515457a93c7174acc63fbaedda2031b002e133375b48873",
       "src/replies.ts": "198380fd454f78690361cadcbedf6e3080e6e5a7e93afd0425ab8d02af25ea56",
       "src/round1.ts": "feb6b4f6f6c7cf629c270ff60bef96f38f0955a671c19af60dcb906ce6216ce1",
       "src/searchview.ts": "1f213dde12e0d2fb888a1819e81f6e72e415482320166f41d895d30e69cc2c95",
       "src/validators.ts": "a5423bbc0129366aff593b2afd00f13fc42f5b98d581fbfbdc06150763387bba",
-      "src/version.ts": "584b17d94ea1aeb495c55d2e48c8ee572bffaf3cb417dc8e44ebd66d5b471528",
+      "src/version.ts": "9772fc63b2c7fe2c950e0ddef7fc2234a6667fae8f8fa104091e5b3e14a5d5b5",
       "src/visual.ts": "662bf5dbf7a5e5900eabdd70877df2d250be0a1ced8b10acfd117e118125e6be",
       "test/command-bounds.test.ts": "b0dade20e78958cb40e28e16e8c42a8b46f0ac8905315df315c1a3e5d9d41087",
       "test/graph.test.ts": "555bfbea11fe773ce9269777e9a4dcc8acd67715200c7ec913eea22535f54e04",

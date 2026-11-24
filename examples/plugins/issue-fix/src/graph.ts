@@ -177,7 +177,7 @@ import { arbiterInstruction, arbiterRevisionInstruction } from "./arbiter.js";
 import { cleanRun, codeReview, finalRun, implementerRecord, latestImplementerRecord, plannerRecord, reportText, validatorById, verifiedChecks } from "./validators.js";
 
 export const GRAPH_ID = "issue-fix";
-export const GRAPH_VERSION = "0.17.1";
+export const GRAPH_VERSION = "0.17.2";
 
 /** Graph bookkeeping; everything else is read back from recorded evidence. */
 export interface FixPrivateState {

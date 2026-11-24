@@ -1,6 +1,6 @@
 {
   "graphId": "pr-review",
-  "version": "1.1.7",
+  "version": "1.1.8",
   "sdkProtocol": 1,
   "taskConfig": "required",
   "entryPoints": {
@@ -16,10 +16,10 @@
     "vitest": "^4.1.12"
   },
   "digests": {
-    "sourceTree": "6f3ce496b85cd68e929b48b487fdd23027885c5a99f2677edccd2ee53e7d0913",
+    "sourceTree": "ea5c36410dcc54e3d957479afcec40540d23e4d977a41c3e0c440631aaa71648",
     "packageLock": "1123e4e7d6011e4d012ec8a7d176b90952dd9efc98c832e27e3c856aad263108",
     "files": {
-      "package.json": "146622c7efcfe9246c33a7dab33b8820f0982e021b95207199383a82f46dd658",
+      "package.json": "02474422b12d268700c6fe4ef7398d46962ca14c3ac667b7dde0d85b5a2657cc",
       "package-lock.json": "1123e4e7d6011e4d012ec8a7d176b90952dd9efc98c832e27e3c856aad263108",
       "tsconfig.json": "d166142bd5d917d1eb7d3011cf6423c652f30e2989881deec6147a997bf41597",
       "profiles/banyandb.json": "ed576959e7e034bd145ae697c7160b2ea1b1ced532a2cf59b8c55596a22e0b32",
@@ -150,7 +150,7 @@
       "src/rehearsal-huge.ts": "423fb5887d3d0b59772c70884f4e2dc9e75d16dbec35c9b254ad3cd2627f2813",
       "src/rehearsal-large.ts": "5e3e6bd09118e6952c877ef91e1868498f11ac5b05199c54193cc51b63daa211",
       "src/rehearsal-review.ts": "e036e493c227eca5231dc4e7bff8644c18d3e51250ecffe7b4ac68fc0fe852a1",
-      "src/rehearsal.ts": "949f143168799a13abf95774493da3859e2e6d847fa14007b6398077d6e0c651",
+      "src/rehearsal.ts": "99eb5ee14e964f48f82a6e88f59cfd9b10582dfd8df267ccc5fac4c947564e56",
       "src/repro.ts": "c1d2bf48897add28353ee40c5a7020f7b27f1d5b4f488e5f66e5d519a4e41aa6",
       "src/reproplan.ts": "a3cfea73d201b20af94f2009ccc683494f97d44401b59497e5256e4063796c30",
       "src/review.ts": "923503c885de0907248e1976baac9a98c3a7a22e7f73ad13b5eccb084f8e3df1",
@@ -161,7 +161,7 @@
       "src/reviewvalidators.ts": "15288a1c64c9946469d3adda3088f5c4960de28a1d21f350275a1a6a0df6cdf2",
       "src/runcontext.ts": "a4a405d839051b302491145b26bb4b67ed35abfc937f03291d37fd38a98b7595",
       "src/validators.ts": "80a572bc3ce91736e8fff3ff28079c28bcd76ae761d250b5cf731f68f46b73f8",
-      "src/version.ts": "cd8e239f3303975b74bb1fbe5011b053bfa322eb8d43c3a0b894f1987c1b9614",
+      "src/version.ts": "05f2ad4b4bc8c38d05d7b490831986cd0eb48a9675f364cb1d305bdcc8c9e234",
       "src/visual.ts": "53f5464147d1ae463ffb9ab1c22ddb4407e55c20ef1c9893822259ad19d6527b",
       "test/areas.test.ts": "b1e12094b42cbc5016d464374d60b1ff032e046801217b7f2ab7bbbe0726a4e9",
       "test/assignments-fit.test.ts": "26b634ce186149a71565ed6feecc4df65d6a901a0ddbbcf6e89c538d4a41db9d",
@@ -172,7 +172,7 @@
       "test/claims.test.ts": "8ddb31d8aef749f62e723fd10a17f9e4e7bcf0a01c5c56e51b43ff40d8934b2e",
       "test/command-bounds.test.ts": "b0dade20e78958cb40e28e16e8c42a8b46f0ac8905315df315c1a3e5d9d41087",
       "test/context-leads.test.ts": "aa983ae504edc4c1c560c1641d02004b15fd97dc1c9f2bad8eca7c4e6f05eb63",
-      "test/coverage.test.ts": "f574bea323a455f070236531a45770795ff19215ed7beaa7e9bdb540d9a919ee",
+      "test/coverage.test.ts": "d772aba4ff9a0f7efad43dc4c1728276aa219faf8ede6a7d031f94c8bb2a7cb0",
       "test/crap.test.ts": "82db56db32013b6079b5001195ef025379b7e74b0b1ad4973d88de720a4b3c98",
       "test/detectors.test.ts": "83b8192ea9854cb9188ca55f4850bacc7aad1a27f030035f9d7aea0e75790b60",
       "test/diagrams.test.ts": "49641667493cb8c33c325c9524ceb3849b0b4fadc1a2f9b0cdc3d14bb0b59665",

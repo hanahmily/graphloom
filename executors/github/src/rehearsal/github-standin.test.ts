@@ -13,6 +13,7 @@ import {
   type RehearsalScenario,
 } from "@graphloom/sdk";
 import type { ExecutorContext } from "@graphloom/sdk";
+import { executors as realExecutors } from "../executors.js";
 import { executors } from "./github-standin.js";
 
 const GET_ISSUE = "graphloom.github/get-issue";
@@ -85,8 +86,17 @@ describe("github rehearsal stand-in (--offline, §4.6)", () => {
     expect(await readUnverifiedReads(scenarioFile)).toEqual([]);
   });
 
-  it("declares no write executor at all, regardless of the binding's own allowedEffects", () => {
-    expect(executors.some((e) => e.id === "graphloom.github/create-issue-comment")).toBe(false);
-    expect(executors.every((e) => e.effect === "read")).toBe(true);
+  it("declares every write id as the real module does, so the binding withholds it as online, and fails any write that runs", async () => {
+    const writes = realExecutors.filter((e) => e.effect === "write");
+    expect(writes.length).toBeGreaterThan(0);
+    for (const real of writes) {
+      const standIn = executor(real.id);
+      expect({ effect: standIn.effect, version: standIn.version, capabilities: standIn.capabilities }).toEqual({ effect: "write", version: real.version, capabilities: undefined });
+    }
+    // Every id the stand-in declares is one the real module declares.
+    expect(executors.map((e) => e.id).sort()).toEqual(realExecutors.map((e) => e.id).sort());
+    await withScenario({ results: {}, expect: { status: "succeeded" } });
+    const result = (await executor("graphloom.github/create-pull-review").execute({}, ctx)) as { status: string; summary: string };
+    expect(result).toEqual({ status: "failed", summary: expect.stringContaining("a rehearsal never writes to GitHub") });
   });
 });

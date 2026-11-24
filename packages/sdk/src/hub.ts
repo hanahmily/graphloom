@@ -73,7 +73,15 @@ export interface HubRehearsal {
   commands?: "stub" | "run";
   /** Replays the scenario's recorded GitHub reads instead of asking GitHub. */
   offline?: boolean;
+  /**
+   * Stops the run once this node (its id or name) is accepted, as `graphloom
+   * rehearse --stop-at` does; the verdict is the stop's. `hub resume` continues
+   * the stopped run on the stand-ins.
+   */
+  stopAt?: string;
 }
+/** A rehearsal submission's `stopAt`: a node id or name, at most 128 characters. */
+export const HUB_REHEARSAL_STOP_AT = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,127}$/;
 /** The idempotency-key scope of a rehearsal submission: a rehearsal and a real submission never share a key. */
 export const HUB_REHEARSAL_KEY_PREFIX = "rehearsal:";
 /**
@@ -86,8 +94,10 @@ export interface HubRehearsalVerdict {
   /** Each boundary check (B1 to B10) and its status. */
   boundaries: Record<string, "passed" | "failed" | "unverified" | "unexercised">;
   blocker?: { boundary: string; reason: string };
-  /** Whether the run met the scenario's expectation. */
+  /** Whether the run met the scenario's expectation (under `stopAt`, whether it stopped there). */
   convergence: boolean;
+  /** Under the submission's `stopAt`: the node's name, and the verdict is the stop's (`rehearse --stop-at`). */
+  stoppedAt?: string;
   /** The run's status and stop reason when the verdict was taken. */
   runStatus: string;
   stopReason?: string;

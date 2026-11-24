@@ -28,7 +28,8 @@
  */
 import type { GraphDecision, GraphRehearsal, RehearsalExpectation, RehearsalScenario } from "@graphloom/sdk";
 import { exampleBenchReport } from "./bench.js";
-import { parseProfile } from "./profile.js";
+import { createHash } from "node:crypto";
+import { parseProfile, type Profile } from "./profile.js";
 import { ARBITRATE_STAGE, FIX_STAGE, REVIEW_STAGE } from "./constants.js";
 import { descriptionOf, ISSUES_FILE, ISSUES_SCHEMA, severityOf, titleOf } from "./issues.js";
 
@@ -689,7 +690,92 @@ export function rehearsal(config: unknown): GraphRehearsal {
     runner = "go-test";
     name = "";
   }
-  if (name === "canopy" && runner === "vitest") return CANOPY_REHEARSAL;
-  if (name === "banyandb-ql" && runner === "go-test") return goTestQl();
-  return runner === "vitest" ? VITEST_REHEARSAL : GO_TEST_WITH_REENTRY;
+  if (name === "canopy" && runner === "vitest") return withIssueReads(CANOPY_REHEARSAL, config);
+  if (name === "banyandb-ql" && runner === "go-test") return withIssueReads(goTestQl(), config);
+  return withIssueReads(runner === "vitest" ? VITEST_REHEARSAL : GO_TEST_WITH_REENTRY, config);
+}
+
+/**
+ * The issue every scenario replays offline (`graphloom rehearse --offline`,
+ * docs/design-graph-rehearsal.md §4.6): the one the go-test scenarios were
+ * recorded on (apache/skywalking#14111), in the profile's issue repository.
+ * Like the pull request the review graphs' scenarios replay, it is fixed: a
+ * rehearsal task's request names it (`rehearsalRequest`), since the graph
+ * reads the issue its request names and a recorded read answers whatever it
+ * is asked.
+ */
+export const REHEARSAL_ISSUE = {
+  number: 14111,
+  title: "Scheduler reports long actions as timed out",
+  body: "Backups over five minutes log action timed out.",
+  comment: "A running backup is not an error; report it as running.",
+} as const;
+
+/** The request of a rehearsal task for the profile `config`: the fix of `REHEARSAL_ISSUE` in the profile's issue repository. */
+export function rehearsalRequest(config: unknown): string {
+  const { owner, repo } = issueRepository(config);
+  return `Fix ${owner}/${repo}#${REHEARSAL_ISSUE.number}.`;
+}
+
+function issueRepository(config: unknown): Profile["issues"] {
+  try {
+    return parseProfile(config).issues;
+  } catch {
+    return { owner: "apache", repo: "skywalking" };
+  }
+}
+
+/** A context document from another repository as a rehearsal replays it: it says what it stands in for, nothing else. */
+const contextStandIn = (path: string): string => `# ${path}\n\nA rehearsal stand-in for this context document: an offline rehearsal replays no real copy of it.\n`;
+
+/**
+ * The GitHub reads an issue-fix run makes before its first agent job, in the
+ * shapes the GitHub executor records them: the issue, its comments (one
+ * complete page), and each context document the profile names in another
+ * repository, in the profile's order. Every scenario replays them offline;
+ * online, the real reads answer instead.
+ */
+function issueReads(config: unknown): NonNullable<RehearsalScenario["reads"]> {
+  const { owner, repo, context } = issueRepository(config);
+  const query = { owner, repo, number: REHEARSAL_ISSUE.number };
+  const url = `https://github.com/${owner}/${repo}/issues/${REHEARSAL_ISSUE.number}`;
+  const documents = (context ?? []).filter((doc) => doc.repo !== undefined);
+  const reads: NonNullable<RehearsalScenario["reads"]> = {
+    "graphloom.github/get-issue": [
+      {
+        operation: "get-issue",
+        query,
+        item: { number: REHEARSAL_ISSUE.number, title: REHEARSAL_ISSUE.title, state: "open", url, author: "reporter", labels: ["bug"], milestone: null, comments: 1, createdAt: null, updatedAt: null, closedAt: null, body: REHEARSAL_ISSUE.body },
+        rateLimit: {},
+      },
+    ],
+    "graphloom.github/list-issue-comments": [
+      {
+        operation: "list-issue-comments",
+        query: { ...query, perPage: 100 },
+        items: [{ id: 1, url: `${url}#issuecomment-1`, author: "maintainer", createdAt: null, body: REHEARSAL_ISSUE.comment }],
+        page: { complete: true },
+        rateLimit: {},
+      },
+    ],
+  };
+  if (documents.length > 0) {
+    reads["graphloom.github/get-file"] = documents.map((doc) => {
+      const [docOwner, docRepo] = doc.repo!.split("/");
+      const text = contextStandIn(doc.path);
+      return {
+        operation: "get-file",
+        query: { owner: docOwner, repo: docRepo, path: doc.path, ref: doc.ref ?? null },
+        item: { found: true, path: doc.path, ref: doc.ref ?? null, sha: createHash("sha1").update(text).digest("hex"), size: Buffer.byteLength(text), text },
+        rateLimit: {},
+      };
+    });
+  }
+  return reads;
+}
+
+/** Every scenario of `rehearsal` with the issue reads, under any reads the scenario records itself. */
+function withIssueReads(rehearsal: GraphRehearsal, config: unknown): GraphRehearsal {
+  const reads = issueReads(config);
+  return { scenarios: Object.fromEntries(Object.entries(rehearsal.scenarios).map(([name, scenario]) => [name, { ...scenario, reads: { ...reads, ...scenario.reads } }])) };
 }

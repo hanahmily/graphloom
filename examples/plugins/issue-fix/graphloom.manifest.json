@@ -1,6 +1,6 @@
 {
   "graphId": "issue-fix",
-  "version": "0.17.1",
+  "version": "0.17.2",
   "sdkProtocol": 2,
   "taskConfig": "required",
   "entryPoints": {
@@ -16,10 +16,10 @@
     "vitest": "^4.1.12"
   },
   "digests": {
-    "sourceTree": "b116a278c2831ecf6af01f1bb98be623f21b010453600a8e1c1d1d72c373cb0a",
+    "sourceTree": "1b488556c20bb8d9ac4c2b74f88e174217503792a227fd202ef44e7c7f02e1bb",
     "packageLock": "836cb04e6dc8c8a57f9e753b53211c95680c6c4b87ae5f5b62a2d96a6171fc20",
     "files": {
-      "package.json": "35424862bdb440896f8e4a51164d32adacfebaf255117af7dbdf376ee9e3ed02",
+      "package.json": "19a78d9b17b5ae8b13bec54f4510c89a9eb7a3d37ca9488ee29b12d1738705aa",
       "package-lock.json": "836cb04e6dc8c8a57f9e753b53211c95680c6c4b87ae5f5b62a2d96a6171fc20",
       "tsconfig.json": "3bafb75902b6084b621c996ae838dbfb87088cf095ce411be9809ce79bf3916b",
       "profiles/banyandb-ql.json": "450362287cfbd25773eb38c1f175ae44798b768ddfa9b1993d4cbdca501bc89b",
@@ -37,14 +37,14 @@
       "src/evidence.ts": "f7bede44580cfb444c649311513ef71dc23b68b01de71a08df2f421e49799633",
       "src/final.ts": "4bc011007a06be8ec0547bfa3beb6a886bf859e685741e28c2ed7463be5a8612",
       "src/findings.ts": "0408c7da5c2e7af6e507c9fa8861b183a5366faf6a78e5e1fbf2453e55fbdada",
-      "src/graph.ts": "fab052d6b513bdc0b24f4fdd21fa3ccd27c1dd87d6e466cf8313f2c5ffb46bad",
+      "src/graph.ts": "e2b5631c8fde035cc971aa59840c70c011d79271f98698ebe5482ff1f2b4f239",
       "src/index.ts": "c512b43af7c1b350abf39c060fb305d23a8c041a665e65f978e9207569d729ba",
       "src/issues.ts": "a8dff29d827691edd05f2a23da331e0ff1c31bb53c75473d55707c8571c9403c",
       "src/ocr.ts": "b7e9504bc7a9770e490e109bbdb32dba06ebdd60eee51fe3569145b20f9dee72",
       "src/profile.ts": "378ef1cd43d408b911f7508bd330795c1e5bf5ffea46bb2a1bc9d98cb4e0a887",
       "src/prompts.ts": "ae6be5665cccd0f7c8e53f5de3dc2b24413e9f7bf1d93960df479743e5482704",
       "src/qualification.ts": "584b6fbac6ef97eb07d5d753e63a3d49497edb4fdecce43980f719ffb05851b1",
-      "src/rehearsal.ts": "350ae996bcf418dc6e5b0423e961db1447b72fe5cd85759e6d2503deb1171ec7",
+      "src/rehearsal.ts": "3b8bbc7957daabfe8da88b77346ed6bb99ff24c0e84c785108024dd9459c374c",
       "src/review-common.ts": "7576030776aa158afea4099ff10c257e7990317e386978b39fbc9a8593302fa7",
       "src/rulings.ts": "7bf5d1638e43def2510f9ceb0e757d66e2281919e4cf3438cc66b1996180d55a",
       "src/runners/go-test.ts": "5bfa8f9234f6c39633b97f0d091f20bde2ba36bcebdac6189ce385d8b2ccc1c1",

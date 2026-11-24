@@ -833,7 +833,14 @@ scenario scripts a hang:
 - Network: GitHub reads are real by default because they are cheap and verify
   the token; `--offline` replays the scenario's `reads`, and a rehearsal that
   needs a read it has no recording for reports `unverified` for that read,
-  never a fabricated payload.
+  never a fabricated payload. A rehearsal never writes to GitHub: its runner
+  binds the GitHub executor read-only, online and offline. The offline
+  stand-in declares every write id of the real package too (same id, version,
+  effect and input checks; its execution always fails), so a graph sees the
+  same executor catalog and grants offline as online: a write the binding
+  withholds is `effectGranted: false` in both, and a graph that ends on it
+  (a review graph's Publish stops with `posting not enabled`) ends the same
+  way offline.
 
 ### 4.7 Evaluation and verdict
 
@@ -937,7 +944,7 @@ verdict is read next to the list of what it did not prove.
 | `createCliRunner` | module and command overrides become a supported parameter, not a test hook | cli |
 | `RunReport`/`InspectReport` | `rehearsalGate` summary, present whenever a caller supplied one; `run` no longer does (§3.5) | controller |
 | Stand-in binaries | shipped under `@graphloom/executor-coding-agent/rehearsal`, same protocols as today's fakes, refuse to run without a scenario | executors |
-| `@graphloom/executor-github` | `githubRehearsalModule`: `--offline`'s stand-in, serving read-only ids from `scenario.reads`; runs unrestricted (§4.6), unlike the real sandboxed package | executors |
+| `@graphloom/executor-github` | `githubRehearsalModule`: `--offline`'s stand-in, serving read-only ids from `scenario.reads` and declaring the write ids it never runs; runs unrestricted (§4.6), unlike the real sandboxed package | executors |
 | `packages/sdk/src/rehearsal-client.ts` | `nextRead`/`recordUnverifiedRead`/`readUnverifiedReads`, the `reads` analog of `nextReply`/`nextCommandOutcome`; `synthesizedRepliesOnly()`/`REHEARSAL_SYNTHESIZED_ENV` for `--synthesized`; `adversarialMutationOnly()`/`REHEARSAL_ADVERSARIAL_ENV` for `--adversarial` | sdk |
 | `packages/sdk/src/rehearsal.ts` | `mutateAdversarially`: picks and applies one of the three generic mutations (§4.4) to a reply | sdk |
 | `packages/sdk/src/rehearsal-client.ts` | `recordCall`/`readCallLog` (§4.1, §4.7): the per-dispatch call log B3's provenance check reads | sdk |
@@ -1181,12 +1188,56 @@ Decided 2026-11-19, after issue-fix 0.17.0's `arbitrate-operator` scenario
   because the controller rejected it; it now continues with the leave.
 
 Decided 2026-11-24: the run hub takes rehearsal submissions
-(`graphloom hub submit --rehearsal [--scenario] [--commands] [--offline]`,
+(`graphloom hub submit --rehearsal [--scenario] [--commands] [--offline] [--stop-at]`,
 [run hub §12](design-run-hub.md#12-rehearsal-submissions)). The hub queues
 and launches them as any submission; the managed launch runs this design's
 `rehearse` (and, on `hub resume`, `resume --rehearsal`) on the hub's run ID
 and grant, with its scratch kept under the hub instead of `$TMPDIR`, and
 records the verdict once the run stops on its own.
+
+Decided 2026-11-24, after a rehearsal campaign on a deployed hub found that
+only hello and release reached `ready` there: every shipped scenario
+rehearses offline with no GitHub at all, and a hub rehearsal submission's
+verdict equals the direct one
+(`apps/graphloom/test/hub-rehearsal-shipped.<tier>.test.ts`; the PR tier runs
+each graph's `happy`, the full tier every scenario).
+
+- The offline GitHub stand-in hid the write executors, so a review graph,
+  which reads its grant before posting, saw no `create-pull-review` at all,
+  asked `get-viewer` (unrecorded) and fell into recovery. It now declares the
+  write ids (§4.6): Publish stops with `posting not enabled` offline as online,
+  and needs no viewer read.
+- issue-fix's scenarios replay the issue they were recorded on
+  (apache/skywalking#14111, `REHEARSAL_ISSUE`, in the profile's issue
+  repository): `get-issue`, its comments, and each context document the
+  profile names in another repository (a stand-in text for each). A
+  rehearsal task names that issue; the plugin's rehearsal entry exports
+  `rehearsalRequest(config)` for it.
+- The review graphs' expectations follow the graphs: a pr-design-review
+  scenario with open items stops after Round 1 with `posting not enabled`
+  (it said `report ready`, from before Round 1 and Publish), and a clean one
+  (`design-clean`, `added-other`, `other-corrected`, `incremental-round1`)
+  succeeds `complete` (it said `stopped`).
+- pr-review's `coverage-measured` stubbed host paths that exist on no host;
+  the runner checks a confined job's mounts before the command stand-in
+  answers, and refused it. The stubs name paths that exist on any Linux or
+  macOS host and hold no workspace. The same check needs the profile's pinned
+  Go sandbox image in the local store (`docker image inspect`), which the
+  scenario's `sandbox-go: ready` stub presumes: on a host without it the
+  scenario is `not-ready` (B5, recovery after the refused job), as a real run
+  would be. The CLI suite's rehearsal task puts a `docker` stand-in on `PATH`
+  that reports the profile's images present and refuses anything else, so the
+  verdict does not depend on what the host has pulled.
+- issue-fix's scenarios are designed for `--commands run`, not quick mode: Fix
+  judges RED and GREEN from the regression test's `go test -json` report on
+  the base and on the candidate checkout, and the findings ledger
+  (`issues-write`, `issues-read`), design points and delivery are command jobs
+  whose output the graph reads back. Quick mode answers each command id with
+  one canned result, so it cannot stand in for them; with `--offline
+  --commands run` on the testkit's fixture module every scenario is `ready`.
+- `hub submit --rehearsal --stop-at <stage>` takes `rehearse --stop-at`
+  ([run hub §12](design-run-hub.md#12-rehearsal-submissions)): stored with the
+  settings, honoured by the initial launch, and the verdict is the stop's.
 
 Not borrowed from that earlier orchestrator, on purpose: its edge-coverage generation builds one
 case per branch from a workflow's declarative predicates and gates on 100%.

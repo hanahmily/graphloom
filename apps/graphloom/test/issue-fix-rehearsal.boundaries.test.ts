@@ -34,15 +34,14 @@ describe.skipIf(GO === undefined)("graphloom rehearse (L1) on issue-fix with the
     expect(seen).not.toMatch(/GRAPHLOOM_REHEARSAL/);
   }, 120_000);
 
-  it("--offline never asks the real (fake) GitHub, and reports the unrecorded read as unverified under B2", async () => {
+  it("--offline never asks the real (fake) GitHub: the scenario's recorded reads answer, and the verdict is ready", async () => {
     const env = await rehearsal.ready();
-    // The go-test scenario declares no `reads` at all (§4.5 has not
-    // recorded one yet): every dispatched read is unrecorded by construction,
-    // which is exactly the gap --offline exists to report rather than hide.
-    const report = await rehearse(env.taskPath, { offline: true });
+    // The scenario records the issue, its comments and the profile's context documents (§4.6); a read it had no
+    // recording for would leave B2 unverified, naming the read.
+    const report = await rehearse(env.taskPath, { offline: true, commands: "run" });
     expect(rehearsal.github().requests).toEqual([]);
     expect(report.substituted.some((s) => s.startsWith("github: rehearsal stand-in"))).toBe(true);
-    expect(report.boundaries.B2.status).toBe("unverified");
-    expect(report.boundaries.B2.notes.some((n) => n.startsWith("offline: no recorded read for graphloom.github/"))).toBe(true);
-  }, 30_000);
+    expect(report.boundaries.B2).toMatchObject({ status: "passed", notes: [] });
+    expect(report.verdict, JSON.stringify({ blocker: report.blocker, convergence: report.convergence })).toBe("ready");
+  }, 120_000);
 });

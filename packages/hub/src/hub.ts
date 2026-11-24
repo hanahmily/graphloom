@@ -4,7 +4,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { mkdir, readFile } from "node:fs/promises";
-import { HUB_REHEARSAL_KEY_PREFIX } from "@graphloom/sdk";
+import { HUB_REHEARSAL_KEY_PREFIX, HUB_REHEARSAL_STOP_AT } from "@graphloom/sdk";
 import type { HubArchiveEntry, HubArchivedSubmission, HubCommand, HubConfig, HubContinuation, HubLaunchReport, HubObservation, HubRehearsal, HubResumeRemedy, HubRetryPolicy, HubStatus, HubSubmission } from "@graphloom/sdk";
 import { acquireHubLock } from "./lock.js";
 import { HubArchiveIndex } from "./archive.js";
@@ -665,6 +665,7 @@ function validateRehearsal(value: unknown): asserts value is HubRehearsal {
     if (key === "scenario" && typeof item === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(item)) continue;
     if (key === "commands" && (item === "stub" || item === "run")) continue;
     if (key === "offline" && item === true) continue;
+    if (key === "stopAt" && typeof item === "string" && HUB_REHEARSAL_STOP_AT.test(item)) continue;
     throw new Error(`unknown or invalid rehearsal setting ${key}`);
   }
 }

@@ -55,6 +55,18 @@ export const FULL_TIER_GROUPS: Record<string, FullTierGroup> = {
     ],
     paths: ["examples/plugins/issue-fix/"],
   },
+  "hub-rehearsal": {
+    files: ["test/hub-rehearsal-shipped.full.test.ts"],
+    paths: [
+      // Every shipped graph's rehearsal entry and the scenario data beside it.
+      ...["hello", "release", "issue-fix", "pr-design-review", "pr-review"].map((plugin) => `examples/plugins/${plugin}/src/rehearsal*`),
+      "executors/github/src/rehearsal/",
+      "executors/command/src/rehearsal/",
+      "apps/graphloom/src/rehearsal*",
+      "apps/graphloom/src/hub-rehearsal*",
+      "packages/sdk/src/rehearsal*",
+    ],
+  },
   session: {
     files: ["test/session.test.ts"],
     paths: ["apps/graphloom/src/session*", "packages/agent-harness/"],

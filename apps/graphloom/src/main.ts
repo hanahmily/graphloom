@@ -494,10 +494,11 @@ async function main(args = process.argv.slice(2), launch?: ManagedExecution): Pr
     const stateRootFlag = flagValue(args, "--state-root");
     if (args[1] === undefined || stateRootFlag === undefined) throw new Error("a managed rehearsal needs its task and --state-root");
     const rehearsalRoot = hubRehearsalRoot(managed.grant.hubStateDir, managed.grant.runId);
-    const { report, runReport, state } = await rehearseManaged(path.resolve(args[1]), {
+    const { report, runReport, state, stopped } = await rehearseManaged(path.resolve(args[1]), {
       ...(settings.scenario !== undefined ? { scenario: settings.scenario } : {}),
       ...(settings.commands !== undefined ? { commands: settings.commands } : {}),
       ...(settings.offline === true ? { offline: true } : {}),
+      ...(settings.stopAt !== undefined ? { stopAt: settings.stopAt } : {}),
       managed: { grant: managed.grant, rehearsalRoot, stateRoot: path.resolve(stateRootFlag) },
       install: self.record,
       onRunCreated: async ({ runId, stateDir }) => {
@@ -507,8 +508,8 @@ async function main(args = process.argv.slice(2), launch?: ManagedExecution): Pr
         await managed.created({ runId, stateDir });
       },
     });
-    const verdict = await recordHubVerdict(rehearsalRoot, report, state, managed.grant.launchId);
-    console.log(JSON.stringify(report, null, 2));
+    const verdict = await recordHubVerdict(rehearsalRoot, report, state, managed.grant.launchId, stopped);
+    console.log(JSON.stringify(stopped ?? report, null, 2));
     console.error(verdict !== undefined ? `graphloom: rehearsal verdict ${verdict.verdict}` : "graphloom: rehearsal verdict pending: the run was interrupted before it stopped on its own");
     console.error(launchEndLine(runReport));
     process.exitCode = runReport.status === "succeeded" ? 0 : 1;
