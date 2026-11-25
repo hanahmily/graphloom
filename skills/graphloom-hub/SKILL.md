@@ -264,6 +264,10 @@ graphloom hub policy <submission> --renew
 graphloom hub policy <submission> --automatic false
 ```
 
+A blocker `memory limit reached (<limit>)`: the launch hit `launchMemoryMax`
+(retried once); `--panel usage` shows peak vs limit. Raising it in `hub.json`
+is the operator's.
+
 ## 7. Concurrency limit
 
 ```sh

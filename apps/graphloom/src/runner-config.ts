@@ -73,6 +73,12 @@ export interface RunnerConfig {
   github?: { tokenEnv?: string; writeTokenEnv?: string; baseUrl?: string };
   /** Settings for command jobs, which run as the user in the job's workspace. */
   command?: { timeoutMs?: number };
+  /**
+   * Limits on the containers of docker-confined command jobs, which run outside the hub's launch
+   * cgroup: `maxMemory` (a docker size such as `6g`) caps each container's `--memory` and
+   * `--memory-swap`; a job declaring more runs with this instead. Absent: the job's own limit.
+   */
+  docker?: { maxMemory?: string };
   /** Shell command run once when a run leaves `running`; `run --on-stop` and `resume --on-stop` override it. */
   notify?: { onStop?: string; timeoutMs?: number };
   /** Automatic updates of the install (docs/design-release.md §5.4). Default `auto`. */
@@ -173,7 +179,7 @@ function expandHome(p: string): string {
 }
 
 export function parseRunnerConfig(value: unknown, source = "runner config"): RunnerConfig {
-  const obj = settings(value, source, ["harness", "harnesses", "allowUnrestricted", "timeoutMs", "maxTimeoutMs", "maxConversationBytes", "claude", "codex", "pi", "github", "command", "notify", "autoUpdate"]);
+  const obj = settings(value, source, ["harness", "harnesses", "allowUnrestricted", "timeoutMs", "maxTimeoutMs", "maxConversationBytes", "claude", "codex", "pi", "github", "command", "docker", "notify", "autoUpdate"]);
   if (!isHarness(obj.harness)) throw new Error(`${source}: harness must be one of ${HARNESS_NAMES.join(", ")}`);
   if (obj.allowUnrestricted !== true) throw new Error(`${source}: allowUnrestricted must be true to run an agent with your user permissions`);
   const config: RunnerConfig = { harness: obj.harness, allowUnrestricted: true };
@@ -216,6 +222,13 @@ export function parseRunnerConfig(value: unknown, source = "runner config"): Run
   if (obj.command !== undefined) {
     const c = settings(obj.command, `${source}: command`, ["timeoutMs"]);
     config.command = c.timeoutMs !== undefined ? { timeoutMs: milliseconds(c.timeoutMs, `${source}: command.timeoutMs`, false) } : {};
+  }
+  if (obj.docker !== undefined) {
+    const d = settings(obj.docker, `${source}: docker`, ["maxMemory"]);
+    if (d.maxMemory !== undefined && (typeof d.maxMemory !== "string" || !/^[1-9][0-9]{0,14}[bkmg]?$/i.test(d.maxMemory))) {
+      throw new Error(`${source}: docker.maxMemory must be a docker size such as 6g, 512m or 1048576`);
+    }
+    config.docker = d.maxMemory !== undefined ? { maxMemory: d.maxMemory as string } : {};
   }
   if (obj.notify !== undefined) {
     const n = settings(obj.notify, `${source}: notify`, ["onStop", "timeoutMs"]);

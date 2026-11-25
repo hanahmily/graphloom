@@ -37,6 +37,12 @@ describe("operator runner configuration", () => {
     expect(parseRunnerConfig({ harness: "claude-code", allowUnrestricted: true, github: { tokenEnv: "GITHUB_TOKEN", writeTokenEnv: "GRAPHLOOM_GITHUB_WRITE_TOKEN" } }).github).toEqual({ tokenEnv: "GITHUB_TOKEN", writeTokenEnv: "GRAPHLOOM_GITHUB_WRITE_TOKEN" });
   });
 
+  it("accepts docker.maxMemory, the ceiling on each docker-confined container's memory", () => {
+    expect(parseRunnerConfig({ harness: "claude-code", allowUnrestricted: true, docker: { maxMemory: "6g" } }).docker).toEqual({ maxMemory: "6g" });
+    for (const maxMemory of ["6 GB", "lots", 6, "0g"]) expect(() => parseRunnerConfig({ harness: "claude-code", allowUnrestricted: true, docker: { maxMemory } })).toThrow(/docker\.maxMemory/);
+    expect(() => parseRunnerConfig({ harness: "claude-code", allowUnrestricted: true, docker: { memory: "6g" } })).toThrow();
+  });
+
   it("checks every harness a job may choose before a run starts", async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), "gl-runner-config-"));
     dirs.push(dir);

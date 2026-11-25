@@ -7,6 +7,7 @@ import { mkdir, readFile } from "node:fs/promises";
 import { HUB_REHEARSAL_KEY_PREFIX, HUB_REHEARSAL_STOP_AT } from "@graphloom/sdk";
 import type { HubArchiveEntry, HubArchivedSubmission, HubCommand, HubConfig, HubContinuation, HubLaunchReport, HubObservation, HubRehearsal, HubResumeRemedy, HubRetryPolicy, HubStatus, HubSubmission } from "@graphloom/sdk";
 import { acquireHubLock } from "./lock.js";
+import { launchMemoryEnd, validLaunchMemory, type HubLaunchMemory } from "./memory.js";
 import { HubArchiveIndex } from "./archive.js";
 import { assertCapacity, durableWrite, HubStore, syncDirectory, validateConfig } from "./store.js";
 import type { HubSnapshot } from "./store.js";
@@ -344,7 +345,7 @@ export class Hub {
       }
       const observation = result.observation;
       if (result.execution === "drained" && result.ownerGone && result.externalStopped) {
-        await this.settle(s.id, observation, validReport(result.report, s) ? result.report : undefined);
+        await this.settle(s.id, observation, validReport(result.report, s) ? result.report : undefined, validLaunchMemory(result.memory) ? result.memory : undefined);
       } else {
         await this.commit((next) => {
           const current = next.submissions[s.id]!;
@@ -417,8 +418,11 @@ export class Hub {
   private exhausted(s: HubSubmission, limit = this.retryLimit(s) ?? "automatic retry stopped"): string {
     return `automatic retry stopped: ${limit}${s.lastFailure ? `; last cause: ${s.lastFailure}` : ""}`.slice(0, 1024);
   }
-  private async settle(id: string, observation?: HubObservation, report?: HubLaunchReport): Promise<void> {
+  private async settle(id: string, observation?: HubObservation, report?: HubLaunchReport, memory?: HubLaunchMemory): Promise<void> {
     const before = this.get(id);
+    // A granted launch that wrote no report and whose cgroup records an OOM kill ended on memory (§6.2);
+    // a launch that reported its end survived whatever its cgroup recorded.
+    const memoryEnd = before.launch!.phase === "granted" && report === undefined ? launchMemoryEnd(memory) : undefined;
     // The driver reconciles input it changed for this launch (a plugin update) before the record settles.
     let inputUpdate: { bundlePath: string; bundleDigest: string } | undefined;
     let inputFailure: string | undefined;
@@ -496,7 +500,8 @@ export class Hub {
       }
       if (continuation?.kind === "operator") {
         s.state = "blocked";
-        const blocker = observation?.blocker ?? continuation.cause;
+        const stop = observation?.blocker ?? continuation.cause;
+        const blocker = memoryEnd !== undefined ? `the launch was ${memoryEnd.kind === "limit" ? "killed: " : ""}${memoryEnd.text}; the run stops on: ${stop}` : stop;
         // A refused plugin update replaces the run's stop with the pin mismatch; the stop it
         // answered (an approval it waits on, say) is still in force, so both are shown.
         s.blocker = (pluginRefused !== undefined
@@ -509,6 +514,10 @@ export class Hub {
         if (launch.mode === "reconcile") delete s.reconciliationPending; else s.reconciliationPending = true;
         s.pendingCommand = { id: interruptionId, kind: "service-interruption", acceptedAt: this.stamp() };
         delete s.automaticPending;
+        return;
+      }
+      if (memoryEnd !== undefined && (!continuation || continuation.kind === "automatic")) {
+        this.settleMemory(s, memoryEnd, observation);
         return;
       }
       // Without a report and without a recorded stop, the launch was killed or crashed.
@@ -527,9 +536,34 @@ export class Hub {
     // A launch that ended without reporting its end (killed, or crashed) gets its log's closing line from the hub (§8).
     if (before.launch!.phase === "granted" && report === undefined && this.driver.appendLog) {
       const after = this.get(id);
-      const line = `graphloom: run ${after.runId} ${after.state}: the launch ended without reporting its end; the hub settled it${after.blocker ? `; blocker: ${after.blocker}` : after.eligibleAt ? `; next attempt at ${after.eligibleAt}` : ""}`;
+      const line = `graphloom: run ${after.runId} ${after.state}: ${memoryEnd !== undefined ? `the launch was ${memoryEnd.kind === "limit" ? "killed: " : ""}${memoryEnd.text}` : "the launch ended without reporting its end"}; the hub settled it${after.blocker ? `; blocker: ${after.blocker}` : after.eligibleAt ? `; next attempt at ${after.eligibleAt}` : ""}`;
       await this.driver.appendLog(copy(before.launch!), copy(after), line).catch(() => undefined);
     }
+  }
+  /**
+   * A launch the OOM killer ended (§6.2). Killed at its own memory limit: one automatic
+   * retry, since the run resumes from its last accepted state and a coincidence of
+   * concurrent jobs need not recur; reached again with no accepted progress between,
+   * the working set does not fit the limit and the operator decides. Killed outside its
+   * own limit (the service's or the host's memory): an ordinary crash under the normal
+   * retry allowance.
+   */
+  private settleMemory(s: HubSubmission, end: { kind: "limit" | "outside"; text: string }, observation?: HubObservation): void {
+    if (!observation) s.reconciliationPending = true;
+    const fingerprint = `${end.kind === "limit" ? "memory-limit" : "memory-outside"}:${s.runId}`;
+    const progressed = observation !== undefined && observation.progressRevision > s.progressRevision;
+    if (end.kind === "limit" && s.failureFingerprint === fingerprint && !progressed) {
+      s.failureRepeats++;
+      s.lastFailure = `memory-limit: ${end.text}`.slice(0, 512);
+      s.state = "blocked";
+      s.blocker = `${end.text}; reached again on its automatic retry with no accepted progress, so the hub does not retry it: raise launchMemoryMax in hub.json and restart the hub (or lower the run's parallel jobs), then graphloom hub resume ${s.id}`.slice(0, 1024);
+      return;
+    }
+    const continuation = observation?.continuation?.kind === "automatic" ? observation.continuation : undefined;
+    this.scheduleRetry(s, {
+      kind: "automatic", cause: "controller-crash", fingerprint, stateRevision: observation?.stateRevision ?? s.observation?.stateRevision ?? 0,
+      ...(continuation?.notBefore ? { notBefore: continuation.notBefore } : {}),
+    }, observation, end.text);
   }
   private scheduleRetry(s: HubSubmission, continuation: Extract<HubContinuation, { kind: "automatic" }>, observation?: HubObservation, detail?: string): void {
     if (observation && observation.progressRevision > s.progressRevision) { s.failureRepeats = 0; delete s.failureFingerprint; s.progressRevision = observation.progressRevision; }

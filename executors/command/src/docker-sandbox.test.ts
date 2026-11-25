@@ -135,7 +135,8 @@ describe("docker confinement: what the job is built from", () => {
       gid: 1001,
     });
     const text = args.join(" ");
-    expect(args.slice(0, 3)).toEqual(["run", "--rm", "--name"]);
+    expect(args.slice(0, 2)).toEqual(["run", "--name"]);
+    expect(args).not.toContain("--rm");
     for (const part of [
       "--label graphloom.run=r1",
       "--network none",
@@ -379,6 +380,16 @@ describe.skipIf(unavailable !== undefined)("a command job in a docker confinemen
     expect(slow!.exitCode).toBe(124);
     expect(slow!.stderrTail).toMatch(/exceeded its wall clock/);
     expect(await until(() => running().length === 0, 10_000)).toBe(true);
+  }, 60_000);
+
+  it("reports a container the kernel OOM-killed at its memory limit, and leaves none behind", async () => {
+    // dd's one 64 MiB block cannot fit a 16 MiB container with no swap beyond it.
+    const result = await runner.runJob(job([{ id: "hungry", argv: sh("dd if=/dev/zero of=/dev/null bs=64M count=1") }], { memory: "16m" }), ctx());
+    expect(result.summary).toContain("hungry: the container was killed at its memory limit (--memory 16m; exit 137, OOMKilled)");
+    const command = (result.evidence![0]!.payload as { command: CommandOutcome & { sandbox: Record<string, unknown> } }).command;
+    expect(command.exitCode).toBe(137);
+    expect(command.sandbox).toMatchObject({ kind: "docker", memory: "16m", oomKilled: true });
+    expect(spawnSync("docker", ["ps", "-aq", "--filter", `label=graphloom.run=${runId}`], { encoding: "utf8" }).stdout.trim()).toBe("");
   }, 60_000);
 
   it("kills the container by name when the run stops", async () => {

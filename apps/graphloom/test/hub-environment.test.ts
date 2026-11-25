@@ -66,6 +66,9 @@ describe("hub status: the hub's environment, names only", () => {
     expect(text.out).toContain("Warning: git is not found on the hub's PATH, but every run");
     expect(text.out).not.toContain("Warning: codex");
     expect(text.out).not.toContain(secret);
+    // Its memory limits, read from its cgroup: this test hub has none to read (docs/design-run-hub.md §9.1).
+    expect(text.out).toContain("Memory: service MemoryHigh unreadable · MemoryMax unreadable · now unreadable");
+    expect(text.out).toContain("Memory error: the service's memory controller files are not readable under /not-used");
     const json = await invoke(["status", "--json", "--socket", socket]);
     expect(json.out).not.toContain(secret);
     const environment = (JSON.parse(json.out) as { environment: HubEnvironmentSummary }).environment;
@@ -117,6 +120,8 @@ describe("hub doctor: doctor's checks in the hub's environment", () => {
     const passed = JSON.parse((await invoke(["doctor", "--json", "--socket", present])).out) as DoctorReport;
     expect(passed.checks.find((c) => c.name === "runner config")).toMatchObject({ status: "pass" });
     expect(passed.checks.find((c) => c.name === "claude-code")?.detail).toContain("capability probe passed");
+    // The hub's own memory check, among the host checks: this test hub has no cgroup to read.
+    expect(passed.checks.find((c) => c.name === "hub memory")).toMatchObject({ section: "host", status: "warn", detail: expect.stringContaining("not readable") });
   }, 180_000);
 
   it("refuses a relative task path at the endpoint and exits 1 when no hub answers", async () => {
@@ -265,7 +270,7 @@ exec /bin/sh -c "$4"
     // The plain form is unchanged: the unit, nothing written.
     const unit = await run(["hub", "service"], s.env);
     expect(unit.stdout).toContain("Delegate=yes");
-    expect((await run(["hub", "service", "--write"], s.env)).stderr).toContain("--write and --write-token need --capture-env or --token-env-file");
+    expect((await run(["hub", "service", "--write"], s.env)).stderr).toContain("--write and --write-token need --capture-env, --token-env-file or --limits");
   }, 60_000);
 
   it("keeps only allowlisted names and escapes systemd specifiers and quotes", () => {

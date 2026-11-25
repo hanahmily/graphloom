@@ -10,7 +10,7 @@ import type { HubLaunch, HubSubmission } from "@graphloom/sdk";
 import { createLinuxHubDriver, launchCgroupPath } from "./linux.js";
 import type { HubDriver } from "./types.js";
 
-const cgroups = vi.hoisted(() => ({ root: "", enabled: true, members: new Map<string, Set<number>>(), killed: [] as string[] }));
+const cgroups = vi.hoisted(() => ({ root: "", enabled: true, memoryFiles: true, members: new Map<string, Set<number>>(), killed: [] as string[] }));
 vi.mock("node:fs/promises", async (original) => {
   const actual = await original<typeof import("node:fs/promises")>();
   return {
@@ -21,11 +21,17 @@ vi.mock("node:fs/promises", async (original) => {
       if (file.startsWith(`${cgroups.root}/`) && path.dirname(file) === cgroups.root) {
         cgroups.members.set(file, new Set());
         await Promise.all(["cgroup.procs", "cgroup.kill", "cgroup.events"].map((name) => actual.writeFile(path.join(file, name), name === "cgroup.events" ? "populated 0\n" : "")));
+        // The memory controller's files, as the kernel gives a child of a parent with +memory.
+        if (cgroups.memoryFiles) {
+          await Promise.all([["memory.high", "max\n"], ["memory.max", "max\n"], ["memory.oom.group", "0\n"], ["memory.events", "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\n"]].map(([name, value]) => actual.writeFile(path.join(file, name!), value!)));
+        }
       }
       return value;
     },
     rmdir: async (file: string) => file.startsWith(`${cgroups.root}/`) ? actual.rm(file, { recursive: true }) : actual.rmdir(file),
     writeFile: async (file: string, data: string, options?: Parameters<typeof writeFile>[2]) => {
+      // A cgroup without the memory controller has no memory.* files, and none can be created.
+      if (file.startsWith(`${cgroups.root}/`) && path.basename(file).startsWith("memory.") && !cgroups.memoryFiles) throw Object.assign(new Error(`ENOENT: no such file or directory, open '${file}'`), { code: "ENOENT" });
       if (file.startsWith(`${cgroups.root}/`) && path.basename(file) === "cgroup.procs") cgroups.members.get(path.dirname(file))?.add(Number(data));
       if (file.startsWith(`${cgroups.root}/`) && path.basename(file) === "cgroup.kill") {
         cgroups.killed.push(path.dirname(file));
@@ -49,9 +55,9 @@ afterEach(async () => {
   for (const driver of drivers.splice(0)) await driver.close?.();
   await new Promise((resolve) => setTimeout(resolve, 20));
   for (const folder of folders.splice(0)) await rm(folder, { recursive: true, force: true });
-  cgroups.members.clear(); cgroups.killed = []; cgroups.enabled = true; cgroups.root = "";
+  cgroups.members.clear(); cgroups.killed = []; cgroups.enabled = true; cgroups.memoryFiles = true; cgroups.root = "";
 });
-async function fixture(script?: string) {
+async function fixture(script?: string, memory?: { high: number | null; max: number | null }) {
   const directory = await mkdtemp(path.join(tmpdir(), "graphloom-cgroup-fixture-")); folders.push(directory);
   cgroups.root = path.join(directory, "delegated");
   await mkdir(cgroups.root);
@@ -61,7 +67,7 @@ async function fixture(script?: string) {
   await writeFile(bootstrap, script ?? `const fs=require('node:fs'); const net=require('node:net'); const control=new net.Socket({fd:3}); let pending=''; control.on('data',chunk=>{pending+=chunk; const n=pending.indexOf('\\n');if(n<0)return;const message=JSON.parse(pending.slice(0,n));pending=pending.slice(n+1);if(message.type==='grant'){fs.writeFileSync(${JSON.stringify(marker)},JSON.stringify(message));process.stdout.write('x'.repeat(3000));}if(message.type==='stop')process.exit(0);});control.on('end',()=>process.exit(0));`);
   let ownerGone = false;
   let externalStopped = true;
-  const driver = createLinuxHubDriver({ cgroupRoot: cgroups.root, directory, maxLogBytes: 1024, command: async () => ({ executable: process.execPath, args: [bootstrap] }), observe: async () => ({ ownerGone, externalStopped }), cleanup: async () => ({ ownerGone, externalStopped }) });
+  const driver = createLinuxHubDriver({ cgroupRoot: cgroups.root, directory, maxLogBytes: 1024, ...(memory ? { memory } : {}), command: async () => ({ executable: process.execPath, args: [bootstrap] }), observe: async () => ({ ownerGone, externalStopped }), cleanup: async () => ({ ownerGone, externalStopped }) });
   drivers.push(driver);
   const launch: HubLaunch = { id: `l-${randomUUID()}`, generation: 1, mode: "initial", phase: "reserved", reservedAt: new Date().toISOString(), automatic: false };
   const submission: HubSubmission = { id: `s-${randomUUID()}`, runId: "run-1", hubId: "hub-1", acceptedAt: launch.reservedAt, updatedAt: launch.reservedAt, requestDigest: "a".repeat(64), contentDigest: "b".repeat(64), input: { taskFile: "/task.yaml", taskPath: "/task.yaml", repoPath: "/repo", baseCommit: "base", bundlePath: "/bundle", bundleDigest: "digest", runtimePath: process.execPath, runtimeDigest: "runtime" }, desiredAction: "execute", state: "starting", queueSequence: 1, generation: 1, automaticResumes: 0, retry: { automatic: true, maxAutomaticResumes: 5, maxElapsedMs: 10000, baseDelayMs: 10, maxDelayMs: 100 }, failureRepeats: 0, progressRevision: 0, journalBytes: 0, launch };
@@ -154,5 +160,60 @@ describe("Linux managed launch adapter with an emulated cgroup filesystem", () =
     });
     f.owner();
     await eventually(async () => expect((await f.driver.inspect(f.launch, f.submission)).execution).toBe("drained"));
+  });
+});
+
+describe("launch memory limits (docs/design-run-hub.md §6.2)", () => {
+  const GiB = 1024 ** 3;
+  it("writes memory.high, memory.max and memory.oom.group on the launch cgroup before the launch starts", async () => {
+    const f = await fixture(undefined, { high: 4 * GiB, max: 6 * GiB });
+    await f.driver.probe();
+    const directory = launchCgroupPath(cgroups.root, f.launch.id);
+    // The command is asked for only after the limits are in place: nothing of the launch runs unlimited.
+    let seen: Record<string, string> | undefined;
+    const driver = createLinuxHubDriver({ cgroupRoot: cgroups.root, directory: f.directory, memory: { high: 4 * GiB, max: 6 * GiB },
+      command: async () => {
+        seen = Object.fromEntries(await Promise.all(["memory.high", "memory.max", "memory.oom.group"].map(async (name) => [name, await readFile(path.join(directory, name), "utf8")])));
+        return { executable: process.execPath, args: ["-e", "setTimeout(()=>{},10000)"] };
+      },
+      observe: async () => ({ ownerGone: true, externalStopped: true }), cleanup: async () => ({ ownerGone: true, externalStopped: true }) });
+    drivers.push(driver); await driver.probe();
+    f.launch.identity = await driver.prepare(f.launch, f.submission);
+    expect(seen).toEqual({ "memory.high": String(4 * GiB), "memory.max": String(6 * GiB), "memory.oom.group": "1" });
+  });
+  it("refuses to start when limits are configured and the memory controller is not delegated", async () => {
+    const f = await fixture(undefined, { high: 4 * GiB, max: 6 * GiB });
+    await writeFile(path.join(cgroups.root, "cgroup.controllers"), "cpu\n");
+    await expect(f.driver.probe()).rejects.toThrow(/launch memory limits are configured \(launchMemoryHigh 4 GiB, launchMemoryMax 6 GiB in hub\.json\) but the memory controller is not delegated/);
+    // Without limits the same subtree is accepted: nothing needs the controller.
+    const open = createLinuxHubDriver({ cgroupRoot: cgroups.root, directory: f.directory, memory: { high: null, max: null },
+      command: async () => { throw new Error("unused"); }, observe: async () => ({ ownerGone: true, externalStopped: true }), cleanup: async () => ({ ownerGone: true, externalStopped: true }) });
+    drivers.push(open);
+    await expect(open.probe()).resolves.toBeUndefined();
+  });
+  it("refuses a launch whose limits cannot be written, before anything of it runs", async () => {
+    const f = await fixture(undefined, { high: null, max: 6 * GiB });
+    await f.driver.probe();
+    cgroups.memoryFiles = false;
+    await expect(f.driver.prepare(f.launch, f.submission)).rejects.toThrow(/cannot set the launch cgroup's memory.max/);
+    await expect(readFile(f.marker)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+  it("reports the cgroup's OOM record and peak when the launch drains, before the cgroup is removed", async () => {
+    const f = await fixture(undefined, { high: 4 * GiB, max: 6 * GiB }); await f.driver.probe();
+    f.launch.identity = await f.driver.prepare(f.launch, f.submission); f.launch.phase = "granted";
+    await f.driver.grant(f.launch, f.submission);
+    const directory = launchCgroupPath(cgroups.root, f.launch.id);
+    await writeFile(path.join(directory, "memory.events"), "low 0\nhigh 12\nmax 3\noom 1\noom_kill 4\noom_group_kill 1\n");
+    await writeFile(path.join(directory, "memory.peak"), `${6 * GiB}\n`);
+    await f.driver.kill(f.launch, f.submission); f.owner();
+    let drained: Awaited<ReturnType<HubDriver["inspect"]>> | undefined;
+    await eventually(async () => { drained = await f.driver.inspect(f.launch, f.submission); expect(drained.execution).toBe("drained"); });
+    expect(drained!.memory).toEqual({ oom: 1, oomKill: 4, oomGroupKill: 1, maxBytes: 6 * GiB, peakBytes: 6 * GiB });
+    await expect(readFile(path.join(directory, "memory.events"))).rejects.toMatchObject({ code: "ENOENT" });
+    // A hub that stopped before settling reads the durable record: the cgroup is gone.
+    const restarted = createLinuxHubDriver({ cgroupRoot: cgroups.root, directory: f.directory, memory: { high: 4 * GiB, max: 6 * GiB },
+      command: async () => { throw new Error("unused"); }, observe: async () => ({ ownerGone: true, externalStopped: true }), cleanup: async () => ({ ownerGone: true, externalStopped: true }) });
+    drivers.push(restarted);
+    expect((await restarted.inspect(f.launch, f.submission)).memory).toEqual(drained!.memory);
   });
 });

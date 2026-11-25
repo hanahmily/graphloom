@@ -19,6 +19,7 @@ import { selfInstall } from "./ownership.js";
 import { HubEvents } from "./hub-events.js";
 import { parseListQuery, readLiveRequest, searchHub, type LiveRequest } from "./hub-history.js";
 import { runHubDoctor, summarizeHubEnvironment } from "./hub-environment.js";
+import { memoryChecks, summarizeHubMemory, withMemoryChecks } from "./hub-memory.js";
 
 export interface HubService {
   hub: Hub;
@@ -146,8 +147,9 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
           if (item.input.rehearsal !== undefined) rehearsalCounts[item.state] = (rehearsalCounts[item.state] ?? 0) + 1;
         }
         const summary = await summarizeHubEnvironment(environment, config).catch((error: unknown) => ({ pathHead: [], pathEntries: 0, tools: [], variables: [], warnings: [], error: String(error).slice(0, 1024) }));
+        const memory = await summarizeHubMemory(config, status.maxConcurrentRuns, status.submissions);
         const health: HubHealth = {
-          ...status, socket: config.socket, ...(version !== undefined ? { version } : {}), counts, rehearsalCounts, archivedEntries: scheduler.archived().length, environment: summary,
+          ...status, socket: config.socket, ...(version !== undefined ? { version } : {}), counts, rehearsalCounts, archivedEntries: scheduler.archived().length, environment: summary, memory,
           ...(scheduler.archiveIndexError ? { archiveIndexError: scheduler.archiveIndexError } : {}),
           ...((monitoringError || historyError) ? { monitoringError: (monitoringError ?? historyError)! } : {}), ...(retentionError ? { retentionError } : {}), closing,
         };
@@ -187,7 +189,13 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
         if (taskPath !== undefined && !path.isAbsolute(taskPath)) throw new HubHttpError("taskPath must be absolute on the hub's machine", 400);
         if (doctoring) throw new HubHttpError("the hub is already running a doctor; try again when it finishes", 409);
         doctoring = true;
-        try { return respond(response, 200, await runHubDoctor(environment, config, taskPath)); }
+        try {
+          const result = await runHubDoctor(environment, config, taskPath);
+          // The doctor's child cannot see the hub's cgroups as the hub does: the memory checks are the hub's own (§9.1).
+          const status = scheduler.list();
+          result.report.checks = withMemoryChecks(result.report.checks, memoryChecks(await summarizeHubMemory(config, status.maxConcurrentRuns, status.submissions)));
+          return respond(response, 200, result);
+        }
         finally { doctoring = false; }
       }
       if (url.pathname === "/v1/limit" && request.method === "POST") {

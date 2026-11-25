@@ -44,6 +44,11 @@ export {
   withDockerConfinement,
   type DockerRunOptions,
   type DockerRunSpec,
+  containerMemory,
+  containerOomReason,
+  dockerSizeBytes,
+  type DockerRunEnd,
+  type DockerSandboxOptions,
 } from "./sandbox-docker.js";
 export { agentExecutables, resolveOwnStateDirs } from "./registry.js";
 export { assertSandboxSupported, packageClosure, packageRootOf } from "./sandbox.js";
