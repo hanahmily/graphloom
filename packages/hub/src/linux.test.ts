@@ -210,5 +210,10 @@ describe("launch memory limits (docs/design-run-hub.md §6.2)", () => {
     await eventually(async () => { drained = await f.driver.inspect(f.launch, f.submission); expect(drained.execution).toBe("drained"); });
     expect(drained!.memory).toEqual({ oom: 1, oomKill: 4, oomGroupKill: 1, maxBytes: 6 * GiB, peakBytes: 6 * GiB });
     await expect(readFile(path.join(directory, "memory.events"))).rejects.toMatchObject({ code: "ENOENT" });
+    // A hub that stopped before settling reads the durable record: the cgroup is gone.
+    const restarted = createLinuxHubDriver({ cgroupRoot: cgroups.root, directory: f.directory, memory: { high: 4 * GiB, max: 6 * GiB },
+      command: async () => { throw new Error("unused"); }, observe: async () => ({ ownerGone: true, externalStopped: true }), cleanup: async () => ({ ownerGone: true, externalStopped: true }) });
+    drivers.push(restarted);
+    expect((await restarted.inspect(f.launch, f.submission)).memory).toEqual(drained!.memory);
   });
 });

@@ -29,9 +29,11 @@ export function serviceMemoryLimits(config: Limits): { high: number | null; max:
   const derive = (launch: number | null | undefined) => launch === null || launch === undefined ? null : launch * slots + SERVICE_MEMORY_HEADROOM;
   const high = config.serviceMemoryHigh !== undefined ? config.serviceMemoryHigh : derive(config.launchMemoryHigh);
   let max = config.serviceMemoryMax !== undefined ? config.serviceMemoryMax : derive(config.launchMemoryMax);
-  // A derived max is never below the high it pairs with.
+  // A derived value never inverts the pair: a derived max is at least its high, and a derived high
+  // under an explicit max is three quarters of it (MemoryHigh=6G under MemoryMax=8G).
   if (config.serviceMemoryMax === undefined && max !== null && high !== null && high > max) max = high;
-  return { high, max, derived: { high: config.serviceMemoryHigh === undefined, max: config.serviceMemoryMax === undefined } };
+  const bounded = config.serviceMemoryHigh === undefined && max !== null && (high === null || high > max) ? Math.floor(max * 3 / 4) : high;
+  return { high: bounded, max, derived: { high: config.serviceMemoryHigh === undefined, max: config.serviceMemoryMax === undefined } };
 }
 
 /** The drop-in `graphloom-hub.service.d/10-limits.conf`: the service's memory limits. */

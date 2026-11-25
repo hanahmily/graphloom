@@ -105,7 +105,7 @@ export async function readLaunchMemory(directory: string): Promise<HubLaunchMemo
   return memory;
 }
 
-/** A launch memory record the driver returned, checked before the scheduler reads it. */
+/** A launch memory record (the driver's, or one read back from disk), checked before it is used. */
 export function validLaunchMemory(value: unknown): value is HubLaunchMemory {
   if (typeof value !== "object" || value === null) return false;
   const m = value as Record<string, unknown>;

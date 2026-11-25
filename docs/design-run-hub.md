@@ -587,7 +587,9 @@ limits cannot be written fails before anything of it runs. With both set to
 `max` the hub writes no limit and needs no memory controller.
 
 **An OOM-killed launch.** When a launch drains, the hub reads its cgroup's
-`memory.events` and `memory.peak` before removing it. A granted launch that
+`memory.events` and `memory.peak` and records them durably
+(`<hub>/submissions/<s>/launches/<launchId>.memory.json`) before removing it,
+so a hub that stops before the launch settles reads the record on restart. A granted launch that
 wrote no report of its end (§6.1) and whose cgroup records an OOM kill
 (`oom_kill` or `oom_group_kill`) ended on memory:
 
@@ -1076,7 +1078,8 @@ the service's own `MemoryAccounting=yes`, `MemoryHigh=` and `MemoryMax=`
 (§6.2): `hub.json`'s `serviceMemoryHigh`/`serviceMemoryMax` when given, else
 each launch limit times `maxConcurrentRuns` (at least one) plus 1 GiB for the
 hub itself and its observe and doctor children (9G/13G with the defaults and
-two slots); a launch limit of `max` derives `infinity`. Printed without
+two slots); a launch limit of `max` derives `infinity`, and a derived
+MemoryHigh above an explicit `serviceMemoryMax` becomes three quarters of it. Printed without
 `--write`, written (0600) with it, like the other two. Values set with
 `systemctl --user set-property graphloom-hub.service MemoryHigh=... MemoryMax=...`
 live in `~/.config/systemd/user.control/graphloom-hub.service.d/50-Memory*.conf`

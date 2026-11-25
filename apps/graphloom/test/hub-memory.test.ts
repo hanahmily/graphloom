@@ -52,6 +52,9 @@ describe("service memory limits: hub service --limits", () => {
     expect(serviceMemoryLimits({ launchMemoryHigh: 4 * GiB, launchMemoryMax: 6 * GiB, maxConcurrentRuns: 0 })).toMatchObject({ high: 5 * GiB, max: 7 * GiB });
     expect(serviceMemoryLimits({ launchMemoryHigh: null, launchMemoryMax: null, maxConcurrentRuns: 2 })).toMatchObject({ high: null, max: null });
     expect(serviceMemoryLimits({ launchMemoryHigh: 4 * GiB, launchMemoryMax: 6 * GiB, maxConcurrentRuns: 2, serviceMemoryHigh: 6 * GiB, serviceMemoryMax: 8 * GiB })).toEqual({ high: 6 * GiB, max: 8 * GiB, derived: { high: false, max: false } });
+    // A derived high never exceeds an explicit max: three quarters of it.
+    expect(serviceMemoryLimits({ launchMemoryHigh: 4 * GiB, launchMemoryMax: 6 * GiB, maxConcurrentRuns: 2, serviceMemoryMax: 8 * GiB })).toMatchObject({ high: 6 * GiB, max: 8 * GiB });
+    expect(serviceMemoryLimits({ launchMemoryHigh: null, launchMemoryMax: null, maxConcurrentRuns: 2, serviceMemoryMax: 8 * GiB })).toMatchObject({ high: 6 * GiB, max: 8 * GiB });
     const text = limitsDropIn({ launchMemoryHigh: 4 * GiB, launchMemoryMax: 6 * GiB, maxConcurrentRuns: 2 }, new Date("2026-11-25T00:00:00Z"));
     expect(text).toContain("[Service]\nMemoryAccounting=yes\nMemoryHigh=9G\nMemoryMax=13G\n");
     expect(text).toContain("systemctl --user set-property");

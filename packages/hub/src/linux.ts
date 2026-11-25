@@ -4,12 +4,12 @@
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { createWriteStream, constants } from "node:fs";
-import { access, appendFile, mkdir, readFile, realpath, rmdir, statfs, writeFile } from "node:fs/promises";
+import { access, appendFile, mkdir, open, readFile, realpath, rename, rmdir, statfs, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Duplex, Readable } from "node:stream";
 import type { HubLaunch, HubProcessIdentity, HubSubmission } from "@graphloom/sdk";
 import type { HubDriver, HubExecutionObservation } from "./types.js";
-import { formatBytes, readLaunchMemory, type HubMemoryLimits } from "./memory.js";
+import { formatBytes, readLaunchMemory, validLaunchMemory, type HubLaunchMemory, type HubMemoryLimits } from "./memory.js";
 
 export interface HubCommandSpec { executable: string; args: string[]; cwd?: string; env?: NodeJS.ProcessEnv; }
 export interface HubGrantMessage {
@@ -128,7 +128,12 @@ export function createLinuxHubDriver(options: LinuxHubDriverOptions): HubDriver 
       if (active || identityAlive) return { ...state, execution: "live" };
       if (!state.ownerGone || !state.externalStopped) return { ...state, execution: "uncertain", reason: state.reason ?? "controller owner or external execution remains unverified" };
       // What the cgroup recorded about memory goes with it: read it before it is removed (§6.2).
-      const memory = await readLaunchMemory(cgroup(launch));
+      // Kept durably beside the launch's report first: a hub that stops before this launch settles
+      // finds the cgroup gone on restart, and reads the record instead.
+      const record = path.join(options.directory, "submissions", submission.id, "launches", `${launch.id}.memory.json`);
+      let memory = await readLaunchMemory(cgroup(launch));
+      if (memory !== undefined) await writeDurably(record, JSON.stringify(memory));
+      else memory = await readMemoryRecord(record);
       await rmdir(cgroup(launch)).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
       children.delete(launch.id);
       return { ...state, execution: "drained", ...(memory !== undefined ? { memory } : {}) };
@@ -240,6 +245,21 @@ async function applyMemoryLimits(directory: string, limits: HubMemoryLimits, req
   await write("memory.max", limits.max === null ? "max" : String(limits.max));
   await write("memory.high", limits.high === null ? "max" : String(limits.high));
   await write("memory.oom.group", "1");
+}
+async function writeDurably(file: string, text: string): Promise<void> {
+  await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+  const temporary = `${file}.${process.pid}.tmp`;
+  const handle = await open(temporary, "w", 0o600);
+  try { await handle.writeFile(text); await handle.sync(); } finally { await handle.close(); }
+  await rename(temporary, file);
+  const directory = await open(path.dirname(file), "r");
+  try { await directory.sync(); } finally { await directory.close(); }
+}
+async function readMemoryRecord(file: string): Promise<HubLaunchMemory | undefined> {
+  try {
+    const value: unknown = JSON.parse(await readFile(file, "utf8"));
+    return validLaunchMemory(value) ? value : undefined;
+  } catch { return undefined; }
 }
 async function send(control: Duplex, frame: HubGrantMessage | HubStopMessage): Promise<void> {
   const bytes = `${JSON.stringify(frame)}\n`;
