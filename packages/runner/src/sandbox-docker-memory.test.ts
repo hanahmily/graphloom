@@ -96,7 +96,7 @@ describe("docker-confined jobs' memory", () => {
     expect(run).toContain("--memory 6g --memory-swap 6g");
     expect(run).not.toContain("--rm");
     expect(calls).toContainEqual(expect.stringMatching(/^inspect --format \{\{\.State\.OOMKilled\}\} graphloom-run-memory-/));
-    expect(calls).toContainEqual(expect.stringMatching(/^rm -f graphloom-run-memory-/));
+    expect(calls).toContainEqual(expect.stringMatching(/^rm -f -v graphloom-run-memory-/));
   });
 
   it("leaves an exit 137 that was not an OOM kill, and a job under the ceiling, as they are", async () => {

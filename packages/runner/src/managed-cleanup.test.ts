@@ -32,7 +32,7 @@ describe("managed external execution cleanup", () => {
     const dir = await docker('printf "%s\\n" "$*" >> "$MANAGED_DOCKER_FIXTURE/calls"\nif [ "$1" = ps ]; then\n  if [ ! -f "$MANAGED_DOCKER_FIXTURE/removed" ]; then printf "abc123\\n"; fi\nelse touch "$MANAGED_DOCKER_FIXTURE/removed"; fi');
     expect(await drainRunContainers("run-1")).toEqual({ drained: true, resources: [] });
     expect((await readFile(path.join(dir, "calls"), "utf8")).trim().split("\n")).toEqual([
-      "ps -aq --filter label=graphloom.run=run-1", "rm -f abc123", "ps -aq --filter label=graphloom.run=run-1",
+      "ps -aq --filter label=graphloom.run=run-1", "rm -f -v abc123", "ps -aq --filter label=graphloom.run=run-1",
     ]);
   });
 

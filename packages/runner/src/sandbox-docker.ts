@@ -216,7 +216,7 @@ export async function killContainers(names: readonly string[]): Promise<void> {
 }
 
 async function removeContainers(ids: readonly string[]): Promise<void> {
-  if (ids.length > 0) await execFileAsync("docker", ["rm", "-f", ...ids], { timeout: DOCKER_TIMEOUT_MS }).catch(() => undefined);
+  if (ids.length > 0) await execFileAsync("docker", ["rm", "-f", "-v", ...ids], { timeout: DOCKER_TIMEOUT_MS }).catch(() => undefined);
 }
 
 /**
@@ -240,7 +240,7 @@ export async function drainRunContainers(runId: string): Promise<{ drained: bool
   };
   try {
     const ids = await list();
-    if (ids.length > 0) await execFileAsync("docker", ["rm", "-f", ...ids], { timeout: DOCKER_TIMEOUT_MS });
+    if (ids.length > 0) await execFileAsync("docker", ["rm", "-f", "-v", ...ids], { timeout: DOCKER_TIMEOUT_MS });
     const remaining = await list();
     return { drained: remaining.length === 0, resources: remaining.map((id) => `docker:${id}`) };
   } catch (error) {

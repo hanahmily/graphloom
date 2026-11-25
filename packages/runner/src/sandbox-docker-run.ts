@@ -7,7 +7,7 @@
  * container's first process ignores SIGTERM it does not handle, so on a stop signal or when the
  * container's wall clock ends this kills the container by name before it exits. When the container
  * ends on its own it reads whether the kernel OOM-killed it at its memory limit, writes that beside
- * the spec (`<spec>.end.json`), and removes the container (it runs without --rm so it can be read).
+ * the spec (`<spec>.end.json`), and removes the container (it runs without --rm so it can be read; its anonymous volumes go with it, as with --rm).
  */
 
 import { spawn, spawnSync } from "node:child_process";
@@ -94,7 +94,7 @@ const oomKilled = (): boolean => {
 };
 /** The container runs without --rm, so its state can be read: it is removed here once it ended. */
 const removeContainer = (): void => {
-  spawnSync("docker", ["rm", "-f", spec.name], { stdio: "ignore", timeout: KILL_WAIT_MS });
+  spawnSync("docker", ["rm", "-f", "-v", spec.name], { stdio: "ignore", timeout: KILL_WAIT_MS });
 };
 
 child.once("exit", (code, signal) => {
