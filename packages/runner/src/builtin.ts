@@ -4,6 +4,7 @@
 import type { ExecutorBinding, ExecutorPackageManifest } from "@graphloom/sdk";
 import { BUILTIN_EXECUTOR_NAMESPACE, createChildExecutorRunner } from "./registry.js";
 import { assertSandboxSupported, packageRootOf } from "./sandbox.js";
+import type { DockerSandboxOptions } from "./sandbox-docker.js";
 import type { Runner } from "./types.js";
 
 export interface BuiltinExecutorPackage extends ExecutorBinding {
@@ -23,6 +24,8 @@ export interface BuiltinExecutorRunnerOptions {
   stopGraceMs?: number;
   /** Override the runner's worker entry (tests). */
   workerModule?: string;
+  /** The operator's limits on docker-confined command jobs (runner config `docker`). */
+  docker?: DockerSandboxOptions;
 }
 
 /**
@@ -87,6 +90,7 @@ export function createBuiltinExecutorRunner(options: BuiltinExecutorRunnerOption
       ...(pkg.maxTimeoutMs !== undefined ? { maxTimeoutMs: pkg.maxTimeoutMs } : {}),
       ...(options.stopGraceMs !== undefined ? { stopGraceMs: options.stopGraceMs } : {}),
       ...(options.workerModule !== undefined ? { workerModule: options.workerModule } : {}),
+      ...(options.docker !== undefined ? { docker: options.docker } : {}),
     });
   }, options.fallback);
 }

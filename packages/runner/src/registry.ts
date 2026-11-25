@@ -38,7 +38,7 @@ import {
   sandboxSetupHitTransientMount,
 } from "./confine.js";
 import { digestExecutorSource } from "./digest.js";
-import { withDockerConfinement } from "./sandbox-docker.js";
+import { withDockerConfinement, type DockerSandboxOptions } from "./sandbox-docker.js";
 import { assertSandboxSupported, packageClosure, packageRootOf, sandboxNodeArgs } from "./sandbox.js";
 import type { ExecutorDescriptor, ExecutorSourceOverride, JobContext, JobEvidenceItem, JobResult, Runner } from "./types.js";
 
@@ -121,6 +121,8 @@ export interface ChildExecutorRunnerOptions {
   credentials?: Record<string, string>;
   /** Effects the operator granted; executors declaring any other effect are refused. */
   allowedEffects?: readonly ExecutorEffect[];
+  /** The operator's limits on the built-in command executor's docker-confined jobs (runner config `docker`). */
+  docker?: DockerSandboxOptions;
   /**
    * Run the executor under Node's permission model: it may read only its own
    * package and dependencies, and cannot write files, spawn processes or
@@ -1022,7 +1024,7 @@ export function createChildExecutorRunner(
     },
   };
   // The built-in command executor runs a job's commands in containers when the job asks for it.
-  return options.sandbox !== true && served.has(BUILTIN_COMMAND_EXECUTOR_ID) ? withDockerConfinement(runner) : runner;
+  return options.sandbox !== true && served.has(BUILTIN_COMMAND_EXECUTOR_ID) ? withDockerConfinement(runner, options.docker) : runner;
 }
 
 /** How long an exited sandbox's status and standard error may take to close before it is judged without them. */

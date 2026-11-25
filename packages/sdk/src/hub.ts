@@ -303,6 +303,23 @@ export interface HubHealth extends HubStatus {
   closing?: boolean;
   /** The hub process's environment, which its runs inherit (docs/design-run-hub.md §9). */
   environment?: HubEnvironmentSummary;
+  /** The service's and each launch's memory limits and use (docs/design-run-hub.md §9.1). */
+  memory?: HubMemorySummary;
+}
+/**
+ * Memory containment as the hub reads it from its cgroups (docs/design-run-hub.md
+ * §6.2, §9.1). Bytes; `null` is no limit (`max`/`infinity`); absent is unreadable.
+ */
+export interface HubMemorySummary {
+  /** The hub service's own cgroup (the delegated `cgroupRoot`): its MemoryHigh/MemoryMax and use. */
+  service: { cgroup: string; high?: number | null; max?: number | null; current?: number; peak?: number; error?: string };
+  /** What the hub writes on each launch cgroup (hub.json `launchMemoryHigh`/`launchMemoryMax`). */
+  launch: { high: number | null; max: number | null };
+  maxConcurrentRuns: number;
+  /** Each live launch's cgroup. */
+  launches: Array<{ submissionId: string; launchId: string; current?: number; peak?: number; max?: number | null; oomKills?: number }>;
+  /** Unset or infinite limits, and launch limits the service limit cannot hold together. */
+  warnings: string[];
 }
 /**
  * What the hub's own environment provides to its runs: the head of `PATH`,

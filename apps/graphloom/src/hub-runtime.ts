@@ -6,7 +6,7 @@ import { access, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { isClaimStale, readOwnerClaim, releaseManagedRun } from "@graphloom/controller";
-import { createLinuxHubDriver, launchCgroupPath, type HubDriver } from "@graphloom/hub";
+import { createLinuxHubDriver, formatBytes, launchCgroupPath, parseCgroupLimit, parseMemoryEvents, type HubDriver } from "@graphloom/hub";
 import type { HubLaunch, HubSubmission, HubObservation, MonitorSnapshot, MonitorSeries } from "@graphloom/sdk";
 import type { HubServiceConfig } from "./hub-config.js";
 import { boundedText, verifyHubInput, verifyHubTaskInput } from "./hub-input.js";
@@ -66,6 +66,7 @@ export function createHubRuntime(config: HubServiceConfig, wake: () => void): { 
   };
   const driver = createLinuxHubDriver({
     directory: config.directory, cgroupRoot: config.cgroupRoot, onWake: wake, observe, cleanup,
+    memory: { high: config.launchMemoryHigh ?? null, max: config.launchMemoryMax ?? null },
     settleInput: settlePluginLink,
     async command(launch, submission) {
       const command = await verifyHubExecutionInput(submission, { initial: launch.mode === "initial", upgrade: launch.command?.remedy?.upgrade === true });
@@ -90,6 +91,7 @@ export function createHubRuntime(config: HubServiceConfig, wake: () => void): { 
       result.snapshot.usage ??= { metrics: [] };
       result.snapshot.usage.metrics.push(...frame.usage!.metrics);
       if (frame.usage?.series) result.snapshot.usage.series = frame.usage.series;
+      if (frame.usage?.coverage) result.snapshot.usage.coverage = frame.usage.coverage;
     }
     return result;
   } };
@@ -218,13 +220,23 @@ export async function cleanupOwnedRun(stateDir: string, runId: string, runnerCon
   return releaseManagedRun(createCliRunner(config), runId, stateDir);
 }
 
-async function addProcessMetrics(snapshot: MonitorSnapshot, launch: HubLaunch, samples: Map<string, { launch: string; cpu?: number; at?: number; memory: MonitorSeries["samples"]; cpuSeries: MonitorSeries["samples"] }>, root: string): Promise<void> {
+/** A launch cgroup's memory limits, peak and OOM kills, each unknown when unreadable. */
+async function readLaunchLimits(directory: string): Promise<{ max?: number | null; high?: number | null; peak?: number; oomKill?: number }> {
+  const read = async (file: string) => { try { return parseCgroupLimit(await readFile(path.join(directory, file), "utf8")); } catch { return undefined; } };
+  const [max, high, peak] = await Promise.all([read("memory.max"), read("memory.high"), read("memory.peak")]);
+  let oomKill: number | undefined;
+  try { oomKill = parseMemoryEvents(await readFile(path.join(directory, "memory.events"), "utf8")).oomKill; } catch { oomKill = undefined; }
+  return { ...(max !== undefined ? { max } : {}), ...(high !== undefined ? { high } : {}), ...(peak !== undefined && peak !== null ? { peak } : {}), ...(oomKill !== undefined ? { oomKill } : {}) };
+}
+
+export async function addProcessMetrics(snapshot: MonitorSnapshot, launch: HubLaunch, samples: Map<string, { launch: string; cpu?: number; at?: number; memory: MonitorSeries["samples"]; cpuSeries: MonitorSeries["samples"] }>, root: string): Promise<void> {
   const observedAt = new Date().toISOString();
   const now = Date.now();
   let state = samples.get(snapshot.run.id);
   if (!state || state.launch !== launch.id) state = { launch: launch.id, memory: [], cpuSeries: [] };
   let memory: number | null = null;
   let cpuPercent: number | null = null;
+  const limits = await readLaunchLimits(launchCgroupPath(root, launch.id));
   try {
     const [memoryText, cpuText] = await Promise.all([readFile(path.join(launchCgroupPath(root, launch.id), "memory.current"), "utf8"), readFile(path.join(launchCgroupPath(root, launch.id), "cpu.stat"), "utf8")]);
     const bytes = Number(memoryText.trim());
@@ -243,7 +255,12 @@ async function addProcessMetrics(snapshot: MonitorSnapshot, launch: HubLaunch, s
   snapshot.usage.metrics.push(
     { id: "rss", label: "Launch memory", value: memory, unit: "bytes", source: "cgroup memory.current; external containers excluded", exactness: "reported" },
     { id: "cpu", label: "Launch CPU (100% = one core)", value: cpuPercent, unit: "%", source: "cgroup cpu.stat; external containers excluded", exactness: "reported" },
+    // The peak against the limit (docs/design-run-hub.md §6.2): how close the launch came to an OOM kill.
+    { id: "memory-peak", label: `Launch memory peak (limit ${formatBytes(limits.max)}${limits.high !== null && limits.high !== undefined ? `, throttled above ${formatBytes(limits.high)}` : ""})`, value: limits.peak ?? null, unit: "bytes", source: "cgroup memory.peak against memory.max", exactness: "reported" },
+    { id: "memory-limit", label: "Launch memory limit (memory.max; unknown = no limit)", value: limits.max ?? null, unit: "bytes", source: "cgroup memory.max (hub.json launchMemoryMax)", exactness: "reported" },
+    ...(limits.oomKill ? [{ id: "memory-oom-kills", label: "Launch processes OOM-killed", value: limits.oomKill, unit: "processes", source: "cgroup memory.events oom_kill", exactness: "reported" as const }] : []),
   );
+  if (memory !== null && limits.max !== undefined) snapshot.usage.coverage = `launch cgroup memory ${formatBytes(memory)} now, peak ${limits.peak !== undefined ? formatBytes(limits.peak) : "unknown"} of ${formatBytes(limits.max)}; external Docker containers are excluded (each has its own --memory)`;
   snapshot.usage.series = [
     { id: "memory", label: "Launch memory", unit: "bytes", source: "cgroup memory.current", samples: state.memory, aggregation: "max", coverage: "external containers excluded" },
     { id: "cpu", label: "Launch CPU", unit: "%", source: "cgroup cpu.stat", samples: state.cpuSeries, aggregation: "time-weighted", coverage: "100% = one CPU core; external containers excluded" },

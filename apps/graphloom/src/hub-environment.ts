@@ -256,7 +256,7 @@ export function tokensDropIn(tokenEnvFile: string, at?: Date): string {
 }
 
 /** Where a drop-in goes: beside the user unit graphloom-hub.service. */
-export function dropInPath(name: "environment.conf" | "tokens.conf", env: NodeJS.ProcessEnv = process.env): string {
+export function dropInPath(name: "environment.conf" | "tokens.conf" | "10-limits.conf", env: NodeJS.ProcessEnv = process.env): string {
   const config = env.XDG_CONFIG_HOME || path.join(env.HOME ?? os.homedir(), ".config");
   return path.join(config, "systemd", "user", "graphloom-hub.service.d", name);
 }

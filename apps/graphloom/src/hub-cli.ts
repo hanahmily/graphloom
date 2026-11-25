@@ -14,6 +14,7 @@ import { hubPaths, integer, loadHubConfig } from "./hub-config.js";
 import { hubRequest } from "./hub-client.js";
 import { captureLoginEnvironment, dropInPath, environmentDropIn, tokenEnvFileText, tokensDropIn, writeOwnerOnly, type CapturedEnvironment, type HubDoctorResult } from "./hub-environment.js";
 import { formatDoctor } from "./doctor.js";
+import { limitsDropIn, memoryLines } from "./hub-memory.js";
 import { loadRunnerConfig } from "./runner-config.js";
 import { blockerOf, HUB_LIST_LIMIT_MAX, HUB_STATES, listQuery, type HubListFilter } from "./hub-history.js";
 import { serveHub, type HubLogPage } from "./hub-server.js";
@@ -23,7 +24,7 @@ import { installRoot } from "./version.js";
 
 export const HUB_USAGE = [
   "graphloom hub serve [--config <file>]",
-  "graphloom hub service [--config <file>] [--capture-env] [--token-env-file <file> [--write-token]] [--write]",
+  "graphloom hub service [--config <file>] [--capture-env] [--token-env-file <file> [--write-token]] [--limits] [--write]",
   "graphloom hub status [--json] [--socket <path>]",
   "graphloom hub doctor [--task <task.yaml>] [--json] [--socket <path>]",
   "graphloom hub submit <task.yaml> [--key <id>] [--rehearsal [--scenario <name>] [--commands <stub|run>] [--offline] [--stop-at <stage>]] [--socket <path>]",
@@ -41,7 +42,7 @@ export const HUB_USAGE = [
 /** One paragraph per command for `graphloom hub <command> --help`. */
 const HUB_HELP: Record<string, string> = {
   serve: "Runs the hub in the foreground (normally under the systemd user service).",
-  service: "Prints a systemd user unit for the hub; installs nothing.\n--capture-env prints the drop-in graphloom-hub.service.d/environment.conf instead: PATH, Go's variables,\nCLAUDE_CONFIG_DIR, CODEX_HOME, LANG, LC_ALL, the proxies and GraphLoom's own non-secret settings\n(GRAPHLOOM_DISABLE_AUTOUPDATE, the harness CLIs and models, ...) from a clean login shell of $SHELL.\n--token-env-file <file> prints the drop-in tokens.conf (EnvironmentFile=-<file>); the file holds the runner\nconfig's github.tokenEnv, from that variable or gh auth token, owner-only (0600); --write-token adds\ngithub.writeTokenEnv. --write writes the drop-ins (and the token file) instead; nothing is written without it.\nOnly names are printed, never a token. Re-run after a shell profile, toolchain or gh auth change.",
+  service: "Prints a systemd user unit for the hub; installs nothing.\n--capture-env prints the drop-in graphloom-hub.service.d/environment.conf instead: PATH, Go's variables,\nCLAUDE_CONFIG_DIR, CODEX_HOME, LANG, LC_ALL, the proxies and GraphLoom's own non-secret settings\n(GRAPHLOOM_DISABLE_AUTOUPDATE, the harness CLIs and models, ...) from a clean login shell of $SHELL.\n--token-env-file <file> prints the drop-in tokens.conf (EnvironmentFile=-<file>); the file holds the runner\nconfig's github.tokenEnv, from that variable or gh auth token, owner-only (0600); --write-token adds\ngithub.writeTokenEnv. --limits prints the drop-in 10-limits.conf: the service's MemoryHigh/MemoryMax, from\nhub.json serviceMemoryHigh/serviceMemoryMax, else launchMemoryHigh/launchMemoryMax x maxConcurrentRuns + 1 GiB;\na systemctl --user set-property value (user.control) takes precedence over it.\n--write writes the drop-ins (and the token file) instead; nothing is written without it.\nOnly names are printed, never a token. Re-run after a shell profile, toolchain or gh auth change.",
   doctor: "Runs graphloom doctor's checks (with --task, the task's too) inside the running hub's environment:\nwhat its runs find, not what your shell has. Exit 0 no check failed, 1 one did or the hub is unreachable.",
   status: "Reports whether the hub is reachable and healthy: id, socket, version, limit, slot and state counts, faults,\nand its environment (PATH head, where the agent CLIs resolve, which token variables are set; names only).\nExit 0 healthy, 1 unreachable, 3 faulted or shutting down.",
   submit: "Submits a task to the queue; the same --key and task return the same submission.\n--rehearsal makes a rehearsal submission: queued, launched, contained, continued and stopped like any other,\nbut its run runs on graphloom rehearse's stand-ins (scripted agents and supervisor, stubbed commands,\nno provider calls). --scenario names the bundle's scenario (default happy), --commands stub|run,\n--offline and --stop-at <stage> are rehearse's (under --stop-at the verdict is the stop's); all need\n--rehearsal. Its key is scoped apart from real submissions';\nhub resume continues it as a rehearsal, and hub list/inspect show its verdict once recorded.",
@@ -60,7 +61,7 @@ const PANELS: MonitorPanelKind[] = ["overview", "topology", "stages", "jobs", "a
 const FORMATS: MonitorFormat[] = ["text", "ansi", "markdown", "json"];
 const RENDERERS: ChatRenderer[] = ["auto", "plain", "katex"];
 const valueFlags = ["task", "token-env-file", "config", "socket", "key", "format", "chat-renderer", "job", "attempt", "stage", "cursor", "page-size", "width", "since", "until", "graph", "repo", "grep", "limit", "stream", "launch", "command-id", "approve", "decline", "reason", "supervisor", "automatic", "max-automatic-resumes", "max-elapsed-ms", "base-delay-ms", "max-delay-ms", "scenario", "commands", "stop-at"];
-const booleanFlags = ["capture-env", "write-token", "write", "json", "plain", "once", "follow", "reconciled", "upgrade", "update-plugin", "update-executors", "follow-current", "renew", "archived", "rehearsal", "offline", "help"];
+const booleanFlags = ["limits", "capture-env", "write-token", "write", "json", "plain", "once", "follow", "reconciled", "upgrade", "update-plugin", "update-executors", "follow-current", "renew", "archived", "rehearsal", "offline", "help"];
 const repeatable = ["panel", "input", "state"];
 
 export async function hubCommand(args: string[]): Promise<number> {
@@ -82,7 +83,7 @@ export async function hubCommand(args: string[]): Promise<number> {
     return command || yes("help") ? 0 : 2;
   }
   const allowed: Record<string, string[]> = {
-    serve: ["config", "socket"], service: ["config", "capture-env", "token-env-file", "write-token", "write"], doctor: ["task", "json", "socket"], submit: ["key", "socket", "rehearsal", "scenario", "commands", "offline", "stop-at"], status: ["json", "socket"], limit: ["socket"],
+    serve: ["config", "socket"], service: ["config", "capture-env", "token-env-file", "write-token", "limits", "write"], doctor: ["task", "json", "socket"], submit: ["key", "socket", "rehearsal", "scenario", "commands", "offline", "stop-at"], status: ["json", "socket"], limit: ["socket"],
     list: ["json", "socket", "state", "graph", "repo", "key", "since", "until", "grep", "limit", "archived"],
     pause: ["command-id", "socket"], cancel: ["command-id", "socket"], archive: ["command-id", "socket"],
     resume: ["command-id", "socket", "reconciled", "approve", "input", "decline", "reason", "upgrade", "update-plugin", "update-executors", "supervisor"],
@@ -120,12 +121,12 @@ export async function hubCommand(args: string[]): Promise<number> {
     return 0;
   }
   if (command === "service") {
-    if (!yes("capture-env") && flag("token-env-file") === undefined) {
-      if (yes("write") || yes("write-token")) throw new Error("--write and --write-token need --capture-env or --token-env-file");
+    if (!yes("capture-env") && flag("token-env-file") === undefined && !yes("limits")) {
+      if (yes("write") || yes("write-token")) throw new Error("--write and --write-token need --capture-env, --token-env-file or --limits");
       console.log(hubServiceUnit(path.resolve(flag("config") ?? hubPaths().config)));
       return 0;
     }
-    return hubServiceEnvironment({ config: flag("config"), capture: yes("capture-env"), tokenEnvFile: flag("token-env-file"), writeToken: yes("write-token"), write: yes("write") });
+    return hubServiceEnvironment({ config: flag("config"), capture: yes("capture-env"), tokenEnvFile: flag("token-env-file"), writeToken: yes("write-token"), limits: yes("limits"), write: yes("write") });
   }
   if (command === "doctor") {
     const task = flag("task");
@@ -355,6 +356,7 @@ export function formatHubStatus(health: HubHealth, socket: string): string {
     ...(health.monitoringError ? [`Monitoring error: ${safeText(health.monitoringError)}`] : []),
     ...(health.archiveIndexError ? [`Archive index error: ${safeText(health.archiveIndexError)}`] : []),
     ...(health.environment ? environmentLines(health.environment) : []),
+    ...(health.memory ? memoryLines(health.memory) : []),
   ].join("\n");
 }
 /** The rehearsal submissions among the counts, when there are any. */
@@ -375,7 +377,7 @@ function environmentLines(env: HubEnvironmentSummary): string[] {
   ];
 }
 
-interface ServiceEnvironmentOptions { config: string | undefined; capture: boolean; tokenEnvFile: string | undefined; writeToken: boolean; write: boolean; }
+interface ServiceEnvironmentOptions { config: string | undefined; capture: boolean; tokenEnvFile: string | undefined; writeToken: boolean; limits?: boolean; write: boolean; }
 
 /**
  * The token variables any runner config the hub's runs may read names: the hub
@@ -447,11 +449,13 @@ async function hubServiceEnvironment(options: ServiceEnvironmentOptions): Promis
     }
     if (!options.writeToken && runner?.github?.writeTokenEnv) note(`token env file: ${runner.github.writeTokenEnv} (github.writeTokenEnv) left out; --write-token adds it`);
   }
-  // Two drop-ins, so capturing again never drops the token file, and the reverse.
+  // Separate drop-ins, so capturing again never drops the token file or the limits, and the reverse.
   const dropIns: Array<[string, string]> = [
     ...(captured ? [[dropInPath("environment.conf"), environmentDropIn({ captured, shell })] as [string, string]] : []),
     ...(tokenFile !== undefined ? [[dropInPath("tokens.conf"), tokensDropIn(tokenFile)] as [string, string]] : []),
+    ...(options.limits ? [[dropInPath("10-limits.conf"), limitsDropIn(await loadHubConfig(options.config))] as [string, string]] : []),
   ];
+  if (options.limits) note("limits: a MemoryHigh/MemoryMax set with systemctl --user set-property (~/.config/systemd/user.control/graphloom-hub.service.d/50-Memory*.conf) takes precedence over 10-limits.conf; remove those files for these to apply");
   if (!options.write) {
     for (const [file, text] of dropIns) process.stdout.write(`${dropIns.length > 1 ? `# ${file}\n` : ""}${text}`);
     note(`printed only; with --write it writes ${[...dropIns.map(([file]) => file), ...(tokenFile !== undefined ? [tokenFile] : [])].join(" and ")}`);

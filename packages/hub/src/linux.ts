@@ -9,6 +9,7 @@ import path from "node:path";
 import type { Duplex, Readable } from "node:stream";
 import type { HubLaunch, HubProcessIdentity, HubSubmission } from "@graphloom/sdk";
 import type { HubDriver, HubExecutionObservation } from "./types.js";
+import { formatBytes, readLaunchMemory, type HubMemoryLimits } from "./memory.js";
 
 export interface HubCommandSpec { executable: string; args: string[]; cwd?: string; env?: NodeJS.ProcessEnv; }
 export interface HubGrantMessage {
@@ -35,6 +36,13 @@ export interface LinuxHubDriverOptions {
   cleanup(launch: HubLaunch, submission: HubSubmission, observed?: RuntimeObservation): Promise<RuntimeObservation>;
   maxLogBytes?: number;
   onWake?(): void;
+  /**
+   * Each launch cgroup's `memory.high` and `memory.max` (docs/design-run-hub.md §6.2),
+   * written before the launch starts, with `memory.oom.group` set so an OOM kills the
+   * launch's whole group. A limit needs the delegated memory controller: the probe
+   * refuses to start without it. Absent or both null: no limit is written.
+   */
+  memory?: HubMemoryLimits;
   /** See HubDriver.settleInput. */
   settleInput?: NonNullable<HubDriver["settleInput"]>;
 }
@@ -49,6 +57,11 @@ export function createLinuxHubDriver(options: LinuxHubDriverOptions): HubDriver 
   const maximum = options.maxLogBytes ?? 1024 * 1024;
   if (!Number.isSafeInteger(maximum) || maximum < 1024 || maximum > 16 * 1024 * 1024) throw new Error("maxLogBytes must be 1 KiB–16 MiB per stream");
   const cgroup = (launch: HubLaunch): string => launchCgroupPath(root, launch.id);
+  const limits = options.memory ?? { high: null, max: null };
+  const limited = limits.high !== null || limits.max !== null;
+  if (limits.high !== null && limits.max !== null && limits.high > limits.max) throw new Error("launch memory.high must not exceed memory.max");
+  /** Whether launch cgroups get the memory controller's files: known once the probe enabled it. */
+  let memoryController = false;
   async function probe(context?: { lockPid: number }): Promise<void> {
     if (process.platform !== "linux") throw new Error("managed hub execution requires Linux cgroup v2");
     if (await realpath(root) !== root || Number((await statfs(root)).type) !== CGROUP2_SUPER_MAGIC) throw new Error("hub cgroupRoot must be a real delegated cgroup v2 directory");
@@ -59,16 +72,23 @@ export function createLinuxHubDriver(options: LinuxHubDriverOptions): HubDriver 
     await writeFile(path.join(leaf, "cgroup.procs"), String(process.pid));
     // The lifetime lock helper was born before delegation setup and belongs in the same leaf.
     if (context?.lockPid) await writeFile(path.join(leaf, "cgroup.procs"), String(context.lockPid));
+    if (limited && !available.includes("memory")) {
+      throw new Error(`launch memory limits are configured (launchMemoryHigh ${formatBytes(limits.high)}, launchMemoryMax ${formatBytes(limits.max)} in hub.json) but the memory controller is not delegated to ${root} (its cgroup.controllers: ${available.join(" ") || "none"}); run the hub as its systemd user service with Delegate=yes (graphloom hub service), or set both to "max" to run launches without a memory limit`);
+    }
     const enable = ["cpu", "memory"].filter((controller) => available.includes(controller));
     if (enable.length) {
       try { await writeFile(path.join(root, "cgroup.subtree_control"), enable.map((controller) => `+${controller}`).join(" ")); }
       catch (error) { throw new Error(`cannot enable delegated cgroup ${enable.join("/")} controllers; the hub needs its own empty delegated subtree: ${String(error)}`); }
     }
+    const enabled = (await readFile(path.join(root, "cgroup.subtree_control"), "utf8").catch(() => "")).trim().split(/\s+/).map((name) => name.replace(/^\+/, ""));
+    memoryController = enabled.includes("memory");
+    if (limited && !memoryController) throw new Error(`launch memory limits are configured but the memory controller could not be enabled for ${root}'s children (its cgroup.subtree_control: ${enabled.join(" ") || "none"})`);
     const test = path.join(root, `probe-${process.pid}`);
     await mkdir(test);
     try {
       await access(path.join(test, "cgroup.procs"), constants.W_OK);
       await access(path.join(test, "cgroup.kill"), constants.W_OK);
+      if (limited) for (const file of ["memory.high", "memory.max", "memory.oom.group"]) await access(path.join(test, file), constants.W_OK);
       if (!/^populated 0$/m.test(await readFile(path.join(test, "cgroup.events"), "utf8"))) throw new Error("unexpected populated cgroup capability probe");
     } finally { await rmdir(test); }
   }
@@ -107,9 +127,11 @@ export function createLinuxHubDriver(options: LinuxHubDriverOptions): HubDriver 
       if (error && (active || identityAlive)) return { ...state, execution: "uncertain", reason: error };
       if (active || identityAlive) return { ...state, execution: "live" };
       if (!state.ownerGone || !state.externalStopped) return { ...state, execution: "uncertain", reason: state.reason ?? "controller owner or external execution remains unverified" };
+      // What the cgroup recorded about memory goes with it: read it before it is removed (§6.2).
+      const memory = await readLaunchMemory(cgroup(launch));
       await rmdir(cgroup(launch)).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
       children.delete(launch.id);
-      return { ...state, execution: "drained" };
+      return { ...state, execution: "drained", ...(memory !== undefined ? { memory } : {}) };
     } catch (error) { return { execution: "uncertain", ownerGone: false, externalStopped: false, reason: String(error instanceof Error ? error.message : error).slice(0, 1024) }; }
   }
   return {
@@ -118,6 +140,8 @@ export function createLinuxHubDriver(options: LinuxHubDriverOptions): HubDriver 
     async prepare(launch, submission) {
       const directory = cgroup(launch);
       await mkdir(directory); // An existing generation is never reused for a second child.
+      // Limits are in place before anything of the launch runs (§6.2).
+      if (memoryController || limited) await applyMemoryLimits(directory, limits, limited);
       const command = await options.command(launch, submission);
       if (!path.isAbsolute(command.executable) || command.args.some((arg) => typeof arg !== "string" || arg.includes("\0"))) throw new Error("managed launch requires a fixed absolute executable and valid argv");
       const logDirectory = path.join(options.directory, "submissions", submission.id, "logs");
@@ -199,6 +223,23 @@ export function createLinuxHubDriver(options: LinuxHubDriverOptions): HubDriver 
       children.clear();
     },
   };
+}
+/**
+ * Writes a launch cgroup's memory limits and `memory.oom.group=1`: an OOM inside the launch
+ * (at its own limit, or a global one choosing one of its processes) kills its whole group,
+ * never one process of it. Without configured limits a missing memory controller is fine.
+ */
+async function applyMemoryLimits(directory: string, limits: HubMemoryLimits, required: boolean): Promise<void> {
+  const write = async (file: string, value: string) => {
+    try { await writeFile(path.join(directory, file), value); }
+    catch (error) {
+      if (!required && (error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw new Error(`cannot set the launch cgroup's ${file} to ${value}: ${String(error instanceof Error ? error.message : error)}`);
+    }
+  };
+  await write("memory.max", limits.max === null ? "max" : String(limits.max));
+  await write("memory.high", limits.high === null ? "max" : String(limits.high));
+  await write("memory.oom.group", "1");
 }
 async function send(control: Duplex, frame: HubGrantMessage | HubStopMessage): Promise<void> {
   const bytes = `${JSON.stringify(frame)}\n`;

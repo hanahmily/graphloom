@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
+import type { HubLaunchMemory } from "./memory.js";
 import type { HubArchiveEntry, HubConfig, HubInput, HubLaunch, HubLaunchReport, HubObservation, HubProcessIdentity, HubSubmission } from "@graphloom/sdk";
 
 export interface HubExecutionObservation {
@@ -11,6 +12,12 @@ export interface HubExecutionObservation {
   observation?: HubObservation;
   /** What the launch reported about its own end (docs/design-run-hub.md §6.1); absent when it wrote nothing (it was killed). */
   report?: HubLaunchReport;
+  /**
+   * What the launch cgroup recorded about memory when the launch drained
+   * (docs/design-run-hub.md §6.2): an OOM kill there settles as a memory
+   * outcome, never as a plain crash.
+   */
+  memory?: HubLaunchMemory;
   reason?: string;
 }
 export interface HubDriver {

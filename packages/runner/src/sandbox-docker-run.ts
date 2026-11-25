@@ -5,7 +5,9 @@
  * Runs one `docker run` for the command executor (`node sandbox-docker-run.js <spec.json>`) and
  * makes sure its container dies with it. The Docker CLI forwards SIGTERM but not SIGKILL, and a
  * container's first process ignores SIGTERM it does not handle, so on a stop signal or when the
- * container's wall clock ends this kills the container by name before it exits.
+ * container's wall clock ends this kills the container by name before it exits. When the container
+ * ends on its own it reads whether the kernel OOM-killed it at its memory limit, writes that beside
+ * the spec (`<spec>.end.json`), and removes the container (it runs without --rm so it can be read).
  */
 
 import { spawn, spawnSync } from "node:child_process";
@@ -20,6 +22,7 @@ interface Spec {
   args: string[];
   guards: Array<{ root: string; rel: string }>;
   reportAt?: number;
+  memory?: string;
 }
 
 const specFile = process.argv[2];
@@ -84,10 +87,31 @@ child.once("error", (err) => {
   process.stderr.write(`graphloom: cannot start docker: ${err.message}\n`);
   process.exit(127);
 });
+/** Whether Docker records the container as killed by the kernel's OOM killer (exit 137 alone could be any SIGKILL). */
+const oomKilled = (): boolean => {
+  const inspect = spawnSync("docker", ["inspect", "--format", "{{.State.OOMKilled}}", spec.name], { encoding: "utf8", timeout: KILL_WAIT_MS });
+  return inspect.status === 0 && inspect.stdout.trim() === "true";
+};
+/** The container runs without --rm, so its state can be read: it is removed here once it ended. */
+const removeContainer = (): void => {
+  spawnSync("docker", ["rm", "-f", spec.name], { stdio: "ignore", timeout: KILL_WAIT_MS });
+};
+
 child.once("exit", (code, signal) => {
   exited = true;
   clearTimeout(timer);
-  if (stopping === "wall-clock") process.exit(124);
-  if (stopping === "signal") process.exit(143);
-  process.exit(code ?? (signal !== null ? 128 + (signal === "SIGKILL" ? 9 : 15) : 1));
+  if (stopping !== undefined) {
+    removeContainer();
+    process.exit(stopping === "wall-clock" ? 124 : 143);
+  }
+  const exitCode = code ?? (signal !== null ? 128 + (signal === "SIGKILL" ? 9 : 15) : 1);
+  const oom = exitCode === 137 && oomKilled();
+  if (oom) process.stderr.write(`graphloom: container ${spec.name} was killed at its memory limit (--memory ${spec.memory ?? "unknown"}; OOMKilled)\n`);
+  try {
+    writeFileSync(`${specFile}.end.json`, JSON.stringify({ exitCode, oomKilled: oom }));
+  } catch {
+    /* The job reports the exit code alone. */
+  }
+  removeContainer();
+  process.exit(exitCode);
 });

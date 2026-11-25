@@ -119,16 +119,18 @@ export function createCliRunner(
         ...(githubModule !== undefined ? { allowUnrestricted: true as const } : {}),
       }]
     : [];
+  // The operator's ceiling on docker-confined containers, which run outside the hub's launch cgroup.
+  const dockerOptions = config.docker?.maxMemory !== undefined ? { docker: { maxMemory: config.docker.maxMemory } } : {};
   const commandPackage = (module: string) => ({
     manifest: { ...commandExecutorPackage, entryModule: module },
     ...commandBinding(commandOptions(config)),
   });
   const others =
     commandModule === undefined
-      ? createBuiltinExecutorRunner({ managedProcessOnly: true, packages: [commandPackage(commandExecutorPackage.entryModule), ...githubPackages], fallback })
+      ? createBuiltinExecutorRunner({ managedProcessOnly: true, ...dockerOptions, packages: [commandPackage(commandExecutorPackage.entryModule), ...githubPackages], fallback })
       : routeEnvironmentChecks(
-          createBuiltinExecutorRunner({ managedProcessOnly: true, packages: [commandPackage(commandExecutorPackage.entryModule), ...githubPackages], fallback }),
-          createBuiltinExecutorRunner({ managedProcessOnly: true, packages: [commandPackage(commandModule), ...githubPackages], fallback }),
+          createBuiltinExecutorRunner({ managedProcessOnly: true, ...dockerOptions, packages: [commandPackage(commandExecutorPackage.entryModule), ...githubPackages], fallback }),
+          createBuiltinExecutorRunner({ managedProcessOnly: true, ...dockerOptions, packages: [commandPackage(commandModule), ...githubPackages], fallback }),
           environmentCommands ?? new Map(),
         );
   const defaultAgent = agents.get(config.harness)!;

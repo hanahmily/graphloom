@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { HubConfig } from "@graphloom/sdk";
+import { DEFAULT_LAUNCH_MEMORY_MAX, parseMemorySize } from "@graphloom/hub";
 
 export interface HubServiceConfig extends HubConfig {
   directory: string;
@@ -12,6 +13,19 @@ export interface HubServiceConfig extends HubConfig {
   cgroupRoot: string;
   runnerConfig?: string;
   supervisorConfig?: string;
+  /**
+   * Each launch cgroup's `memory.high` / `memory.max` in bytes (docs/design-run-hub.md §6.2);
+   * null (or absent) is `max`, no limit. `loadHubConfig` always sets both: by default
+   * 6 GiB, and two thirds of the max (4 GiB).
+   */
+  launchMemoryHigh?: number | null;
+  launchMemoryMax?: number | null;
+  /**
+   * The service's own MemoryHigh / MemoryMax that `hub service --limits` writes (§9.1);
+   * absent: derived from the launch limits and maxConcurrentRuns. null is `infinity`.
+   */
+  serviceMemoryHigh?: number | null;
+  serviceMemoryMax?: number | null;
 }
 
 export function hubPaths(env: NodeJS.ProcessEnv = process.env): { directory: string; socket: string; config: string } {
@@ -31,7 +45,7 @@ export async function loadHubConfig(file?: string, env: NodeJS.ProcessEnv = proc
   try { raw = JSON.parse(await readFile(source, "utf8")); }
   catch (error) { if (file !== undefined || (error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   const value = object(raw, "hub configuration");
-  const allowed = new Set(["maxConcurrentRuns", "retry", "pollIntervalMs", "shutdownGraceMs", "directory", "socket", "cgroupRoot", "runnerConfig", "supervisorConfig"]);
+  const allowed = new Set(["maxConcurrentRuns", "retry", "pollIntervalMs", "shutdownGraceMs", "directory", "socket", "cgroupRoot", "runnerConfig", "supervisorConfig", "launchMemoryHigh", "launchMemoryMax", "serviceMemoryHigh", "serviceMemoryMax"]);
   for (const key of Object.keys(value)) if (!allowed.has(key)) throw new Error(`unknown hub configuration field: ${key}`);
   const retry = object(value.retry ?? {}, "hub retry policy");
   for (const key of Object.keys(retry)) if (!["automatic", "maxAutomaticResumes", "maxElapsedMs", "baseDelayMs", "maxDelayMs"].includes(key)) throw new Error(`unknown hub retry field: ${key}`);
@@ -41,6 +55,7 @@ export async function loadHubConfig(file?: string, env: NodeJS.ProcessEnv = proc
     if (typeof v !== "string" || !v || v.includes("\0")) throw new Error("hub paths must be nonempty strings");
     return path.resolve(path.dirname(source), v);
   };
+  const launchMemoryMax = value.launchMemoryMax === undefined ? DEFAULT_LAUNCH_MEMORY_MAX : parseMemorySize(value.launchMemoryMax, "launchMemoryMax");
   const config: HubServiceConfig = {
     maxConcurrentRuns: integer(value.maxConcurrentRuns ?? 2, "maxConcurrentRuns", 0, 1024),
     retry: {
@@ -57,7 +72,15 @@ export async function loadHubConfig(file?: string, env: NodeJS.ProcessEnv = proc
     cgroupRoot: resolve(value.cgroupRoot, await currentCgroup()),
     ...(value.runnerConfig !== undefined ? { runnerConfig: resolve(value.runnerConfig) } : {}),
     ...(value.supervisorConfig !== undefined ? { supervisorConfig: resolve(value.supervisorConfig) } : {}),
+    launchMemoryMax,
+    // Two thirds of the max by default (4 GiB of 6 GiB): the kernel throttles and reclaims before it kills.
+    launchMemoryHigh: value.launchMemoryHigh !== undefined ? parseMemorySize(value.launchMemoryHigh, "launchMemoryHigh") : launchMemoryMax === null ? null : Math.floor(launchMemoryMax * 2 / 3),
+    ...(value.serviceMemoryHigh !== undefined ? { serviceMemoryHigh: parseMemorySize(value.serviceMemoryHigh, "serviceMemoryHigh") } : {}),
+    ...(value.serviceMemoryMax !== undefined ? { serviceMemoryMax: parseMemorySize(value.serviceMemoryMax, "serviceMemoryMax") } : {}),
   };
+  // A launchMemoryHigh above launchMemoryMax never throttles: the kernel kills first.
+  if (config.launchMemoryHigh != null && config.launchMemoryMax != null && config.launchMemoryHigh > config.launchMemoryMax) throw new Error("launchMemoryHigh must not exceed launchMemoryMax");
+  if (config.serviceMemoryHigh != null && config.serviceMemoryMax != null && config.serviceMemoryHigh > config.serviceMemoryMax) throw new Error("serviceMemoryHigh must not exceed serviceMemoryMax");
   if (config.retry.maxDelayMs < config.retry.baseDelayMs) throw new Error("maxDelayMs must be at least baseDelayMs");
   if (Buffer.byteLength(config.socket) > 100) throw new Error("hub socket path exceeds 100 bytes; choose a shorter socket path");
   return config;

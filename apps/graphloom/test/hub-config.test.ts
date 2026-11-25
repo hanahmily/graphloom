@@ -26,6 +26,17 @@ describe("hub configuration", () => {
   ])("rejects invalid settings %j", async value => {
     const { file } = await config(value); await expect(loadHubConfig(file)).rejects.toThrow();
   });
+  it("limits each launch's memory by default (4 GiB high, 6 GiB max) and takes sizes, bytes or max", async () => {
+    const GiB = 1024 ** 3;
+    expect(await loadHubConfig((await config({ cgroupRoot: "delegated" })).file)).toMatchObject({ launchMemoryHigh: 4 * GiB, launchMemoryMax: 6 * GiB });
+    expect(await loadHubConfig((await config({ cgroupRoot: "delegated", launchMemoryMax: "12G" })).file)).toMatchObject({ launchMemoryHigh: 8 * GiB, launchMemoryMax: 12 * GiB });
+    expect(await loadHubConfig((await config({ cgroupRoot: "delegated", launchMemoryHigh: 3 * GiB, launchMemoryMax: "3.5G", serviceMemoryHigh: "10G", serviceMemoryMax: "max" })).file))
+      .toMatchObject({ launchMemoryHigh: 3 * GiB, launchMemoryMax: 3.5 * GiB, serviceMemoryHigh: 10 * GiB, serviceMemoryMax: null });
+    expect(await loadHubConfig((await config({ cgroupRoot: "delegated", launchMemoryMax: "max" })).file)).toMatchObject({ launchMemoryHigh: null, launchMemoryMax: null });
+    for (const value of [{ launchMemoryHigh: "8G", launchMemoryMax: "6G" }, { launchMemoryMax: "lots" }, { launchMemoryMax: "1M" }, { serviceMemoryHigh: "9G", serviceMemoryMax: "8G" }]) {
+      await expect(loadHubConfig((await config({ cgroupRoot: "delegated", ...value })).file)).rejects.toThrow(/Memory/);
+    }
+  });
   it("uses explicit XDG/environment paths without borrowing the real operator home", () => {
     expect(hubPaths({ HOME: "/private", XDG_RUNTIME_DIR: "/runtime", XDG_STATE_HOME: "/state", XDG_CONFIG_HOME: "/config" })).toEqual({ directory: "/state/graphloom/hub", socket: "/runtime/graphloom/hub.sock", config: "/config/graphloom/hub.json" });
     expect(hubPaths({ HOME: "/private", GRAPHLOOM_HUB_STATE: "/override-state", GRAPHLOOM_HUB_SOCKET: "/override.sock" }).socket).toBe("/override.sock");

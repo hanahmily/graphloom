@@ -4,7 +4,7 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, lstatSync, realpathSync, statSync } from "node:fs";
-import { mkdir, writeFile, open, access } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile, open, access } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -40,6 +40,40 @@ export interface DockerRunSpec {
    * the working directory flag), when the executor names that file in `GRAPHLOOM_REPORT_FILE`.
    */
   reportAt: number;
+  /** The container's memory (and memory+swap) limit as passed to `docker run`, for the end report. */
+  memory?: string;
+}
+
+/**
+ * What the wrapper writes beside its spec (`<spec>.end.json`) when its container ended on its
+ * own: its exit code, and whether Docker says the kernel OOM-killed it at its memory limit.
+ */
+export interface DockerRunEnd {
+  exitCode: number;
+  oomKilled: boolean;
+}
+
+/** The operator's limits on docker-confined jobs (the runner config's `docker`). */
+export interface DockerSandboxOptions {
+  /**
+   * The most memory (and memory+swap) any container gets, a docker size such as `6g`: a job
+   * declaring more runs with this instead, and its evidence says so. Absent: the job's own.
+   */
+  maxMemory?: string;
+}
+
+const SIZE_UNITS: Record<string, number> = { "": 1, b: 1, k: 1024, m: 1024 ** 2, g: 1024 ** 3 };
+/** A docker size (`8g`, `512m`, `1048576`) in bytes. */
+export function dockerSizeBytes(size: string): number {
+  const match = /^([1-9][0-9]{0,14})([bkmg]?)$/i.exec(size);
+  if (!match) throw new Error(`${JSON.stringify(size)} is not a docker size such as 8g, 512m or 1048576`);
+  return Number(match[1]) * SIZE_UNITS[match[2]!.toLowerCase()]!;
+}
+
+/** The memory a container gets: the job's, or the operator's ceiling when the job declares more. */
+export function containerMemory(declared: string, options: DockerSandboxOptions = {}): { memory: string; capped: boolean } {
+  if (options.maxMemory === undefined || dockerSizeBytes(declared) <= dockerSizeBytes(options.maxMemory)) return { memory: declared, capped: false };
+  return { memory: options.maxMemory, capped: true };
 }
 
 export interface DockerRunOptions {
@@ -66,9 +100,9 @@ export function dockerRunArgs(spec: DockerConfinement, options: DockerRunOptions
   if (!DIGEST.test(spec.image)) throw new Error(`docker image ${JSON.stringify(spec.image)} must be pinned by digest (name@sha256:...)`);
   if (options.argv.length === 0 || options.argv[0] === "") throw new Error("a docker command needs a program");
   const [program, ...rest] = options.argv as [string, ...string[]];
+  // No --rm: the wrapper reads the container's OOMKilled state after it exits, then removes it.
   return [
     "run",
-    "--rm",
     "--name", options.name,
     "--label", `${RUN_LABEL}=${options.runId}`,
     "--label", `${OPERATION_LABEL}=${options.operationId}`,
@@ -238,6 +272,8 @@ interface PreparedDockerJob {
   job: JobSpec;
   names: string[];
   originals: Map<string, OriginalCommand>;
+  /** Each command's spec file, by command id: the wrapper's end report is beside it. */
+  specFiles: Map<string, string>;
 }
 
 /**
@@ -246,14 +282,16 @@ interface PreparedDockerJob {
  * description goes in a spec file under the run's artifacts, so it does not count against the
  * executor's argument limits. Or why the job cannot run.
  */
-async function prepareDockerJob(job: JobSpec, spec: DockerConfinement, ctx: JobContext): Promise<PreparedDockerJob | { refusal: string }> {
+async function prepareDockerJob(job: JobSpec, declared: DockerConfinement, ctx: JobContext, options: DockerSandboxOptions): Promise<PreparedDockerJob | { refusal: string }> {
+  // The operator's ceiling replaces a larger declared memory limit (the evidence records both).
+  const spec: DockerConfinement = { ...declared, memory: containerMemory(declared.memory, options).memory };
   const { confinement: _spec, ...plain } = job;
   void _spec;
   const input = job.input as { commands?: unknown; env?: unknown } | undefined;
   const commands = input?.commands;
   if (!Array.isArray(commands) || commands.some((c) => c === null || typeof c !== "object" || !Array.isArray((c as { argv?: unknown }).argv))) {
     // Not a command input: the executor says what is wrong with it.
-    return { job: plain, names: [], originals: new Map() };
+    return { job: plain, names: [], originals: new Map(), specFiles: new Map() };
   }
   if (input?.env !== undefined && Object.keys(input.env as object).length > 0) {
     return { refusal: "a command job in a docker confinement takes its environment from the confinement's env, not from input.env" };
@@ -329,6 +367,7 @@ async function prepareDockerJob(job: JobSpec, spec: DockerConfinement, ctx: JobC
   }
   const names: string[] = [];
   const originals = new Map<string, OriginalCommand>();
+  const specFiles = new Map<string, string>();
   const rewritten: unknown[] = [];
   for (const [index, raw] of (commands as Array<{ id: string; argv: string[] }>).entries()) {
     const name = containerName(ctx.runId, ctx.operationId, index);
@@ -350,21 +389,46 @@ async function prepareDockerJob(job: JobSpec, spec: DockerConfinement, ctx: JobC
       return { refusal: err instanceof Error ? err.message : String(err) };
     }
     const specFile = path.join(specDir, `${index}.json`);
-    const runSpec: DockerRunSpec = { name, wallClockMs: spec.wallClockMs, args, guards, reportAt: args.indexOf("-w") };
+    const runSpec: DockerRunSpec = { name, wallClockMs: spec.wallClockMs, args, guards, reportAt: args.indexOf("-w"), memory: spec.memory };
     await writeFile(specFile, JSON.stringify(runSpec, null, 2), "utf8");
+    await rm(`${specFile}.end.json`, { force: true });
+    specFiles.set(raw.id, specFile);
     rewritten.push({ ...(raw as object), argv: [process.execPath, DOCKER_RUN_MODULE, specFile] });
   }
-  return { job: { ...plain, input: { ...(input as object), commands: rewritten } }, names, originals };
+  return { job: { ...plain, input: { ...(input as object), commands: rewritten } }, names, originals, specFiles };
 }
 
-/** The evidence of a docker job names the command the plugin declared, and the image it ran in. */
-function restoreEvidence(evidence: JobEvidenceItem[] | undefined, spec: DockerConfinement, originals: ReadonlyMap<string, OriginalCommand>): JobEvidenceItem[] | undefined {
+/** Each command's container end, by command id, where its wrapper reported one. */
+async function readRunEnds(specFiles: ReadonlyMap<string, string>): Promise<Map<string, DockerRunEnd>> {
+  const ends = new Map<string, DockerRunEnd>();
+  for (const [id, file] of specFiles) {
+    try {
+      const value = JSON.parse(await readFile(`${file}.end.json`, "utf8")) as Partial<DockerRunEnd>;
+      if (typeof value.exitCode === "number" && typeof value.oomKilled === "boolean") ends.set(id, { exitCode: value.exitCode, oomKilled: value.oomKilled });
+    } catch { /* No end report: the wrapper was stopped or never ran. */ }
+  }
+  return ends;
+}
+
+/** Why a container was OOM-killed, as the job's summary and evidence say it. */
+export function containerOomReason(id: string, memory: string, capped: string | undefined): string {
+  return `${id}: the container was killed at its memory limit (--memory ${memory}${capped !== undefined ? `, the runner config's docker.maxMemory in place of the declared ${capped}` : ""}; exit 137, OOMKilled)`;
+}
+
+/**
+ * The evidence of a docker job names the command the plugin declared, the image it ran in and its
+ * memory limit, and, for a container the kernel killed at that limit, `oomKilled`.
+ */
+function restoreEvidence(evidence: JobEvidenceItem[] | undefined, spec: DockerConfinement, originals: ReadonlyMap<string, OriginalCommand>, ends: ReadonlyMap<string, DockerRunEnd>, options: DockerSandboxOptions): JobEvidenceItem[] | undefined {
   if (evidence === undefined) return undefined;
+  const { memory, capped } = containerMemory(spec.memory, options);
   return evidence.map((item) => {
     const command = (item.payload as { command?: { id?: unknown } } | undefined)?.command;
     const original = typeof command?.id === "string" ? originals.get(command.id) : undefined;
     if (item.kind !== "command" || command === undefined || original === undefined) return item;
-    return { ...item, payload: { ...(item.payload as object), command: { ...command, argv: original.argv, sandbox: { kind: "docker", image: spec.image } } } };
+    const oomKilled = ends.get(original.id)?.oomKilled === true;
+    const sandbox = { kind: "docker", image: spec.image, memory, ...(capped ? { declaredMemory: spec.memory } : {}), ...(oomKilled ? { oomKilled: true, failure: containerOomReason(original.id, memory, capped ? spec.memory : undefined) } : {}) };
+    return { ...item, payload: { ...(item.payload as object), command: { ...command, argv: original.argv, sandbox } } };
   });
 }
 
@@ -374,7 +438,8 @@ function restoreEvidence(evidence: JobEvidenceItem[] | undefined, spec: DockerCo
  * removed afterwards. `releaseRun` removes the containers a stopped controller left behind. A job
  * with another executor, or no docker confinement, passes through untouched.
  */
-export function withDockerConfinement(inner: Runner): Runner {
+export function withDockerConfinement(inner: Runner, options: DockerSandboxOptions = {}): Runner {
+  if (options.maxMemory !== undefined) dockerSizeBytes(options.maxMemory);
   const managedStateDirs = new Set<string>();
   const applies = (job: JobSpec): { pinned: JobSpec; spec: DockerConfinement } | undefined => {
     const pinned = pinJobExecutor(job);
@@ -424,7 +489,7 @@ export function withDockerConfinement(inner: Runner): Runner {
           const directory = await open(managedStateDir, "r");
           try { await directory.sync(); } finally { await directory.close(); }
         }
-        prepared = await prepareDockerJob(found.pinned, found.spec, ctx);
+        prepared = await prepareDockerJob(found.pinned, found.spec, ctx, options);
       } catch (err) {
         return failed(`docker confinement could not be prepared, so the job was not run: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -434,8 +499,16 @@ export function withDockerConfinement(inner: Runner): Runner {
       ctx.signal?.addEventListener("abort", onAbort, { once: true });
       try {
         const result = await inner.runJob(prepared.job, ctx);
-        const evidence = restoreEvidence(result.evidence, found.spec, prepared.originals);
-        return evidence !== undefined ? { ...result, evidence } : result;
+        // A container the kernel killed at its memory limit is a recognised failure, not a bare exit 137.
+        const ends = await readRunEnds(prepared.specFiles);
+        const { memory, capped } = containerMemory(found.spec.memory, options);
+        const oom = [...ends].filter(([, end]) => end.oomKilled).map(([id]) => containerOomReason(id, memory, capped ? found.spec.memory : undefined));
+        const evidence = restoreEvidence(result.evidence, found.spec, prepared.originals, ends, options);
+        return {
+          ...result,
+          ...(oom.length > 0 ? { summary: `${result.summary}; ${oom.join("; ")}` } : {}),
+          ...(evidence !== undefined ? { evidence } : {}),
+        };
       } finally {
         ctx.signal?.removeEventListener("abort", onAbort);
         // Anything the job left running goes with it.

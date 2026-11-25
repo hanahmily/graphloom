@@ -559,6 +559,73 @@ retries an initial launch (captured input is immutable, so a refused task or
 scenario needs a new submission). Any other failure follows the continuation
 rules of §7.
 
+### 6.2 Memory containment
+
+The host the hub shares is finite, and one run's agents, builds and tests can
+take all of it: a global out-of-memory kill then picks a victim anywhere, the
+user's systemd manager included, which takes the hub and its socket down with
+it. So every launch runs under memory limits, and an OOM kill is a recognised
+outcome, not a crash.
+
+**Launch limits.** `hub.json`'s `launchMemoryHigh` and `launchMemoryMax`
+(bytes, or a systemd-style size: `512M`, `4G`, `1.5G`; `max` for none) are
+written to each launch cgroup's `memory.high` and `memory.max` before its
+bootstrap starts, with `memory.oom.group=1`: an OOM inside a launch (at its
+own limit, or a global one that chose one of its processes) kills the launch's
+whole group, controller included, never one random process of it, so the run
+resumes from its last accepted state instead of continuing with a job's
+process missing. The defaults are 6 GiB for the max and two thirds of the max
+(4 GiB) for the high, where the kernel throttles and reclaims before it kills.
+A launch holds its controller and plugin worker (a few hundred MiB), the agent
+CLIs of its parallel jobs (each several hundred MiB), and command jobs' builds
+and tests run on the host (a Go or Node test suite takes a few GiB); 6 GiB
+holds that with room, and two default slots (12 GiB) leave most of a 32 GiB
+host to everything else on it. A limit needs the delegated memory controller:
+with a limit configured, the probe refuses to start the hub (naming the
+cgroup and its controllers) when `memory` is not delegated, and a launch whose
+limits cannot be written fails before anything of it runs. With both set to
+`max` the hub writes no limit and needs no memory controller.
+
+**An OOM-killed launch.** When a launch drains, the hub reads its cgroup's
+`memory.events` and `memory.peak` before removing it. A granted launch that
+wrote no report of its end (§6.1) and whose cgroup records an OOM kill
+(`oom_kill` or `oom_group_kill`) ended on memory:
+
+| Record | Cause | Hub behaviour |
+| --- | --- | --- |
+| `oom` > 0: the cgroup reached its own `memory.max` | `memory limit reached (<limit>): the kernel killed the launch at its cgroup's memory.max (launchMemoryMax); peak <peak>` | One automatic retry; reached again with no accepted progress between, it blocks with that cause and what to change |
+| `oom` = 0 | `killed by the out-of-memory killer outside the launch's own limit (the hub service's MemoryMax, or the host out of memory)` | An ordinary crash retry, under the normal allowance (§7) |
+
+One retry, not none: the run resumes from its last accepted state, and a peak
+made of concurrent jobs that happened to overlap need not recur. Not more: a
+second kill at the same limit with no progress between says the run's working
+set does not fit, and another attempt would only spend time (and, with agent
+jobs, tokens) to reach it again. Accepted progress between kills resets that
+count, as for any repeated failure fingerprint; every retry still spends the
+submission's allowance. The blocker reads `memory limit reached (6 GiB): ...;
+reached again on its automatic retry with no accepted progress, so the hub
+does not retry it: raise launchMemoryMax in hub.json and restart the hub (or
+lower the run's parallel jobs), then graphloom hub resume <submission>`. A run
+that recorded an operator stop keeps that stop, with the memory cause before
+it. The launch's log gets the cause as its closing line (§8). `hub inspect
+--panel usage` shows the launch's peak against its limit, its high, and any
+OOM-killed processes, read from the launch cgroup while it runs; a launch that
+reported its own end is settled by its report, whatever its cgroup recorded.
+
+**Docker-confined jobs.** A docker-confined command job's containers run in
+Docker's cgroups, outside the launch's and the service's, so neither limit
+covers them. Each container gets its confinement's `memory` as `--memory` and
+an equal `--memory-swap` (no swap beyond it); the runner config's
+`docker.maxMemory` (a docker size such as `6g`) caps every container: a job
+declaring more runs with the ceiling, and its command evidence records both
+(`sandbox.memory`, `sandbox.declaredMemory`). Containers run without `--rm`,
+so that once one exits on its own the wrapper reads Docker's `OOMKilled`; a
+container that exited 137 with `OOMKilled` is reported as `<command>: the
+container was killed at its memory limit (--memory <size>; exit 137,
+OOMKilled)` in the job's summary and as `sandbox.oomKilled` in its evidence,
+then removed (as before, the runner removes the job's containers afterwards,
+and resume cleanup removes any the run left).
+
 ## 7. Automatic continuation
 
 The controller currently exposes stop retryability, quota/retry timing, and
@@ -956,7 +1023,8 @@ environment, so a toolchain the profile puts on `PATH` (a Go or nvm Node, say),
 from its provider), and the runner config's token variables are missing unless
 the unit provides them, while `graphloom doctor` in the operator's shell still
 passes. `graphloom hub service` writes that environment explicitly, as two
-drop-ins beside the unit `graphloom-hub.service`, under
+drop-ins beside the unit `graphloom-hub.service` (a third, `--limits`, holds
+its memory limits; below), under
 `$XDG_CONFIG_HOME/systemd/user/graphloom-hub.service.d/` (default
 `~/.config/systemd/user/...`):
 
@@ -985,7 +1053,7 @@ drop-ins beside the unit `graphloom-hub.service`, under
   caller's environment, else `gh auth token`. The write token is opt-in:
   `--write-token` adds `github.writeTokenEnv` the same way. A secret is never
   captured anywhere but this file, and never printed.
-- Without `--write` both drop-ins are printed and nothing is written; with it,
+- Without `--write` the drop-ins are printed and nothing is written; with it,
   the token file and the drop-ins are written (mode 0600). Either way only
   variable names go to stderr. Plain `graphloom hub service` still prints the
   unit and installs nothing.
@@ -1000,8 +1068,41 @@ graphloom hub doctor --task ./tasks/fix/task.yaml
 Re-run it after changing the shell profile or a toolchain, and after `gh auth
 login` or a token rotation (the token file is a copy), then reload and restart
 the service; a restart stops active runs cooperatively and continues them. The
-two drop-ins are independent: refreshing the tokens leaves the captured
-environment alone, and the reverse.
+drop-ins are independent: refreshing the tokens leaves the captured
+environment and the limits alone, and the reverse.
+
+**Memory limits.** `--limits` adds a third drop-in, `10-limits.conf`, with
+the service's own `MemoryAccounting=yes`, `MemoryHigh=` and `MemoryMax=`
+(§6.2): `hub.json`'s `serviceMemoryHigh`/`serviceMemoryMax` when given, else
+each launch limit times `maxConcurrentRuns` (at least one) plus 1 GiB for the
+hub itself and its observe and doctor children (9G/13G with the defaults and
+two slots); a launch limit of `max` derives `infinity`. Printed without
+`--write`, written (0600) with it, like the other two. Values set with
+`systemctl --user set-property graphloom-hub.service MemoryHigh=... MemoryMax=...`
+live in `~/.config/systemd/user.control/graphloom-hub.service.d/50-Memory*.conf`
+and take precedence: systemd applies drop-ins of every directory in file-name
+order, and `10-limits.conf` sorts first, so a set-property value wins until its
+file is removed (`--limits` says so). A `MemoryMax` change applies on
+`systemctl --user daemon-reload`; a launch limit change in `hub.json` applies
+to launches started after the hub restarts.
+
+`hub status` shows the service's MemoryHigh, MemoryMax, current and peak use
+(read from the delegated cgroup), the launch limits and concurrency, and each
+live launch's current and peak use against its limit; `hub status --json`
+carries them as `memory`. Both `hub status` and `hub doctor` (a `hub memory`
+check among its host checks) warn when the service has no MemoryMax (or a
+MemoryMax but no MemoryHigh), when `launchMemoryMax` is `max`, when it
+exceeds the service's MemoryMax, and when `launchMemoryMax` times the
+concurrency limit exceeds the service's MemoryMax: launches together can then
+reach the service's limit, where the kernel kills one that is under its own
+(the warning names the `hub limit` that would fit). Docker containers are in
+none of these (§6.2).
+
+```sh
+graphloom hub service --limits --write
+systemctl --user daemon-reload
+graphloom hub status     # Memory: and Launch limits: lines, and any warning
+```
 
 The hub must not use the daily-update shim as the running daemon executable.
 Runtime upgrades are an explicit service restart; existing runs retain their

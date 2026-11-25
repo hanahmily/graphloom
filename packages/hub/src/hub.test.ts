@@ -10,6 +10,7 @@ import type { HubContinuation, HubLaunch, HubLaunchReport, HubObservation, HubSu
 import { assertHubGrant, openHub, submissionBlocker } from "./hub.js";
 import type { Hub } from "./hub.js";
 import type { HubDriver, HubExecutionObservation, HubSubmitRequest } from "./types.js";
+import type { HubLaunchMemory } from "./memory.js";
 
 const folders: string[] = [];
 const hubs: Hub[] = [];
@@ -782,5 +783,76 @@ describe("operator commands and launch reports (campaign findings)", () => {
     await hub.tick();
     expect(hub.inspect(a.id).blocker).toBe(`plugin update refused: ${drift.blocker}; the run still stops on: ${waiting().blocker}`);
     expect(hub.inspect(a.id).lastResume).toMatchObject({ commandId: "update", status: "refused", reason: `plugin update refused: ${drift.blocker}` });
+  });
+});
+
+describe("a launch the OOM killer ended (docs/design-run-hub.md §6.2)", () => {
+  const GiB = 1024 ** 3;
+  const atLimit: HubLaunchMemory = { oom: 1, oomKill: 3, oomGroupKill: 1, maxBytes: 6 * GiB, peakBytes: 6 * GiB };
+  const crashed = (progressRevision = 0) => observation({ kind: "automatic", cause: "controller-crash", fingerprint: "crash", stateRevision: 1 }, progressRevision);
+  const killed = (driver: FakeDriver, s: HubSubmission, memory: HubLaunchMemory, observed: HubObservation | null = crashed()) => {
+    driver.executions.set(s.launch!.id, { execution: "drained", ownerGone: true, externalStopped: true, memory, ...(observed ? { observation: observed } : {}) });
+  };
+
+  it("retries once at the launch's own limit, then blocks naming the limit and what to change", async () => {
+    const { hub, driver, advance } = await fixture(); const a = await accepted(hub); await hub.tick();
+    killed(driver, hub.inspect(a.id), atLimit); await hub.tick();
+    const waiting = hub.inspect(a.id);
+    expect(waiting).toMatchObject({ state: "waiting", automaticPending: true, failureFingerprint: `memory-limit:${a.runId}` });
+    expect(waiting.lastFailure).toBe("controller-crash: memory limit reached (6 GiB): the kernel killed the launch at its cgroup's memory.max (launchMemoryMax); peak 6 GiB");
+    expect(driver.logs[0]).toMatch(new RegExp(`^graphloom: run ${a.runId} waiting: the launch was killed: memory limit reached \\(6 GiB\\)`));
+    advance(1000); await hub.tick();
+    expect(hub.inspect(a.id).state).toBe("running");
+    // The retry reaches the same limit with no accepted progress: the working set does not fit.
+    killed(driver, hub.inspect(a.id), atLimit); await hub.tick();
+    const blocked = hub.inspect(a.id);
+    expect(blocked.state).toBe("blocked");
+    expect(blocked.blocker).toBe(`memory limit reached (6 GiB): the kernel killed the launch at its cgroup's memory.max (launchMemoryMax); peak 6 GiB; reached again on its automatic retry with no accepted progress, so the hub does not retry it: raise launchMemoryMax in hub.json and restart the hub (or lower the run's parallel jobs), then graphloom hub resume ${a.id}`);
+    expect(blocked.automaticResumes).toBe(1);
+    advance(100_000); await hub.tick();
+    expect(hub.inspect(a.id).state).toBe("blocked");
+    // The operator's resume launches it again.
+    await hub.resume(a.id); await hub.tick();
+    expect(hub.inspect(a.id).state).toBe("running");
+  });
+
+  it("retries again when the run made accepted progress between the kills", async () => {
+    const { hub, driver, advance } = await fixture(); const a = await accepted(hub); await hub.tick();
+    killed(driver, hub.inspect(a.id), atLimit, crashed(1)); await hub.tick(); advance(1000); await hub.tick();
+    killed(driver, hub.inspect(a.id), atLimit, crashed(2)); await hub.tick();
+    expect(hub.inspect(a.id)).toMatchObject({ state: "waiting", automaticResumes: 1 });
+  });
+
+  it("treats a kill outside the launch's own limit as a crash under the normal allowance", async () => {
+    const { hub, driver, advance } = await fixture(); const a = await accepted(hub); await hub.tick();
+    const outside: HubLaunchMemory = { oom: 0, oomKill: 2, oomGroupKill: 1, maxBytes: 6 * GiB };
+    killed(driver, hub.inspect(a.id), outside); await hub.tick(); advance(1000); await hub.tick();
+    killed(driver, hub.inspect(a.id), outside); await hub.tick();
+    const s = hub.inspect(a.id);
+    expect(s).toMatchObject({ state: "waiting", failureFingerprint: `memory-outside:${a.runId}`, failureRepeats: 2 });
+    expect(s.lastFailure).toContain("killed by the out-of-memory killer outside the launch's own limit");
+  });
+
+  it("reconciles an unobserved kill, and keeps an operator stop with the memory cause beside it", async () => {
+    const unobserved = await fixture(); const a = await accepted(unobserved.hub); await unobserved.hub.tick();
+    killed(unobserved.driver, unobserved.hub.inspect(a.id), atLimit, null); await unobserved.hub.tick();
+    expect(unobserved.hub.inspect(a.id)).toMatchObject({ state: "waiting", reconciliationPending: true });
+    const stopped = await fixture(); const b = await accepted(stopped.hub); await stopped.hub.tick();
+    killed(stopped.driver, stopped.hub.inspect(b.id), atLimit, { ...observation({ kind: "operator", cause: "reconciliation", evidenceRefs: [] }), blocker: "an effect needs reconciling" });
+    await stopped.hub.tick();
+    expect(stopped.hub.inspect(b.id).blocker).toMatch(/^the launch was killed: memory limit reached \(6 GiB\).*; the run stops on: an effect needs reconciling$/);
+  });
+
+  it("ignores the cgroup's OOM record when the launch reported its end, or no OOM killer acted", async () => {
+    const { hub, driver } = await fixture(); const a = await accepted(hub); await hub.tick();
+    const launch = hub.inspect(a.id).launch!;
+    driver.executions.set(launch.id, { execution: "drained", ownerGone: true, externalStopped: true, memory: atLimit, observation: observation({ kind: "complete" }),
+      report: { protocolVersion: 1, launchId: launch.id, generation: launch.generation, outcome: "completed", endedAt: new Date(0).toISOString() } });
+    await hub.tick();
+    expect(hub.inspect(a.id).state).toBe("succeeded");
+    const quiet = await fixture(); const b = await accepted(quiet.hub); await quiet.hub.tick();
+    killed(quiet.driver, quiet.hub.inspect(b.id), { oom: 0, oomKill: 0, oomGroupKill: 0, maxBytes: 6 * GiB });
+    await quiet.hub.tick();
+    expect(quiet.hub.inspect(b.id).lastFailure).toBe("controller-crash: the launch ended without reporting its end (killed or crashed)");
   });
 });
