@@ -190,7 +190,7 @@ function continued(ctx: QaContext, questions: Question[]): Question[] {
   return questions.map((q) => ({ ...q, id: ids.get(q.id) ?? q.id, stable: keys.get(q.id) ?? "" }));
 }
 
-export const answerContext = (ctx: QaContext, questions: readonly Question[]): AnswerContext => ({ questions, groundwork: ctx.groundwork, view: ctx.view, packs: ctx.packs, pinned: ctx.pinned });
+export const answerContext = (ctx: QaContext, questions: readonly Question[]): AnswerContext => ({ questions, groundwork: ctx.groundwork, view: ctx.view, packs: ctx.packs, pinned: ctx.pinned, files: ctx.analysis.snapshot.files });
 
 /** N1's own answer context: the principles that apply to the change must each be judged once. */
 export const necessityContext = (ctx: QaContext): AnswerContext => ({ ...answerContext(ctx, [necessityQuestion()]), principles: ctx.principles?.applicable ?? [] });

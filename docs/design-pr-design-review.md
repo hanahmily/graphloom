@@ -1,6 +1,6 @@
 # PR design review graph (`pr-design-review`)
 
-Status: implemented, `pr-design-review` 0.1.8 (`examples/plugins/pr-design-review`).
+Status: implemented, `pr-design-review` 0.1.9 (`examples/plugins/pr-design-review`).
 This is round 1 of a pull request's review: the design-level review. Round 2, the
 detail review, is the [PR-review graph](design-pr-review-graph.md) (`pr-review`
 1.x). The two graphs are independent plugins that share the review kit
@@ -220,6 +220,41 @@ related code. `none_found` true with `reusable` true is sent back. An answer tha
 names an existing feature, mechanism or library cites it. No answer carries a
 proposal (a split, a test outline or an assertion): `proposal.kind` must be
 `none`.
+
+**Equivalents and reuse.** An `existing-feature` answer with `reusable` true also
+lists each equivalent it names in `equivalents` (empty for every other answer,
+and when `none_found` is true or `reusable` false):
+
+| Field | Meaning |
+|---|---|
+| `name` | The one symbol or library, as the code writes it (`setup.PauseDataNodeWatch`) |
+| `cites` | The 1-based numbers of the answer's citations that show it: its definition and the code under or around it |
+| `reusedByPullRequest` | True only when the pull request's own added code already calls or imports it, instead of adding its own |
+| `uses` | When true: the head lines the pull request adds that call or import it (`path`, `start`, `end`, `quote`); empty when false |
+
+A reuse claim is verified twice, and holds only when both agree:
+
+- **Deterministically**, with the answer's other checks: every line of a use lies
+  in a hunk of the file's patch at the head, at most 20 lines, and a line the pull
+  request **adds** among them names the equivalent (it holds the name as written or
+  its last identifier, at identifier boundaries: `PauseDataNodeWatch(addr)` names
+  `setup.PauseDataNodeWatch`, `setup.PauseDataNodeWatchLocal(addr)` does not). A use in
+  a file the pull request does not change, on a context line, outside every hunk,
+  or in a file whose patch GitHub did not give fails, and the answer is sent back
+  (cite the added lines, or set `reusedByPullRequest` false). An equivalent's
+  `cites` must be numbers of the answer's citations.
+- **By the checker**, in its verdict's `reuse` (`{ equivalent, verdict, note }`,
+  one per claimed equivalent by its number; empty for every other answer and for
+  N1): `supported` only when the cited head lines really call or import that same
+  equivalent (not a namesake, a local copy or a comment). A claim left unjudged
+  sends the check back, like an unjudged principle; a refuted claim does not make
+  the answer's own verdict unsupported. `qa.json` records the judgments under the
+  answer's `check.reuse`, and the Q&A shows each equivalent with its uses and the
+  checker's judgment.
+
+An answer recorded before 0.1.9 has no `equivalents`, and a check no `reuse`: the
+gate then reads every outside citation as an equivalent the pull request does not
+use, as before ([§8](#8-the-gate)).
 
 #### Ids
 
@@ -473,6 +508,23 @@ The Round 1 stage computes the open items from `necessity.json` and `qa.json`
   `reusable: false` is an item. Answers whose only kind is `existing` and that cite
   one outside equivalent merge into one item, hosted by the lowest id, which lists
   the others in `covers`.
+- **Reuse is not an `existing` item.** An equivalent is **reused** when its entry
+  in the answer's `equivalents` says `reusedByPullRequest` (whose uses passed the
+  deterministic diff check, [§5.4](#54-answers)) and the checker's `check.reuse`
+  judgment of it is `supported`; nothing else counts, and the answer's words never
+  do. An outside citation is set aside only when a reused equivalent lists it in
+  its `cites` and no equivalent that is not reused also lists it; an outside
+  citation that no equivalent lists stays an equivalent the pull request does not
+  use. When every outside citation is set aside, the answer is not an item and is
+  recorded under `noted` as `the pull request already reuses it: <names>`. When
+  some remain (an answer naming several equivalents, only some reused), it is an
+  `existing` item for those that remain: its text names the reused ones and says
+  the item is about the others, and only the remaining citations merge it with
+  other answers. On apache/skywalking-banyandb#1496, Q1 answered that the base's
+  `setup.PauseDataNodeWatch`, `setup.ResumeDataNodeWatch` and the cluster setup
+  helpers already existed and that the new suite calls them, and was still an
+  `existing` item, because the gate never asked whether the pull request used the
+  equivalent it found.
 
 A missing test is not a round-1 item. Each item has its id (`N1`, `Q<n>`), kinds,
 status, text and, when its place lies inside a hunk at the head, its anchor. The
@@ -564,6 +616,7 @@ and `large-artifacts` exercise the shared report. The design review's own:
 | `added-other` | The questioner adds a design-level `other` question about `W1`; it is asked and answered like any other |
 | `other-corrected` | The questioner first adds a detail question of another type; it is refused and corrected |
 | `answer-finds-existing-feature` | The `existing-feature` answer cites `ParseDuration` outside the change: an `existing` item |
+| `answer-reuses-existing-feature` | The base's `schedule` does what the change needs and the line the pull request adds calls it: the answer claims the reuse at that line, the checker supports it, round 1 notes it and is clean |
 | `answer-no-library-with-whole-repo-search` | "None found", with the whole-repository searches and every go.mod entry with its source status |
 | `answer-checker-contradicts` | The checker's own search finds an equivalent in a vendored directory: one correction |
 | `needs-author-purpose`, `purpose-stated` | A purpose nobody states is `needs author`; a stated one is recorded with its quote and not asked |
@@ -630,3 +683,14 @@ and `large-artifacts` exercise the shared report. The design review's own:
   `stopped`, from before Round 1 and Publish. Every scenario is `ready` with
   `graphloom rehearse --offline`
   ([rehearsal design §4.6](design-graph-rehearsal.md#46-hermeticity-and-time)).
+- **0.1.9:** an `existing-feature` answer lists the equivalents it names, each
+  with the citations that show it and whether the pull request already uses it,
+  at the added head lines that call or import it; the claim is checked against
+  the diff and judged by the checker, and an equivalent the pull request is
+  verified to reuse is `noted`, not an `existing` item
+  ([§5.4](#54-answers), [§8](#8-the-gate)). On
+  apache/skywalking-banyandb#1496 the answer said the new suite calls the base's
+  cluster setup and watch-pause helpers, and the gate still raised it as "the
+  codebase or a declared library already has this". The
+  `answer-reuses-existing-feature` scenario rehearses it. An answer recorded
+  before 0.1.9 is read as before.

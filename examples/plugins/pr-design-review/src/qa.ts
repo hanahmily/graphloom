@@ -85,13 +85,27 @@ export function qaJson(i: QaInput): string {
   });
 }
 
+/** An existing-feature answer's equivalents, each with whether the pull request uses it and what the checker said of that claim. */
+export function reuseText(a: Pick<FinalAnswer, "equivalents" | "check">): string {
+  const checks = new Map((a.check.reuse ?? []).map((c) => [c.equivalent, c] as const));
+  return (a.equivalents ?? [])
+    .map((e, i) => {
+      if (!e.reusedByPullRequest) return `\`${oneLine(e.name)}\` (not used by the pull request)`;
+      const c = checks.get(i + 1);
+      const sites = e.uses.map((u) => `\`${u.path}:${u.start === u.end ? u.start : `${u.start}-${u.end}`}\``).join(", ");
+      return `\`${oneLine(e.name)}\` (used by the pull request at ${sites}; checker: ${c === undefined ? "not judged" : `${c.verdict}${c.note !== "" ? `: ${short(oneLine(c.note), 120)}` : ""}`})`;
+    })
+    .join(", ");
+}
+
 function evidenceLine(a: FinalAnswer): string {
   const parts: string[] = [];
   if (a.citations.length > 0) parts.push(`cites ${a.citations.map((c) => `${c.tree === "base" ? "" : `${c.tree} `}\`${c.path}${c.start < 1 ? "" : c.start === c.end ? `:${c.start}` : `:${c.start}-${c.end}`}\`${c.quote.trim() !== "" ? ` "${short(oneLine(c.quote), 70)}"` : ""}`).join(", ")}`);
   if (a.searches.length > 0) parts.push(`searches ${a.searches.map((s) => searchLine(s, 80)).join("; ")}`);
   if (a.inventory.length > 0) parts.push(`inventory ${a.inventory.map((d) => `${d.name}@${d.version}`).join(", ")}`);
   if (a.metrics.length > 0) parts.push(`metrics ${a.metrics.map((m) => `${m.function} (${m.path}) ${m.name} ${m.value}`).join(", ")}`);
-  const check = a.check.verdict === "downgraded" ? `downgraded to needs author${a.check.note !== "" ? ` (${oneLine(a.check.note)})` : ""}` : `${a.check.verdict}${a.check.note !== "" ? `: ${oneLine(a.check.note)}` : ""}`;
+  if ((a.equivalents ?? []).length > 0) parts.push(`equivalents ${reuseText(a)}`);
+  const check =a.check.verdict === "downgraded" ? `downgraded to needs author${a.check.note !== "" ? ` (${oneLine(a.check.note)})` : ""}` : `${a.check.verdict}${a.check.note !== "" ? `: ${oneLine(a.check.note)}` : ""}`;
   return `  Evidence: ${parts.length === 0 ? "none" : parts.join("; ")}. Checker: ${check}.${a.check.searches.length > 0 ? ` Its own searches: ${a.check.searches.map((s) => searchLine(s, 60)).join("; ")}.` : ""}`;
 }
 
