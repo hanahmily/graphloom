@@ -290,3 +290,6 @@ export {
   MAX_CASE_REFUTED,
   MAX_CASE_TEXT,
 } from "./case-file.js";
+
+export type { LoopCandidate, LoopCandidatesInput, LoopCandidatesReply, LoopRead, LoopReadResult, LoopReplyLimits } from "./loop.js";
+export { LoopReplyError, validateLoopReply } from "./loop.js";

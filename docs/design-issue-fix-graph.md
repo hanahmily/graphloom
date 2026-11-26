@@ -1701,6 +1701,74 @@ with the reason.
    the correction count, and set each profile's `budgets` and `timeBudgetMs`
    from them, in [budgets](budgets.md).
 
+## Looping (designed, not implemented)
+
+A [loop](design-loop.md) starts issue-fix runs on a schedule. The loop knows
+nothing about issues; everything below belongs to issue-fix and its profile.
+
+**Profile `loop` section.** Optional; a profile without it cannot be looped.
+It selects which issues the bundle's `loopCandidates` hook lists:
+
+```jsonc
+"loop": {
+  "assignee": "hanahmily",                 // required: the loop runs only for this login
+  "state": "open",                         // default open
+  "labels": { "any": [], "none": ["wontfix", "needs-design"] },
+  "since": "2026-11-01"                    // optional: ignore older issues
+}
+```
+
+The issue repository is the profile's existing `issues` (owner and repo). The
+loop passes nothing else. The section is validated with the rest of the profile
+(`check`), and `loop add` refuses a profile with no `loop`.
+
+**Listing.** `loopCandidates({ profile })` returns candidate issues as
+`{ key: "github:<owner>/<repo>#<n>", taskArgs }`. The hook is pure, so the CLI
+performs its GitHub reads through the read executors under the runner config's
+read token, under the [hook protocol](design-loop.md#14-the-loopcandidates-hook-protocol)
+(multi-round, read-effect executors the manifest lists). Gaps in
+`graphloom.github` today (`executors/github/src/executors.ts`): `list-issues`
+filters by `state` and `labels` only, with no `assignee`, and GitHub's issue
+list includes pull requests. So v1 adds an `assignee` input to `list-issues`
+(additive, read-only) and drops items that are pull requests.
+
+**The delivery step.** A new first step in the graph, *Triage*, runs before
+Plan and needs no model. It refuses an issue that already has a pull request,
+**open, merged or closed** (loop decision 1), with the pull request named in the
+refusal. Evidence it reads:
+
+1. Pull requests that reference the issue, through GitHub's cross-references
+   and closing keywords; `pullRequest.reference` can keep the issue number out
+   of the PR body, so the number alone is not enough.
+2. The graph's own markers: a pull request whose head branch is
+   `graphloom/<run-id>` of an earlier run for this issue, or whose body carries
+   the delivery marker the graph writes.
+3. The issue's own state (closed).
+
+`graphloom.github` has no read that lists an issue's cross-references or
+linked pull requests: `list-pulls` filters by `state` and `base` only. Triage
+therefore needs one new read executor, for example `list-issue-timeline` (the
+cross-reference and `closed` events), plus `list-pulls` for the head-branch
+marker. Both read-only; the write token is not involved.
+
+The refusal is a terminal, successful no-op: the run ends `succeeded` with a
+"skipped: pull request #N exists" result. It is not a failure, so the loop
+does not rerun it and the hub does not retry it. A hand-started `graphloom run`
+gets the same protection, which is the reason it is a graph step. The cost is
+one hub slot, a run record, and a worktree with its branch in the task
+repository per refused issue (until worktree release exists, see the loop
+design's open items), with no model call.
+
+**Topology.** Triage adds a node and an edge at the start; the topology is
+fixed per plugin version, so this is a plugin version bump (a minor release:
+existing runs keep their pinned version, and nothing in the loop depends on it
+beyond the hook).
+
+**Tests.** Listing with a fake GitHub (assignee, labels, pull requests
+excluded); Triage for no PR, open, merged, closed-unmerged, cross-reference
+without the number in the body, and a private `pullRequest.reference`; the
+refusal's result and that it is `succeeded`; rehearsal scenarios for both.
+
 ## Migration from banyandb-fix
 
 `examples/plugins/banyandb-fix` has been removed: BanyanDB runs use
