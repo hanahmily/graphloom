@@ -20,6 +20,8 @@ import { sourceDirs } from "./kit/inventory.js";
 import { resolveId } from "./kit/ids.js";
 import { matchesGeneratedGlob } from "./kit/metrics/generated.js";
 import type { FullPack } from "./kit/packs.js";
+import { parsePatch } from "./kit/patch.js";
+import type { PullFile } from "./kit/snapshot.js";
 import type { MetricsRecord } from "./kit/metrics/record.js";
 import { crapRounded } from "./kit/metrics/crap.js";
 import { effectiveConclusion, NECESSITY_SCHEMA, NECESSITY_REVISION_SCHEMA_NAME, NECESSITY_SCHEMA_NAME, necessityAnswer, necessityProblems, statusOf, type Necessity, type PrincipleCheck } from "./necessity.js";
@@ -64,13 +66,29 @@ export const ANSWERS_SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["question", "answer", "status", "none_found", "reusable", "citations", "searches", "inventory", "metrics", "proposal"],
+        required: ["question", "answer", "status", "none_found", "reusable", "equivalents", "citations", "searches", "inventory", "metrics", "proposal"],
         properties: {
           question: { type: "string" },
           answer: { type: "string" },
           status: { type: "string", enum: STATUSES },
           none_found: { type: "boolean" },
           reusable: { type: "boolean" },
+          // An existing-feature answer: each equivalent it names, the citations that show it, and whether the pull request already
+          // uses it, with the added head lines of the diff that call or import it (design §5.4); empty for every other answer.
+          equivalents: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["name", "cites", "reusedByPullRequest", "uses"],
+              properties: {
+                name: { type: "string" },
+                cites: { type: "array", items: { type: "integer" } },
+                reusedByPullRequest: { type: "boolean" },
+                uses: { type: "array", items: { type: "object", additionalProperties: false, required: ["path", "start", "end", "quote"], properties: { path: { type: "string" }, start: { type: "integer" }, end: { type: "integer" }, quote: { type: "string" } } } },
+              },
+            },
+          },
           citations: {
             type: "array",
             items: {
@@ -115,7 +133,7 @@ export const ANSWER_CHECK_SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["question", "verdict", "note", "searches", "principles"],
+        required: ["question", "verdict", "note", "searches", "principles", "reuse"],
         properties: {
           question: { type: "string" },
           verdict: { type: "string", enum: VERDICTS },
@@ -125,6 +143,12 @@ export const ANSWER_CHECK_SCHEMA = {
           principles: {
             type: "array",
             items: { type: "object", additionalProperties: false, required: ["id", "verdict", "note"], properties: { id: { type: "string" }, verdict: { type: "string", enum: VERDICTS }, note: { type: "string" } } },
+          },
+          // An existing-feature answer only: the judgment of each equivalent it says the pull request already reuses, by the
+          // equivalent's 1-based number in the answer (design §5.4); empty for every other question.
+          reuse: {
+            type: "array",
+            items: { type: "object", additionalProperties: false, required: ["equivalent", "verdict", "note"], properties: { equivalent: { type: "integer" }, verdict: { type: "string", enum: VERDICTS }, note: { type: "string" } } },
           },
         },
       },
@@ -138,6 +162,29 @@ export interface Citation {
   start: number;
   end: number;
   quote: string;
+}
+/** Head lines of the diff where the pull request calls or imports an equivalent. */
+export interface ReuseSite {
+  path: string;
+  start: number;
+  end: number;
+  quote: string;
+}
+/**
+ * One equivalent an existing-feature answer names (design §5.4): its name as the code writes it, the 1-based numbers of the
+ * answer's citations that show it, and whether the pull request already uses it, at the added head lines of the diff in `uses`.
+ */
+export interface Equivalent {
+  name: string;
+  cites: number[];
+  reusedByPullRequest: boolean;
+  uses: ReuseSite[];
+}
+/** The checker's judgment of one reuse claim, by the equivalent's 1-based number in the answer. */
+export interface ReuseCheck {
+  equivalent: number;
+  verdict: AnswerVerdict;
+  note: string;
 }
 export interface Proposal {
   kind: "none" | "split" | "test" | "assertion";
@@ -157,6 +204,8 @@ export interface Answer {
    * changes that the change could use or should share (design §7.3). Absent in an answer recorded before 0.26.3.
    */
   reusable?: boolean;
+  /** An existing-feature answer: the equivalents it names and whether the pull request reuses each. Absent before 0.1.9. */
+  equivalents?: Equivalent[];
   citations: Citation[];
   searches: Search[];
   inventory: Array<{ name: string; version: string }>;
@@ -174,6 +223,8 @@ export interface CheckVerdict {
   note: string;
   searches: Search[];
   principles: PrincipleCheck[];
+  /** Absent in a result recorded before 0.1.9. */
+  reuse?: ReuseCheck[];
 }
 
 export interface AnswerContext {
@@ -185,6 +236,11 @@ export interface AnswerContext {
   pinned?: readonly PinnedText[];
   /** The design principles that apply to the change, which N1's answer must each judge once (design §7.5.1). */
   principles?: readonly Principle[];
+  /**
+   * The pull request's changed files with their patches: a reuse claim's sites must be added head lines of the diff that name
+   * the equivalent (design §5.4). A claim no file here shows is sent back.
+   */
+  files?: ReadonlyArray<Pick<PullFile, "path"> & Partial<Pick<PullFile, "patch" | "parsed">>>;
 }
 
 const isRelative = (p: string): boolean => p !== "" && !p.startsWith("/") && !p.split("/").some((s) => s === ".." || s === "") && !/[\n\u0000|]/.test(p);
@@ -280,12 +336,82 @@ function answerProblemsOf(a: Answer, q: Question, ctx: AnswerContext, dirs: read
         // An unavailable dependency source is a limit of the inventory, recorded as a note on the answer (assemble), not a lower
         // status; the answerer says "partially answered" itself when the answer relies on a dependency it could not read.
       } else if (a.reusable !== false && a.citations.length === 0 && a.status !== "needs author") out.push(`${at}: an answer that names an existing feature, mechanism or library cites it`);
+      out.push(...equivalentProblems(a, ctx));
       break;
     default:
+      if ((a.equivalents ?? []).length > 0) out.push(`${at}: only an existing-feature answer lists equivalents: leave equivalents empty`);
       break;
   }
   // The design review asks no detail question (design-pr-review-split §3.1): no split, test outline or assertion is proposed.
   if (a.proposal.kind !== "none") out.push(`${at}: a design review proposes no ${a.proposal.kind} (that answered a detail question, which pr-review judges now): set proposal.kind to "none"`);
+  return out;
+}
+
+const MAX_NAME_CHARS = 200;
+/** The lines one reuse site may span: a call or an import, not a whole function. */
+const MAX_SITE_LINES = 20;
+
+/**
+ * Whether a line of code names the equivalent: it holds the name as written, or the name's last identifier as a whole word
+ * (`setup.PauseDataNodeWatch` is named by `PauseDataNodeWatch(addr)`). Deterministic: no model judges it.
+ */
+export function namesEquivalent(text: string, name: string): boolean {
+  const n = name.trim();
+  if (n === "") return false;
+  if (text.includes(n)) return true;
+  const last = n.match(/[A-Za-z_$][\w$]*/g)?.at(-1);
+  if (last === undefined) return false;
+  return new RegExp(`(^|[^\\w$])${last.replace(/\$/g, "\\$")}([^\\w$]|$)`).test(text);
+}
+
+/**
+ * Why a reuse site does not show the pull request using the equivalent, or undefined when it does: every line of its range
+ * lies in a hunk of the file's patch at the head, and an added line among them names the equivalent (`namesEquivalent`). A file
+ * the pull request does not change, or whose patch GitHub did not give, shows nothing.
+ */
+export function reuseSiteProblem(site: ReuseSite, name: string, files: AnswerContext["files"]): string | undefined {
+  const where = `${site.path}:${site.start}-${site.end}`;
+  if (!isRelative(site.path)) return `${where} is not a repository-relative path`;
+  if (site.start < 1 || site.end < site.start) return `${where} is not a line range`;
+  if (site.end - site.start + 1 > MAX_SITE_LINES) return `${where} spans more than ${MAX_SITE_LINES} lines: cite the lines that call or import it`;
+  const file = (files ?? []).find((f) => f.path === site.path);
+  if (file === undefined) return `${where} is not in a file this pull request changes`;
+  if (file.patch === undefined || file.patch === null || file.patch === "") return `${where}: the pull request's patch of ${site.path} is not available, so the use cannot be shown in the diff`;
+  const lines = (file.parsed ?? parsePatch(file.patch)).lines.filter((l) => l.kind !== "del");
+  const at = new Map(lines.map((l) => [l.line, l] as const));
+  for (let n = site.start; n <= site.end; n += 1) if (!at.has(n)) return `${where}: line ${n} is not in a hunk of the diff at the head`;
+  const added = lines.filter((l) => l.kind === "add" && l.line >= site.start && l.line <= site.end);
+  if (added.length === 0) return `${where} has no line the pull request adds`;
+  if (!added.some((l) => namesEquivalent(l.text, name))) return `no line the pull request adds at ${where} names ${JSON.stringify(name)}`;
+  return undefined;
+}
+
+/** What is wrong with an existing-feature answer's equivalents (design §5.4); empty when they hold. */
+function equivalentProblems(a: Answer, ctx: Pick<AnswerContext, "files">): string[] {
+  const at = a.question;
+  const list = a.equivalents ?? [];
+  const out: string[] = [];
+  if ((a.none_found || a.reusable === false) && list.length > 0) out.push(`${at}: an answer that names nothing the change could use lists no equivalents: leave equivalents empty`);
+  if (!a.none_found && a.reusable !== false && a.citations.length > 0 && list.length === 0) out.push(`${at}: list each equivalent the answer names in equivalents, with the numbers of the citations that show it and whether the pull request already uses it`);
+  if (list.length > MAX_LIST) out.push(`${at}: more than ${MAX_LIST} equivalents (name the ones that settle it)`);
+  list.forEach((e, i) => {
+    const where = `${at} equivalent ${i + 1}${e.name.trim() !== "" ? ` (${e.name.trim().slice(0, 80)})` : ""}`;
+    if (e.name.trim() === "") out.push(`${where}: its name is empty`);
+    if (e.name.length > MAX_NAME_CHARS) out.push(`${where}: its name is longer than ${MAX_NAME_CHARS} characters (name one symbol or library)`);
+    if (e.cites.length === 0) out.push(`${where}: it lists no citation: give the numbers (1-based) of the citations that show it`);
+    for (const n of e.cites) if (!Number.isInteger(n) || n < 1 || n > a.citations.length) out.push(`${where}: citation number ${n} is not one of the answer's ${a.citations.length} citations (1-based)`);
+    if (!e.reusedByPullRequest) {
+      if (e.uses.length > 0) out.push(`${where}: an equivalent the pull request does not use has no uses: leave uses empty, or set reusedByPullRequest true`);
+      return;
+    }
+    if (e.uses.length === 0) out.push(`${where}: a claim that the pull request already uses it cites the added head lines of the diff that call or import it in uses`);
+    if (e.uses.length > MAX_LIST) out.push(`${where}: more than ${MAX_LIST} uses (cite the ones that show it)`);
+    for (const site of e.uses) {
+      if (site.quote.length > 400) out.push(`${where}: the quote of a use is longer than 400 characters`);
+      const problem = reuseSiteProblem(site, e.name, ctx.files);
+      if (problem !== undefined) out.push(`${where}: the use ${problem}; cite added head lines of the diff that call or import it, or set reusedByPullRequest false`);
+    }
+  });
   return out;
 }
 
@@ -537,11 +663,16 @@ export interface AnswerReading {
   searches: Map<string, Search[]>;
   /** The checker's judgment of each principle verdict, on N1. */
   principles: Map<string, PrincipleCheck[]>;
+  /** The checker's judgment of each reuse claim, on an existing-feature answer that makes one. */
+  reuse: Map<string, ReuseCheck[]>;
   /** What was normalized in reading the verdicts' ids, by question id. */
   notes: Map<string, string[]>;
   /** Verdict ids that matched no question (unknown or ambiguous), which stay unjudged. */
   ignored: string[];
 }
+
+/** The 1-based numbers of the equivalents an answer says the pull request already uses: the claims the checker judges. */
+export const reuseClaims = (a: Pick<Answer, "equivalents">): number[] => (a.equivalents ?? []).flatMap((e, i) => (e.reusedByPullRequest ? [i + 1] : []));
 
 /** Reads a checker result against the answers it was asked about. */
 export function readAnswerCheck(output: unknown, questions: readonly Question[], answers: ReadonlyMap<string, Answer>): AnswerReading | { problems: string[] } {
@@ -564,7 +695,7 @@ export function readAnswerCheck(output: unknown, questions: readonly Question[],
     // Two verdicts for one question: the weaker stands.
     if (earlier === undefined || VERDICTS.indexOf(v.verdict) > VERDICTS.indexOf(earlier.verdict)) byQuestion.set(r.id, v);
   }
-  const reading: AnswerReading = { unchecked: [], supported: new Set(), partial: new Map(), unsupported: new Map(), searches: new Map(), principles: new Map(), notes, ignored };
+  const reading: AnswerReading = { unchecked: [], supported: new Set(), partial: new Map(), unsupported: new Map(), searches: new Map(), principles: new Map(), reuse: new Map(), notes, ignored };
   for (const q of questions) {
     const a = answers.get(q.id);
     const v = byQuestion.get(q.id);
@@ -576,11 +707,19 @@ export function readAnswerCheck(output: unknown, questions: readonly Question[],
       if (earlier === undefined || VERDICTS.indexOf(c.verdict) > VERDICTS.indexOf(earlier.verdict)) judged.set(c.id, c);
     }
     const mine = (a.necessity?.principles ?? []).map((p) => p.id);
-    if (v === undefined || (needsOwnSearch(q, a) && v.searches.length === 0) || mine.some((id) => !judged.has(id))) {
+    // Every reuse claim is judged too (the weaker judgment of two stands); one left unjudged sends the check back.
+    const reuseJudged = new Map<number, ReuseCheck>();
+    for (const c of v?.reuse ?? []) {
+      const earlier = reuseJudged.get(c.equivalent);
+      if (earlier === undefined || VERDICTS.indexOf(c.verdict) > VERDICTS.indexOf(earlier.verdict)) reuseJudged.set(c.equivalent, c);
+    }
+    const claims = reuseClaims(a);
+    if (v === undefined || (needsOwnSearch(q, a) && v.searches.length === 0) || mine.some((id) => !judged.has(id)) || claims.some((n) => !reuseJudged.has(n))) {
       reading.unchecked.push(q.id);
       continue;
     }
     if (mine.length > 0) reading.principles.set(q.id, mine.map((id) => ({ id, verdict: judged.get(id)!.verdict, note: judged.get(id)!.note.trim() })));
+    if (claims.length > 0) reading.reuse.set(q.id, claims.map((n) => ({ equivalent: n, verdict: reuseJudged.get(n)!.verdict, note: reuseJudged.get(n)!.note.trim() })));
     reading.searches.set(q.id, v.searches);
     if (v.verdict === "supported") reading.supported.add(q.id);
     else if (v.verdict === "partial") reading.partial.set(q.id, v.note.trim());
@@ -593,7 +732,15 @@ export function readAnswerCheck(output: unknown, questions: readonly Question[],
 export interface FinalAnswer extends Answer {
   /** The searches as the plugin re-ran them: its own count beside the agent's, or why it has none. */
   searches: MeasuredSearch[];
-  check: { verdict: AnswerVerdict | "downgraded"; note: string; searches: MeasuredSearch[]; /** N1: the checker's judgment of each principle verdict. */ principles?: PrincipleCheck[] };
+  check: {
+    verdict: AnswerVerdict | "downgraded";
+    note: string;
+    searches: MeasuredSearch[];
+    /** N1: the checker's judgment of each principle verdict. */
+    principles?: PrincipleCheck[];
+    /** An existing-feature answer: the checker's judgment of each equivalent it says the pull request already uses (the gate reads it, design §8). */
+    reuse?: ReuseCheck[];
+  };
   /** What was normalized in reading this answer's id and its verdict's, recorded and never silent. */
   notes: string[];
   /** The statements the answerer made, oldest first, when the answer was corrected. */
@@ -764,7 +911,8 @@ export function assemble(questions: readonly Question[], current: ReadonlyMap<st
     const notes = [...(idNotes.get(q.id) ?? []), ...(reading.notes.get(q.id) ?? [])];
     const mine = { ...a, searches: measured(a.searches), notes };
     const principles = reading.principles.get(q.id);
-    const checked = (verdict: AnswerVerdict, note: string): FinalAnswer["check"] => ({ verdict, note, searches, ...(principles !== undefined ? { principles } : {}) });
+    const reuse = reading.reuse.get(q.id);
+    const checked = (verdict: AnswerVerdict, note: string): FinalAnswer["check"] => ({ verdict, note, searches, ...(principles !== undefined ? { principles } : {}), ...(reuse !== undefined ? { reuse } : {}) });
     // A design principle the checker supports as broken makes N1 questionable, so its status says so (design §7.5.1).
     const settle = (f: FinalAnswer): FinalAnswer => (f.necessity !== undefined && effectiveConclusion(f) !== f.necessity.conclusion && f.check.verdict !== "downgraded" ? { ...f, status: statusOf(effectiveConclusion(f)) } : f);
     if (reading.unsupported.has(q.id)) {

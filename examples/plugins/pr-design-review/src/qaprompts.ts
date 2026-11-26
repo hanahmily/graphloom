@@ -306,6 +306,7 @@ export function planAnswerer(a: AnswererAssignment): Fitted {
     "",
     `Every answer has three elements. The answer: what exists, in factual terms. The evidence: citations (path, tree base, head or dependency, first and last line, a short verbatim quote), the searches you ran (each a structured record, below), and inventory entries you read (name and version, copied from the inventory). The status: answered when the code and its dependencies settle the question; partially answered when part is settled and the rest is stated with what was searched; needs author when the answer depends on intent the code cannot show. An answer is at most ${MAX_ANSWER_CHARS} characters, and an existing-feature answer, which covers two concerns, at most ${MAX_COMBINED_ANSWER_CHARS}.`,
     'A "none found" answer (the codebase has no such feature or mechanism, and no declared library does it) sets none_found true and lists the whole-repository searches that found nothing: the feature\'s names and their variants, its key types and tokens (three or more searches over the whole base tree, with no paths; a search scoped to paths is supplementary and does not count). A dependency marked source unavailable does not by itself make the answer partially answered (the plugin notes it on the answer); it is partially answered only when the answer itself relies on a dependency whose source you could not read. Set none_found false otherwise. For an existing-feature answer also set reusable: true only when it names a feature, mechanism or library outside the code this pull request changes that already does what the change adds; set it false when you found none, even if you cite related code that does something else.',
+    'An existing-feature answer with reusable true lists every equivalent it names in equivalents, one entry each: name (the one symbol or library as the code writes it, for example setup.PauseDataNodeWatch), cites (the 1-based numbers of your citations that show it: its definition and the code under it or around it you cite for it; list every citation outside the change under the equivalent it is about, since a citation no equivalent lists counts as one the pull request does not use), reusedByPullRequest (true only when the pull request\'s own added code already calls or imports that equivalent instead of adding its own), and uses (when reusedByPullRequest is true: the head lines the pull request adds that call or import it, each with path, first and last line at the head and a verbatim quote; the plugin checks that each lies in the diff and that an added line names the equivalent; empty when false). Name each equivalent once; one the pull request does not use is reusedByPullRequest false. Leave equivalents empty for every other answer, and when none_found is true or reusable is false.',
     SEARCH_HELP,
     "Every number you cite from a measurement goes in metrics (function, path, complexity, nesting or crap, value) and must equal the measurement record below. Cite no number you did not take from there.",
     "Per type. purpose: answered only from a code comment, a linked design document or a call site you cite; else needs author, with what you read. existing-feature (one question per high-level change: does the codebase already have this feature or mechanism, or does an already-declared library do it?): work out which code belongs to the change from its cites and the areas, then give ONE answer, one statement with one status and the evidence for it (citations, searches, inventory entries): describe and cite each existing feature, mechanism or library you found, or state the searches that show none; needs author when one exists and only the author can say why it was not used. It is about the feature as a whole, never about one helper function or duplicated lines. other: a design-level question; answer it from the code, the design documents and the comments you cite. Every answer has a proposal of kind none (with empty splits, testFile, testName, cases and assertion): the design review proposes no split, test or assertion. Never state a severity, a verdict or a recommendation.",
@@ -348,15 +349,24 @@ const ANSWERS_INLINE_CHARS = 30_000;
 
 function answerText(a: Answer): string {
   const parts = [`status ${a.status}${a.none_found ? ", none found" : ""}: ${oneLine(a.answer)}`];
-  if (a.citations.length > 0) parts.push(`cites ${a.citations.map((c) => `${c.tree}:${c.path}:${c.start}-${c.end}`).join(", ")}`);
+  if (a.citations.length > 0) parts.push(`cites ${a.citations.map((c, i) => `${(a.equivalents ?? []).length > 0 ? `[${i + 1}] ` : ""}${c.tree}:${c.path}:${c.start}-${c.end}`).join(", ")}`);
   if (a.searches.length > 0) parts.push(`its searches ${a.searches.map(reportedSearch).join("; ")}`);
+  if ((a.equivalents ?? []).length > 0) parts.push(`equivalents ${equivalentsText(a)}`);
   if (a.proposal.kind !== "none") parts.push(`proposal ${a.proposal.kind}`);
   return parts.join(" | ");
 }
 
+/** An answer's equivalents as the checker reads them: each one's number, name, citations and reuse claim with its sites. */
+function equivalentsText(a: Answer): string {
+  return (a.equivalents ?? [])
+    .map((e, i) => `E${i + 1} ${oneLine(e.name)} (cites ${e.cites.join(", ")}): ${e.reusedByPullRequest ? `the pull request already uses it at ${e.uses.map((u) => `head:${u.path}:${u.start}-${u.end} "${clipText(u.quote, 80)}"`).join(", ")}` : "not used by the pull request"}`)
+    .join("; ");
+}
+
 /** One answer as a short line: its status, the start of its text, and how many citations, searches and what proposal it has. */
 function answerSummary(a: Answer): string {
-  return `status ${a.status}${a.none_found ? ", none found" : ""}: ${clipText(a.answer, 160)} | ${a.citations.length} cite(s), ${a.searches.length} search(es)${a.proposal.kind !== "none" ? `, proposal ${a.proposal.kind}` : ""}`;
+  const claims = (a.equivalents ?? []).flatMap((e, i) => (e.reusedByPullRequest ? [`E${i + 1}`] : []));
+  return `status ${a.status}${a.none_found ? ", none found" : ""}: ${clipText(a.answer, 160)} | ${a.citations.length} cite(s), ${a.searches.length} search(es)${claims.length > 0 ? `, reuse claimed for ${claims.join(", ")}` : ""}${a.proposal.kind !== "none" ? `, proposal ${a.proposal.kind}` : ""}`;
 }
 
 /** The answer checker's assignment (design §7.3): re-check the claims against the trees, with searches of its own. */
@@ -382,6 +392,7 @@ export function planAnswerChecker(a: CheckerAssignment): Fitted {
     a.mountedDirs.length > 0 ? `Dependency source is mounted read-only at: ${a.mountedDirs.join(", ")}; a dependency citation names a file there.` : "No dependency source is available on this machine.",
     "",
     "For every answer: re-check each feature, mechanism and library it cites against the tree (does the cited code exist and do what the answer says?). For every answer that says none found, run searches of your own over the whole base tree with your own patterns, not only the answerer's, and list them in the searches of your verdict (structured records, below); an absence you could not reproduce is a finding. Give a verdict: supported when your checks agree; partial when part holds (say which in note); unsupported when a none-found answer has an existing feature or library you found, or a cited one does not do what is claimed (say what you found in note). Judge claims only, never wording. Return the verdicts of your result: one for every question, none left out. The question field of each verdict is the bare id exactly as listed below (for example Q1, never the type or the text after it); the result contract accepts no other value. Leave the principles of every verdict empty (they are for the necessity question only). An existing-feature question has one answer that covers whether the codebase already has the feature and whether a declared library does it: judge that one answer as a whole, with one verdict.",
+    "An existing-feature answer lists its equivalents (E1, E2, … below), each with the citations that show it and whether the pull request already uses it. For every equivalent it says the pull request already uses, judge that claim on its own in the reuse of your verdict, one entry per such equivalent, with its number (1 for E1), a verdict and a note: supported only when the head lines it cites are lines the pull request adds and they really call or import that same equivalent (read them at the head: not a namesake, not a local copy, not a comment); unsupported otherwise, with what the lines do in note. A reuse claim you do not support never makes the answer's own verdict unsupported. Leave the reuse of every other verdict empty.",
     SEARCH_HELP,
     "",
     `Questions and answers (${a.questions.length}):`,
@@ -547,6 +558,7 @@ export function planNecessityChecker(a: NecessityCheckerAssignment): Fitted {
           ...fitPrinciples(a.principles, (p, short) => `    - ${p.id}: ${short ? clipText(p.statement, 500) : oneLine(p.statement)}`, scale),
         ]
       : ["Leave the principles of your verdict empty: no design principle applies."]),
+    "Leave the reuse of your verdict empty: it is for existing-feature answers only.",
     SEARCH_HELP,
     `Give one verdict for the question: supported only when every element holds and the conclusion follows from them; partial when part holds (say which does not in note); unsupported when a statement, a trace step or the conclusion does not hold (say what you found in note). Judge claims only, never wording. Return the verdicts of your result: one entry for the question, whose question field is exactly ${NECESSITY_ID}.`,
     ...designDocLines(a.designDocs, a.context),

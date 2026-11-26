@@ -10,7 +10,7 @@
  * plugin's own functions, so a scenario cannot drift from the graph.
  */
 import type { RehearsalCommandResult, RehearsalReply } from "@graphloom/sdk";
-import { needsOwnSearch, searchItems, verificationPlan, type Answer, type CheckVerdict, type VerifyItem } from "./answers.js";
+import { needsOwnSearch, reuseClaims, searchItems, verificationPlan, type Answer, type CheckVerdict, type VerifyItem } from "./answers.js";
 import { COMMAND } from "./kit/constants.js";
 import { isLarge, STANDARD, type ReviewMode } from "./kit/mode.js";
 import { answerBatches, batchCitePrefix, batchRecordId } from "./qaflow.js";
@@ -88,7 +88,7 @@ export interface QaSpec {
   /** Changes an answer the answerer gives; the argument is the plugin's default for that question. */
   answer?: (q: Question, sym: SymbolDef | undefined, record: MetricsRecord | undefined, dflt: Answer) => Answer;
   /** The checker's verdict for a question, by round; a round it does not list judges everything supported. */
-  checks?: Array<(q: Question, a: Answer) => { verdict: "supported" | "partial" | "unsupported"; note: string; searches?: CheckVerdict["searches"] } | undefined>;
+  checks?: Array<(q: Question, a: Answer) => { verdict: "supported" | "partial" | "unsupported"; note: string; searches?: CheckVerdict["searches"]; reuse?: CheckVerdict["reuse"] } | undefined>;
   /** The corrected answers after the checker's first round. */
   revise?: (q: Question, sym: SymbolDef | undefined, prev: Answer) => Answer;
   /** Round 1 on a later head (design §9.3): only the questions this returns true for are asked; the others are carried, so the replies and canned checks leave them out. */
@@ -120,7 +120,7 @@ const emptyProposal = { kind: "none" as const, splits: [], testFile: "", testNam
 
 function defaultAnswer(q: Question, _sym: SymbolDef | undefined, _record: MetricsRecord | undefined, hasDeps: boolean): Answer {
   const searches = (names: string[]): Answer["searches"] => names.map((pattern) => ({ pattern, tree: "base", paths: [], ignoreCase: false as const, hits: 0 }));
-  const base: Answer = { question: q.id, answer: "", status: "answered", none_found: false, reusable: false, citations: [], searches: [], inventory: [], metrics: [], proposal: { ...emptyProposal } };
+  const base: Answer = { question: q.id, answer: "", status: "answered", none_found: false, reusable: false, equivalents: [], citations: [], searches: [], inventory: [], metrics: [], proposal: { ...emptyProposal } };
   switch (q.type) {
     case "purpose":
       return { ...base, answer: "Nothing the pull request's text, its commits or the code comments state why this change is made.", status: "needs author", searches: searches(["retention|purpose|why", "the pull request's title, body and commit messages (read)", "comments next to the change (read)"]) };
@@ -217,7 +217,7 @@ export function qaScenario(i: QaInput): QaScenario {
   const n1Verdicts = (round: number, n: Necessity): CheckVerdict[] => {
     const given = nChecks[round];
     const principles = n.principles.map((p) => ({ id: p.id, verdict: nspec.principles?.checks?.[p.id] ?? "supported", note: nspec.principles?.checks?.[p.id] === undefined ? "" : `the checker's note on ${p.id}` }));
-    return [{ question: necessityQuestion().id, verdict: given?.verdict ?? "supported", note: given?.note ?? "", principles, searches: [{ pattern: "design|flush|write path|acknowledg", tree: "base", paths: [], ignoreCase: false, hits: 4 }, { pattern: n.problem.trace[0]?.path ?? "path", tree: "base", paths: [], ignoreCase: false, hits: 1 }] }];
+    return [{ question: necessityQuestion().id, verdict: given?.verdict ?? "supported", note: given?.note ?? "", principles, reuse: [], searches: [{ pattern: "design|flush|write path|acknowledg", tree: "base", paths: [], ignoreCase: false, hits: 4 }, { pattern: n.problem.trace[0]?.path ?? "path", tree: "base", paths: [], ignoreCase: false, hits: 1 }] }];
   };
   const n1Rounds = [n1Verdicts(0, n1First), ...(n1Revised !== undefined ? [n1Verdicts(1, n1Revised)] : [])];
   const lastN1 = nChecks[n1Rounds.length - 1];
@@ -228,7 +228,8 @@ export function qaScenario(i: QaInput): QaScenario {
       const a = set[n]!;
       const given = spec.checks?.[round]?.(q, a);
       const searches = given?.searches ?? (needsOwnSearch(q, a) ? [{ pattern: `\\b${symOf(q)?.name ?? "x"}\\b|test`, tree: "base", paths: [], ignoreCase: false as const, hits: 0 }] : []);
-      return { question: q.id, verdict: given?.verdict ?? "supported", note: given?.note ?? "", searches, principles: [] };
+      const reuse = given?.reuse ?? reuseClaims(a).map((equivalent) => ({ equivalent, verdict: "supported" as const, note: "" }));
+      return { question: q.id, verdict: given?.verdict ?? "supported", note: given?.note ?? "", searches, principles: [], reuse };
     });
   const rounds = revised.length > 0 || (spec.checks?.length ?? 0) > 1 ? [verdicts(0, first), verdicts(1, final)] : [verdicts(0, final)];
   // Large mode (design §7.6): the answerer takes the questions in batches, each checked in a fresh session; a scenario revises none.
@@ -258,7 +259,7 @@ export function qaScenario(i: QaInput): QaScenario {
     commands[c.id] = ok(`${names.map((n) => `${n}\t${base.sites?.[n] ?? "-"}`).join("\n")}\n# end\n`);
   }
   if (deps.some((d) => d.ecosystem === "go")) commands["dep-source-go-1"] = ok("# end\n");
-  const ctx = { questions, groundwork, view, packs };
+  const ctx = { questions, groundwork, view, packs, files: i.files };
   // A canned verification: citations resolve, and a re-run search measures what the scenario's agent reported (a scenario
   // that wants a mismatch says so in the search's own hits and its fixture's).
   const canned = (item: VerifyItem): void => {

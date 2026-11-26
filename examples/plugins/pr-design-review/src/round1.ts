@@ -5,9 +5,9 @@
  * The gate of the design review (design-pr-review-split §3.6). Round 1's open items are computed by plugin code from
  * `necessity.json` and `qa.json`, with no model and no human: N1's conclusion when it is not `necessary` (a supported broken
  * principle included), every question whose answer needs the author or is only partially answered, and every `existing-feature`
- * answer that names an equivalent outside the code the pull request changes (answers citing one outside equivalent merge into one
- * item with `covers`). A missing test is not a round-1 item any more: the kinds are `necessity`, `needs-author`, `partial` and
- * `existing`. Earlier open items are judged against this head by their stable key (§3.5). The computation is a pure function over
+ * answer that names an equivalent outside the code the pull request changes and that the pull request is not verified to reuse
+ * already (`reuseSplit`; answers citing one outside equivalent merge into one item with `covers`). A missing test is not a
+ * round-1 item any more: the kinds are `necessity`, `needs-author`, `partial` and `existing`. Earlier open items are judged against this head by their stable key (§3.5). The computation is a pure function over
  * the two artifacts, recorded once as `round1.json`; the validator recomputes it.
  */
 import type { EvidenceRecord } from "@graphloom/sdk";
@@ -68,7 +68,10 @@ export interface Round1Covered {
   excerpt: string;
 }
 
-/** An `existing-feature` answer set aside, not an item: it found nothing to reuse, or every equivalent it names lies in code the pull request changes. */
+/**
+ * An `existing-feature` answer set aside, not an item: it found nothing to reuse, every equivalent it names lies in code the pull
+ * request changes, or the pull request is verified to reuse every one outside it already.
+ */
 export interface Round1Noted {
   id: string;
   key: string;
@@ -164,7 +167,25 @@ interface QaQuestion {
   item: string;
   stable: string;
   text: string;
-  answer?: { answer: string; status: string; none_found: boolean; reusable?: boolean; citations: Array<{ path: string; start: number; end: number; tree: string }>; inventory: Array<{ name: string; version: string }>; proposal?: ProposalLike };
+  answer?: { answer: string; status: string; none_found: boolean; reusable?: boolean; equivalents?: QaEquivalent[]; reuseChecks: Map<number, string>; citations: Array<{ path: string; start: number; end: number; tree: string }>; inventory: Array<{ name: string; version: string }>; proposal?: ProposalLike };
+}
+
+/** An equivalent an existing-feature answer names, as `qa.json` records it (design §5.4); absent in an answer recorded before 0.1.9. */
+interface QaEquivalent {
+  name: string;
+  cites: number[];
+  reusedByPullRequest: boolean;
+}
+
+function equivalentsOf(v: unknown): QaEquivalent[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  return v.filter(isObj).map((e) => ({ name: str(e.name), cites: Array.isArray(e.cites) ? e.cites.filter((n): n is number => Number.isInteger(n)) : [], reusedByPullRequest: e.reusedByPullRequest === true }));
+}
+
+/** The checker's verdict on each reuse claim, by the equivalent's 1-based number. */
+function reuseChecksOf(check: unknown): Map<number, string> {
+  const list = isObj(check) && Array.isArray(check.reuse) ? check.reuse.filter(isObj) : [];
+  return new Map(list.flatMap((c) => (Number.isInteger(c.equivalent) && typeof c.verdict === "string" ? [[c.equivalent as number, c.verdict] as const] : [])));
 }
 
 function qaOf(json: string): { questions: QaQuestion[] } | undefined {
@@ -184,7 +205,7 @@ function qaOf(json: string): { questions: QaQuestion[] } | undefined {
       stable: str(q.stable),
       text: str(q.text),
       ...(a !== undefined && typeof a.status === "string"
-        ? { answer: { answer: str(a.answer), status: a.status, none_found: a.none_found === true, ...(typeof a.reusable === "boolean" ? { reusable: a.reusable } : {}), citations: (Array.isArray(a.citations) ? a.citations.filter(isObj) : []).map((c) => ({ path: str(c.path), start: Number(c.start) || 0, end: Number(c.end) || 0, tree: str(c.tree) })), inventory: (Array.isArray(a.inventory) ? a.inventory.filter(isObj) : []).map((d) => ({ name: str(d.name), version: str(d.version) })), ...(isObj(a.proposal) ? { proposal: a.proposal as ProposalLike } : {}) } }
+        ? { answer: { answer: str(a.answer), status: a.status, none_found: a.none_found === true, ...(typeof a.reusable === "boolean" ? { reusable: a.reusable } : {}), ...(equivalentsOf(a.equivalents) !== undefined ? { equivalents: equivalentsOf(a.equivalents)! } : {}), reuseChecks: reuseChecksOf(a.check), citations: (Array.isArray(a.citations) ? a.citations.filter(isObj) : []).map((c) => ({ path: str(c.path), start: Number(c.start) || 0, end: Number(c.end) || 0, tree: str(c.tree) })), inventory: (Array.isArray(a.inventory) ? a.inventory.filter(isObj) : []).map((d) => ({ name: str(d.name), version: str(d.version) })), ...(isObj(a.proposal) ? { proposal: a.proposal as ProposalLike } : {}) } }
         : {}),
     };
   });
@@ -193,19 +214,43 @@ function qaOf(json: string): { questions: QaQuestion[] } | undefined {
 
 const NOTED_REASON = "the equivalent it names is the code this pull request changes";
 const NOTED_NONE = "the answer found no existing feature, mechanism or library the change could use";
+const NOTED_REUSED = "the pull request already reuses it";
+
+const nameList = (names: readonly string[]): string => names.map((n) => `\`${oneLine(n).replace(/`/g, "")}\``).join(", ");
+
+type CitedAt = { path: string; start: number; tree: string };
+
+/** The key of a cited equivalent outside the change (`path:start`; a library's prefixed `dependency:`), or undefined when it lies in the change. */
+function outsideKey(c: CitedAt, changed: ReadonlySet<string>): string | undefined {
+  if (c.path === "") return undefined;
+  if (c.tree === "dependency") return `dependency:${c.path}:${c.start}`;
+  return changed.has(c.path) ? undefined : `${c.path}:${c.start}`;
+}
 
 /**
  * The cited equivalents that lie outside the change, as `path:start` keys: a library's source, or a base or head file the
  * pull request does not add, modify, rename or delete. Deterministic: no model judges it.
  */
-function outsideEquivalents(citations: ReadonlyArray<{ path: string; start: number; tree: string }>, changed: ReadonlySet<string>): string[] {
-  const out = new Set<string>();
-  for (const c of citations) {
-    if (c.path === "") continue;
-    if (c.tree === "dependency") out.add(`dependency:${c.path}:${c.start}`);
-    else if (!changed.has(c.path)) out.add(`${c.path}:${c.start}`);
-  }
-  return [...out];
+function outsideEquivalents(citations: readonly CitedAt[], changed: ReadonlySet<string>): string[] {
+  return [...new Set(citations.flatMap((c) => outsideKey(c, changed) ?? []))];
+}
+
+/**
+ * An `existing-feature` answer's outside equivalents split by reuse (design §8), from structured fields only: an equivalent is
+ * reused when the answer says `reusedByPullRequest` (whose sites the deterministic checks showed are added lines of the diff
+ * naming it) and the checker's verdict on that claim is `supported`. An outside citation is set aside only when a reused
+ * equivalent lists it and no other equivalent does; every other outside citation, one no equivalent lists included, stays
+ * `open`. `reused` names the reused equivalents that set one aside. An answer without `equivalents` (recorded before 0.1.9)
+ * reuses nothing.
+ */
+export function reuseSplit(a: { citations: readonly CitedAt[]; equivalents?: readonly QaEquivalent[]; reuseChecks: ReadonlyMap<number, string> }, changed: ReadonlySet<string>): { open: string[]; reused: string[] } {
+  const all = outsideEquivalents(a.citations, changed);
+  const list = (a.equivalents ?? []).map((e, i) => ({ e, verified: e.reusedByPullRequest && a.reuseChecks.get(i + 1) === "supported" }));
+  const keysOf = (e: QaEquivalent): string[] => e.cites.flatMap((n) => (n >= 1 && n <= a.citations.length ? (outsideKey(a.citations[n - 1]!, changed) ?? []) : []));
+  const held = new Set(list.filter((x) => !x.verified).flatMap((x) => keysOf(x.e)));
+  const covered = new Set(list.filter((x) => x.verified).flatMap((x) => keysOf(x.e).filter((k) => !held.has(k))));
+  const reused = [...new Set(list.filter((x) => x.verified && keysOf(x.e).some((k) => covered.has(k))).map((x) => x.e.name.trim()).filter((n) => n !== ""))];
+  return { open: all.filter((k) => !covered.has(k)), reused };
 }
 
 /**
@@ -362,13 +407,17 @@ export function round1Record(i: Round1Input): Round1Record | undefined {
     if (a.status === "needs author") kinds.push("needs-author");
     if (a.status === "partially answered") kinds.push("partial");
     let outside: string[] = [];
+    let reused: string[] = [];
     if (q.type === FEATURE_TYPE && !a.none_found && a.reusable === false) {
       // The answer says it found nothing the change could use (what it cites is related code), so it is noted, never an item.
       noted.push({ id: q.id, key: q.stable, note: NOTED_NONE });
     } else if (q.type === FEATURE_TYPE && !a.none_found) {
-      outside = outsideEquivalents(a.citations, changedPaths);
+      const split = reuseSplit(a, changedPaths);
+      outside = split.open;
+      reused = split.reused;
       // No citation at all cannot show the equivalent is the changed code, so it stays an item.
       if (outside.length > 0 || a.citations.every((c) => c.path === "")) kinds.push("existing");
+      else if (reused.length > 0) noted.push({ id: q.id, key: q.stable, note: `${NOTED_REUSED}: ${nameList(reused)}` });
       else noted.push({ id: q.id, key: q.stable, note: NOTED_REASON });
     }
     if (kinds.length === 0) continue;
@@ -377,7 +426,7 @@ export function round1Record(i: Round1Input): Round1Record | undefined {
     if (outside.length > 0) outsideOf.set(q.id, outside);
     const parts: ItemParts = {
       id: q.id,
-      head: scrub(`**${kinds.map((k) => ROUND1_LABEL[k]).join("; ")}** (${q.id}). ${oneLine(q.text)}`),
+      head: scrub(`**${kinds.map((k) => ROUND1_LABEL[k]).join("; ")}** (${q.id}). ${oneLine(q.text)}${kinds.includes("existing") && reused.length > 0 ? ` The pull request already reuses ${nameList(reused)}; this item is about the other equivalents the answer names.` : ""}`),
       label: a.status === "needs author" ? "What was checked" : `Answer (${a.status})`,
       answer: scrub(oneLine(a.answer)),
       cites: citationLinks(a.citations, i.github, a.inventory).map(scrub),

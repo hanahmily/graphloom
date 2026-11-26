@@ -65,7 +65,8 @@ interface QaAnswer {
   inventory?: Array<{ name: string; version: string }>;
   metrics?: Array<{ function: string; path: string; name: string; value: number }>;
   proposal?: { kind: string; splits?: Array<{ name: string; startLine: number; endLine: number; responsibility: string }>; testFile?: string; testName?: string; cases?: Array<{ input: string; branches: string }>; assertion?: string };
-  check?: { verdict: string; note: string; searches?: MeasuredSearch[] };
+  equivalents?: Array<{ name: string; reusedByPullRequest: boolean; uses: Array<{ path: string; start: number; end: number }> }>;
+  check?: { verdict: string; note: string; searches?: MeasuredSearch[]; reuse?: Array<{ equivalent: number; verdict: string; note: string }> };
   notes?: string[];
   history?: Array<{ answer: string; status: string }>;
 }
@@ -503,6 +504,11 @@ function answerHtml(a: QaAnswer, g: Github): string {
     (a.searches ?? []).length > 0 ? `<details class="steps"><summary>Searches (${(a.searches ?? []).length})</summary><ul class="plain">${(a.searches ?? []).map(searchHtml).join("")}</ul></details>` : "",
     (a.inventory ?? []).length > 0 ? `<p class="muted">Inventory: ${(a.inventory ?? []).map((d) => esc(`${d.name}@${d.version}`)).join(", ")}</p>` : "",
     (a.metrics ?? []).length > 0 ? `<p class="muted">Metrics: ${(a.metrics ?? []).map((m) => esc(`${m.function} ${m.name} ${m.value}`)).join(", ")}</p>` : "",
+    (a.equivalents ?? []).length > 0 ? `<p class="muted">Equivalents: ${(a.equivalents ?? []).map((e, i) => {
+      if (!e.reusedByPullRequest) return `<code>${esc(e.name)}</code> (not used by the pull request)`;
+      const c = (check?.reuse ?? []).find((x) => x.equivalent === i + 1);
+      return `<code>${esc(e.name)}</code> (used by the pull request at ${e.uses.map((u) => esc(`${u.path}:${u.start === u.end ? u.start : `${u.start}-${u.end}`}`)).join(", ")}; checker: ${esc(c === undefined ? "not judged" : `${c.verdict}${c.note !== "" ? `: ${clip(c.note, 120)}` : ""}`)})`;
+    }).join(", ")}</p>` : "",
     proposal,
     check !== undefined ? `<p class="muted">Checker: ${esc(verdict)}.${(check.searches ?? []).length > 0 ? ` Its own searches: ${(check.searches ?? []).map((s) => esc(clip(s.pattern, 60))).join("; ")}.` : ""}</p>` : "",
     (a.notes ?? []).length > 0 ? `<p class="muted">Note: ${esc((a.notes ?? []).join("; "))}.</p>` : "",

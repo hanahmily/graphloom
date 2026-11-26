@@ -59,7 +59,7 @@ describe("graphloom.manifest.json", () => {
   });
 
   it("has a rehearsal entry whose scenarios the graph can describe", () => {
-    expect(Object.keys(rehearsal(BANYANDB).scenarios)).toEqual(["happy", "report", "report-corrections", "injection", "large-pull-request", "design-clean", "added-other", "other-corrected", "answer-finds-existing-feature", "answer-no-library-with-whole-repo-search", "answer-checker-contradicts", "needs-author-purpose", "purpose-stated", "necessity-unnecessary", "necessity-disputed", "necessity-necessary", "necessity-principles", "necessity-principle-broken", "necessity-principle-unsupported", "state-lifecycle", "feature-data-flow", "diagram-corrected", "diagram-skill-check-fails", "diagram-fallback", "large-artifacts", "incremental-round1"]);
+    expect(Object.keys(rehearsal(BANYANDB).scenarios)).toEqual(["happy", "report", "report-corrections", "injection", "large-pull-request", "design-clean", "added-other", "other-corrected", "answer-finds-existing-feature", "answer-reuses-existing-feature", "answer-no-library-with-whole-repo-search", "answer-checker-contradicts", "needs-author-purpose", "purpose-stated", "necessity-unnecessary", "necessity-disputed", "necessity-necessary", "necessity-principles", "necessity-principle-broken", "necessity-principle-unsupported", "state-lifecycle", "feature-data-flow", "diagram-corrected", "diagram-skill-check-fails", "diagram-fallback", "large-artifacts", "incremental-round1"]);
     expect(Object.keys(rehearsal({ not: "a profile" }).scenarios)).toEqual([]);
   });
 });

@@ -734,6 +734,7 @@ const RETENTION_PULL: Pull = {
               { path: "pkg/timestamp/duration.go", tree: "base", start: 30, end: 42, quote: "func ParseDuration" },
               { path: "banyand/measure/flusher.go", tree: "base", start: 52, end: 52, quote: "timestamp.ParseDuration" },
             ],
+            equivalents: [{ name: "timestamp.ParseDuration", cites: [1, 2], reusedByPullRequest: false, uses: [] }],
             searches: [{ pattern: "func .*\\(.*string.*\\).*int.*error", tree: "base", paths: [], ignoreCase: false, hits: 3 }],
           }
         : dflt,
@@ -817,6 +818,7 @@ const JITTER_PULL: Pull = {
       reusable: true,
       status: "answered",
       citations: [{ path: "vendor/github.com/foo/jitter/jitter.go", tree: "base", start: 12, end: 18, quote: "func Jitter" }],
+      equivalents: [{ name: "jitter.Jitter", cites: [1], reusedByPullRequest: false, uses: [] }],
       searches: [{ pattern: "func Jitter", tree: "base", paths: [], ignoreCase: false, hits: 1 }],
       question: q.id,
     }),
@@ -1039,6 +1041,41 @@ const CLEAN_DESIGN: QaSpec = {
   purposes: [{ section: "features", source: "body", quote: "which parses a retention such as 7d" }],
 };
 
+/**
+ * The `answer-reuses-existing-feature` scenario's Q&A on the flag change, whose purposes the body states: the base already has
+ * `schedule`, which runs a function on a cron spec, and the line the pull request adds for the nightly sweep calls it. The
+ * existing-feature answer names it as an equivalent the pull request reuses, at that added line, and the checker supports the
+ * claim, so round 1 notes it and is clean (apache/skywalking-banyandb#1496 was an `existing` item for the same shape).
+ */
+const REUSE_DESIGN: QaSpec = {
+  base: { defs: "banyand/cmd/server/flags.go:1:package server\nbanyand/cmd/server/flags.go:12:func registerFlags(cmd *cobra.Command) {", manifests: { "go.mod": "module github.com/apache/skywalking-banyandb\n\ngo 1.24.0\n" } },
+  purposes: [
+    { section: "config", source: "body", quote: "so retention can be set per group" },
+    { section: "background", source: "body", quote: "a nightly sweep at 3am that removes expired data" },
+  ],
+  answer: (q, _sym, _record, dflt) =>
+    q.type === FEATURE_TYPE && /cron|sweep|nightly/i.test(q.text)
+      ? {
+          ...dflt,
+          answer: "Yes, and the pull request uses it: the base's `schedule` (banyand/cmd/server/schedule.go:9) runs a function on a cron spec, and the line the pull request adds for the nightly sweep calls it (banyand/cmd/server/flags.go:16) rather than adding a scheduler of its own.",
+          none_found: false,
+          reusable: true,
+          status: "answered",
+          citations: [{ path: "banyand/cmd/server/schedule.go", tree: "base", start: 9, end: 14, quote: "func schedule(spec string) {" }],
+          searches: [{ pattern: "func schedule", tree: "base", paths: [], ignoreCase: false, hits: 1 }],
+          equivalents: [{ name: "schedule", cites: [1], reusedByPullRequest: true, uses: [{ path: "banyand/cmd/server/flags.go", start: 16, end: 16, quote: 'schedule("0 3 * * *")' }] }],
+        }
+      : dflt,
+};
+const STATED_FLAG_BODY = "Adds a --retention-days flag so retention can be set per group, and a nightly sweep at 3am that removes expired data.";
+const REUSE_PULL = FLAG_PULL(STATED_FLAG_BODY, "Add retention flag");
+
+/** The `answer-reuses-existing-feature` scenario; `checks` replaces the checker's verdicts (one that refutes the reuse claim, say). */
+export function reuseRehearsal(config: unknown, checks?: QaSpec["checks"]): RehearsalScenario {
+  const profile = parseProfile(config, "pr-design-review");
+  return build(profile, REUSE_PULL, { toolId: "static-go-1", qa: { ...REUSE_DESIGN, ...(checks !== undefined ? { checks } : {}) } }).scenario;
+}
+
 /** The questioner adds design-level questions (design-pr-review-split §3.3), on the change and on a design-level change item. */
 const ADDED_OTHER = (question: { item: string; text: string }): QaSpec => ({ ...CLEAN_DESIGN, added: [{ key: "", type: "other", item: question.item, symbol: "", text: question.text }] });
 
@@ -1070,7 +1107,7 @@ export function rehearsal(config: unknown): GraphRehearsal {
     throw err;
   }
   const report = build(profile, REPORT_PULL, { toolId: "static-go-1" }).scenario;
-  const stated = FLAG_PULL("Adds a --retention-days flag so retention can be set per group, and a nightly sweep at 3am that removes expired data.", "Add retention flag");
+  const stated = FLAG_PULL(STATED_FLAG_BODY, "Add retention flag");
   const clean = build(profile, COMPLEX_PULL, { toolId: "static-go-1", qa: CLEAN_DESIGN }).scenario;
   return {
     scenarios: {
@@ -1090,6 +1127,9 @@ export function rehearsal(config: unknown): GraphRehearsal {
       "other-corrected": { ...build(profile, COMPLEX_PULL, { toolId: "static-go-1", qa: { ...ADDED_OTHER({ item: "W1", text: "Does ParseTTL belong in pkg/schema, or with the other duration parsing of the storage layer?" }), rejectedFirst: [{ key: "", type: "purpose", item: "W1", symbol: "", text: "Which test covers the error branches of this change?" }] } }).scenario, expect: CLEAN },
       // A codebase feature does what the change adds: the existing-feature answer cites ParseDuration outside the change, an `existing` item.
       "answer-finds-existing-feature": build(profile, RETENTION_PULL, { toolId: "static-go-1" }).scenario,
+      // The base has the scheduler the change needs and the pull request's added line calls it: the answer says it is reused, the
+      // checker supports the claim, and round 1 notes it, not an `existing` item; the design review is clean.
+      "answer-reuses-existing-feature": { ...reuseRehearsal(config), expect: CLEAN },
       // No declared dependency or internal package provides a back-off; every go.mod entry is listed with its source status.
       "answer-no-library-with-whole-repo-search": build(profile, BACKOFF_PULL, { toolId: "static-go-1" }).scenario,
       // The answerer says none found; the checker's own search finds an equivalent in a vendored directory.

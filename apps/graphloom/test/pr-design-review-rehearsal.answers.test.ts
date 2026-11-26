@@ -5,4 +5,4 @@
 
 import { round1Scenarios } from "./pr-design-review-rehearsal.js";
 
-round1Scenarios(["added-other", "other-corrected", "answer-finds-existing-feature", "answer-no-library-with-whole-repo-search", "answer-checker-contradicts"]);
+round1Scenarios(["added-other", "other-corrected", "answer-finds-existing-feature", "answer-reuses-existing-feature", "answer-no-library-with-whole-repo-search", "answer-checker-contradicts"]);
