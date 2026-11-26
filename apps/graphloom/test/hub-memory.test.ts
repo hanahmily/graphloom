@@ -14,11 +14,11 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { HubHealth, HubLaunch, HubSubmission, MonitorSnapshot } from "@graphloom/sdk";
+import type { HubHealth, HubLaunch, HubLaunchMemoryRecord, HubSubmission, MonitorSnapshot } from "@graphloom/sdk";
 import type { DoctorCheck } from "../src/doctor.js";
 import { formatHubStatus } from "../src/hub-cli.js";
 import { addProcessMetrics } from "../src/hub-runtime.js";
-import { limitsDropIn, memoryChecks, memoryWarnings, serviceMemoryLimits, summarizeHubMemory, withMemoryChecks } from "../src/hub-memory.js";
+import { limitsDropIn, memoryChecks, memoryLines, memoryWarnings, recordedMemory, recordedMemoryText, serviceMemoryLimits, summarizeHubMemory, withMemoryChecks, withRecordedMemory } from "../src/hub-memory.js";
 import { repoRoot } from "./cli-env.js";
 
 const GiB = 1024 ** 3;
@@ -146,5 +146,44 @@ describe("hub inspect's usage panel: the launch's peak against its limit", () =>
     expect(metrics["memory-limit"]).toMatchObject({ value: 6 * GiB });
     expect(metrics["memory-oom-kills"]).toMatchObject({ value: 2 });
     expect(frame.usage!.coverage).toBe("launch cgroup memory 2 GiB now, peak 5 GiB of 6 GiB; external Docker containers are excluded (each has its own --memory)");
+  });
+});
+
+describe("recorded launch memory: the peaks to tune launchMemoryMax by", () => {
+  const at = "2026-11-26T10:00:00.000Z";
+  const record = (launchId: string, peak: number | undefined, oomKills = 0): HubLaunchMemoryRecord => ({ launchId, recordedAt: at, ...(peak !== undefined ? { peak } : {}), max: 6 * GiB, high: 4 * GiB, oom: oomKills > 0 ? 1 : 0, oomKills });
+  it("aggregates each submission's latest record, live and archived, against the current launchMemoryMax", async () => {
+    const items = [
+      { id: "s-a", lastLaunchMemory: record("l-a", 5 * GiB) },
+      { id: "s-b", lastLaunchMemory: record("l-b", 6 * GiB, 2) },
+      { id: "s-c", lastLaunchMemory: record("l-c", 2 * GiB) },
+      { id: "s-d", lastLaunchMemory: record("l-d", undefined) },
+      { id: "s-e" },
+    ];
+    expect(recordedMemory(items, 6 * GiB)).toEqual({ launches: 4, withPeak: 3, highest: { submissionId: "s-b", launchId: "l-b", recordedAt: at, peak: 6 * GiB, max: 6 * GiB }, nearMax: 2, oomKilled: 1 });
+    // Against a raised limit fewer come near it; with no limit there is nothing to come near.
+    expect(recordedMemory(items, 8 * GiB)?.nearMax).toBe(0);
+    expect(recordedMemory(items, null)).not.toHaveProperty("nearMax");
+    expect(recordedMemory([{ id: "s-e" }], 6 * GiB)).toBeUndefined();
+    const root = await temp("gl-hub-memory-none-");
+    const summary = await summarizeHubMemory({ cgroupRoot: root, launchMemoryHigh: 4 * GiB, launchMemoryMax: 6 * GiB }, 2, [items[0] as unknown as HubSubmission], [items[1]!]);
+    expect(summary.recorded).toMatchObject({ launches: 2, nearMax: 2, oomKilled: 1, highest: { submissionId: "s-b" } });
+    expect(memoryLines(summary)).toContain(`Recorded launch peaks: highest 6 GiB of 6 GiB (s-b l-b, ${at}) over the latest finished launch of 2 submissions (live and archived) · 2 within 80% of launchMemoryMax 6 GiB · 1 OOM-killed`);
+    expect(memoryLines({ ...summary, recorded: { launches: 1, withPeak: 0, oomKilled: 0, nearMax: 0 } }).join("\n")).toContain("Recorded launch peaks: none readable over the latest finished launch of 1 submission (live and archived) (no memory.peak on this kernel) · 0 within 80%");
+  });
+
+  it("phrases a record, and adds it to the usage panel without changing the cached snapshot", () => {
+    expect(recordedMemoryText(record("l-a", 5 * GiB))).toBe("peak 5 GiB of 6 GiB (throttled above 4 GiB), no OOM kill");
+    expect(recordedMemoryText({ launchId: "l", recordedAt: at, oom: 0, oomKills: 1, max: null })).toBe("peak unknown (no memory.peak on this kernel) (no memory.max), 1 process OOM-killed");
+    const usage: MonitorSnapshot["usage"] = { metrics: [{ id: "model-calls", label: "Recorded model calls", value: 3, unit: "calls", source: "ledger" }], coverage: "Controller budget ledger" };
+    const idle = withRecordedMemory(usage, { lastLaunchMemory: record("l-a", 5 * GiB) })!;
+    expect(idle.metrics.map((metric) => metric.id)).toEqual(["recorded-memory-peak", "recorded-memory-limit", "recorded-memory-high", "recorded-memory-oom-kills", "model-calls"]);
+    expect(idle.coverage).toBe(`Controller budget ledger; no launch is running; recorded at the end of launch l-a (${at}): peak 5 GiB of 6 GiB (throttled above 4 GiB), no OOM kill`);
+    expect(usage.metrics).toHaveLength(1); expect(usage.coverage).toBe("Controller budget ledger");
+    const running = withRecordedMemory(usage, { launch: { id: "l-b" } as HubLaunch, lastLaunchMemory: record("l-a", 5 * GiB) })!;
+    expect(running.metrics.map((metric) => metric.id)).toEqual(["previous-launch-memory-peak", "model-calls"]);
+    expect(running.coverage).toBe("Controller budget ledger");
+    expect(withRecordedMemory(usage, {})).toBe(usage);
+    expect(withRecordedMemory(undefined, { lastLaunchMemory: record("l-a", 5 * GiB) })?.coverage).toMatch(/^no launch is running/);
   });
 });

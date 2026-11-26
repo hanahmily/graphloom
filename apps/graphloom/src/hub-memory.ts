@@ -9,7 +9,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { formatBytes, launchCgroupPath, parseCgroupLimit, parseMemoryEvents, systemdSize } from "@graphloom/hub";
-import type { HubMemorySummary, HubSubmission } from "@graphloom/sdk";
+import type { HubLaunchMemoryRecord, HubMemorySummary, HubRecordedMemory, HubSubmission, MonitorMetric, MonitorSnapshot } from "@graphloom/sdk";
 import type { DoctorCheck } from "./doctor.js";
 import type { HubServiceConfig } from "./hub-config.js";
 
@@ -58,7 +58,7 @@ async function readLimit(file: string): Promise<number | null | undefined> {
 }
 
 /** The service's and each live launch's memory, read from the hub's cgroups, with what is wrong with them. */
-export async function summarizeHubMemory(config: Pick<HubServiceConfig, "cgroupRoot" | "launchMemoryHigh" | "launchMemoryMax">, maxConcurrentRuns: number, submissions: readonly HubSubmission[]): Promise<HubMemorySummary> {
+export async function summarizeHubMemory(config: Pick<HubServiceConfig, "cgroupRoot" | "launchMemoryHigh" | "launchMemoryMax">, maxConcurrentRuns: number, submissions: readonly HubSubmission[], archived: ReadonlyArray<{ id: string; lastLaunchMemory?: HubLaunchMemoryRecord }> = []): Promise<HubMemorySummary> {
   const root = config.cgroupRoot;
   const service: HubMemorySummary["service"] = { cgroup: root };
   const [high, max, current, peak] = await Promise.all(["memory.high", "memory.max", "memory.current", "memory.peak"].map((name) => readLimit(path.join(root, name))));
@@ -82,9 +82,69 @@ export async function summarizeHubMemory(config: Pick<HubServiceConfig, "cgroupR
       ...(launchMax !== undefined ? { max: launchMax } : {}), ...(oomKills !== undefined ? { oomKills } : {}),
     });
   }
-  const summary: HubMemorySummary = { service, launch: { high: config.launchMemoryHigh ?? null, max: config.launchMemoryMax ?? null }, maxConcurrentRuns, launches, warnings: [] };
+  const launchLimits = { high: config.launchMemoryHigh ?? null, max: config.launchMemoryMax ?? null };
+  const recorded = recordedMemory([...submissions, ...archived], launchLimits.max);
+  const summary: HubMemorySummary = { service, launch: launchLimits, maxConcurrentRuns, launches, ...(recorded !== undefined ? { recorded } : {}), warnings: [] };
   summary.warnings = memoryWarnings(summary);
   return summary;
+}
+
+/** The share of `launchMemoryMax` above which a recorded peak counts as near it. */
+export const NEAR_MAX = 0.8;
+
+/**
+ * The recorded peaks of finished launches, one per submission (its latest),
+ * against the current `launchMemoryMax`: the distribution to tune it by.
+ * Undefined when no submission has a record.
+ */
+export function recordedMemory(items: ReadonlyArray<{ id: string; lastLaunchMemory?: HubLaunchMemoryRecord }>, launchMax: number | null): HubRecordedMemory | undefined {
+  const records = items.flatMap((item) => item.lastLaunchMemory !== undefined ? [{ submissionId: item.id, record: item.lastLaunchMemory }] : []);
+  if (records.length === 0) return undefined;
+  const peaks = records.filter((item) => typeof item.record.peak === "number");
+  const top = peaks.reduce<typeof peaks[number] | undefined>((best, item) => best === undefined || item.record.peak! > best.record.peak! ? item : best, undefined);
+  return {
+    launches: records.length, withPeak: peaks.length,
+    ...(top !== undefined ? { highest: { submissionId: top.submissionId, launchId: top.record.launchId, recordedAt: top.record.recordedAt, peak: top.record.peak!, ...(top.record.max !== undefined ? { max: top.record.max } : {}) } } : {}),
+    ...(launchMax !== null ? { nearMax: peaks.filter((item) => item.record.peak! >= launchMax * NEAR_MAX).length } : {}),
+    oomKilled: records.filter((item) => item.record.oomKills > 0).length,
+  };
+}
+
+/** A launch's recorded memory in one phrase: `peak 4.2 GiB of 6 GiB (throttled above 4 GiB), 2 OOM-killed`. */
+export function recordedMemoryText(record: HubLaunchMemoryRecord): string {
+  const limit = record.max === undefined ? "" : record.max === null ? " (no memory.max)" : ` of ${formatBytes(record.max)}`;
+  const high = record.high !== undefined && record.high !== null ? ` (throttled above ${formatBytes(record.high)})` : "";
+  const peak = record.peak !== undefined ? `peak ${formatBytes(record.peak)}${limit}${high}` : `peak unknown (no memory.peak on this kernel)${limit}${high}`;
+  return `${peak}${record.oomKills > 0 ? `, ${record.oomKills} process${record.oomKills === 1 ? "" : "es"} OOM-killed${record.oom > 0 ? " at its memory.max" : ""}` : ", no OOM kill"}`;
+}
+
+/**
+ * The usage panel's view of a submission's recorded launch memory (§6.2, §8). With
+ * no launch running: its latest finished launch's peak, limits and OOM kills, read
+ * from the record the hub kept at the launch's end; while one runs (its live cgroup
+ * is in the panel already), the previous launch's recorded peak beside it. A new
+ * usage object: the cached snapshot is never changed.
+ */
+export function withRecordedMemory(usage: MonitorSnapshot["usage"], submission: Pick<HubSubmission, "launch" | "lastLaunchMemory">): MonitorSnapshot["usage"] {
+  const record = submission.lastLaunchMemory;
+  if (record === undefined) return usage;
+  const source = "the launch cgroup, recorded by the hub at the launch's end";
+  const limits = `${record.max !== undefined ? `limit ${formatBytes(record.max)}` : "limit unknown"}${record.high !== undefined && record.high !== null ? `, throttled above ${formatBytes(record.high)}` : ""}`;
+  const which = `launch ${record.launchId}, at its end ${record.recordedAt}`;
+  const base = usage ?? { metrics: [] };
+  // First, so a long usage page never pages them out.
+  if (submission.launch !== undefined) {
+    const previous: MonitorMetric = { id: "previous-launch-memory-peak", label: `Previous launch memory peak (${which}; ${limits}${record.oomKills > 0 ? `; ${record.oomKills} OOM-killed` : ""})`, value: record.peak ?? null, unit: "bytes", source, exactness: "settled" };
+    return { ...base, metrics: [previous, ...base.metrics] };
+  }
+  const metrics: MonitorMetric[] = [
+    { id: "recorded-memory-peak", label: `Recorded launch memory peak (${which}; ${limits})`, value: record.peak ?? null, unit: "bytes", source, exactness: "settled" },
+    { id: "recorded-memory-limit", label: "Recorded launch memory limit (memory.max; unknown = no limit)", value: record.max ?? null, unit: "bytes", source, exactness: "settled" },
+    ...(record.high !== undefined ? [{ id: "recorded-memory-high", label: "Recorded launch memory high (memory.high; unknown = no limit)", value: record.high ?? null, unit: "bytes", source, exactness: "settled" as const }] : []),
+    { id: "recorded-memory-oom-kills", label: "Recorded launch processes OOM-killed", value: record.oomKills, unit: "processes", source, exactness: "settled" },
+  ];
+  const coverage = `no launch is running; recorded at the end of launch ${record.launchId} (${record.recordedAt}): ${recordedMemoryText(record)}`;
+  return { ...base, metrics: [...metrics, ...base.metrics], coverage: base.coverage ? `${base.coverage}; ${coverage}` : coverage };
 }
 
 /** Unset or infinite limits, and launch limits the service limit cannot hold all at once. */
@@ -111,9 +171,21 @@ export function memoryLines(summary: HubMemorySummary): string[] {
     `Memory: service MemoryHigh ${value(service.high)} · MemoryMax ${value(service.max)} · now ${value(service.current)}${service.peak !== undefined ? ` · peak ${formatBytes(service.peak)}` : ""}`,
     `Launch limits: memory.high ${formatBytes(launch.high)} · memory.max ${formatBytes(launch.max)} · concurrency ${summary.maxConcurrentRuns}`,
     ...summary.launches.map((item) => `  ${item.submissionId} ${item.launchId}: now ${value(item.current)} · peak ${value(item.peak)} of ${value(item.max)}${item.oomKills ? ` · ${item.oomKills} OOM-killed` : ""}`),
+    ...(summary.recorded !== undefined ? [recordedLine(summary.recorded, launch.max)] : []),
     ...(service.error ? [`Memory error: ${service.error}`] : []),
     ...summary.warnings.map((warning) => `Warning: ${warning}`),
   ];
+}
+
+/** `hub status`'s line on the recorded peaks: the highest, and how many came near the current launchMemoryMax. */
+function recordedLine(recorded: HubRecordedMemory, launchMax: number | null): string {
+  const of = `the latest finished launch of ${recorded.launches} submission${recorded.launches === 1 ? "" : "s"} (live and archived)`;
+  const top = recorded.highest;
+  return [
+    top !== undefined ? `Recorded launch peaks: highest ${formatBytes(top.peak)}${top.max !== undefined ? ` of ${formatBytes(top.max)}` : ""} (${top.submissionId} ${top.launchId}, ${top.recordedAt}) over ${of}` : `Recorded launch peaks: none readable over ${of} (no memory.peak on this kernel)`,
+    ...(recorded.nearMax !== undefined && launchMax !== null ? [`${recorded.nearMax} within ${NEAR_MAX * 100}% of launchMemoryMax ${formatBytes(launchMax)}`] : []),
+    `${recorded.oomKilled} OOM-killed`,
+  ].join(" · ");
 }
 
 /** `hub doctor`'s memory checks: each warning a warn, else one pass naming the limits. */

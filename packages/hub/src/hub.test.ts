@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
-import { mkdtemp, readFile, rm, writeFile, appendFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile, appendFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -841,6 +841,43 @@ describe("a launch the OOM killer ended (docs/design-run-hub.md §6.2)", () => {
     killed(stopped.driver, stopped.hub.inspect(b.id), atLimit, { ...observation({ kind: "operator", cause: "reconciliation", evidenceRefs: [] }), blocker: "an effect needs reconciling" });
     await stopped.hub.tick();
     expect(stopped.hub.inspect(b.id).blocker).toMatch(/^the launch was killed: memory limit reached \(6 GiB\).*; the run stops on: an effect needs reconciling$/);
+  });
+
+  it("keeps the latest finished launch's record with the submission, and in its archive entry", async () => {
+    const { hub, driver, advance } = await fixture(); const a = await accepted(hub); await hub.tick();
+    const first = hub.inspect(a.id).launch!;
+    killed(driver, hub.inspect(a.id), { ...atLimit, highBytes: 4 * GiB }); await hub.tick();
+    expect(hub.inspect(a.id).lastLaunchMemory).toEqual({ launchId: first.id, recordedAt: new Date(100000).toISOString(), peak: 6 * GiB, high: 4 * GiB, max: 6 * GiB, oom: 1, oomKills: 3 });
+    expect(hub.list().submissions[0]!.lastLaunchMemory?.launchId).toBe(first.id);
+    advance(1000); await hub.tick();
+    // The retry runs: the record stays the previous launch's until this one ends.
+    const second = hub.inspect(a.id).launch!;
+    expect(hub.inspect(a.id).lastLaunchMemory?.launchId).toBe(first.id);
+    driver.executions.set(second.id, { execution: "drained", ownerGone: true, externalStopped: true, memory: { oom: 0, oomKill: 0, oomGroupKill: 0, maxBytes: 6 * GiB, peakBytes: 2 * GiB }, observation: observation({ kind: "complete" }),
+      report: { protocolVersion: 1, launchId: second.id, generation: second.generation, outcome: "completed", endedAt: new Date(0).toISOString() } });
+    await hub.tick();
+    expect(hub.inspect(a.id)).toMatchObject({ state: "succeeded", lastLaunchMemory: { launchId: second.id, peak: 2 * GiB, max: 6 * GiB, oom: 0, oomKills: 0 } });
+    await hub.archive(a.id);
+    expect(hub.archived()[0]!.lastLaunchMemory).toMatchObject({ launchId: second.id, peak: 2 * GiB, oomKills: 0 });
+  });
+
+  it("reads the newest memory record on disk for a submission settled before the hub kept it", async () => {
+    const f = await fixture(); const a = await accepted(f.hub); await f.hub.tick();
+    f.driver.finish(f.hub.inspect(a.id)); await f.hub.tick();
+    expect(f.hub.inspect(a.id).lastLaunchMemory).toBeUndefined();
+    await f.hub.close({ graceMs: 0 });
+    const launches = path.join(f.directory, "submissions", a.id, "launches");
+    await mkdir(launches, { recursive: true });
+    const older = "l-00000000-0000-0000-0000-000000000001"; const newer = "l-00000000-0000-0000-0000-000000000002";
+    await writeFile(path.join(launches, `${older}.memory.json`), JSON.stringify({ oom: 0, oomKill: 0, oomGroupKill: 0, maxBytes: 6 * GiB, peakBytes: 5 * GiB }));
+    await writeFile(path.join(launches, `${newer}.memory.json`), JSON.stringify({ oom: 1, oomKill: 2, oomGroupKill: 1, maxBytes: 6 * GiB, peakBytes: 6 * GiB }));
+    await writeFile(path.join(launches, "l-00000000-0000-0000-0000-000000000003.memory.json"), "not json");
+    await utimes(path.join(launches, `${older}.memory.json`), new Date(1000), new Date(1000));
+    await utimes(path.join(launches, `${newer}.memory.json`), new Date(2000), new Date(2000));
+    await utimes(path.join(launches, "l-00000000-0000-0000-0000-000000000003.memory.json"), new Date(500), new Date(500));
+    const reopened = await openHub(f.options); hubs.push(reopened);
+    expect(reopened.inspect(a.id).lastLaunchMemory).toEqual({ launchId: newer, recordedAt: new Date(2000).toISOString(), peak: 6 * GiB, max: 6 * GiB, oom: 1, oomKills: 2 });
+    expect(JSON.parse(await readFile(path.join(f.directory, "scheduler.json"), "utf8")).submissions[a.id].lastLaunchMemory.launchId).toBe(newer);
   });
 
   it("ignores the cgroup's OOM record when the launch reported its end, or no OOM killer acted", async () => {

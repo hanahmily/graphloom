@@ -150,3 +150,72 @@ describe("hub command over a Unix socket", () => {
     expect(unit).toContain("%%percent.json"); expect(unit).toContain('\\"quotes\\"');
   });
 });
+
+describe("recorded launch memory once the launch has ended (docs/design-run-hub.md §6.2)", () => {
+  const GiB = 1024 ** 3;
+  const flat = (text: string) => text.replace(/[│|]/g, " ").replace(/\s+/g, " ");
+  it("shows the latest finished launch's recorded peak in inspect (text, markdown, JSON), list, the submission, status and the archive", async () => {
+    const { socket, service, driver } = await socketEnvironment(cleanups, 2);
+    const common = ["--socket", socket];
+    const killed = JSON.parse((await invoke(["submit", "/tasks/a.yaml", ...common])).out) as HubSubmission;
+    const quiet = JSON.parse((await invoke(["submit", "/tasks/b.yaml", ...common])).out) as HubSubmission;
+    await service.hub.tick();
+    const launchA = service.hub.inspect(killed.id).launch!.id; const launchB = service.hub.inspect(quiet.id).launch!.id;
+    const complete = { protocolVersion: 1 as const, observedAt: new Date().toISOString(), stateRevision: 1, progressRevision: 1, status: "succeeded" as const, continuation: { kind: "complete" as const } };
+    driver.executions.set(launchA, { execution: "drained", ownerGone: true, externalStopped: true, observation: complete, memory: { oom: 1, oomKill: 2, oomGroupKill: 1, maxBytes: 6 * GiB, highBytes: 4 * GiB, peakBytes: 6 * GiB } });
+    driver.executions.set(launchB, { execution: "drained", ownerGone: true, externalStopped: true, observation: complete, memory: { oom: 0, oomKill: 0, oomGroupKill: 0, maxBytes: 6 * GiB, highBytes: 4 * GiB, peakBytes: 5 * GiB } });
+    await service.hub.tick();
+    const recordedAt = service.hub.inspect(killed.id).lastLaunchMemory!.recordedAt;
+
+    const text = flat((await invoke(["inspect", killed.id, "--panel", "usage", "--width", "240", ...common])).out);
+    expect(text).toContain(`Recorded launch memory peak (launch ${launchA}, at its end ${recordedAt}; limit 6 GiB, throttled above 4 GiB): ${6 * GiB} bytes; settled`);
+    expect(text).toContain("Recorded launch processes OOM-killed: 2 processes");
+    expect(text).toContain(`no launch is running; recorded at the end of launch ${launchA} (${recordedAt}): peak 6 GiB of 6 GiB (throttled above 4 GiB), 2 processes OOM-killed at its memory.max`);
+    const markdown = flat((await invoke(["inspect", killed.id, "--panel", "usage", "--format", "markdown", "--width", "240", ...common])).out);
+    expect(markdown).toContain(`recorded at the end of launch ${launchA} (${recordedAt}): peak 6 GiB of 6 GiB`);
+    expect(markdown).toContain("Recorded launch memory peak");
+    const json = JSON.parse((await invoke(["inspect", killed.id, "--panel", "usage", "--format", "json", ...common])).out) as { panels: Array<{ content: { usage: { metrics: Array<{ id: string; value: number | null }>; coverage: string } } }> };
+    const metrics = Object.fromEntries(json.panels[0]!.content.usage.metrics.map((metric) => [metric.id, metric.value]));
+    expect(metrics).toMatchObject({ "recorded-memory-peak": 6 * GiB, "recorded-memory-limit": 6 * GiB, "recorded-memory-high": 4 * GiB, "recorded-memory-oom-kills": 2 });
+    expect(json.panels[0]!.content.usage.coverage).toContain(`launch ${launchA}`);
+
+    const record = { launchId: launchA, recordedAt, peak: 6 * GiB, high: 4 * GiB, max: 6 * GiB, oom: 1, oomKills: 2 };
+    expect((await hubRequest<HubSubmission>("GET", `/v1/submissions/${killed.id}`, undefined, socket)).lastLaunchMemory).toEqual(record);
+    const listed = JSON.parse((await invoke(["list", "--json", ...common])).out) as HubStatus;
+    expect(listed.submissions.find((item) => item.id === killed.id)!.lastLaunchMemory).toEqual(record);
+    expect(listed.submissions.find((item) => item.id === quiet.id)!.lastLaunchMemory).toMatchObject({ launchId: launchB, peak: 5 * GiB, oomKills: 0 });
+    // The text list stays compact: only the OOM-killed launch is marked.
+    const lines = (await invoke(["list", ...common])).out.split("\n");
+    expect(lines.find((line) => line.startsWith(killed.id))).toContain(`OOM-killed: peak 6 GiB of 6 GiB (launch ${launchA})`);
+    expect(lines.find((line) => line.startsWith(quiet.id))).not.toContain("OOM");
+
+    const status = (await invoke(["status", ...common])).out;
+    expect(status).toContain(`Recorded launch peaks: highest 6 GiB of 6 GiB (${killed.id} ${launchA}, ${recordedAt}) over the latest finished launch of 2 submissions (live and archived) · 1 OOM-killed`);
+    await invoke(["archive", killed.id, ...common]);
+    const archived = await hubRequest<HubStatus>("GET", "/v1/submissions?archived=true", undefined, socket);
+    expect(archived.archived!.find((entry) => entry.id === killed.id)!.lastLaunchMemory).toEqual(record);
+    const health = JSON.parse((await invoke(["status", "--json", ...common])).out) as { memory: { recorded: unknown } };
+    expect(health.memory.recorded).toEqual({ launches: 2, withPeak: 2, highest: { submissionId: killed.id, launchId: launchA, recordedAt, peak: 6 * GiB, max: 6 * GiB }, oomKilled: 1 });
+  });
+
+  it("keeps the live view while a launch runs, with the previous launch's recorded peak beside it", async () => {
+    const { socket, service, driver } = await socketEnvironment(cleanups, 1);
+    const common = ["--socket", socket];
+    const item = JSON.parse((await invoke(["submit", "/tasks/a.yaml", ...common])).out) as HubSubmission;
+    await service.hub.tick();
+    const first = service.hub.inspect(item.id).launch!.id;
+    // The launch is OOM-killed at its limit; the hub retries it once.
+    driver.executions.set(first, { execution: "drained", ownerGone: true, externalStopped: true, memory: { oom: 1, oomKill: 3, oomGroupKill: 1, maxBytes: 6 * GiB, peakBytes: 6 * GiB },
+      observation: { protocolVersion: 1, observedAt: new Date().toISOString(), stateRevision: 1, progressRevision: 0, status: "stopped", continuation: { kind: "automatic", cause: "controller-crash", fingerprint: "crash", stateRevision: 1 } } });
+    await service.hub.tick();
+    expect(service.hub.inspect(item.id)).toMatchObject({ state: "waiting", lastLaunchMemory: { launchId: first, oomKills: 3 } });
+    await service.hub.resume(item.id); await service.hub.tick();
+    expect(service.hub.inspect(item.id).launch?.id).not.toBe(first);
+    const json = JSON.parse((await invoke(["inspect", item.id, "--panel", "usage", "--format", "json", ...common])).out) as { panels: Array<{ content: { usage: { metrics: Array<{ id: string; value: number | null; label: string }>; coverage?: string } } }> };
+    const usage = json.panels[0]!.content.usage;
+    expect(usage.metrics.map((metric) => metric.id)).toEqual(["previous-launch-memory-peak", "tokens"]);
+    expect(usage.metrics[0]).toMatchObject({ value: 6 * GiB, label: expect.stringContaining(`launch ${first}, at its end`) });
+    expect(usage.metrics[0]!.label).toContain("3 OOM-killed");
+    expect(usage.coverage ?? "").not.toContain("no launch is running");
+  });
+});

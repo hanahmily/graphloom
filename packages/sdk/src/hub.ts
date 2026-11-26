@@ -202,6 +202,28 @@ export interface HubLaunch {
   stopReason?: "pause" | "cancel" | "service-interruption";
   stopCommandId?: string;
 }
+/**
+ * What a finished launch's cgroup recorded about memory when the launch drained
+ * (docs/design-run-hub.md §6.2), as the hub keeps it with the submission: the
+ * peak to tune `launchMemoryMax` by once the live cgroup is gone. Bytes; `null`
+ * is no limit (`max`); absent is unknown (a kernel without `memory.peak`, or a
+ * record written before `memory.high` was kept).
+ */
+export interface HubLaunchMemoryRecord {
+  launchId: string;
+  /** When the hub settled the launch (or, for a record found on disk, when the hub wrote it). */
+  recordedAt: string;
+  /** `memory.peak`: the launch's highest use. */
+  peak?: number;
+  /** `memory.high`: above it the kernel throttled and reclaimed. */
+  high?: number | null;
+  /** `memory.max`: at it the kernel OOM-killed the launch. */
+  max?: number | null;
+  /** `memory.events` `oom`: times the launch reached its own `memory.max`. */
+  oom: number;
+  /** `memory.events` `oom_kill`: the launch's processes an OOM killer killed. */
+  oomKills: number;
+}
 export interface HubSubmission {
   id: string;
   runId: string;
@@ -235,6 +257,8 @@ export interface HubSubmission {
   automaticPending?: boolean;
   reconciliationPending?: boolean;
   journalBytes: number;
+  /** The memory its latest finished launch's cgroup recorded at the launch's end (§6.2). */
+  lastLaunchMemory?: HubLaunchMemoryRecord;
 }
 export interface HubArchivedSubmission { archived: true; id: string; runId: string; requestDigest: string; contentDigest: string; key?: string; }
 /** What a task asked for, read from its captured task file: never authority, only search text. */
@@ -272,6 +296,8 @@ export interface HubArchiveEntry {
   /** A rehearsal submission's settings and its verdict, when one was recorded. */
   rehearsal?: HubRehearsal;
   rehearsalVerdict?: HubRehearsalVerdict["verdict"];
+  /** The memory its latest finished launch recorded at its end, kept from the submission. */
+  lastLaunchMemory?: HubLaunchMemoryRecord;
 }
 export interface HubStatus {
   hubId: string;
@@ -318,8 +344,26 @@ export interface HubMemorySummary {
   maxConcurrentRuns: number;
   /** Each live launch's cgroup. */
   launches: Array<{ submissionId: string; launchId: string; current?: number; peak?: number; max?: number | null; oomKills?: number }>;
+  /**
+   * The peaks finished launches recorded at their end (each live and archived
+   * submission's latest launch): how close launches come to `launchMemoryMax`.
+   */
+  recorded?: HubRecordedMemory;
   /** Unset or infinite limits, and launch limits the service limit cannot hold together. */
   warnings: string[];
+}
+/** The distribution of recorded launch peaks `hub status` reports, for tuning `launchMemoryMax`. */
+export interface HubRecordedMemory {
+  /** Submissions (live and archived) with a recorded launch. */
+  launches: number;
+  /** Of those, the ones whose record has a peak. */
+  withPeak: number;
+  /** The highest recorded peak and where. */
+  highest?: { submissionId: string; launchId: string; recordedAt: string; peak: number; max?: number | null };
+  /** Peaks at or above 80% of the current `launchMemoryMax`; absent when it is `max`. */
+  nearMax?: number;
+  /** Records with an OOM-killed process. */
+  oomKilled: number;
 }
 /**
  * What the hub's own environment provides to its runs: the head of `PATH`,

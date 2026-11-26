@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { formatBytes, launchMemoryEnd, parseCgroupLimit, parseMemoryEvents, parseMemorySize, systemdSize, validLaunchMemory } from "./memory.js";
+import { formatBytes, launchMemoryEnd, launchMemoryRecord, readLaunchMemory, parseCgroupLimit, parseMemoryEvents, parseMemorySize, systemdSize, validLaunchMemory } from "./memory.js";
 
 const GiB = 1024 ** 3;
 
@@ -39,5 +42,20 @@ describe("launch memory sizes and outcomes", () => {
     expect(launchMemoryEnd(undefined)).toBeUndefined();
     expect(validLaunchMemory({ oom: 1, oomKill: 1, oomGroupKill: 0, maxBytes: null })).toBe(true);
     expect(validLaunchMemory({ oom: -1, oomKill: 1, oomGroupKill: 0 })).toBe(false);
+    expect(validLaunchMemory({ oom: 0, oomKill: 0, oomGroupKill: 0, highBytes: null })).toBe(true);
+    expect(validLaunchMemory({ oom: 0, oomKill: 0, oomGroupKill: 0, highBytes: "4G" })).toBe(false);
+  });
+  it("reads a launch cgroup's high with its max and peak, and keeps it as the submission's record", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "graphloom-memory-"));
+    try {
+      await writeFile(path.join(directory, "memory.events"), "oom 0\noom_kill 0\noom_group_kill 0\n");
+      await writeFile(path.join(directory, "memory.max"), `${6 * GiB}\n`);
+      await writeFile(path.join(directory, "memory.high"), `${4 * GiB}\n`);
+      await writeFile(path.join(directory, "memory.peak"), `${3 * GiB}\n`);
+      const memory = await readLaunchMemory(directory);
+      expect(memory).toEqual({ oom: 0, oomKill: 0, oomGroupKill: 0, maxBytes: 6 * GiB, highBytes: 4 * GiB, peakBytes: 3 * GiB });
+      expect(launchMemoryRecord("l-1", "2026-11-26T00:00:00.000Z", memory!)).toEqual({ launchId: "l-1", recordedAt: "2026-11-26T00:00:00.000Z", peak: 3 * GiB, high: 4 * GiB, max: 6 * GiB, oom: 0, oomKills: 0 });
+      expect(launchMemoryRecord("l-2", "t", { oom: 0, oomKill: 1, oomGroupKill: 0 })).toEqual({ launchId: "l-2", recordedAt: "t", oom: 0, oomKills: 1 });
+    } finally { await rm(directory, { recursive: true, force: true }); }
   });
 });

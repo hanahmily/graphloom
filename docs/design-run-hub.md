@@ -614,6 +614,22 @@ it. The launch's log gets the cause as its closing line (§8). `hub inspect
 OOM-killed processes, read from the launch cgroup while it runs; a launch that
 reported its own end is settled by its report, whatever its cgroup recorded.
 
+**The recorded peak.** The hub also keeps the record (peak, `memory.high`,
+`memory.max`, `oom`, OOM-killed processes, the launch id and when it settled)
+with the submission as `lastLaunchMemory`, replaced each time a launch drains;
+a hub that finds a submission without one (settled before it was kept) reads
+the newest `<launchId>.memory.json` on start. So the peak to retune
+`launchMemoryMax` by outlives the cgroup: with no launch running, `--panel
+usage` (text, Markdown, JSON) shows that launch's recorded peak, limits and OOM
+kills, labelled with the launch id and time and named in the panel's coverage
+line as recorded at the launch's end; while a launch runs, the live cgroup view
+stays and the previous launch's recorded peak is shown beside it. `hub list
+--json` and `GET /v1/submissions/<id>` carry `lastLaunchMemory`, and an archive
+entry keeps it. Text `hub list` stays one short line per submission and adds
+`OOM-killed: peak <peak> of <max> (launch <id>)` only when that launch had an
+OOM-killed process, the one memory fact that calls for action. `hub status`
+gives the distribution (§9.1).
+
 **Docker-confined jobs.** A docker-confined command job's containers run in
 Docker's cgroups, outside the launch's and the service's, so neither limit
 covers them. Each container gets its confinement's `memory` as `--memory` and
@@ -1091,8 +1107,12 @@ to launches started after the hub restarts.
 
 `hub status` shows the service's MemoryHigh, MemoryMax, current and peak use
 (read from the delegated cgroup), the launch limits and concurrency, and each
-live launch's current and peak use against its limit; `hub status --json`
-carries them as `memory`. Both `hub status` and `hub doctor` (a `hub memory`
+live launch's current and peak use against its limit, and a `Recorded launch
+peaks:` line over each live and archived submission's latest finished launch
+(§6.2): the highest recorded peak (its submission, launch and time), how many
+came within 80% of the current `launchMemoryMax`, and how many had an
+OOM-killed process; `hub status --json` carries them as `memory` (the
+distribution as `memory.recorded`). Both `hub status` and `hub doctor` (a `hub memory`
 check among its host checks) warn when the service has no MemoryMax (or a
 MemoryMax but no MemoryHigh), when `launchMemoryMax` is `max`, when it
 exceeds the service's MemoryMax, and when `launchMemoryMax` times the
