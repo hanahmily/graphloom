@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
-import { readFile } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
+import type { HubLaunchMemoryRecord } from "@graphloom/sdk";
 
 /**
  * Memory containment of a managed launch (docs/design-run-hub.md §6.2): the
@@ -33,6 +34,8 @@ export interface HubLaunchMemory {
   oomGroupKill: number;
   /** `memory.max`; null when `max`. */
   maxBytes?: number | null;
+  /** `memory.high`; null when `max` (records written before it was kept lack it). */
+  highBytes?: number | null;
   /** `memory.peak`, on kernels that have it (5.19 and later). */
   peakBytes?: number;
 }
@@ -98,6 +101,7 @@ export async function readLaunchMemory(directory: string): Promise<HubLaunchMemo
   catch { return undefined; }
   const memory: HubLaunchMemory = parseMemoryEvents(events);
   try { memory.maxBytes = parseCgroupLimit(await readFile(path.join(directory, "memory.max"), "utf8")); } catch { /* Unreadable: unknown. */ }
+  try { memory.highBytes = parseCgroupLimit(await readFile(path.join(directory, "memory.high"), "utf8")); } catch { /* Unreadable: unknown. */ }
   try {
     const peak = parseCgroupLimit(await readFile(path.join(directory, "memory.peak"), "utf8"));
     if (peak !== null) memory.peakBytes = peak;
@@ -112,6 +116,7 @@ export function validLaunchMemory(value: unknown): value is HubLaunchMemory {
   const count = (v: unknown) => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
   return count(m.oom) && count(m.oomKill) && count(m.oomGroupKill)
     && (m.maxBytes === undefined || m.maxBytes === null || count(m.maxBytes))
+    && (m.highBytes === undefined || m.highBytes === null || count(m.highBytes))
     && (m.peakBytes === undefined || count(m.peakBytes));
 }
 
@@ -128,4 +133,39 @@ export function launchMemoryEnd(memory: HubLaunchMemory | undefined): { kind: "l
     return { kind: "limit", text: `memory limit reached (${formatBytes(memory.maxBytes)}): the kernel killed the launch at its cgroup's memory.max (launchMemoryMax)${peak}` };
   }
   return { kind: "outside", text: `killed by the out-of-memory killer outside the launch's own limit (the hub service's MemoryMax, or the host out of memory)${peak}` };
+}
+
+/** A launch's memory record as the hub keeps it with its submission (§6.2). */
+export function launchMemoryRecord(launchId: string, recordedAt: string, memory: HubLaunchMemory): HubLaunchMemoryRecord {
+  return {
+    launchId, recordedAt,
+    ...(memory.peakBytes !== undefined ? { peak: memory.peakBytes } : {}),
+    ...(memory.highBytes !== undefined ? { high: memory.highBytes } : {}),
+    ...(memory.maxBytes !== undefined ? { max: memory.maxBytes } : {}),
+    oom: memory.oom, oomKills: memory.oomKill,
+  };
+}
+
+/**
+ * The newest `<launchId>.memory.json` under a submission's launches directory, as
+ * a record dated by the file's write; undefined when there is none readable. A
+ * submission settled before the hub kept the record with it gets it from here.
+ */
+export async function latestLaunchMemoryRecord(launchesDirectory: string): Promise<HubLaunchMemoryRecord | undefined> {
+  let names: string[];
+  try { names = await readdir(launchesDirectory); } catch { return undefined; }
+  let latest: { launchId: string; at: number } | undefined;
+  for (const name of names) {
+    const match = /^(l-[a-f0-9-]{36})\.memory\.json$/.exec(name);
+    if (!match) continue;
+    try {
+      const at = (await stat(path.join(launchesDirectory, name))).mtimeMs;
+      if (latest === undefined || at > latest.at) latest = { launchId: match[1]!, at };
+    } catch { /* Gone: skip. */ }
+  }
+  if (latest === undefined) return undefined;
+  try {
+    const memory: unknown = JSON.parse(await readFile(path.join(launchesDirectory, `${latest.launchId}.memory.json`), "utf8"));
+    return validLaunchMemory(memory) ? launchMemoryRecord(latest.launchId, new Date(latest.at).toISOString(), memory) : undefined;
+  } catch { return undefined; }
 }

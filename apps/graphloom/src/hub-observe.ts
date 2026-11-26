@@ -5,6 +5,7 @@ import { livePath, loadRunState, managedObservation, nodeAccepted, type DurableR
 import type { HubObservation, HubStatus, HubSubmission, MonitorActivity, MonitorJob, MonitorMetric, MonitorSnapshot, MonitorTopology } from "@graphloom/sdk";
 import { normalizeTopology, stableHash } from "@graphloom/sdk";
 import { runStats } from "./stats.js";
+import { withRecordedMemory } from "./hub-memory.js";
 
 export interface OwnedMonitorResult { observation: HubObservation; snapshot?: MonitorSnapshot; monitoringError?: string; }
 
@@ -197,8 +198,12 @@ export function withHubSnapshot(snapshot: MonitorSnapshot | undefined, submissio
   // An active launch supersedes the earlier stop's blocker; an idle submission keeps the run's
   // (an approval it waits on) unless the hub has its own. A succeeded run has none.
   const blocker = submission.state === "succeeded" ? null : submission.blocker ?? (superseded !== undefined && launching ? null : base.run.blocker ?? null);
+  // What the latest finished launch's cgroup recorded at its end (§6.2): its peak once the live cgroup is gone.
+  const usage = withRecordedMemory(base.usage, submission);
+  const record = submission.lastLaunchMemory;
   return {
     ...base, frameId: `${base.frameId}:hub:${submission.updatedAt}`, observedAt: now,
+    ...(usage !== undefined ? { usage } : {}),
     run: { ...base.run, ...(base.run.graph === undefined && request.graph !== undefined ? { graph: request.graph } : {}), ...(superseded !== undefined ? { status: submission.state } : {}), submissionId: submission.id, nextEligibleAt: submission.eligibleAt ?? null, blocker },
     sources: [
       ...base.sources.map((source) => {
@@ -209,6 +214,7 @@ export function withHubSnapshot(snapshot: MonitorSnapshot | undefined, submissio
       }),
       ...(snapshot === undefined ? [{ id: "controller", status: "unavailable" as const, observedAt: null, detail: controllerDetail }] : []),
       { id: "hub", status: "available", observedAt: now, revision: submission.updatedAt },
+      ...(record !== undefined ? [{ id: "launch-memory-record", status: "available" as const, observedAt: record.recordedAt, detail: `launch ${record.launchId}'s cgroup, recorded at its end` }] : []),
     ],
     hub: { occupied: status.occupiedSlots, limit: status.maxConcurrentRuns, queued: status.submissions.filter((item) => item.state === "queued").length, state: submission.state, observationId: submission.updatedAt },
   };

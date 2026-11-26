@@ -147,7 +147,7 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
           if (item.input.rehearsal !== undefined) rehearsalCounts[item.state] = (rehearsalCounts[item.state] ?? 0) + 1;
         }
         const summary = await summarizeHubEnvironment(environment, config).catch((error: unknown) => ({ pathHead: [], pathEntries: 0, tools: [], variables: [], warnings: [], error: String(error).slice(0, 1024) }));
-        const memory = await summarizeHubMemory(config, status.maxConcurrentRuns, status.submissions);
+        const memory = await summarizeHubMemory(config, status.maxConcurrentRuns, status.submissions, scheduler.archived());
         const health: HubHealth = {
           ...status, socket: config.socket, ...(version !== undefined ? { version } : {}), counts, rehearsalCounts, archivedEntries: scheduler.archived().length, environment: summary, memory,
           ...(scheduler.archiveIndexError ? { archiveIndexError: scheduler.archiveIndexError } : {}),

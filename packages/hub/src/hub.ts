@@ -7,7 +7,7 @@ import { mkdir, readFile } from "node:fs/promises";
 import { HUB_REHEARSAL_KEY_PREFIX, HUB_REHEARSAL_STOP_AT } from "@graphloom/sdk";
 import type { HubArchiveEntry, HubArchivedSubmission, HubCommand, HubConfig, HubContinuation, HubLaunchReport, HubObservation, HubRehearsal, HubResumeRemedy, HubRetryPolicy, HubStatus, HubSubmission } from "@graphloom/sdk";
 import { acquireHubLock } from "./lock.js";
-import { launchMemoryEnd, validLaunchMemory, type HubLaunchMemory } from "./memory.js";
+import { latestLaunchMemoryRecord, launchMemoryEnd, launchMemoryRecord, validLaunchMemory, type HubLaunchMemory } from "./memory.js";
 import { HubArchiveIndex } from "./archive.js";
 import { assertCapacity, durableWrite, HubStore, syncDirectory, validateConfig } from "./store.js";
 import type { HubSnapshot } from "./store.js";
@@ -48,6 +48,20 @@ export async function openHub(options: OpenHubOptions): Promise<Hub> {
       await store.save(snapshot);
     }
     for (const submission of Object.values(snapshot.submissions)) await store.command(submission, "");
+    // Submissions settled before the hub kept each launch's memory record with them read the newest one on disk (§6.2).
+    const backfilled: Record<string, HubSubmission["lastLaunchMemory"]> = {};
+    for (const submission of Object.values(snapshot.submissions)) {
+      if (submission.lastLaunchMemory !== undefined || submission.generation === 0) continue;
+      const record = await latestLaunchMemoryRecord(path.join(path.resolve(options.directory), "submissions", submission.id, "launches"));
+      if (record !== undefined && record.launchId !== submission.launch?.id) backfilled[submission.id] = record;
+    }
+    if (Object.keys(backfilled).length > 0) {
+      const next: HubSnapshot = { ...snapshot, submissions: Object.fromEntries(Object.entries(snapshot.submissions).map(([id, s]) => [id, backfilled[id] !== undefined ? { ...s, lastLaunchMemory: backfilled[id] } : s])) };
+      // Observability only: a snapshot near its capacity starts without the records rather than not at all.
+      let fits = true;
+      try { assertCapacity(next); } catch { fits = false; }
+      if (fits) { await store.save(next); snapshot = next; }
+    }
     await options.driver.probe({ lockPid: lock.pid });
     if (lockLost) throw new Error("kernel hub lock lost during startup");
     const archiveIndex = await HubArchiveIndex.open(path.resolve(options.directory), snapshot.hubId, options.archiveIndexBounds);
@@ -309,6 +323,7 @@ export class Hub {
         ...(blocker ? { blocker } : {}),
         ...(s.input.rehearsal !== undefined ? { rehearsal: s.input.rehearsal } : {}),
         ...(described.rehearsalVerdict !== undefined ? { rehearsalVerdict: described.rehearsalVerdict } : {}),
+        ...(s.lastLaunchMemory !== undefined ? { lastLaunchMemory: s.lastLaunchMemory } : {}),
       });
       await this.commit((next) => { delete next.submissions[s.id]; next.tombstones.push(tombstone); });
       return tombstone;
@@ -452,6 +467,8 @@ export class Hub {
       const pluginRefused = granted && resume?.remedy?.updatePlugin === true && observation?.continuation?.kind === "operator" && observation.continuation.cause === "pin-drift"
         ? (observation.blocker ?? "the run refused the plugin update") : undefined;
       s.journalBytes = cursor;
+      // What its cgroup recorded at its end stays with the submission once the cgroup is gone (§6.2).
+      if (memory !== undefined) s.lastLaunchMemory = launchMemoryRecord(launch.id, this.stamp(), memory);
       delete s.launch;
       delete s.blocker;
       s.updatedAt = this.stamp();

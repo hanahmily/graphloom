@@ -8,8 +8,9 @@ import { realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { projectPanels, renderPanels, type ChatRenderer, type MonitorFormat } from "@graphloom/monitor";
-import type { HubEnvironmentSummary, HubHealth, HubRehearsal, HubSchedulingState, HubStatus, HubSubmission, HubRetryPolicy, MonitorPanelKind, MonitorSnapshot, PanelSelection } from "@graphloom/sdk";
+import type { HubEnvironmentSummary, HubHealth, HubLaunchMemoryRecord, HubRehearsal, HubSchedulingState, HubStatus, HubSubmission, HubRetryPolicy, MonitorPanelKind, MonitorSnapshot, PanelSelection } from "@graphloom/sdk";
 import { HUB_REHEARSAL_STOP_AT } from "@graphloom/sdk";
+import { formatBytes } from "@graphloom/hub";
 import { hubPaths, integer, loadHubConfig } from "./hub-config.js";
 import { hubRequest } from "./hub-client.js";
 import { captureLoginEnvironment, dropInPath, environmentDropIn, tokenEnvFileText, tokensDropIn, writeOwnerOnly, type CapturedEnvironment, type HubDoctorResult } from "./hub-environment.js";
@@ -269,9 +270,20 @@ function rehearsalMark(item: HubSubmission, status: HubStatus): string {
 export function formatHubList(status: HubStatus): string {
   return [`Hub ${status.hubId} · occupied ${status.occupiedSlots}/${status.maxConcurrentRuns}${status.occupiedSlots > status.maxConcurrentRuns ? " · new starts held" : ""}`,
     ...(status.fault ? [`Fault: ${safeText(status.fault)}`] : []),
-    ...status.submissions.map((item) => `${item.id}  ${item.state.padEnd(10)}  ${item.runId}${rehearsalMark(item, status)}${item.blocker ? `  ${safeText(item.blocker).replace(/\s+/g, " ")}` : ""}`),
+    ...status.submissions.map((item) => `${item.id}  ${item.state.padEnd(10)}  ${item.runId}${rehearsalMark(item, status)}${oomMark(item.lastLaunchMemory)}${item.blocker ? `  ${safeText(item.blocker).replace(/\s+/g, " ")}` : ""}`),
     ...(status.submissions.length ? [] : ["No submissions."]),
   ].join("\n");
+}
+
+/**
+ * `hub list`'s mark for a submission whose latest finished launch was OOM-killed:
+ * the recorded peak against its limit. Only then: the list stays one short line per
+ * submission, and an OOM kill is the one memory fact that calls for action (the
+ * peaks of every launch are in `hub list --json` and `hub status`).
+ */
+function oomMark(record: HubLaunchMemoryRecord | undefined): string {
+  if (record === undefined || record.oomKills === 0) return "";
+  return `  OOM-killed: peak ${record.peak !== undefined ? formatBytes(record.peak) : "unknown"}${record.max !== undefined ? ` of ${formatBytes(record.max)}` : ""} (launch ${record.launchId})`;
 }
 
 /** `hub list`'s search flags as a filter; times and local paths resolve here, on the caller's clock and filesystem. */

@@ -63,8 +63,7 @@ systemctl --user status graphloom-hub.service
 systemctl --user start graphloom-hub.service
 ```
 
-(the unit is the name the operator installed `graphloom hub service`'s output
-under; `journalctl --user -u graphloom-hub.service` shows why it stopped).
+(`journalctl --user -u graphloom-hub.service` shows why it stopped).
 Never run the start yourself. Meanwhile a run can start directly with
 graphloom-run, outside the hub's limit; the user chooses.
 
@@ -265,8 +264,9 @@ graphloom hub policy <submission> --automatic false
 ```
 
 A blocker `memory limit reached (<limit>)`: the launch hit `launchMemoryMax`
-(retried once); `--panel usage` shows peak vs limit. Raising it in `hub.json`
-is the operator's.
+(retried once); `--panel usage` shows peak vs limit, live or recorded at its
+end; `hub status`'s `Recorded launch peaks:` line: the highest, and how many
+came within 80% of it. Raising it in `hub.json` is the operator's.
 
 ## 7. Concurrency limit
 
