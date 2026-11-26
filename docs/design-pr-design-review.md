@@ -236,9 +236,9 @@ A reuse claim is verified twice, and holds only when both agree:
 
 - **Deterministically**, with the answer's other checks: every line of a use lies
   in a hunk of the file's patch at the head, at most 20 lines, and a line the pull
-  request **adds** among them names the equivalent (it holds the name as written,
-  or its last identifier as a whole word: `PauseDataNodeWatch(addr)` names
-  `setup.PauseDataNodeWatch`, `PauseDataNodeWatchLocal(addr)` does not). A use in
+  request **adds** among them names the equivalent (it holds the name as written or
+  its last identifier, at identifier boundaries: `PauseDataNodeWatch(addr)` names
+  `setup.PauseDataNodeWatch`, `setup.PauseDataNodeWatchLocal(addr)` does not). A use in
   a file the pull request does not change, on a context line, outside every hunk,
   or in a file whose patch GitHub did not give fails, and the answer is sent back
   (cite the added lines, or set `reusedByPullRequest` false). An equivalent's

@@ -358,10 +358,11 @@ const MAX_SITE_LINES = 20;
 export function namesEquivalent(text: string, name: string): boolean {
   const n = name.trim();
   if (n === "") return false;
-  if (text.includes(n)) return true;
+  // Both forms are matched at identifier boundaries, so `PauseDataNodeWatchLocal` never names `PauseDataNodeWatch`.
+  const bounded = (s: string): boolean => new RegExp(`(^|[^\\w$])${s.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}([^\\w$]|$)`).test(text);
+  if (bounded(n)) return true;
   const last = n.match(/[A-Za-z_$][\w$]*/g)?.at(-1);
-  if (last === undefined) return false;
-  return new RegExp(`(^|[^\\w$])${last.replace(/\$/g, "\\$")}([^\\w$]|$)`).test(text);
+  return last !== undefined && bounded(last);
 }
 
 /**

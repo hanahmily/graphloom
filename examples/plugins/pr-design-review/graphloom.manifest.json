@@ -16,7 +16,7 @@
     "vitest": "^4.1.12"
   },
   "digests": {
-    "sourceTree": "f77c6548aaf1d8e7eb6e647f518569c20414421b710e61d7c16b0e0f5bdfa760",
+    "sourceTree": "895811dd396994988b15838facaec89d5a54ed83102700241aeb217ccc97d311",
     "packageLock": "6abe1ee61ea10688f7d8ae11564051daae1d0265442a48530dd14bbc87667461",
     "files": {
       "package.json": "994c446707063b8910092f9b112f3dd40cdaa69e3f6e493020a56456e7372f6a",
@@ -51,7 +51,7 @@
       "vendor/diagram-design/references/type-state.md": "9c8ed85762d5bbb3672907bc1664ebf94bcc72850efbacf33d5ee12731053122",
       "vendor/diagram-design/scripts/self_check.py": "444851f6e53f83d50920381df17cdd5f1b7a23cfba9c0ddda27786d78e53e2de",
       "vendor/diagram-design/scripts/verify-geometry.py": "33fb89edbdc8b9cf625a388ba47147bf46ec9e8ae84b7110e240de165732001f",
-      "src/answers.ts": "6e966b8a89332cb3ea9255fa94713dc55c8f40491c83e67e5f1c6c8076b33201",
+      "src/answers.ts": "7b12ad1c3fb7add118c0c4c29fb16938f46b863d83bddf65bf9d4a3635809746",
       "src/designledger.ts": "da6399799ee770c6a8879a5badf8541266fc89f94dcad534b7836288d7a26fd0",
       "src/designvalidators.ts": "82800d783f8b36475e8776a639bd5e6538eb97343f14daa09787c76b10cb3dbc",
       "src/graph.ts": "dd96e74f6de14d16b5a576534a79ac8e6d5d5175059d3b22d6ab071433cbc512",
@@ -164,7 +164,7 @@
       "test/publish.test.ts": "baec72ba1506aafbdb57247833fe916a524b30b7333fb3458be7e13510f4e2a8",
       "test/questions.test.ts": "38aa1bcaefb8cf3e9debeed842255c84cb5d356bb7e54aa4a36b138140945030",
       "test/reentry.test.ts": "bec3b9d1a38f8f5617f23efa388ecbd19f34fa5737eace1f3d0586eb7f176dcb",
-      "test/reuse.test.ts": "d1960675ed8263b89c23cd97cf66d6e3026a48bec6a003ab78f7c3706ecd57f5",
+      "test/reuse.test.ts": "e586f34400c4f46407d59924c7024339e7395d965d7de310c9f8122ecc2dbb69",
       "test/round1.test.ts": "4ea0a6f0bbd684a328a38a5bb0eced305acaacb3f47b5c848f991536871878d9",
       "test/support.ts": "64478aabac468ad83a95dccf88412d5d7eced4e5f1ba7369b0bca99be471fdfb"
     }

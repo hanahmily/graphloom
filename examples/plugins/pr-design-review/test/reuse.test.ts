@@ -171,6 +171,12 @@ describe("the existing-feature answer's equivalents (design §5.4)", () => {
     expect(answerProblems([answer([pause([site(4)])])], CTX)).toEqual([]);
     expect(namesEquivalent("\tPauseDataNodeWatch(addr)", "setup.PauseDataNodeWatch")).toBe(true);
     expect(namesEquivalent("\tPauseDataNodeWatchLocal(addr)", "setup.PauseDataNodeWatch")).toBe(false);
+    // A prefix collision never names it, qualified or not.
+    expect(namesEquivalent("\tsetup.PauseDataNodeWatchLocal(addr)", "setup.PauseDataNodeWatch")).toBe(false);
+    expect(namesEquivalent("\tschedulePrune(spec)", "schedule")).toBe(false);
+    expect(namesEquivalent("\tschedule(spec)", "schedule")).toBe(true);
+    expect(namesEquivalent('\t"github.com/onsi/ginkgo/v2"', "github.com/onsi/ginkgo/v2")).toBe(true);
+    expect(namesEquivalent('\t"github.com/onsi/ginkgo/v2extra"', "github.com/onsi/ginkgo/v2")).toBe(false);
   });
 
   it("send back a reuse claim the diff does not show: a namesake, a context line, a line outside every hunk, a file the pull request does not change", () => {
