@@ -8,6 +8,39 @@ import { StringDecoder } from "node:string_decoder";
 import type { HubArchivedSubmission, HubConfig, HubLaunch, HubObservation, HubSubmission } from "@graphloom/sdk";
 
 export const SNAPSHOT_LIMIT = 16 * 1024 * 1024;
+/**
+ * The hub state format this GraphLoom reads and writes: `scheduler.json`'s
+ * `schemaVersion` (docs/design-run-hub.md §9.2). A hub refuses to start on a
+ * newer one, before it writes anything; an older one it would migrate forward.
+ */
+export const HUB_STATE_FORMAT = 1;
+
+/** A hub state directory written by a GraphLoom whose state format this one does not read. */
+export class HubStateFormatError extends Error {
+  constructor(readonly directory: string, readonly format: unknown) {
+    super(`the hub state at ${directory} has format ${JSON.stringify(format)} (scheduler.json schemaVersion), but this GraphLoom reads format ${HUB_STATE_FORMAT}: a newer GraphLoom wrote it. `
+      + "Nothing was changed. Start the hub with that newer version (graphloom self list; graphloom self use <version>), never with this one");
+    this.name = "HubStateFormatError";
+  }
+}
+
+/**
+ * Reads only `scheduler.json`'s format, before the hub takes its lock or writes
+ * anything: a format newer than `HUB_STATE_FORMAT` (or none this GraphLoom
+ * knows) throws `HubStateFormatError`. A missing store is a new hub; an
+ * unreadable one is left to the full load, which refuses it as corrupt.
+ */
+export async function checkHubStateFormat(directory: string): Promise<void> {
+  let bytes: string;
+  try {
+    if ((await stat(path.join(directory, "scheduler.json"))).size > SNAPSHOT_LIMIT) return;
+    bytes = await readFile(path.join(directory, "scheduler.json"), "utf8");
+  } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+  let format: unknown;
+  try { format = (JSON.parse(bytes) as { schemaVersion?: unknown }).schemaVersion; } catch { return; }
+  if (format === HUB_STATE_FORMAT) return;
+  if (typeof format === "number" && Number.isSafeInteger(format) && format > HUB_STATE_FORMAT) throw new HubStateFormatError(directory, format);
+}
 const LIFECYCLE_RESERVE = 2 * 1024 * 1024;
 export const RECORD_RESERVE = 20 * 1024;
 export const RECORD_LIMIT = 16 * 1024;
@@ -59,7 +92,7 @@ export class HubStore {
       bytes = await readFile(file, "utf8");
     } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
     const result: unknown = JSON.parse(bytes);
-    validateSnapshot(result);
+    validateSnapshot(result, this.directory);
     assertCapacity(result);
     for (const s of Object.values(result.submissions)) {
       const expected = path.join(this.directory, "submissions", s.id);
@@ -125,8 +158,9 @@ export function validateConfig(value: unknown): asserts value is HubConfig {
   }
   if (Number(value.retry.baseDelayMs) > Number(value.retry.maxDelayMs)) throw new Error("retry base delay exceeds maximum delay");
 }
-function validateSnapshot(value: unknown): asserts value is HubSnapshot {
-  if (!object(value) || value.schemaVersion !== 1 || typeof value.hubId !== "string" || !object(value.submissions) || !Array.isArray(value.tombstones) || !Number.isSafeInteger(value.sequence)) {
+function validateSnapshot(value: unknown, directory: string): asserts value is HubSnapshot {
+  if (object(value) && typeof value.schemaVersion === "number" && value.schemaVersion > HUB_STATE_FORMAT) throw new HubStateFormatError(directory, value.schemaVersion);
+  if (!object(value) || value.schemaVersion !== HUB_STATE_FORMAT || typeof value.hubId !== "string" || !object(value.submissions) || !Array.isArray(value.tombstones) || !Number.isSafeInteger(value.sequence)) {
     throw new Error("invalid or unsupported hub snapshot schema");
   }
   validateConfig(value.config);

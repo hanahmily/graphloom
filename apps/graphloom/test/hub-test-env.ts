@@ -8,7 +8,13 @@ import path from "node:path";
 import type { HubDriver, HubExecutionObservation } from "@graphloom/hub";
 import type { HubInput, HubLaunch, HubSubmission, MonitorSnapshot } from "@graphloom/sdk";
 import type { HubServiceConfig } from "../src/hub-config.js";
-import { serveHub } from "../src/hub-server.js";
+import { serveHub, type HubServiceOptions } from "../src/hub-server.js";
+import type { HubDoctorResult } from "../src/hub-environment.js";
+
+/** A doctor whose checks all pass: the default for test hubs, so a submit's preflight never runs the real doctor. */
+export async function passingDoctor(): Promise<HubDoctorResult> {
+  return { exitCode: 0, report: { ok: true, checks: [{ section: "host", name: "git", status: "pass", detail: "test" }], available: [], viable: { defaultHarness: [], enable: [], supervisors: [] } } };
+}
 
 export class SocketTestDriver implements HubDriver {
   executions = new Map<string, HubExecutionObservation>();
@@ -36,7 +42,7 @@ export function fakeInput(file = "/tasks/task.yaml"): HubInput {
   const task = "graph: hello\nrepo: ./repo\nrequest: Test one graph.\n";
   return { task, taskDigest: createHash("sha256").update(task).digest("hex"), taskPath: file, repoPath: "/repo", baseCommit: "a".repeat(40), bundlePath: "/bundle", bundleDigest: "b".repeat(64), runtimePath: "/runtime/main.js", runtimeDigest: "c".repeat(64) };
 }
-export async function socketEnvironment(cleanups: Array<() => Promise<void>>, limit = 3, setup?: (directory: string) => Promise<void>, input: (file: string) => HubInput = fakeInput, environment?: NodeJS.ProcessEnv, observe?: (submission: HubSubmission) => Promise<MonitorSnapshot>) {
+export async function socketEnvironment(cleanups: Array<() => Promise<void>>, limit = 3, setup?: (directory: string) => Promise<void>, input: (file: string) => HubInput = fakeInput, environment?: NodeJS.ProcessEnv, observe?: (submission: HubSubmission) => Promise<MonitorSnapshot>, extra: Partial<HubServiceOptions> = {}) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "gl-hub-http-"));
   cleanups.push(() => rm(directory, { recursive: true, force: true }));
   const config: HubServiceConfig = { directory, socket: path.join(directory, "hub.sock"), cgroupRoot: "/not-used", maxConcurrentRuns: limit,
@@ -44,7 +50,8 @@ export async function socketEnvironment(cleanups: Array<() => Promise<void>>, li
   const driver = new SocketTestDriver();
   await setup?.(directory);
   // The hub's own environment: a temporary HOME, never the operator's configs.
-  const service = await serveHub({ config, driver, environment: environment ?? { HOME: directory, PATH: process.env.PATH }, captureInput: async file => input(file), observe: observe ?? (async submission => ({
+  // A hub with its own environment runs the real doctor; others a passing stand-in.
+  const service = await serveHub({ config, driver, ...(environment === undefined ? { doctor: passingDoctor } : {}), ...extra, environment: environment ?? { HOME: directory, PATH: process.env.PATH }, captureInput: async file => input(file), observe: observe ?? (async submission => ({
     schemaVersion: 1, frameId: `${submission.runId}:fixture`, observedAt: "2026-11-20T12:00:00Z",
     run: { id: submission.runId, status: "running", graph: "hello", currentStage: "Write", currentAttempt: 1 },
     sources: [{ id: "fixture-controller", status: "available", observedAt: "2026-11-20T12:00:00Z" }],

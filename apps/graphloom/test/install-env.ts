@@ -70,6 +70,26 @@ echo "stub gh: unsupported: $*" >&2
 exit 1
 `;
 
+/**
+ * Stub systemctl, on every sandbox's PATH so no test can reach the operator's user manager: it logs each call to
+ * $FAKE_SYSTEMCTL_LOG; with FAKE_SYSTEMCTL=up it answers as a user manager with graphloom-hub.service active (its
+ * RestartForceExitStatus read from the unit file) and a restart touches $FAKE_SYSTEMCTL_RESTARTED; else no user bus.
+ */
+const SYSTEMCTL_STUB = `#!/bin/sh
+printf '%s\\n' "$*" >>"$FAKE_SYSTEMCTL_LOG"
+[ "\${FAKE_SYSTEMCTL:-}" = up ] || { echo "Failed to connect to bus: No medium found" >&2; exit 1; }
+[ "$1" = --user ] || { echo "stub systemctl: --user only" >&2; exit 1; }
+shift
+case "$1" in
+  show)
+    echo "ActiveState=\${FAKE_SYSTEMCTL_ACTIVE:-active}"
+    echo "RestartForceExitStatus=$(sed -n 's/^RestartForceExitStatus=//p' "\${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/graphloom-hub.service" 2>/dev/null)" ;;
+  daemon-reload) ;;
+  restart) touch "$FAKE_SYSTEMCTL_RESTARTED" ;;
+  *) echo "stub systemctl: unsupported: $*" >&2; exit 1 ;;
+esac
+`;
+
 /** The stub CLI of a fake release: `version`, `exit <n>`, `hold <file>`, and the real `__auto-update`. */
 function stubMain(version: string): string {
   return `import { existsSync, realpathSync } from "node:fs";
@@ -192,6 +212,7 @@ export async function makeSandbox(base: string, options: { gh?: boolean } = {}):
   const ghLog = path.join(root, "gh.log");
   for (const dir of [home, stub, releases, path.join(root, "tmp"), path.join(root, "builds")]) await mkdir(dir, { recursive: true });
   if (options.gh !== false) await writeFile(path.join(stub, "gh"), GH_STUB, { mode: 0o755 });
+  await writeFile(path.join(stub, "systemctl"), SYSTEMCTL_STUB, { mode: 0o755 });
   await writeFile(ghLog, "");
   const sys = await noNodePath(base);
   const keys = await testKeys(base);
@@ -202,6 +223,7 @@ export async function makeSandbox(base: string, options: { gh?: boolean } = {}):
     TMPDIR: path.join(root, "tmp"),
     FAKE_GH_RELEASES: releases,
     FAKE_GH_LOG: ghLog,
+    FAKE_SYSTEMCTL_LOG: path.join(root, "systemctl.log"),
   };
   const signers = path.join(root, "allowed_signers");
   const installerPath = path.join(root, "installer", "install.sh");

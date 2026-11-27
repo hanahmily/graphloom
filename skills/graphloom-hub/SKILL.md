@@ -5,11 +5,11 @@ description: Drive GraphLoom runs through the run hub, the operator's systemd us
 
 # Drive runs through the GraphLoom hub
 
-The hub (`graphloom hub serve`) is a daemon the operator runs as a systemd
-user service. It keeps a durable queue of **submissions**, starts at most
-`maxConcurrentRuns` runs at once (one **run slot** each), and continues a run
-by itself after a provider cooldown or a transient failure, within the
-submission's retry policy. A submission keeps one run id across every resume.
+The hub (`graphloom hub serve`) is the operator's systemd user service. It
+keeps a durable queue of **submissions**, runs at most `maxConcurrentRuns` at
+once (one **run slot** each), and continues a run by itself after a provider
+cooldown or transient failure, within its retry policy. A submission keeps one
+run id across every resume.
 Every `graphloom hub` command talks to it over a Unix socket
 (`$XDG_RUNTIME_DIR/graphloom/hub.sock`; `GRAPHLOOM_HUB_SOCKET` names another).
 
@@ -38,8 +38,8 @@ Every `graphloom hub` command talks to it over a Unix socket
   never edit `state.json` or the hub's `scheduler.json`.
 - Use only commands and flags `graphloom --help` and `graphloom hub --help` list.
 - Never decide liveness with `pgrep`, `ps | grep` or `kill -0` (a `pgrep -f`
-  pattern matches its own shell and once hid a stop for two hours): the hub's
-  scheduling state and the run's durable state are the truth.
+  pattern matches its own shell): the hub's scheduling state and the run's
+  durable state are the truth.
 
 ## 1. Is the hub reachable?
 
@@ -50,7 +50,10 @@ graphloom hub status
 Exit 0: the hub answers with no fault: `Hub <id> · healthy`, its GraphLoom
 version, socket, `Limit <n> · occupied <n>/<limit> · queued <n>`, per-state
 counts. Quote any `Retention error:`, `Monitoring error:` or `Archive index
-error:` line; the hub still admits work.
+error:` line; the hub still admits work. `Installed: GraphLoom <v> is current,
+the hub runs <old>`: the operator's `graphloom hub service --refresh` is due.
+`Restart pending ...`: it restarts on the new version once running launches
+finish, starting none meanwhile. Quote either.
 
 Exit 3: the hub is `FAULTED` (persistence or reconciliation, `Fault: ...`) or
 shutting down, and admits nothing new until the operator fixes it; quote it.
@@ -67,10 +70,9 @@ systemctl --user start graphloom-hub.service
 Never run the start yourself. Meanwhile a run can start directly with
 graphloom-run, outside the hub's limit; the user chooses.
 
-`graphloom hub status --json` prints `reachable`, `healthy` (and, when
-reachable, `version`, `counts`, `fault`). A hub older than `hub status`
-refuses it (`unknown hub command status`): use `graphloom hub list` (exit 0:
-reachable; a `Fault:` line is a fault).
+`graphloom hub status --json`: `reachable`, `healthy` (and `version`,
+`counts`, `fault`). A hub older than `hub status` refuses it: use `graphloom
+hub list` (exit 0: reachable; a `Fault:` line is a fault).
 
 ## 2. Submit a run
 
@@ -79,25 +81,19 @@ base, `graphloom task new` for graphs that prepare their own task,
 `graphloom check task.yaml`, `graphloom doctor --task task.yaml`); confirm it
 with the user.
 
-**The hub does not take your shell's environment.** Command jobs and the
-runner config's token variables (`github.tokenEnv`, `writeTokenEnv`) come from
-the **hub service's environment**; its `PATH` is the toolchain. Check what the
-hub's runs will find:
-
-```sh
-graphloom hub doctor --task task.yaml
-```
-
-It runs the doctor's checks (agent CLIs and logins, token variables, the
-task's environment checks) inside the hub; exit 1 means one failed there even
-if `graphloom doctor` passes in your shell. `graphloom hub status` names the
-hub's `PATH` head, where `claude`/`codex` resolve, the token variables set,
-and a `Warning:` per missing agent CLI. On a failure, quote it: the operator
-refreshes the service's environment (`graphloom hub service --capture-env`,
+**The hub does not take your shell's environment.** Command jobs, agent CLIs
+and logins, and the runner config's token variables (`github.tokenEnv`,
+`writeTokenEnv`) come from the **hub service's environment** (its `PATH` is
+the toolchain). `graphloom hub doctor --task task.yaml` runs the doctor's
+checks inside the hub: exit 1 means one fails there even if `graphloom
+doctor` passes in your shell. `graphloom hub status` names the hub's `PATH`
+head, where `claude`/`codex` resolve, the token variables set, a `Warning:`
+per missing agent CLI. On a failure, quote it: the operator refreshes the
+service's environment (`graphloom hub service --capture-env`,
 `--token-env-file` for tokens, then a restart; never you), or the run starts
-directly with graphloom-run. The service also needs the shell's
-`CLAUDE_CONFIG_DIR`/`CODEX_HOME`, or agent jobs fail with `401 … OAuth access
-token is invalid`; name the missing variable and don't retry.
+directly with graphloom-run. A missing `CLAUDE_CONFIG_DIR`/`CODEX_HOME`
+fails agent jobs with `401 … OAuth access token is invalid`; name it, don't
+retry.
 
 **Submit** with a key that names the work, so a retry after an uncertain
 reply never makes a second run, and record the submission beside the task:
@@ -108,18 +104,22 @@ mkdir -p .graphloom-watch
 printf '%s\n' <submission-id> > .graphloom-watch/submission
 ```
 
+First the hub runs that doctor for the task (**preflight**): a failing check
+refuses the submission (exit 1, `preflight refused ...`, each check with its
+`fix:`), queuing nothing; quote it as above. `--no-preflight` only when the
+user asks. Warnings pass; a rehearsal is checked only for what its stand-ins
+do not replace.
 stderr prints `submission key: <key>`; stdout is the submission as JSON
 (`id`, `runId`, `state`, `queueSequence`). After a timeout or lost reply, rerun
 it with the same key: the same task returns the same submission; a different
 task with that key is refused. Without `--key` every submit is a new run.
 Task, profile, base commit and bundle are captured at submission; later edits
-change nothing, and a bundle or runtime config that changes before the first
-start blocks the submission.
+change nothing (a bundle or runtime config changed before the first start
+blocks it).
 
-**Hand over** to graphloom-watch, which watches hub submissions too. The
-run's state directory, once started, is
-`~/.local/state/graphloom/hub/runs/<runId>` (`$XDG_STATE_HOME` or the hub
-config's `directory` moves it).
+**Hand over** to graphloom-watch, which watches hub submissions too. The run's
+state directory is `~/.local/state/graphloom/hub/runs/<runId>`
+(`$XDG_STATE_HOME` or the hub config's `directory` moves it).
 
 ### 2.1 Rehearse through the hub
 
@@ -137,10 +137,10 @@ graphloom hub submit task.yaml --rehearsal --scenario operator --commands stub -
 the verdict and each B-check under `rehearsals`. Report it; for `not-ready`
 quote the blocker. An approval stop blocks it as a real run (section 6).
 
-`--offline` asks no GitHub: shipped scenarios replay their recorded reads.
-issue-fix's are meant for `--commands run` (their checks read real test
-output) on a task naming the issue they replay; the review graphs' stop at
-Publish with `posting not enabled` (a rehearsal never posts).
+`--offline` asks no GitHub: shipped scenarios replay recorded reads.
+issue-fix's are for `--commands run` (checks read real test output) on a task
+naming the issue they replay; the review graphs' stop at Publish with
+`posting not enabled` (a rehearsal never posts).
 `--stop-at <stage>` (id or name) stops once that stage is accepted, as
 `graphloom rehearse --stop-at` does: the verdict is the stop's (`ready` when
 it stopped there), the submission shows `blocked`, and a plain `hub resume` on
@@ -168,21 +168,18 @@ graphloom hub inspect <submission> --panel job --job <operation-id> --attempt 2
 graphloom hub inspect <submission> --panel output --job <operation-id>
 ```
 
-`<submission>` is the submission or run id. Without `--panel`: `overview`
-(status, graph, current stage and attempt, `Blocker`, `Next eligible`, hub
-slots). `topology`: live path and declared graph; `stages`, `jobs`: progress;
-`usage`: budgets, model calls, tokens, CPU/memory with coverage; `activity`:
-recent events; `job`, `output`: one job's detail and output (`--job`, an
-operation id from `jobs`). `--format text` (default) is for you; in chat use
-`--format markdown` (plain unless the user asked for `--chat-renderer katex`
-and their host renders it); `--format json` is for `jq`. A truncated panel
-names the `--cursor <cursor>` or `--page-size <n>` that continues it.
-`hub list`'s one line is usually enough; open panels when the user asks for
-detail.
+`<submission>` is the submission or run id. Default panel `overview` (status,
+graph, current stage and attempt, `Blocker`, `Next eligible`, slots);
+`topology`: live path and declared graph; `stages`, `jobs`: progress; `usage`:
+budgets, model calls, tokens, CPU/memory; `activity`: recent events; `job`,
+`output`: one job (`--job`, an operation id from `jobs`). `--format text`
+(default) is for you; in chat `--format markdown` (`--chat-renderer katex`
+only when the user asked and their host renders it); `--format json` for
+`jq`. A truncated panel names the `--cursor <cursor>` or `--page-size <n>`
+that continues it. `hub list`'s line is usually enough; open panels on request.
 
-`graphloom hub watch [<submission>]` is the user's live terminal view and
-never exits: suggest it, don't run it. One snapshot:
-`graphloom hub watch <submission> --once --plain`.
+`graphloom hub watch [<submission>]` is the user's live view and never exits:
+suggest it. One snapshot: `graphloom hub watch <submission> --once --plain`.
 
 ## 4. Logs
 
@@ -204,10 +201,9 @@ the user's terminal, never as a tool call.
 | Continue | `graphloom hub resume <submission>` | Only with a new submission, which is a new run |
 | Kept | Run state, worktree, budgets | Run state and worktree (no run continues them) |
 
-Pause is what the user almost always means by "stop". Both reply at once with
-the accepted command (stderr: `command id: <id>`), `stopping` until drained,
-and win over any scheduled automatic retry. On a hub run `graphloom stop` is
-`hub pause`.
+Pause is what the user usually means by "stop". Both reply at once (stderr:
+`command id: <id>`), show `stopping` until drained, and win over a scheduled
+automatic retry. On a hub run `graphloom stop` is `hub pause`.
 
 ## 6. Resume
 
@@ -222,10 +218,10 @@ graphloom hub resume <submission> --upgrade
 graphloom hub resume <submission> --supervisor <harness>
 ```
 
-A plain resume lifts a pause or asks for another attempt; it queues behind
-ready work and never bypasses the limit. A remedy means what it means for
-`graphloom resume` (see graphloom-triage), applied once by the run's owning
-GraphLoom under the run lock:
+A plain resume lifts a pause or asks for another attempt, queued behind ready
+work, never past the limit. A remedy means what it means for `graphloom
+resume` (graphloom-triage), applied once by the run's owning GraphLoom under
+the run lock:
 
 - `--approve <id>` (with each declared `--input <name>=<value>`) and
   `--decline <id>` record the user's decision on a declared approval. Only the
@@ -236,9 +232,10 @@ GraphLoom under the run lock:
 - `--update-plugin` takes the plugin the task's `plugins/<graph>` link names
   when the hub accepts it, as `graphloom resume --update-plugin` does. To move
   a blocked run to a newer plugin, on the user's yes: install the newer
-  GraphLoom; repoint the link if it names the old `versions/<old>/...`; the
-  user restarts the hub service; then `graphloom hub resume <submission>
-  --update-plugin` (`--upgrade` moves the run's GraphLoom too). A gone or
+  GraphLoom (`graphloom upgrade` restarts the hub on it, at once or when
+  idle); repoint the link if it names the old `versions/<old>/...`; then
+  `graphloom hub resume <submission> --update-plugin` (`--upgrade` moves the
+  run's GraphLoom too). A gone or
   dangling link is refused, naming it; an update the controller refuses
   (changed stages) keeps the pinned plugin, which a plain resume never changes.
 - A rehearsal (2.1) resumes only as a rehearsal, at its script's next
@@ -248,8 +245,8 @@ GraphLoom under the run lock:
   `hub resume`. `succeeded` and `canceled` submissions cannot resume.
 
 The reply is the accepted command, not the result; follow it with `hub list`
-or graphloom-watch; `lastResume` says what became of it (`refused` gives the
-run's reason; a pause keeps an unapplied one for the next resume).
+or graphloom-watch; `lastResume` says what became of it (`refused` with the
+run's reason; a pause keeps an unapplied one).
 `graphloom resume` on a hub run is routed to the hub and refuses `--on-stop`.
 
 **Retry allowance.** Automatic resumes are bounded per submission (default 5
@@ -264,9 +261,9 @@ graphloom hub policy <submission> --automatic false
 ```
 
 A blocker `memory limit reached (<limit>)`: the launch hit `launchMemoryMax`
-(retried once); `--panel usage` shows peak vs limit, live or recorded at its
-end; `hub status`'s `Recorded launch peaks:` line: the highest, and how many
-came within 80% of it. Raising it in `hub.json` is the operator's.
+(retried once); `--panel usage` shows peak vs limit; `hub status`'s `Recorded
+launch peaks:` line the highest and how many came within 80%. Raising it in
+`hub.json` is the operator's.
 
 ## 7. Concurrency limit
 
@@ -274,10 +271,9 @@ came within 80% of it. Raising it in `hub.json` is the operator's.
 graphloom hub limit 3
 ```
 
-Sets the hub-wide `maxConcurrentRuns` at once and durably. Lowering never
-kills a run (`hub list`: `occupied 4/2 · new starts held` until runs finish);
-`0` admits nothing new; raising starts queued runs at once. It applies to
-every user of this hub: ask first.
+Sets the hub-wide `maxConcurrentRuns` at once, durably. Lowering never kills
+a run (`occupied 4/2 · new starts held` until runs finish); `0` admits nothing
+new; raising starts queued runs at once. It affects every user: ask first.
 
 ## 8. Archive
 
@@ -288,10 +284,10 @@ graphloom hub archive <submission>
 Only a `succeeded`, `failed` or `canceled` submission whose run has drained.
 It leaves `hub list`'s queue; run state, worktree and branch stay; its key
 stays reserved (the same task with it returns the archived result, never a new
-run). The hub's archive index keeps a compact entry (id, run id, key, graph,
-repository, task path, request first line, times, final state, state
-directory, blocker) that `hub list --archived` searches; it holds the newest
-5,000 entries, older ones drop out of search but stay on disk. Ask first.
+run). The archive index keeps a compact entry (ids, key, graph, repository,
+task path, request first line, times, final state, state directory, blocker)
+that `hub list --archived` searches; the newest 5,000, older ones drop out of
+search but stay on disk. Ask first.
 
 ## 9. Search past submissions
 
@@ -315,11 +311,11 @@ graphloom hub list --graph issue-fix --grep "flaky test" --archived
 | `--grep <text>` | Text in the request or the blocker, any case (an archived entry keeps only the request's first line) |
 | `--limit <n>` | The newest `n` matches; the header says `<n> of <total>` |
 
-Each line is `<acceptedAt>  <submission>  <state>  <runId>  <graph>
-<request first line>`, then any `blocker: ...`. `--json` gives the matches as
-`submissions` (full records), `summaries` (graph and request line each),
-`archived` (index entries with `stateDir`) and `matched`. Use `jq` on `--json`
-only for a field the flags miss (e.g. `automaticResumes`, `launch.failure`):
+Each line: `<acceptedAt>  <submission>  <state>  <runId>  <graph>  <request
+first line>`, then any `blocker: ...`. `--json`: `submissions` (full records),
+`summaries` (graph, request line), `archived` (index entries with `stateDir`),
+`matched`. Use `jq` on it only for a field the flags miss (e.g.
+`automaticResumes`, `launch.failure`):
 
 ```sh
 graphloom hub list --state blocked --json | jq '.submissions[] | {id, automaticResumes, failureRepeats, launch}'

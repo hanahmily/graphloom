@@ -1188,6 +1188,20 @@ of `current`, falling back to that of `previous` when `current` is missing.
 5. List each run still owned by an older installed version, with its status,
    and print the hint `graphloom resume <run> --upgrade` (§5.2). Nothing is
    migrated.
+6. When a run hub unit is installed (`$XDG_CONFIG_HOME/systemd/user/graphloom-hub.service`),
+   release `install.lock` and run the new version's `graphloom hub service
+   --refresh` ([run hub §9.2](design-run-hub.md#92-upgrades-the-launcher-and-restarts)):
+   a unit still pinned to `versions/<old>/` gets the version-independent
+   launcher `current/bin/graphloom` once; systemd is reloaded; the hub
+   restarts on the new version at once when no launch runs, else once its
+   running launches finish (it starts no new one meanwhile); when systemd's
+   user manager is not reachable, nothing restarts and the commands are
+   printed. The service's captured environment and token file are left as
+   they are; the new version's `hub doctor` result is printed instead. A plain
+   `install.sh` that switches `current` does the same; `--no-switch` does not.
+   The first upgrade from a version without the refresh runs that version's
+   installer, which lacks this step: run `graphloom hub service --refresh`
+   once afterwards.
 
 Upgrading the install never moves a run. Live runs continue on the version
 that loaded them, and every run-scoped command still dispatches to the owner
@@ -1261,6 +1275,16 @@ directory (§4.1). `resume`, `stop`, `wait`, `inspect`, and the other run-scoped
 commands dispatch to the owning version (§5.1), including when an `--on-stop`
 hook calls `graphloom` through the shim. Automatic updates never migrate run
 state; only an explicit `resume --upgrade` does.
+
+**The run hub.** An automatic install switches `current` but never restarts
+the run hub: `install.sh --auto` notes `hub: keeps its version until
+restarted` in `update/log`, and the notice adds that the hub keeps running the
+old version until `graphloom hub service --refresh`. Its next restart, of any
+kind, runs the new version through the unit's launcher. Setting
+`GRAPHLOOM_HUB_RESTART_ON_AUTO_UPDATE=1` in the shell the shim runs from lets
+the automatic install run the refresh as `graphloom upgrade` does (§5.3 step
+6); `GRAPHLOOM_DISABLE_AUTOUPDATE=1` starts no check, so nothing is installed
+or restarted ([run hub §9.2](design-run-hub.md#92-upgrades-the-launcher-and-restarts)).
 
 **Pruning.** After each automatic install, the worker prunes under the same
 lock. It keeps the three newest installed versions, `current`, `previous`, and
