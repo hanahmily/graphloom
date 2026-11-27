@@ -259,6 +259,15 @@ describe("input and command durability", () => {
     expect(reopened.list().launchesHeld).toBeUndefined();
     expect(reopened.inspect(b.id).state).toBe("running");
   });
+  it("stops admitting at a hold that lands while a launch prepares", async () => {
+    const f = await fixture(3);
+    const original = f.driver.prepare.bind(f.driver);
+    f.driver.prepare = async (launch, s) => { f.hub.holdNewLaunches("restart when idle: test"); return original(launch, s); };
+    await accepted(f.hub); await accepted(f.hub); await accepted(f.hub);
+    await f.hub.tick();
+    expect(f.driver.launches).toHaveLength(1);
+    expect(f.hub.list().occupiedSlots).toBe(1);
+  });
   it("knows a key as submit scopes it, real and rehearsal apart", async () => {
     const f = await fixture(0);
     await accepted(f.hub, "fix-1");

@@ -279,7 +279,7 @@ describe("hub submit's preflight (§3.3)", () => {
   it("refuses a failing check with its fix and queues nothing; warnings pass; a pass is reused; --no-preflight skips it", async () => {
     let checks = [check("host", "git", "pass"), check("configuration", "github token", "warn", "export GH_TOKEN=<token>"), check("task", "environment go", "fail", "put go on the service's PATH")];
     const { seen, doctor } = doctorOf(() => checks);
-    const { socket, service } = await socketEnvironment(cleanups, 0, undefined, undefined, undefined, undefined, { doctor });
+    const { socket, service, directory } = await socketEnvironment(cleanups, 0, undefined, undefined, undefined, undefined, { doctor });
     const task = path.join(await temp("gl-preflight-"), "task.yaml");
     await writeFile(task, "graph: hello\n");
     const refused = await invoke(["submit", task, "--key", "fix-1", "--socket", socket]);
@@ -306,13 +306,19 @@ describe("hub submit's preflight (§3.3)", () => {
     const cached = await invoke(["submit", task, "--key", "fix-2", "--socket", socket]);
     expect(cached.err).toContain("preflight: passed in the hub's environment (cached)");
     expect(seen).toHaveLength(2);
+    // A changed runner config (the hub's, under its HOME) invalidates the cached pass.
+    await mkdir(path.join(directory, ".config", "graphloom"), { recursive: true });
+    await writeFile(path.join(directory, ".config", "graphloom", "runner.json"), "{}\n");
+    const changed = await invoke(["submit", task, "--key", "fix-4", "--socket", socket]);
+    expect(changed.err).not.toContain("(cached)");
+    expect(seen).toHaveLength(3);
 
     checks = [check("task", "plugin", "fail", "graphloom check task.yaml")];
     const skipped = await invoke(["submit", task, "--key", "fix-3", "--no-preflight", "--socket", socket]);
     expect(skipped.code).toBe(0);
     expect(skipped.err).toContain("preflight: skipped (--no-preflight)");
-    expect(seen).toHaveLength(2);
-    expect(service.hub.list().submissions).toHaveLength(3);
+    expect(seen).toHaveLength(3);
+    expect(service.hub.list().submissions).toHaveLength(4);
   });
 
   it("checks for a rehearsal only what its stand-ins do not replace", async () => {

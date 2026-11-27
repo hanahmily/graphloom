@@ -153,12 +153,12 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
   const serialDoctor = <T>(run: () => Promise<T>): Promise<T> => { const next = doctorQueue.then(run); doctorQueue = next.catch(() => undefined); return next; };
   const doctor = options.doctor ?? ((taskPath: string | undefined) => runHubDoctor(environment, config, taskPath));
   const preflights = new PreflightCache();
-  let fingerprint: Promise<string> | undefined;
   /** The submit preflight (§3.3): the hub's doctor for the task; a failing check the run needs refuses it, before anything is captured. */
   const preflight = async (taskPath: string, rehearsal: HubRehearsal | undefined): Promise<string> => {
     const runEnv = hubRunEnvironment(environment, config);
-    fingerprint ??= environmentFingerprint(environment, [runnerConfigPath(runEnv).file, supervisorConfigPath(runEnv).file]);
-    const key = await preflights.key(taskPath, rehearsal, await fingerprint);
+    // Recomputed each time: a changed runner or supervisor config invalidates a cached pass.
+    const fingerprint = await environmentFingerprint(environment, [runnerConfigPath(runEnv).file, supervisorConfigPath(runEnv).file]);
+    const key = await preflights.key(taskPath, rehearsal, fingerprint);
     const known = key !== undefined ? preflights.get(key) : undefined;
     if (known !== undefined) return preflightNote(known, true);
     const verdict = preflightVerdict((await serialDoctor(() => doctor(taskPath))).report, rehearsal);

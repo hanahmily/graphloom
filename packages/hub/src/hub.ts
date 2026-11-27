@@ -403,8 +403,8 @@ export class Hub {
     }
     if (this.closing || this.fault) return;
     await this.promoteReady();
-    if (this.held !== undefined) return;
-    while (this.occupied() < this.snapshot.config.maxConcurrentRuns) {
+    // Checked before each admission: a hold that lands while a launch prepares stops the next one.
+    while (this.held === undefined && this.occupied() < this.snapshot.config.maxConcurrentRuns) {
       const candidate = Object.values(this.snapshot.submissions).filter((s) => s.state === "queued" && s.desiredAction === "execute" && !s.launch && this.ready(s)).sort((a, b) => a.queueSequence - b.queueSequence)[0];
       if (!candidate) break;
       if (candidate.automaticPending && !this.retryAllowed(candidate)) {
