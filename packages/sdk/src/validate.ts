@@ -72,6 +72,11 @@ export function assertWireRequest(value: unknown): WireRequest {
       requireArray(input, "args");
       return obj as unknown as WireRequest;
     }
+    case "loop_candidates": {
+      const input = asObject(obj["input"], "input");
+      requireArray(input, "results");
+      return obj as unknown as WireRequest;
+    }
     default:
       throw new WireValidationError("unknown", `unknown request kind: ${kind}`);
   }
@@ -102,6 +107,10 @@ export function assertWireResponse(value: unknown): WireResponse {
     case "prepare_task_ok":
       // The reply's own shape is `validateTaskPlan`'s to judge, in the CLI; the wire only bounds it.
       if (obj["reply"] !== undefined) asObject(obj["reply"], "reply");
+      return obj as unknown as WireResponse;
+    case "loop_candidates_ok":
+      // The reply's own shape is `validateLoopReply`'s to judge, in the evaluator; the wire only bounds it.
+      // It is not necessarily an object (a malformed hook may return anything), so it is passed on as data.
       return obj as unknown as WireResponse;
     case "error":
       requireString(obj, "code");

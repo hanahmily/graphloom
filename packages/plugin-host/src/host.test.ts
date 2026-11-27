@@ -471,3 +471,69 @@ describe("task config", () => {
     expect(seen).toEqual([[42], [42]]);
   });
 });
+
+describe("loopCandidates", () => {
+  const input = (profile: unknown) => ({ protocol: 1 as const, profile, now: "2026-03-04T05:06:07.000Z", round: 0, results: [] });
+  const open = (timeout = 2_000) => track(createChildPluginHost({ entryModule: fixture("looping", "graph.mjs"), activeVersion: "looping@1", generation: 1, workerModule: workerJs, callbackTimeoutMs: timeout }));
+
+  it("carries the input to the hook in the child and the reply back, sync or async", async () => {
+    const host = await open();
+    expect(await host.loopCandidates!(ctx("op-1"), input({}))).toEqual({ ok: true, value: { candidates: [{ key: "round:0", taskArgs: ["0"] }] } });
+    expect(await host.loopCandidates!(ctx("op-2"), input({ mode: "async" }))).toEqual({ ok: true, value: { candidates: [{ key: "day:2026-03-04", taskArgs: [] }] } });
+  });
+
+  it("reports a thrown hook error as an observation naming the message", async () => {
+    const host = await open();
+    const result = await host.loopCandidates!(ctx("op-throw"), input({ mode: "throw" }));
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected observation");
+    expect(result.observation.message).toContain("hook exploded");
+  });
+
+  it("observes a hanging hook as a timeout", async () => {
+    const host = await open(200);
+    const started = Date.now();
+    const result = await host.loopCandidates!(ctx("op-hang"), input({ mode: "hang" }));
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(result).toMatchObject({ ok: false, observation: { code: "timeout" } });
+  });
+
+  it("answers no reply from a graph without the hook", async () => {
+    const host = await track(createChildPluginHost({ entryModule: fixture("minimal", "graph.mjs"), activeVersion: "minimal@1", generation: 1, workerModule: workerJs, callbackTimeoutMs: 2_000 }));
+    expect(await host.loopCandidates!(ctx("op-none"), input({}))).toEqual({ ok: true });
+  });
+
+  it("answers a thrown error and a missing hook in process too", async () => {
+    const plugin = { describe: () => ({}) as never, advance: () => ({}) as never };
+    const none = createInProcessPluginHost(plugin, { activeVersion: "v1" });
+    expect(await none.loopCandidates!(ctx("a"), input({}))).toEqual({ ok: true, value: undefined });
+    const bad = createInProcessPluginHost({ ...plugin, loopCandidates: () => { throw new Error("boom"); } }, { activeVersion: "v1" });
+    expect(await bad.loopCandidates!(ctx("b"), input({}))).toMatchObject({ ok: false, observation: { message: "boom" } });
+  });
+});
+
+describe("launcher", () => {
+  it("starts the worker through the wrapper it is given, with the worker command passed to it, and the protocol on stdin/stdout", async () => {
+    const seen: Array<readonly string[]> = [];
+    const host = await track(createChildPluginHost({
+      entryModule: fixture("looping", "graph.mjs"),
+      activeVersion: "looping@1",
+      generation: 1,
+      workerModule: workerJs,
+      callbackTimeoutMs: 2_000,
+      launcher: (worker) => {
+        seen.push(worker);
+        return { command: "sh", args: ["-c", '"$@"; exit $?', "sh", ...worker] };
+      },
+    }));
+    expect(seen).toEqual([[process.execPath, workerJs, fixture("looping", "graph.mjs")]]);
+    expect(await host.loopCandidates!(ctx("op-1"), { protocol: 1, profile: {}, now: "2026-03-04T05:06:07.000Z", round: 0, results: [] })).toMatchObject({ ok: true });
+  });
+
+  it("reports a wrapper that cannot start as a startup failure", async () => {
+    await expect(createChildPluginHost({
+      entryModule: fixture("looping", "graph.mjs"), activeVersion: "looping@1", generation: 1, workerModule: workerJs,
+      launcher: () => ({ command: "/nonexistent/launcher", args: [] }),
+    })).rejects.toThrow(/spawn failed/);
+  });
+});

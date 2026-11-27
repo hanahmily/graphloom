@@ -291,5 +291,5 @@ export {
   MAX_CASE_TEXT,
 } from "./case-file.js";
 
-export type { LoopCandidate, LoopCandidatesInput, LoopCandidatesReply, LoopRead, LoopReadResult, LoopReplyLimits } from "./loop.js";
-export { LoopReplyError, validateLoopReply } from "./loop.js";
+export type { LoopCandidate, LoopCandidatesInput, LoopCandidatesReply, LoopManifest, LoopRead, LoopReadResult, LoopReplyLimits } from "./loop.js";
+export { LoopReplyError, MAX_LOOP_MANIFEST_READS, validateLoopManifest, validateLoopReply } from "./loop.js";

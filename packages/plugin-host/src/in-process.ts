@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
-import type { GraphDecision, GraphDefinition, GraphPlugin, PrepareTaskInput, PrepareTaskReply, RunView } from "@graphloom/sdk";
+import type { GraphDecision, GraphDefinition, GraphPlugin, LoopCandidatesInput, PrepareTaskInput, PrepareTaskReply, RunView } from "@graphloom/sdk";
 import { createScriptedGraph, hydrateRecord, isEvidenceUnavailable, type ScriptedGraphOptions } from "@graphloom/sdk";
 import type {
   CallContext,
@@ -73,6 +73,13 @@ export function createInProcessPluginHost(
     async prepareTask(_ctx: CallContext, input: PrepareTaskInput): Promise<HostResult<PrepareTaskReply | undefined>> {
       try {
         return { ok: true, value: plugin.prepareTask?.(input) };
+      } catch (err) {
+        return { ok: false, observation: { kind: "child_observation", code: "crash", message: err instanceof Error ? err.message : String(err) } };
+      }
+    },
+    async loopCandidates(_ctx: CallContext, input: LoopCandidatesInput): Promise<HostResult<unknown>> {
+      try {
+        return { ok: true, value: await plugin.loopCandidates?.(input) };
       } catch (err) {
         return { ok: false, observation: { kind: "child_observation", code: "crash", message: err instanceof Error ? err.message : String(err) } };
       }
