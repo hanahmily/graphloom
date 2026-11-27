@@ -21,14 +21,19 @@ import { blockerOf, HUB_LIST_LIMIT_MAX, HUB_STATES, listQuery, type HubListFilte
 import { serveHub, type HubLogPage } from "./hub-server.js";
 import type { HubEventPage } from "./hub-events.js";
 import { parseRemedy } from "./hub-managed.js";
-import { installRoot } from "./version.js";
+import { HubHttpError } from "./hub-client.js";
+import { HubStateFormatError } from "@graphloom/hub";
+import { currentVersion, HUB_RESTART_EXIT, HUB_STATE_FORMAT_EXIT, hubServiceUnit, refreshHubService } from "./hub-service.js";
+import { preflightVerdict, preflightNote, preflightRefusal } from "./hub-preflight.js";
+
+export { hubServiceUnit } from "./hub-service.js";
 
 export const HUB_USAGE = [
   "graphloom hub serve [--config <file>]",
-  "graphloom hub service [--config <file>] [--capture-env] [--token-env-file <file> [--write-token]] [--limits] [--write]",
+  "graphloom hub service [--config <file>] [--capture-env] [--token-env-file <file> [--write-token]] [--limits] [--write] | --refresh",
   "graphloom hub status [--json] [--socket <path>]",
   "graphloom hub doctor [--task <task.yaml>] [--json] [--socket <path>]",
-  "graphloom hub submit <task.yaml> [--key <id>] [--rehearsal [--scenario <name>] [--commands <stub|run>] [--offline] [--stop-at <stage>]] [--socket <path>]",
+  "graphloom hub submit <task.yaml> [--key <id>] [--no-preflight] [--rehearsal [--scenario <name>] [--commands <stub|run>] [--offline] [--stop-at <stage>]] [--socket <path>]",
   "graphloom hub list [--state <state> ...] [--graph <id>] [--repo <path|text>] [--key <text>] [--since <iso|duration>] [--until <iso|duration>] [--grep <text>] [--limit <n>] [--archived] [--json] [--socket <path>]",
   "graphloom hub inspect <submission> [--panel <overview|topology|stages|jobs|activity|job|usage|output>] [--format <text|ansi|markdown|json>] [--chat-renderer <auto|plain|katex>] [--job <operation-id>|--follow-current] [--attempt <n>] [--stage <stage>] [--width <columns>] [--cursor <cursor>] [--page-size <n>]",
   "graphloom hub watch [<submission>] [--panel <kind>] [--job <operation-id>|--follow-current] [--attempt <n>] [--stage <stage>] [--plain|--json] [--since <cursor>] [--once]",
@@ -43,10 +48,10 @@ export const HUB_USAGE = [
 /** One paragraph per command for `graphloom hub <command> --help`. */
 const HUB_HELP: Record<string, string> = {
   serve: "Runs the hub in the foreground (normally under the systemd user service).",
-  service: "Prints a systemd user unit for the hub; installs nothing.\n--capture-env prints the drop-in graphloom-hub.service.d/environment.conf instead: PATH, Go's variables,\nCLAUDE_CONFIG_DIR, CODEX_HOME, LANG, LC_ALL, the proxies and GraphLoom's own non-secret settings\n(GRAPHLOOM_DISABLE_AUTOUPDATE, the harness CLIs and models, ...) from a clean login shell of $SHELL.\n--token-env-file <file> prints the drop-in tokens.conf (EnvironmentFile=-<file>); the file holds the runner\nconfig's github.tokenEnv, from that variable or gh auth token, owner-only (0600); --write-token adds\ngithub.writeTokenEnv. --limits prints the drop-in 10-limits.conf: the service's MemoryHigh/MemoryMax, from\nhub.json serviceMemoryHigh/serviceMemoryMax, else launchMemoryHigh/launchMemoryMax x maxConcurrentRuns + 1 GiB;\na systemctl --user set-property value (user.control) takes precedence over it.\n--write writes the drop-ins (and the token file) instead; nothing is written without it.\nOnly names are printed, never a token. Re-run after a shell profile, toolchain or gh auth change.",
+  service: "Prints a systemd user unit for the hub; installs nothing. Its ExecStart is the install's launcher\n(<home>/current/bin/graphloom hub serve), so a hub start runs the installed current version.\n--refresh (graphloom upgrade runs it when a hub unit is installed) migrates a unit pinned to versions/<v>/\nto the launcher, reloads systemd and restarts the hub on this version: now when no launch runs, else once\nthe running ones finish (it starts no new launch meanwhile); it prints the command when systemd is not\nreachable, then the new version's hub doctor. It never captures the environment again.\n--capture-env prints the drop-in graphloom-hub.service.d/environment.conf instead: PATH, Go's variables,\nCLAUDE_CONFIG_DIR, CODEX_HOME, LANG, LC_ALL, the proxies and GraphLoom's own non-secret settings\n(GRAPHLOOM_DISABLE_AUTOUPDATE, the harness CLIs and models, ...) from a clean login shell of $SHELL.\n--token-env-file <file> prints the drop-in tokens.conf (EnvironmentFile=-<file>); the file holds the runner\nconfig's github.tokenEnv, from that variable or gh auth token, owner-only (0600); --write-token adds\ngithub.writeTokenEnv. --limits prints the drop-in 10-limits.conf: the service's MemoryHigh/MemoryMax, from\nhub.json serviceMemoryHigh/serviceMemoryMax, else launchMemoryHigh/launchMemoryMax x maxConcurrentRuns + 1 GiB;\na systemctl --user set-property value (user.control) takes precedence over it.\n--write writes the drop-ins (and the token file) instead; nothing is written without it.\nOnly names are printed, never a token. Re-run after a shell profile, toolchain or gh auth change.",
   doctor: "Runs graphloom doctor's checks (with --task, the task's too) inside the running hub's environment:\nwhat its runs find, not what your shell has. Exit 0 no check failed, 1 one did or the hub is unreachable.",
   status: "Reports whether the hub is reachable and healthy: id, socket, version, limit, slot and state counts, faults,\nand its environment (PATH head, where the agent CLIs resolve, which token variables are set; names only).\nExit 0 healthy, 1 unreachable, 3 faulted or shutting down.",
-  submit: "Submits a task to the queue; the same --key and task return the same submission.\n--rehearsal makes a rehearsal submission: queued, launched, contained, continued and stopped like any other,\nbut its run runs on graphloom rehearse's stand-ins (scripted agents and supervisor, stubbed commands,\nno provider calls). --scenario names the bundle's scenario (default happy), --commands stub|run,\n--offline and --stop-at <stage> are rehearse's (under --stop-at the verdict is the stop's); all need\n--rehearsal. Its key is scoped apart from real submissions';\nhub resume continues it as a rehearsal, and hub list/inspect show its verdict once recorded.",
+  submit: "Submits a task to the queue; the same --key and task return the same submission.\nFirst the hub runs the doctor for the task in its own environment (preflight): a failing check refuses\nthe submission with its fix, warnings do not; a rehearsal needs only the host checks, the plugin and,\nwith --commands run, the task's environment checks. A pass is reused for 5 minutes. --no-preflight skips it.\n--rehearsal makes a rehearsal submission: queued, launched, contained, continued and stopped like any other,\nbut its run runs on graphloom rehearse's stand-ins (scripted agents and supervisor, stubbed commands,\nno provider calls). --scenario names the bundle's scenario (default happy), --commands stub|run,\n--offline and --stop-at <stage> are rehearse's (under --stop-at the verdict is the stop's); all need\n--rehearsal. Its key is scoped apart from real submissions';\nhub resume continues it as a rehearsal, and hub list/inspect show its verdict once recorded.",
   list: "Lists submissions in queue order. Any filter, --limit or --archived searches instead, newest first:\n--state is repeatable (any of); --repo is an exact path (starting with /, . or ~) or a substring;\n--key is a substring; --since/--until bound acceptance time by an ISO time or a duration ago\n(90s, 10m, 2h, 3d, 1w); --grep is case-insensitive text in the request or the blocker (an archived\nentry keeps only the request's first line); --archived adds the archive index.",
   inspect: "Renders a submission's monitoring panels. --stage narrows to one stage's neighbourhood;\n--follow-current selects the current stage's running job (instead of --job).",
   watch: "Live view of all submissions or one; never exits without --once.",
@@ -62,7 +67,7 @@ const PANELS: MonitorPanelKind[] = ["overview", "topology", "stages", "jobs", "a
 const FORMATS: MonitorFormat[] = ["text", "ansi", "markdown", "json"];
 const RENDERERS: ChatRenderer[] = ["auto", "plain", "katex"];
 const valueFlags = ["task", "token-env-file", "config", "socket", "key", "format", "chat-renderer", "job", "attempt", "stage", "cursor", "page-size", "width", "since", "until", "graph", "repo", "grep", "limit", "stream", "launch", "command-id", "approve", "decline", "reason", "supervisor", "automatic", "max-automatic-resumes", "max-elapsed-ms", "base-delay-ms", "max-delay-ms", "scenario", "commands", "stop-at"];
-const booleanFlags = ["limits", "capture-env", "write-token", "write", "json", "plain", "once", "follow", "reconciled", "upgrade", "update-plugin", "update-executors", "follow-current", "renew", "archived", "rehearsal", "offline", "help"];
+const booleanFlags = ["refresh", "no-preflight", "limits", "capture-env", "write-token", "write", "json", "plain", "once", "follow", "reconciled", "upgrade", "update-plugin", "update-executors", "follow-current", "renew", "archived", "rehearsal", "offline", "help"];
 const repeatable = ["panel", "input", "state"];
 
 export async function hubCommand(args: string[]): Promise<number> {
@@ -84,7 +89,7 @@ export async function hubCommand(args: string[]): Promise<number> {
     return command || yes("help") ? 0 : 2;
   }
   const allowed: Record<string, string[]> = {
-    serve: ["config", "socket"], service: ["config", "capture-env", "token-env-file", "write-token", "limits", "write"], doctor: ["task", "json", "socket"], submit: ["key", "socket", "rehearsal", "scenario", "commands", "offline", "stop-at"], status: ["json", "socket"], limit: ["socket"],
+    serve: ["config", "socket"], service: ["config", "capture-env", "token-env-file", "write-token", "limits", "write", "refresh"], doctor: ["task", "json", "socket"], submit: ["key", "socket", "no-preflight", "rehearsal", "scenario", "commands", "offline", "stop-at"], status: ["json", "socket"], limit: ["socket"],
     list: ["json", "socket", "state", "graph", "repo", "key", "since", "until", "grep", "limit", "archived"],
     pause: ["command-id", "socket"], cancel: ["command-id", "socket"], archive: ["command-id", "socket"],
     resume: ["command-id", "socket", "reconciled", "approve", "input", "decline", "reason", "upgrade", "update-plugin", "update-executors", "supervisor"],
@@ -108,20 +113,35 @@ export async function hubCommand(args: string[]): Promise<number> {
     if (parsed.positionals.length !== 1) throw new Error("hub serve takes configuration through --config");
     const config = await loadHubConfig(flag("config"));
     if (flag("socket") !== undefined) config.socket = path.resolve(socket);
-    const service = await serveHub({ config });
+    let stop: (code: number) => void = () => undefined;
+    let service: Awaited<ReturnType<typeof serveHub>>;
+    try {
+      // Under its systemd unit (INVOCATION_ID) the hub can restart itself when idle: it exits 75, which the unit restarts.
+      service = await serveHub({ config, ...(process.env.INVOCATION_ID ? { onIdleRestart: () => stop(HUB_RESTART_EXIT) } : {}) });
+    } catch (error) {
+      if (!(error instanceof HubStateFormatError)) throw error;
+      console.error(`graphloom hub serve: ${error.message}`);
+      return HUB_STATE_FORMAT_EXIT;
+    }
     console.log(JSON.stringify({ event: "hub-ready", socket: service.socket, hubId: service.hub.list().hubId }));
-    await new Promise<void>((resolve, reject) => {
+    return await new Promise<number>((resolve, reject) => {
       let shutting = false;
-      const stop = () => {
+      const onSignal = () => stop(0);
+      stop = (code: number) => {
         if (shutting) return;
         shutting = true;
-        void service.close().then(resolve, reject).finally(() => { process.off("SIGINT", stop); process.off("SIGTERM", stop); });
+        if (code === HUB_RESTART_EXIT) console.log(JSON.stringify({ event: "hub-restart", reason: "a restart when idle was requested; the service starts the installed version" }));
+        void service.close().then(() => resolve(code), reject).finally(() => { process.off("SIGINT", onSignal); process.off("SIGTERM", onSignal); });
       };
-      process.on("SIGINT", stop); process.on("SIGTERM", stop);
+      process.on("SIGINT", onSignal); process.on("SIGTERM", onSignal);
     });
-    return 0;
   }
   if (command === "service") {
+    if (yes("refresh")) {
+      if (["capture-env", "token-env-file", "write-token", "limits", "write", "config"].some((name) => values[name] !== undefined)) throw new Error("--refresh takes no other flag: it reads the hub config from the installed unit");
+      await refreshHubService();
+      return 0;
+    }
     if (!yes("capture-env") && flag("token-env-file") === undefined && !yes("limits")) {
       if (yes("write") || yes("write-token")) throw new Error("--write and --write-token need --capture-env, --token-env-file or --limits");
       console.log(hubServiceUnit(path.resolve(flag("config") ?? hubPaths().config)));
@@ -144,7 +164,18 @@ export async function hubCommand(args: string[]): Promise<number> {
     const key = flag("key") ?? randomUUID();
     // The hub scopes a rehearsal's key apart from real submissions' (it stores it as rehearsal:<key>).
     console.error(`submission key: ${key}${rehearsal !== undefined ? " (a rehearsal submission)" : ""}`);
-    console.log(JSON.stringify(await hubRequest("POST", "/v1/submissions", { taskPath: file, key, ...(rehearsal !== undefined ? { rehearsal } : {}) }, socket), null, 2));
+    const body = { taskPath: file, key, ...(rehearsal !== undefined ? { rehearsal } : {}) };
+    let result: Record<string, unknown>;
+    try { result = await submitWithPreflight(body, rehearsal, !yes("no-preflight"), socket); }
+    catch (error) {
+      if (!(error instanceof HubHttpError) || error.status !== 422) throw error;
+      console.error(error.message);
+      return 1;
+    }
+    const { preflight, ...accepted } = result;
+    if (typeof preflight === "string") console.error(preflight);
+    else if (yes("no-preflight")) console.error("preflight: skipped (--no-preflight)");
+    console.log(JSON.stringify(accepted, null, 2));
     return 0;
   }
   if (command === "status") return hubStatus(socket, yes("json"));
@@ -351,7 +382,7 @@ async function hubStatus(socket: string, json: boolean): Promise<number> {
   if (json) {
     const { submissions, ...rest } = health;
     console.log(JSON.stringify({ reachable: true, healthy, ...rest, socket: health.socket ?? socket, counts, submissions: submissions.length }, null, 2));
-  } else console.log(formatHubStatus({ ...health, counts }, socket));
+  } else console.log([formatHubStatus({ ...health, counts }, socket), ...versionLines(health.version, currentVersion())].join("\n"));
   return healthy ? 0 : 3;
 }
 export function formatHubStatus(health: HubHealth, socket: string): string {
@@ -367,9 +398,31 @@ export function formatHubStatus(health: HubHealth, socket: string): string {
     ...(health.retentionError ? [`Retention error: ${safeText(health.retentionError)}`] : []),
     ...(health.monitoringError ? [`Monitoring error: ${safeText(health.monitoringError)}`] : []),
     ...(health.archiveIndexError ? [`Archive index error: ${safeText(health.archiveIndexError)}`] : []),
+    ...(health.restart ? [`Restart pending since ${health.restart.requestedAt} (${safeText(health.restart.reason)}): no new launch starts; the service restarts once the ${health.occupiedSlots} running launch${health.occupiedSlots === 1 ? " finishes" : "es finish"}`] : []),
     ...(health.environment ? environmentLines(health.environment) : []),
     ...(health.memory ? memoryLines(health.memory) : []),
   ].join("\n");
+}
+/** When the installed current version is not the one the hub runs: how the hub gets onto it (docs/design-run-hub.md §9.2). */
+export function versionLines(running: string | undefined, current: string | undefined): string[] {
+  if (running === undefined || current === undefined || running === current) return [];
+  return [`Installed: GraphLoom ${current} is current, the hub runs ${running}: graphloom hub service --refresh restarts it on ${current} (now when idle, else once its launches finish)`];
+}
+
+/**
+ * Submits, with the hub's preflight unless skipped (docs/design-run-hub.md §3.3). A hub older
+ * than the preflight refuses the field: then it runs here, on the hub's doctor endpoint, with the same rules.
+ */
+async function submitWithPreflight(body: Record<string, unknown>, rehearsal: HubRehearsal | undefined, preflight: boolean, socket: string): Promise<Record<string, unknown>> {
+  if (!preflight) return hubRequest("POST", "/v1/submissions", body, socket);
+  try { return await hubRequest("POST", "/v1/submissions", { ...body, preflight: true }, socket, 240_000); }
+  catch (error) {
+    if (!(error instanceof HubHttpError) || error.status !== 400 || !/unknown request field: preflight/.test(error.message)) throw error;
+  }
+  const { report } = await hubRequest<HubDoctorResult>("POST", "/v1/doctor", { taskPath: body.taskPath }, socket, 240_000);
+  const verdict = preflightVerdict(report, rehearsal);
+  if (verdict.failures.length > 0) throw new HubHttpError(preflightRefusal(verdict, String(body.taskPath), rehearsal !== undefined), 422);
+  return { ...(await hubRequest<Record<string, unknown>>("POST", "/v1/submissions", body, socket)), preflight: preflightNote(verdict, false) };
 }
 /** The rehearsal submissions among the counts, when there are any. */
 function rehearsalCountLine(counts: HubHealth["rehearsalCounts"]): string[] {
@@ -528,8 +581,4 @@ function delay(ms: number, signal: AbortSignal): Promise<void> {
     const done = () => { clearTimeout(timer); signal.removeEventListener("abort", done); resolve(); };
     const timer = setTimeout(done, ms); signal.addEventListener("abort", done, { once: true });
   });
-}
-export function hubServiceUnit(config: string): string {
-  const quote = (value: string) => `"${value.replace(/%/g, "%%").replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n")}"`;
-  return `[Unit]\nDescription=GraphLoom run hub\n\n[Service]\nType=exec\nExecStart=${quote(process.execPath)} ${quote(path.join(installRoot(), "apps", "graphloom", "dist", "main.js"))} hub serve --config ${quote(config)}\nRestart=on-failure\nRestartSec=5\nDelegate=yes\nKillMode=mixed\nTimeoutStopSec=90\nUMask=0077\n\n[Install]\nWantedBy=default.target\n`;
 }

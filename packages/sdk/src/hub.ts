@@ -313,6 +313,8 @@ export interface HubStatus {
   matched?: number;
   /** Each listed rehearsal submission's recorded verdict, by submission id. */
   rehearsals?: Record<string, HubRehearsalVerdict>;
+  /** Why the hub starts no new launch until it restarts (docs/design-run-hub.md §9.2); absent: it admits as usual. */
+  launchesHeld?: string;
 }
 /** `GET /v1/health`: the hub's status with aggregate counts and service health. */
 export interface HubHealth extends HubStatus {
@@ -331,6 +333,8 @@ export interface HubHealth extends HubStatus {
   environment?: HubEnvironmentSummary;
   /** The service's and each launch's memory limits and use (docs/design-run-hub.md §9.1). */
   memory?: HubMemorySummary;
+  /** A requested restart when idle (docs/design-run-hub.md §9.2): when, why, and which version is installed now. */
+  restart?: { requestedAt: string; reason: string };
 }
 /**
  * Memory containment as the hub reads it from its cgroups (docs/design-run-hub.md

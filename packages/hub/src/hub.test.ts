@@ -8,6 +8,7 @@ import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import type { HubContinuation, HubLaunch, HubLaunchReport, HubObservation, HubSubmission } from "@graphloom/sdk";
 import { assertHubGrant, openHub, submissionBlocker } from "./hub.js";
+import { checkHubStateFormat, HubStateFormatError } from "./store.js";
 import type { Hub } from "./hub.js";
 import type { HubDriver, HubExecutionObservation, HubSubmitRequest } from "./types.js";
 import type { HubLaunchMemory } from "./memory.js";
@@ -220,6 +221,58 @@ describe("input and command durability", () => {
     await writeFile(path.join(f.directory, "scheduler.json"), '{"schemaVersion":2}');
     await expect(openHub(f.options)).rejects.toThrow(/schema/);
     expect(await readFile(path.join(f.directory, "scheduler.json"), "utf8")).toBe('{"schemaVersion":2}');
+  });
+  it("refuses a newer state format before writing, naming it, and reads its own (docs/design-run-hub.md §9.2)", async () => {
+    const f = await fixture();
+    await f.hub.close({ graceMs: 0 });
+    await checkHubStateFormat(f.directory);
+    const own = await readFile(path.join(f.directory, "scheduler.json"), "utf8");
+    const newer = own.replace('"schemaVersion":1', '"schemaVersion":3');
+    await writeFile(path.join(f.directory, "scheduler.json"), newer);
+    await expect(checkHubStateFormat(f.directory)).rejects.toThrow(HubStateFormatError);
+    await expect(checkHubStateFormat(f.directory)).rejects.toThrow(/has format 3 .*reads format 1: a newer GraphLoom wrote it/);
+    await expect(openHub(f.options)).rejects.toThrow(HubStateFormatError);
+    expect(await readFile(path.join(f.directory, "scheduler.json"), "utf8")).toBe(newer);
+    // A missing store is a new hub.
+    await checkHubStateFormat(path.join(f.directory, "absent"));
+  });
+  it("holds new launches while running ones continue, still queues, and admits nothing until reopened", async () => {
+    const f = await fixture(2);
+    const a = await accepted(f.hub);
+    await f.hub.tick();
+    expect(f.hub.inspect(a.id).state).toBe("running");
+    f.hub.holdNewLaunches("restart when idle: GraphLoom 9.9.9 is installed");
+    const b = await accepted(f.hub);
+    await f.hub.tick();
+    expect(f.hub.list()).toMatchObject({ occupiedSlots: 1, launchesHeld: "restart when idle: GraphLoom 9.9.9 is installed" });
+    expect(f.hub.inspect(b.id)).toMatchObject({ state: "queued" });
+    expect(f.hub.knowsKey("absent", false)).toBe(false);
+    f.driver.finish(f.hub.inspect(a.id));
+    await f.hub.tick();
+    expect(f.hub.inspect(a.id).state).toBe("succeeded");
+    expect(f.hub.list().occupiedSlots).toBe(0);
+    expect(f.hub.inspect(b.id).launch).toBeUndefined();
+    // Nothing of the hold persists: the restarted hub admits as usual.
+    await f.hub.close({ graceMs: 0 });
+    const reopened = await openHub(f.options); hubs.push(reopened);
+    await reopened.tick();
+    expect(reopened.list().launchesHeld).toBeUndefined();
+    expect(reopened.inspect(b.id).state).toBe("running");
+  });
+  it("stops admitting at a hold that lands while a launch prepares", async () => {
+    const f = await fixture(3);
+    const original = f.driver.prepare.bind(f.driver);
+    f.driver.prepare = async (launch, s) => { f.hub.holdNewLaunches("restart when idle: test"); return original(launch, s); };
+    await accepted(f.hub); await accepted(f.hub); await accepted(f.hub);
+    await f.hub.tick();
+    expect(f.driver.launches).toHaveLength(1);
+    expect(f.hub.list().occupiedSlots).toBe(1);
+  });
+  it("knows a key as submit scopes it, real and rehearsal apart", async () => {
+    const f = await fixture(0);
+    await accepted(f.hub, "fix-1");
+    expect(f.hub.knowsKey("fix-1", false)).toBe(true);
+    expect(f.hub.knowsKey("fix-1", true)).toBe(false);
   });
   it("keeps a failed startup reservation until containment is verified then blocks instead of looping", async () => {
     const { hub, driver } = await fixture();

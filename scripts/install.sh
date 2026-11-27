@@ -53,6 +53,7 @@ purge_config=0
 shim_path=
 mode=install
 upgrading=0
+switched=
 sub=
 positional=
 
@@ -420,7 +421,10 @@ do_install() {
   rm -rf "$stage"
 
   # 4. Switch current.
-  if [ "$no_switch" = 0 ]; then switch_to "$version"; fi
+  if [ "$no_switch" = 0 ]; then
+    switch_to "$version"
+    switched=$version
+  fi
   # 5. The shim.
   write_shim "$version"
   # The agent skills GraphLoom installed follow current (docs/design-agent-skills.md §3).
@@ -429,6 +433,8 @@ do_install() {
     rm -f "$home/update/last-failure"
     prune_versions 3
   fi
+  # graphloom upgrade refreshes the hub after listing older runs.
+  if [ "$upgrading" = 0 ]; then refresh_hub; fi
   # 6. The doctor and the setup offer; not for --auto or graphloom upgrade.
   if [ "$auto" = 0 ] && [ "$upgrading" = 0 ]; then offer_setup "$version"; fi
 }
@@ -441,6 +447,34 @@ refresh_skills() { # version
   [ -x "$bin" ] && [ -d "$home/versions/$1/skills" ] || return 0
   GRAPHLOOM_DISABLE_AUTOUPDATE=1 "$bin" skills update --quiet </dev/null ||
     warn "graphloom skills update did not finish; run it again when ready"
+}
+
+# When a hub unit is installed for this user, brings it and the hub onto the
+# version just switched to, with that version's CLI: graphloom hub service
+# --refresh migrates a unit pinned to versions/<v>/ to the launcher, reloads
+# systemd, and restarts the hub (now when idle, else once its launches finish),
+# or prints the command (docs/design-run-hub.md §9.2). It never captures the
+# environment again. An automatic install leaves the running hub alone unless
+# GRAPHLOOM_HUB_RESTART_ON_AUTO_UPDATE=1: no surprise restarts from the daily
+# check. Runs without install.lock, which a starting hub takes.
+refresh_hub() {
+  [ -n "$switched" ] || return 0
+  unit=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/graphloom-hub.service
+  [ -f "$unit" ] || return 0
+  bin="$home/versions/$switched/bin/graphloom"
+  [ -x "$bin" ] || return 0
+  if [ "$auto" = 1 ] && [ "${GRAPHLOOM_HUB_RESTART_ON_AUTO_UPDATE:-}" != 1 ]; then
+    say "hub: keeps its version until restarted: graphloom hub service --refresh (GRAPHLOOM_HUB_RESTART_ON_AUTO_UPDATE=1 lets automatic updates do it)"
+    return 0
+  fi
+  if ! GRAPHLOOM_DISABLE_AUTOUPDATE=1 "$bin" hub service --help </dev/null 2>/dev/null | grep -q -- --refresh; then
+    say "hub: GraphLoom $switched cannot refresh $unit; restart the hub yourself when it is idle (systemctl --user restart graphloom-hub.service)"
+    return 0
+  fi
+  exec 9>&-
+  say ""
+  GRAPHLOOM_DISABLE_AUTOUPDATE=1 "$bin" hub service --refresh </dev/null ||
+    warn "graphloom hub service --refresh did not finish; run it again when ready"
 }
 
 # Removes the agent skill copies GraphLoom installed, with current's CLI; edited ones stay.
@@ -639,6 +673,7 @@ do_upgrade() {
   do_install
   rm -f "$home/update/skip"
   list_older_runs
+  refresh_hub
 }
 
 case "$mode" in
