@@ -13,11 +13,11 @@
  * - **The refresh** (`hub service --refresh`, which `graphloom upgrade` runs
  *   when a hub unit is installed): migrates a unit whose `ExecStart` is pinned
  *   to `versions/<v>/` of this home to the launcher, once; reloads systemd;
- *   then restarts the hub on the new version: at once when no launch runs,
- *   else by asking the hub to restart when idle (it holds new launches and,
- *   once none runs, exits 75, which the unit restarts). When systemd is not
- *   reachable, or the hub cannot take the request, it prints the command
- *   instead. It never captures the environment again: the drop-ins are the
+ *   then asks the hub to restart when idle (it holds new launches and, once
+ *   none runs, at once if none does now, exits 75, which the unit restarts).
+ *   An idle hub that cannot take the request is restarted with systemctl; a
+ *   busy one, or any hub when systemd is not reachable, gets the command
+ *   printed instead. It never captures the environment again: the drop-ins are the
  *   operator's.
  */
 import { execFile } from "node:child_process";
@@ -223,16 +223,16 @@ export async function refreshHubService(options: RefreshOptions = {}): Promise<R
   }
   const socket = await unitSocket(unit.args, env);
   const manual = (why: string): RefreshResult => {
-    note(`hub: ${why}; when the hub is idle, run: ${changed ? "systemctl --user daemon-reload && " : ""}${MANUAL_RESTART} (a restart while runs are active stops them cooperatively and continues them afterwards), then graphloom hub doctor`);
+    note(`hub: ${why}; when the hub is idle, run: systemctl --user daemon-reload && ${MANUAL_RESTART} (a restart while runs are active stops them cooperatively and continues them afterwards), then graphloom hub doctor`);
     return { unit: changed ? "migrated" : "current", restart: "manual", doctor: "pending" };
   };
   const show = await systemctl(["show", "--property=ActiveState", "--property=RestartForceExitStatus", HUB_UNIT]);
   const active = /^ActiveState=(.*)$/m.exec(show.stdout)?.[1]?.trim();
   if (show.code !== 0 || active === undefined) return manual(`systemd's user manager is not reachable (${(show.stderr.trim().split("\n")[0] || `exit ${show.code}`).slice(0, 200)})`);
-  if (changed) {
-    const reload = await systemctl(["daemon-reload"]);
-    if (reload.code !== 0) return manual(`systemctl --user daemon-reload failed (${reload.stderr.trim().split("\n")[0]?.slice(0, 200) ?? reload.code})`);
-  }
+  // Always: an earlier refresh may have edited the unit and been interrupted before its reload.
+  const reload = await systemctl(["daemon-reload"]);
+  if (reload.code !== 0) return manual(`systemctl --user daemon-reload failed (${reload.stderr.trim().split("\n")[0]?.slice(0, 200) ?? reload.code})`);
+  const restartsOnIdleExit = /^RestartForceExitStatus=.*\b75\b/m.test((await systemctl(["show", "--property=RestartForceExitStatus", HUB_UNIT])).stdout);
   const result = (restart: RefreshResult["restart"], doctor?: RefreshResult["doctor"]): RefreshResult => ({ unit: changed ? "migrated" : "current", restart, ...(doctor !== undefined ? { doctor } : {}) });
   if (active !== "active") {
     note(`hub: ${HUB_UNIT} is ${active}; it runs GraphLoom ${version} when it starts (systemctl --user start ${HUB_UNIT})`);
@@ -245,32 +245,40 @@ export async function refreshHubService(options: RefreshOptions = {}): Promise<R
     note(`hub: already runs GraphLoom ${version}`);
     return result("already", await reportDoctor(socket, version, note));
   }
-  const running = health.occupiedSlots;
-  if (running === 0) {
-    const restarted = await systemctl(["restart", HUB_UNIT]);
-    if (restarted.code !== 0) return manual(`${MANUAL_RESTART} failed (${restarted.stderr.trim().split("\n")[0]?.slice(0, 200) ?? restarted.code})`);
-    note(`hub: restarted (it was idle): GraphLoom ${health.version ?? "unknown"} -> ${version}`);
+  const from = health.version ?? "unknown";
+  // The hub restarts itself once idle, holding new launches from the request on, so nothing it admits
+  // after this health reply is interrupted; the loaded unit must restart on that exit.
+  let request: { occupiedSlots: number } | undefined;
+  let refusal: string | undefined;
+  if (!restartsOnIdleExit) refusal = `the loaded unit does not restart on exit ${HUB_RESTART_EXIT}`;
+  else {
+    try { request = await hubRequest<{ occupiedSlots: number }>("POST", "/v1/restart", { when: "idle", reason: `GraphLoom ${version} is installed (the hub runs ${from})` }, socket, 10_000); }
+    catch (error) { refusal = error instanceof HubHttpError && error.status === 404 ? `the hub (GraphLoom ${from}) does not take a restart request` : error instanceof Error ? error.message : String(error); }
+  }
+  if (request !== undefined && request.occupiedSlots === 0) {
+    note(`hub: restarting on GraphLoom ${version} now (it was idle; it was running ${from})`);
     return result("now", await afterRestart(socket, version, note, options.readyTimeoutMs));
   }
-  // Busy: the hub restarts itself once idle, holding new launches meanwhile; the unit must restart on that exit.
-  const restartsOnIdleExit = /^RestartForceExitStatus=.*\b75\b/m.test(changed ? (await systemctl(["show", "--property=RestartForceExitStatus", HUB_UNIT])).stdout : show.stdout);
-  if (!restartsOnIdleExit) return manual(`${running} launch${running === 1 ? "" : "es"} running, and the loaded unit does not restart on exit ${HUB_RESTART_EXIT}`);
-  try {
-    await hubRequest("POST", "/v1/restart", { when: "idle", reason: `GraphLoom ${version} is installed (the hub runs ${health.version ?? "an unknown version"})` }, socket, 10_000);
-  } catch (error) {
-    const why = error instanceof HubHttpError && error.status === 404 ? `the hub (GraphLoom ${health.version ?? "unknown"}) does not take a restart request` : error instanceof Error ? error.message : String(error);
-    return manual(`${running} launch${running === 1 ? "" : "es"} running; ${why}`);
+  const running = request?.occupiedSlots ?? health.occupiedSlots;
+  if (request === undefined && running === 0) {
+    // A hub that cannot restart itself, idle: systemd restarts it (a launch admitted meanwhile is stopped cooperatively and continued).
+    const restarted = await systemctl(["restart", HUB_UNIT]);
+    if (restarted.code !== 0) return manual(`${MANUAL_RESTART} failed (${restarted.stderr.trim().split("\n")[0]?.slice(0, 200) ?? restarted.code})`);
+    note(`hub: restarted (it was idle): GraphLoom ${from} -> ${version}`);
+    return result("now", await afterRestart(socket, version, note, options.readyTimeoutMs));
   }
+  if (request === undefined) return manual(`${running} launch${running === 1 ? "" : "es"} running; ${refusal}`);
   note(`hub: ${running} launch${running === 1 ? "" : "es"} running on GraphLoom ${health.version ?? "unknown"}: the hub restarts on ${version} once ${running === 1 ? "it finishes" : "they finish"}, and starts no new launch until then (graphloom hub status shows it; ${MANUAL_RESTART} restarts it now, stopping them cooperatively)`);
   note("hub doctor: runs on the new version after the restart: graphloom hub doctor");
   return result("when-idle", "pending");
 }
 
-/** The socket of the hub the unit starts: from its `--config`, else the default. */
+/** The socket of the hub the unit starts, as `hub serve` resolves it: its `--socket`, else its `--config`'s, else the default. */
 async function unitSocket(args: string[], env: NodeJS.ProcessEnv): Promise<string> {
-  const at = args.indexOf("--config");
-  const config = at >= 0 ? args[at + 1] : args.find((a) => a.startsWith("--config="))?.slice("--config=".length);
-  try { return (await loadHubConfig(config, env)).socket; }
+  const option = (name: string) => { const at = args.indexOf(name); return at >= 0 ? args[at + 1] : args.find((a) => a.startsWith(`${name}=`))?.slice(name.length + 1); };
+  const socket = option("--socket");
+  if (socket !== undefined) return path.resolve(socket);
+  try { return (await loadHubConfig(option("--config"), env)).socket; }
   catch { return hubPaths(env).socket; }
 }
 

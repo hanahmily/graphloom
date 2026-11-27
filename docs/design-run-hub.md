@@ -1245,18 +1245,21 @@ install that switches `current` (not with `--no-switch`), when
 3. `systemctl --user show` decides reachability. When systemd's user manager
    does not answer (no user bus, a container, `ssh` without lingering), the
    refresh restarts nothing and prints the commands: `systemctl --user
-   daemon-reload` when it changed the unit, and `systemctl --user restart
-   graphloom-hub.service` when the hub is idle. Otherwise it reloads systemd
-   after a change, then asks the hub (`GET /v1/health`) which version it runs
-   and how many launches hold slots:
+   daemon-reload && systemctl --user restart graphloom-hub.service` when the
+   hub is idle. Otherwise it always runs `systemctl --user daemon-reload` (so
+   a retry also applies an edit an interrupted refresh made), reads whether
+   the loaded unit restarts on exit 75, and asks the hub (`GET /v1/health`,
+   on the unit's `--socket`, else its `--config`'s socket) which version it
+   runs and how many launches hold slots:
 
 | The hub | The refresh |
 | --- | --- |
 | Not active | Restarts nothing; the next start runs the new version |
 | Already on this version | Reports its doctor |
-| Idle (no occupied slot) | `systemctl --user restart graphloom-hub.service` at once, waits up to 90 s for the hub to answer on the new version, reports its doctor |
+| Idle (no occupied slot) | `POST /v1/restart {"when": "idle"}`: the hub holds admissions and, still idle, restarts at once, so nothing it admitted after the health reply is interrupted; the refresh waits up to 90 s for it to answer on the new version and reports its doctor |
+| Idle, and the hub (older than this) or the loaded unit cannot take the request | `systemctl --user restart graphloom-hub.service` at once (a launch admitted in between is stopped cooperatively and continued), then as above |
 | Busy | `POST /v1/restart {"when": "idle"}`: the hub restarts once its running launches finish |
-| Busy, and the hub (older than this) or the loaded unit cannot take the request | Prints the restart command for when it is idle |
+| Busy, and the hub or the loaded unit cannot take the request | Prints the restart command for when it is idle |
 | Active but not answering on its socket | Prints the restart command |
 
 **Restart when idle.** A hub asked to restart when idle stops starting new

@@ -46,16 +46,21 @@ async function invoke(args: string[]) {
 }
 
 /** A stub hub on a Unix socket: health with a version and running launches, the restart request, the doctor. */
-async function stubHub(socket: string, state: { version: string; occupied: number; restart?: 202 | 404; doctorFails?: boolean; upgradedWhen?: () => boolean; upgradedTo?: string }) {
+async function stubHub(socket: string, state: { version: string; occupied: number; restart?: 202 | 404; doctorFails?: boolean; upgradedWhen?: () => boolean; upgradedTo?: string; upgraded?: boolean }) {
   const calls: string[] = [];
   const server: Server = createServer((request, response) => {
     calls.push(`${request.method} ${request.url}`);
     request.resume();
     request.on("end", () => {
       const reply = (status: number, value: unknown) => { response.writeHead(status, { "content-type": "application/json" }); response.end(JSON.stringify(value)); };
-      const version = state.upgradedWhen?.() === true ? state.upgradedTo! : state.version;
+      const version = state.upgraded === true || state.upgradedWhen?.() === true ? state.upgradedTo! : state.version;
       if (request.url === "/v1/health") return reply(200, { hubId: "h-stub", maxConcurrentRuns: 2, occupiedSlots: version === state.version ? state.occupied : 0, submissions: [], version } satisfies HubHealth);
-      if (request.url === "/v1/restart") return state.restart === 404 ? reply(404, { error: "unknown hub endpoint" }) : reply(202, { restart: { requestedAt: "now", reason: "test" }, occupiedSlots: state.occupied });
+      if (request.url === "/v1/restart") {
+        if (state.restart === 404) return reply(404, { error: "unknown hub endpoint" });
+        // Idle: the hub exits 75 and its unit starts the new version.
+        if (state.occupied === 0) state.upgraded = true;
+        return reply(202, { restart: { requestedAt: "now", reason: "test" }, occupiedSlots: state.occupied });
+      }
       if (request.url === "/v1/doctor") {
         const checks: DoctorCheck[] = [{ section: "host", name: "git", status: "pass", detail: "git" }, ...(state.doctorFails ? [{ section: "task" as const, name: "environment go", status: "fail" as const, detail: "go version: not found", fix: "put go on the service's PATH" }] : [])];
         return reply(200, { exitCode: state.doctorFails ? 1 : 0, report: { ok: !state.doctorFails, checks, available: [], viable: { defaultHarness: [], enable: [], supervisors: [] } } });
@@ -137,15 +142,16 @@ describe("hub service --refresh after an upgrade (§9.2)", () => {
     const socket = path.join(await temp("gl-hubsock-"), "hub.sock");
     const h = await installHome(pinnedUnit("0.2.5"), socket);
     let restarted = false;
-    const hub = await stubHub(socket, { version: "0.2.5", occupied: 0, doctorFails: true, upgradedWhen: () => restarted, upgradedTo: "0.3.0" });
+    // A hub older than the restart request: systemd restarts it.
+    const hub = await stubHub(socket, { version: "0.2.5", occupied: 0, restart: 404, doctorFails: true, upgradedWhen: () => restarted, upgradedTo: "0.3.0" });
     const dropIn = await readFile(h.dropIn, "utf8");
     const { calls, systemctl } = fakeSystemctl(h.unitFile, { onRestart: () => { restarted = true; } });
     const notes: string[] = [];
     const result = await refreshHubService({ env: h.env, self: h.self, systemctl, note: (line) => notes.push(line), readyTimeoutMs: 5_000 });
     expect(result).toEqual({ unit: "migrated", restart: "now", doctor: "fail" });
     expect(inspectUnit(await readFile(h.unitFile, "utf8"), h.home)).toMatchObject({ kind: "launcher", restartsOnIdleExit: true });
-    expect(calls).toEqual(["show --property=ActiveState --property=RestartForceExitStatus graphloom-hub.service", "daemon-reload", "restart graphloom-hub.service"]);
-    expect(hub.calls).not.toContain("POST /v1/restart");
+    expect(calls).toEqual(["show --property=ActiveState --property=RestartForceExitStatus graphloom-hub.service", "daemon-reload", "show --property=RestartForceExitStatus graphloom-hub.service", "restart graphloom-hub.service"]);
+    expect(hub.calls).toContain("POST /v1/restart");
     const text = notes.join("\n");
     expect(text).toContain("ExecStart pinned to GraphLoom 0.2.5 now runs the launcher");
     expect(text).toContain("restarted (it was idle): GraphLoom 0.2.5 -> 0.3.0");
@@ -156,6 +162,32 @@ describe("hub service --refresh after an upgrade (§9.2)", () => {
     // A second refresh finds nothing to migrate and the hub on the new version.
     const again = await refreshHubService({ env: h.env, self: h.self, systemctl, note: () => undefined });
     expect(again).toEqual({ unit: "current", restart: "already", doctor: "fail" });
+  });
+
+  it("asks an idle hub that can to restart itself (holding admissions first), and honours the unit's --socket", async () => {
+    const dir = await temp("gl-hubsock-");
+    const socket = path.join(dir, "own.sock");
+    const h = await installHome((home, config) => pinnedUnit("0.2.5")(home, config).replace(`--config "${config}"`, `--config "${config}" --socket ${socket}`), path.join(dir, "config.sock"));
+    const hub = await stubHub(socket, { version: "0.2.5", occupied: 0, upgradedTo: "0.3.0" });
+    const { calls, systemctl } = fakeSystemctl(h.unitFile);
+    const notes: string[] = [];
+    expect(await refreshHubService({ env: h.env, self: h.self, systemctl, note: (line) => notes.push(line), readyTimeoutMs: 5_000 })).toEqual({ unit: "migrated", restart: "now", doctor: "pass" });
+    expect(calls).not.toContain("restart graphloom-hub.service");
+    expect(hub.calls).toContain("POST /v1/restart");
+    expect(notes.join("\n")).toContain("restarting on GraphLoom 0.3.0 now (it was idle; it was running 0.2.5)");
+    expect(inspectUnit(await readFile(h.unitFile, "utf8"), h.home).args).toContain(socket);
+  });
+
+  it("reloads systemd on every refresh, so a retry after an interrupted reload still applies the migrated unit", async () => {
+    const socket = path.join(await temp("gl-hubsock-"), "hub.sock");
+    const h = await installHome(pinnedUnit("0.2.5"), socket);
+    await stubHub(socket, { version: "0.2.5", occupied: 1 });
+    const failing = fakeSystemctl(h.unitFile);
+    const broken = async (args: string[]) => args[0] === "daemon-reload" ? { code: 1, stdout: "", stderr: "Failed to reload daemon" } : failing.systemctl(args);
+    expect(await refreshHubService({ env: h.env, self: h.self, systemctl: broken, note: () => undefined })).toMatchObject({ unit: "migrated", restart: "manual" });
+    const retry = fakeSystemctl(h.unitFile);
+    expect(await refreshHubService({ env: h.env, self: h.self, systemctl: retry.systemctl, note: () => undefined })).toEqual({ unit: "current", restart: "when-idle", doctor: "pending" });
+    expect(retry.calls).toContain("daemon-reload");
   });
 
   it("asks a busy hub to restart when idle, and prints the command when the hub cannot take the request", async () => {
@@ -173,7 +205,7 @@ describe("hub service --refresh after an upgrade (§9.2)", () => {
     await stubHub(socket, { version: "0.2.5", occupied: 1, restart: 404 });
     const older: string[] = [];
     expect(await refreshHubService({ env: h.env, self: h.self, systemctl, note: (line) => older.push(line) })).toMatchObject({ unit: "current", restart: "manual" });
-    expect(older.join("\n")).toMatch(/1 launch running; the hub \(GraphLoom 0\.2\.5\) does not take a restart request; when the hub is idle, run: systemctl --user restart graphloom-hub\.service/);
+    expect(older.join("\n")).toMatch(/1 launch running; the hub \(GraphLoom 0\.2\.5\) does not take a restart request; when the hub is idle, run: systemctl --user daemon-reload && systemctl --user restart graphloom-hub\.service/);
   });
 
   it("never restarts when systemd's user manager is unreachable: it migrates the unit and prints the commands", async () => {
@@ -185,6 +217,7 @@ describe("hub service --refresh after an upgrade (§9.2)", () => {
     expect(await refreshHubService({ env: h.env, self: h.self, systemctl, note: (line) => notes.push(line) })).toEqual({ unit: "migrated", restart: "manual", doctor: "pending" });
     expect(calls).toEqual(["show --property=ActiveState --property=RestartForceExitStatus graphloom-hub.service"]);
     expect(hub.calls).toEqual([]);
+
     expect(notes.join("\n")).toContain("systemd's user manager is not reachable (Failed to connect to bus: No medium found); when the hub is idle, run: systemctl --user daemon-reload && systemctl --user restart graphloom-hub.service");
   });
 
@@ -201,7 +234,8 @@ describe("hub service --refresh after an upgrade (§9.2)", () => {
     await writeFile(h.unitFile, hubServiceUnit(h.config, hubExecStart(h.config, h.self)));
     const stopped = fakeSystemctl(h.unitFile, { active: "inactive" });
     expect(await refreshHubService({ env: h.env, self: h.self, systemctl: stopped.systemctl, note: () => undefined })).toEqual({ unit: "current", restart: "not-running" });
-    expect(stopped.calls).toHaveLength(1);
+    expect(stopped.calls).toHaveLength(3);
+    expect(stopped.calls).not.toContain("restart graphloom-hub.service");
   });
 
   it("status names the version current holds when the hub runs another", () => {
@@ -384,13 +418,13 @@ describe("upgrade and the hub unit, in a temporary HOME (§9.2; release design �
     const output = up.stdout + up.stderr;
     expect(output).toContain("current -> 0.2.0 (was 0.1.0)");
     expect(output).toContain("ExecStart pinned to GraphLoom 0.1.0 now runs the launcher");
-    expect(output).toContain("restarted (it was idle): GraphLoom 0.1.0 -> 0.2.0");
+    expect(output).toContain("restarting on GraphLoom 0.2.0 now (it was idle; it was running 0.1.0)");
     expect(output).toContain("hub doctor (GraphLoom 0.2.0, the hub's environment): ok");
     expect(inspectUnit(await readFile(unitFile, "utf8"), sb.ghome)).toMatchObject({ kind: "launcher", args: ["hub", "serve", "--config", config] });
     expect(readFileSync(path.join(sb.root, "systemctl.log"), "utf8").split("\n").filter(Boolean)).toEqual([
-      "--user show --property=ActiveState --property=RestartForceExitStatus graphloom-hub.service", "--user daemon-reload", "--user restart graphloom-hub.service",
+      "--user show --property=ActiveState --property=RestartForceExitStatus graphloom-hub.service", "--user daemon-reload", "--user show --property=RestartForceExitStatus graphloom-hub.service",
     ]);
-    expect(hub.calls.filter((call) => call !== "GET /v1/health")).toEqual(["POST /v1/doctor"]);
+    expect(hub.calls.filter((call) => call !== "GET /v1/health")).toEqual(["POST /v1/restart", "POST /v1/doctor"]);
     expect(existsSync(path.join(path.dirname(unitFile), "graphloom-hub.service.d"))).toBe(false);
 
     const printed = await startDetached(sb.shim, ["hub", "service"], { ...sb.env, GRAPHLOOM_DISABLE_AUTOUPDATE: "1" }).done;
