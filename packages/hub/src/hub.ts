@@ -82,6 +82,8 @@ export class Hub {
   private fault: string | undefined;
   private closing = false;
   private closed = false;
+  /** Why no new launch starts (docs/design-run-hub.md §9.2): a restart waits for the running launches to finish. */
+  private held: string | undefined;
   private readonly now: () => number;
   private readonly monotonic: () => number;
   private readonly random: () => number;
@@ -126,7 +128,21 @@ export class Hub {
   private stamp(): string { return new Date(this.now()).toISOString(); }
   private occupied(): number { return Object.values(this.snapshot.submissions).filter((s) => s.launch).length; }
   list(): HubStatus {
-    return copy({ hubId: this.snapshot.hubId, maxConcurrentRuns: this.snapshot.config.maxConcurrentRuns, occupiedSlots: this.occupied(), submissions: Object.values(this.snapshot.submissions).sort((a, b) => a.queueSequence - b.queueSequence), ...(this.fault ? { fault: this.fault } : {}) });
+    return copy({ hubId: this.snapshot.hubId, maxConcurrentRuns: this.snapshot.config.maxConcurrentRuns, occupiedSlots: this.occupied(), submissions: Object.values(this.snapshot.submissions).sort((a, b) => a.queueSequence - b.queueSequence), ...(this.fault ? { fault: this.fault } : {}), ...(this.held !== undefined ? { launchesHeld: this.held } : {}) });
+  }
+  /**
+   * Starts no new launch from now on, for this process's lifetime: running launches
+   * continue and settle, submissions are still accepted and queued, waiting ones still
+   * become ready. A hub that restarts when idle (§9.2) holds launches so it gets idle;
+   * nothing persists, so the restarted hub admits as usual.
+   */
+  holdNewLaunches(reason: string): void {
+    this.held = reason.slice(0, 1024);
+  }
+  /** Whether a submit with this key (scoped as `submit` scopes it) would return an existing submission or conflict. */
+  knowsKey(key: string, rehearsal: boolean): boolean {
+    const scoped = rehearsal ? `${HUB_REHEARSAL_KEY_PREFIX}${key}` : key;
+    return Object.values(this.snapshot.submissions).some((s) => s.key === scoped) || this.snapshot.tombstones.some((s) => s.key === scoped);
   }
   inspect(id: string): HubSubmission { return copy(this.get(id)); }
   /** The bounded archive index, oldest first (docs/design-run-hub.md §4.1). */
@@ -387,6 +403,7 @@ export class Hub {
     }
     if (this.closing || this.fault) return;
     await this.promoteReady();
+    if (this.held !== undefined) return;
     while (this.occupied() < this.snapshot.config.maxConcurrentRuns) {
       const candidate = Object.values(this.snapshot.submissions).filter((s) => s.state === "queued" && s.desiredAction === "execute" && !s.launch && this.ready(s)).sort((a, b) => a.queueSequence - b.queueSequence)[0];
       if (!candidate) break;

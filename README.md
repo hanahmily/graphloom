@@ -88,13 +88,19 @@ systemctl --user daemon-reload
 systemctl --user enable --now graphloom-hub.service
 graphloom hub status     # includes the hub's environment: PATH head, agent CLIs, token variables set
 graphloom hub doctor --task ./tasks/fix/task.yaml   # doctor's checks in the hub's environment
-graphloom hub submit ./tasks/fix/task.yaml --key fix-14169
+graphloom hub submit ./tasks/fix/task.yaml --key fix-14169   # refused first if a check fails in the hub
 graphloom hub list
 graphloom hub limit 2
 graphloom hub watch <submission>
 graphloom hub pause <submission>
 graphloom hub resume <submission>
 ```
+
+The unit starts the hub through `~/.local/share/graphloom/current/bin/graphloom`, so
+`graphloom upgrade` needs no new unit: it restarts the hub on the new version, at
+once when idle, else once the running launches finish, and keeps your captured
+environment ([run hub §9.2](docs/design-run-hub.md#92-upgrades-the-launcher-and-restarts)).
+After upgrading from a version without this, run `graphloom hub service --refresh` once.
 
 Use the runner/supervisor configuration created by `graphloom setup`, or set their
 paths in the hub config. The queue pins task/config bytes, repository base, bundle

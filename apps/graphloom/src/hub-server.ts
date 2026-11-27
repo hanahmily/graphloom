@@ -5,7 +5,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { createConnection } from "node:net";
 import { chmod, lstat, mkdir, open, readdir, unlink } from "node:fs/promises";
 import path from "node:path";
-import { openHub, type Hub, type HubDriver } from "@graphloom/hub";
+import { checkHubStateFormat, openHub, type Hub, type HubDriver } from "@graphloom/hub";
 import type { HubHealth, HubInput, HubRehearsal, HubRehearsalVerdict, HubResumeRemedy, HubRetryPolicy, HubStatus, HubSubmission, MonitorSnapshot } from "@graphloom/sdk";
 import { parseRehearsalSettings, readHubVerdict, rehearsalLine } from "./hub-rehearsal.js";
 import { object, integer, type HubServiceConfig } from "./hub-config.js";
@@ -18,7 +18,10 @@ import { resolveOperatorPlugin } from "./hub-plugin.js";
 import { selfInstall } from "./ownership.js";
 import { HubEvents } from "./hub-events.js";
 import { parseListQuery, readLiveRequest, searchHub, type LiveRequest } from "./hub-history.js";
-import { runHubDoctor, summarizeHubEnvironment } from "./hub-environment.js";
+import { hubRunEnvironment, runHubDoctor, summarizeHubEnvironment, type HubDoctorResult } from "./hub-environment.js";
+import { environmentFingerprint, PreflightCache, preflightNote, preflightRefusal, preflightVerdict } from "./hub-preflight.js";
+import { runnerConfigPath } from "./runner-config.js";
+import { supervisorConfigPath } from "./supervisor-config.js";
 import { memoryChecks, summarizeHubMemory, withMemoryChecks } from "./hub-memory.js";
 
 export interface HubService {
@@ -37,11 +40,21 @@ export interface HubServiceOptions {
   observe?: (submission: HubSubmission) => Promise<MonitorSnapshot>;
   /** The environment the hub's doctor and status summary see; production: the hub process's own, which its runs inherit. */
   environment?: NodeJS.ProcessEnv;
+  /** Tests replace the doctor the hub runs (`hub doctor`, the submit preflight); production runs this installation's. */
+  doctor?: (taskPath: string | undefined) => Promise<HubDoctorResult>;
+  /**
+   * Called once when a requested restart finds the hub idle (docs/design-run-hub.md §9.2):
+   * `hub serve` under its systemd unit exits so systemd starts the installed version.
+   * Absent, the hub refuses a restart request (it cannot restart itself).
+   */
+  onIdleRestart?: () => void;
 }
 
 /** Owner-only HTTP over Unix: no network listener or arbitrary command endpoint. */
 export async function serveHub(options: HubServiceOptions): Promise<HubService> {
   const { config } = options;
+  // A state format newer than this GraphLoom reads is refused before anything is written (§9.2).
+  await checkHubStateFormat(config.directory);
   await privateDirectory(config.directory);
   await privateDirectory(path.dirname(config.socket));
   // Retention is a production process effect, like the real driver. Synthetic drivers
@@ -99,7 +112,7 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
     finally { capturing = false; }
   };
   await capture();
-  const timer = setInterval(() => { void capture(); }, Math.min(config.pollIntervalMs, 1000));
+  const timer = setInterval(() => { void capture().then(restartIfIdle); }, Math.min(config.pollIntervalMs, 1000));
   timer.unref();
   const refreshes = new Map<string, Promise<void>>();
   const monitor = async (submission: HubSubmission): Promise<MonitorSnapshot> => {
@@ -135,6 +148,32 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
   let closing = false;
   const environment = options.environment ?? process.env;
   let doctoring = false;
+  // Doctor runs, the endpoint's and the submit preflight's, one at a time.
+  let doctorQueue: Promise<unknown> = Promise.resolve();
+  const serialDoctor = <T>(run: () => Promise<T>): Promise<T> => { const next = doctorQueue.then(run); doctorQueue = next.catch(() => undefined); return next; };
+  const doctor = options.doctor ?? ((taskPath: string | undefined) => runHubDoctor(environment, config, taskPath));
+  const preflights = new PreflightCache();
+  let fingerprint: Promise<string> | undefined;
+  /** The submit preflight (§3.3): the hub's doctor for the task; a failing check the run needs refuses it, before anything is captured. */
+  const preflight = async (taskPath: string, rehearsal: HubRehearsal | undefined): Promise<string> => {
+    const runEnv = hubRunEnvironment(environment, config);
+    fingerprint ??= environmentFingerprint(environment, [runnerConfigPath(runEnv).file, supervisorConfigPath(runEnv).file]);
+    const key = await preflights.key(taskPath, rehearsal, await fingerprint);
+    const known = key !== undefined ? preflights.get(key) : undefined;
+    if (known !== undefined) return preflightNote(known, true);
+    const verdict = preflightVerdict((await serialDoctor(() => doctor(taskPath))).report, rehearsal);
+    if (verdict.failures.length > 0) throw new HubHttpError(preflightRefusal(verdict, taskPath, rehearsal !== undefined), 422);
+    if (key !== undefined) preflights.remember(key, verdict);
+    return preflightNote(verdict, false);
+  };
+  // A restart when idle (§9.2): no new launch starts; once nothing runs, the hub hands over to systemd.
+  let restart: { requestedAt: string; reason: string } | undefined;
+  let restarting = false;
+  const restartIfIdle = () => {
+    if (restart === undefined || restarting || closing || scheduler.list().occupiedSlots > 0) return;
+    restarting = true;
+    options.onIdleRestart?.();
+  };
   const server = createServer((request, response) => {
     void (async () => {
       const url = new URL(request.url ?? "/", "http://hub.local");
@@ -152,6 +191,7 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
           ...status, socket: config.socket, ...(version !== undefined ? { version } : {}), counts, rehearsalCounts, archivedEntries: scheduler.archived().length, environment: summary, memory,
           ...(scheduler.archiveIndexError ? { archiveIndexError: scheduler.archiveIndexError } : {}),
           ...((monitoringError || historyError) ? { monitoringError: (monitoringError ?? historyError)! } : {}), ...(retentionError ? { retentionError } : {}), closing,
+          ...(restart !== undefined ? { restart } : {}),
         };
         return respond(response, 200, health);
       }
@@ -166,20 +206,23 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
           return respond(response, 200, await withRehearsals(searchHub(status, scheduler.archived(), live, filter)));
         }
         if (request.method === "POST") {
-          const body = await payload(request, ["taskPath", "key", "rehearsal"]);
+          const body = await payload(request, ["taskPath", "key", "rehearsal", "preflight"]);
           const file = text(body.taskPath, "taskPath");
           if (!path.isAbsolute(file)) throw new HubHttpError("taskPath must be absolute on the hub's machine", 400);
           const key = body.key === undefined ? undefined : text(body.key, "key", 256);
+          if (body.preflight !== undefined && typeof body.preflight !== "boolean") throw new HubHttpError("preflight must be a boolean", 400);
           // A rehearsal submission (§12): its settings are part of the captured input, so of its digest and key scope.
           let rehearsal: HubRehearsal | undefined;
           try { rehearsal = body.rehearsal === undefined ? undefined : parseRehearsalSettings(body.rehearsal); }
           catch (error) { throw new HubHttpError(error instanceof Error ? error.message : String(error), 400); }
+          // A key the hub already holds answers with its submission (or a conflict): no preflight for a retry.
+          const preflightLine = body.preflight === true && !(key !== undefined && scheduler.knowsKey(key, rehearsal !== undefined)) ? await preflight(file, rehearsal) : undefined;
           const captured = await (options.captureInput?.(file, rehearsal) ?? captureHubInput(file, config, process.env, rehearsal));
           const input: HubInput = rehearsal !== undefined ? { ...captured, rehearsal } : captured;
           const submit = () => scheduler.submit({ input, requestDigest: inputDigest(input), ...(key !== undefined ? { key } : {}) });
           const result = retention ? await retention.protect(inputReferences({ input }), submit) : await submit();
           await capture();
-          return respond(response, 202, result);
+          return respond(response, 202, preflightLine !== undefined ? { ...result, preflight: preflightLine } : result);
         }
       }
       if (url.pathname === "/v1/doctor" && request.method === "POST") {
@@ -190,13 +233,25 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
         if (doctoring) throw new HubHttpError("the hub is already running a doctor; try again when it finishes", 409);
         doctoring = true;
         try {
-          const result = await runHubDoctor(environment, config, taskPath);
+          const result = await serialDoctor(() => doctor(taskPath));
           // The doctor's child cannot see the hub's cgroups as the hub does: the memory checks are the hub's own (§9.1).
           const status = scheduler.list();
           result.report.checks = withMemoryChecks(result.report.checks, memoryChecks(await summarizeHubMemory(config, status.maxConcurrentRuns, status.submissions)));
           return respond(response, 200, result);
         }
         finally { doctoring = false; }
+      }
+      if (url.pathname === "/v1/restart" && request.method === "POST") {
+        // A restart when idle (§9.2), asked for after an upgrade: hold new launches, restart once none runs.
+        const body = await payload(request, ["when", "reason"]);
+        if (body.when !== "idle") throw new HubHttpError("when must be \"idle\"", 400);
+        const reason = body.reason === undefined ? "a restart was requested" : text(body.reason, "reason", 512);
+        if (options.onIdleRestart === undefined) throw new HubHttpError("this hub cannot restart itself (it is not running under its systemd unit); restart it yourself when it is idle", 409);
+        restart ??= { requestedAt: new Date().toISOString(), reason };
+        scheduler.holdNewLaunches(`restart when idle: ${restart.reason}`);
+        const occupied = scheduler.list().occupiedSlots;
+        restartIfIdle();
+        return respond(response, 202, { restart, occupiedSlots: occupied, ...(occupied === 0 ? { now: true } : {}) });
       }
       if (url.pathname === "/v1/limit" && request.method === "POST") {
         const body = await payload(request, ["limit"]);

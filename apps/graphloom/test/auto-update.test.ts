@@ -112,6 +112,19 @@ describe("graphloom __auto-update through the shim", () => {
     expect(sb.graphloomTty(["version"]).stdout).not.toContain("GraphLoom updated");
   });
 
+  it("leaves an installed hub on its version, saying so, unless GRAPHLOOM_HUB_RESTART_ON_AUTO_UPDATE=1 (run hub design §9.2)", async () => {
+    const sb = await sandboxWith("0.1.0");
+    const unit = path.join(sb.home, ".config", "systemd", "user", "graphloom-hub.service");
+    await mkdir(path.dirname(unit), { recursive: true });
+    await writeFile(unit, "[Service]\nExecStart=/elsewhere/graphloom hub serve\n");
+    await sb.publish("0.1.1");
+    sb.graphloom(["version"]);
+    const log = await sb.checksDone(1);
+    expect(log).toContain("hub: keeps its version until restarted: graphloom hub service --refresh");
+    expect(sb.read("update/notice")).toContain("The hub keeps running 0.1.0 until graphloom hub service --refresh restarts it.");
+    expect(sb.current()).toBe("0.1.1");
+  });
+
   it("from 1.0, installs a minor release; a new major is only announced", async () => {
     const sb = await sandboxWith("1.0.0");
     await sb.publish("1.1.0");

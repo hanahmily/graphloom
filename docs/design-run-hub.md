@@ -78,6 +78,7 @@ The CLI provides:
 ```sh
 graphloom hub serve --config ~/.config/graphloom/hub.json
 graphloom hub service --capture-env --token-env-file ~/.config/graphloom/hub-tokens.env --write
+graphloom hub service --refresh
 graphloom hub status
 graphloom hub doctor --task ./tasks/fix/task.yaml
 graphloom hub submit ./tasks/fix/task.yaml --key fix-14169
@@ -117,7 +118,9 @@ prints a key **before its first request** unless `--key` supplies one, and reuse
 it after an uncertain response. A new invocation gets a new key. Raw API clients
 may omit a key, but cannot safely retry an uncertain unkeyed submission.
 `--rehearsal` makes a rehearsal submission, whose run runs on stand-ins with no
-model calls ([§12](#12-rehearsal-submissions)).
+model calls ([§12](#12-rehearsal-submissions)). Before it queues anything, the
+hub runs the submission's preflight ([§3.3](#33-submit-preflight));
+`--no-preflight` skips it.
 
 `pause` records a hold and requests a cooperative stop if active. It returns the
 new desired state immediately; `inspect` shows `stopping` until cleanup finishes.
@@ -252,6 +255,42 @@ retry never reports success for a command that did nothing. A refused resume
 is answered from the record with its reason: the same request is refused the
 same way, and a corrected remedy needs a new command ID. The controller's own
 per-command record keeps a reapplied command from applying twice.
+
+### 3.3 Submit preflight
+
+A task whose environment check fails in the hub's environment (a toolchain or
+token the service lacks) would otherwise be accepted and block at its first
+launch. `hub submit` therefore asks the hub to run the doctor for the task
+first: `POST /v1/submissions` with `"preflight": true` runs the same doctor as
+`hub doctor --task` (§3.1), in the hub's environment, before the task is
+captured. Any `fail` among the checks the submission needs refuses it with
+`422` and nothing is queued; the CLI prints each failing check with its fix
+(at most six, then a count), how to see every check (`graphloom hub doctor
+--task <file>`) and that `--no-preflight` submits anyway, and exits 1.
+Warnings never refuse; a passing preflight prints one line on stderr naming
+the warnings, and stdout stays the submission.
+
+| Submission | Checks that refuse it |
+| --- | --- |
+| Real | Every check the doctor fails: host, agents, configuration, setups and the task's (plugin, environment checks, supervisor selection, agent roles) |
+| Rehearsal, `--commands stub` (default) | The host checks and the task's plugin; the stand-ins replace the agents, supervisor, runner config and commands |
+| Rehearsal, `--commands run` | Those, and the task's environment checks, since its commands run for real |
+
+A failing check a rehearsal does not need is named in the passing line (`not
+needed by a rehearsal: ...`). A submit whose `--key` the hub already holds
+(a retry after a lost reply, or an archived key) skips the preflight: the hub
+answers it with the existing submission or a conflict, as before. Doctor runs
+are serialized in the hub, the endpoint's and the preflights', so concurrent
+submits wait in turn rather than fail. A passing verdict is kept in memory for
+5 minutes, keyed by the task file's bytes and path, the mode (real, rehearsal
+with stubbed or real commands) and a fingerprint of the hub's environment and
+its runner and supervisor config files; the same task submitted again in that
+time is not checked twice (the line says `cached`). A failure is never kept:
+after a fix, the next submit checks again. A hub older than the preflight
+refuses the unknown field; the CLI then runs the preflight itself against
+`POST /v1/doctor` with the same rules, and submits without the field.
+`--no-preflight` is for an operator who knows better (a check that fails for
+a reason the run does not meet); it prints `preflight: skipped`.
 
 ## 4. Submission inputs and durable state
 
@@ -1003,7 +1042,8 @@ or being drained, never that a controller already completed the requested action
 Run the daemon in the foreground under a user systemd service, with explicit
 runner/supervisor config paths and installed runtime. No self-daemonization,
 terminal setup prompts, or automatic installation occurs in the serving process.
-An illustrative unit, with the executable path replaced by the installed version:
+`graphloom hub service` prints the unit; its `ExecStart` is the install home's
+version-independent launcher ([§9.2](#92-upgrades-the-launcher-and-restarts)):
 
 ```ini
 [Unit]
@@ -1011,9 +1051,13 @@ Description=GraphLoom run hub
 
 [Service]
 Type=exec
-ExecStart=/absolute/install/bin/graphloom hub serve --config %h/.config/graphloom/hub.json
+ExecStart=/home/me/.local/share/graphloom/current/bin/graphloom hub serve --config /home/me/.config/graphloom/hub.json
 Restart=on-failure
 RestartSec=5
+# 75: the hub restarts itself when idle after an upgrade; 78: its state is newer than the installed GraphLoom reads.
+SuccessExitStatus=75
+RestartForceExitStatus=75
+RestartPreventExitStatus=78
 Delegate=yes
 KillMode=mixed
 TimeoutStopSec=90
@@ -1128,8 +1172,9 @@ graphloom hub status     # Memory: and Launch limits: lines, and any warning
 ```
 
 The hub must not use the daily-update shim as the running daemon executable.
-Runtime upgrades are an explicit service restart; existing runs retain their
-owning version. Installation must preserve versions referenced by queued tasks
+Runtime upgrades take effect at a service restart, which `graphloom upgrade`
+arranges ([§9.2](#92-upgrades-the-launcher-and-restarts)); existing runs retain
+their owning version. Installation must preserve versions referenced by queued tasks
 as well as active runs. An unhealthy scheduler store or failed reconciliation
 prevents new admissions and appears in health output.
 
@@ -1155,6 +1200,119 @@ runtime reference when no remaining submission needs it. Missing or unreadable
 run state prevents release and reports a retention error; it never pins versions
 installed later. A private list of known install homes lets a restarted hub
 remove stale markers after its last submission in a home is archived.
+
+### 9.2 Upgrades: the launcher and restarts
+
+Before the launcher, `hub service` pinned `ExecStart` to one version's Node and
+CLI (`versions/<v>/node/bin/node versions/<v>/apps/graphloom/dist/main.js`), so
+after every upgrade the operator regenerated the unit, reloaded systemd and
+restarted the hub when idle, and a forgotten step left the hub on the old
+version. Three pieces remove those steps.
+
+**The launcher.** For an installed GraphLoom, `ExecStart` is
+`<home>/current/bin/graphloom hub serve --config <file>`: the release's own
+launcher reached through the `current` link, which systemd resolves when it
+starts the hub; the launcher then runs the version's bundled Node on the real
+path of that version's CLI ([release design §4.1](design-release.md#41-layout)),
+so the hub loads every module from `versions/<v>/` and a later switch of
+`current` never changes a running hub. A hub start after an install therefore
+runs the new version with no new unit. It is not the user shim: the hub never
+starts the daily update check. A clone has no install home; its unit stays
+pinned to the clone's Node and CLI. What runs a submission does not change: a
+submission's runtime is the hub's own at acceptance (§4), retained by the
+per-version markers below, and a resume dispatches to the run's owning version
+(§6), so a running or queued submission keeps its runtime across a hub
+restart onto a newer version.
+
+**The refresh.** `graphloom hub service --refresh` brings an installed unit and
+the hub it runs onto the version that runs the command, and `install.sh` runs
+it, with the newly switched version's CLI, after `graphloom upgrade` or an
+install that switches `current` (not with `--no-switch`), when
+`$XDG_CONFIG_HOME/systemd/user/graphloom-hub.service` exists. It releases
+`install.lock` first, since a starting hub takes it (retention below).
+
+1. A unit whose `ExecStart` is pinned to one of this home's
+   `versions/<v>/` (that version's Node and CLI, or its `bin/graphloom`) gets
+   the launcher's `ExecStart` with the same arguments, once; a unit without
+   the restart exit statuses gets them. Every other line, and every drop-in,
+   stays. A unit that starts anything else (a clone, another home) is the
+   operator's own: left alone and not restarted.
+2. The environment is not captured again: `environment.conf`, `tokens.conf`
+   and the token file (§9.1) are the operator's deliberate choice, and an
+   upgrade that silently re-read the login shell could change what runs see.
+   Instead the refresh reports the new version's `hub doctor` in the hub's
+   environment once the hub runs it: `ok`, or each failing check with its fix.
+3. `systemctl --user show` decides reachability. When systemd's user manager
+   does not answer (no user bus, a container, `ssh` without lingering), the
+   refresh restarts nothing and prints the commands: `systemctl --user
+   daemon-reload` when it changed the unit, and `systemctl --user restart
+   graphloom-hub.service` when the hub is idle. Otherwise it reloads systemd
+   after a change, then asks the hub (`GET /v1/health`) which version it runs
+   and how many launches hold slots:
+
+| The hub | The refresh |
+| --- | --- |
+| Not active | Restarts nothing; the next start runs the new version |
+| Already on this version | Reports its doctor |
+| Idle (no occupied slot) | `systemctl --user restart graphloom-hub.service` at once, waits up to 90 s for the hub to answer on the new version, reports its doctor |
+| Busy | `POST /v1/restart {"when": "idle"}`: the hub restarts once its running launches finish |
+| Busy, and the hub (older than this) or the loaded unit cannot take the request | Prints the restart command for when it is idle |
+| Active but not answering on its socket | Prints the restart command |
+
+**Restart when idle.** A hub asked to restart when idle stops starting new
+launches (submissions are still accepted and queued, waiting ones still become
+ready), lets the running launches drain and settle as usual, and when no slot
+is occupied it closes like a service stop and exits 75; the unit's
+`RestartForceExitStatus=75` makes systemd start it again, through the launcher,
+on the installed version (`SuccessExitStatus=75` keeps it from being logged as a
+failure). The request lives only in the hub process: a crash or any other
+restart starts the new version anyway and clears it. `hub status` shows
+`Restart pending since <time> (<reason>): no new launch starts; ...` and the
+health object carries `restart` and `launchesHeld`. The hub accepts the
+request only under its unit (systemd's `INVOCATION_ID` is set); elsewhere it
+answers `409`, and the refresh checks that the loaded unit restarts on 75
+before asking. Holding new launches is the simplest safe choice: it bounds the
+wait by the launches already running, where waiting for a natural idle moment
+could wait forever on a busy queue, and it interrupts nothing; queued work
+loses only the time the running launches take, and starts on the new version.
+An operator who wants the new version at once runs `systemctl --user restart
+graphloom-hub.service`, which stops active runs cooperatively and continues
+them afterwards (§9).
+
+**Automatic updates.** The daily update check ([release design
+§5.4](design-release.md#54-automatic-updates)) installs and switches `current`
+but leaves the running hub alone: `install.sh --auto` prints `hub: keeps its
+version until restarted` to `update/log`, and the update notice says the hub
+keeps its version until `graphloom hub service --refresh`. No surprise
+restarts come from the daily trigger. An operator who wants them sets
+`GRAPHLOOM_HUB_RESTART_ON_AUTO_UPDATE=1` in the shell the shim runs from;
+`install.sh --auto` then runs the refresh as `graphloom upgrade` does (an
+idle hub restarts, a busy one restarts when idle). `GRAPHLOOM_DISABLE_AUTOUPDATE=1`
+starts no check at all, so it installs and restarts nothing. Because `current`
+moved, any later restart of the hub (a reboot, a crash) runs the new version.
+
+**State format.** `scheduler.json`'s `schemaVersion` is the hub state format
+(1 today). Before it writes anything (the state directory, retention markers,
+the store), a starting hub reads that field: a newer format than it reads
+means a newer GraphLoom wrote the state, for example after `graphloom self
+rollback` or `self use` with a hub that the newer version ran, and the hub
+refuses to start, naming the directory and both formats, and exits 78; the
+unit's `RestartPreventExitStatus=78` keeps systemd from looping on it. Nothing
+is changed: the operator starts the newer version again (`graphloom self use
+<v>`, then `systemctl --user restart graphloom-hub.service`). An older format
+is read by a newer hub, which migrates it forward when it next saves; none
+exists yet. A state the hub cannot parse at all stays a corrupt-store refusal
+(§10), never an empty queue.
+
+**First upgrade.** `graphloom upgrade` runs the installer of the version being
+left. Upgrading from a version before the refresh therefore runs no refresh;
+run `graphloom hub service --refresh` once after it. `hub status` names the
+gap meanwhile: `Installed: GraphLoom <current> is current, the hub runs
+<version>: graphloom hub service --refresh restarts it`. A switch to a version
+without the refresh (an older one) prints that the hub restarts by hand.
+`graphloom self use` and `self rollback` switch `current` without a refresh;
+the hub moves at its next restart (`systemctl --user restart
+graphloom-hub.service` when it is idle).
 
 ## 10. Implementation and verification
 
@@ -1205,6 +1363,9 @@ Test observable admission and process behavior, not just queue implementation.
 | Managed direct resume or second hub instance | Cannot bypass the slot scheduler or the hub lock |
 | Missing runtime version, cgroup delegation or cleanup capability | Refuse managed launch with an actionable explanation |
 | Service environment lacks a tool or variable the operator's shell has | `hub status` warns for an enabled harness's missing CLI; `hub doctor` fails the check runs would fail; `hub service --capture-env` prints only allowlisted names, tokens only into the 0600 file |
+| Submit a task whose check fails in the hub's environment | Refused before capture with each failing check and its fix; warnings pass; a rehearsal needs only the host checks, the plugin and, with `--commands run`, its environment checks; `--no-preflight` skips |
+| Upgrade with a pinned unit, an idle hub, a busy hub, or no reachable systemd | Unit migrated once to the launcher, drop-ins untouched; idle restarted at once; busy restarts when idle with new launches held; unreachable restarts nothing and prints the commands |
+| Hub state written in a newer format | Refused at start with exit 78, nothing written |
 | Same run in terminal and chat | Same snapshot facts and controller revision; no client-owned scheduling |
 | Single panel or several panels requested | Independent rendering or shared observation frame; same facts and stable job selection |
 | TTY resize, narrow view, Unicode labels, redirected output | Readable panels or append-only plain/JSON; no stray control sequences |

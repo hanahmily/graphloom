@@ -174,7 +174,9 @@ export async function runAutoUpdate(options: AutoUpdateOptions = {}): Promise<st
       return "none";
     }
     const older = runsOnOlderVersions(home, decision.version);
-    await writeNotice(update, `GraphLoom updated to ${decision.version} (from ${current}).${older > 0 ? ` ${older} run${older === 1 ? " stays" : "s stay"} on older versions; see graphloom self list.` : ""} Undo with graphloom self rollback.`);
+    // The hub keeps the version it runs unless the operator let automatic updates restart it (docs/design-run-hub.md §9.2).
+    const hubStays = env.GRAPHLOOM_HUB_RESTART_ON_AUTO_UPDATE !== "1" && existsSync(path.join(env.XDG_CONFIG_HOME || path.join(env.HOME ?? os.homedir(), ".config"), "systemd", "user", "graphloom-hub.service"));
+    await writeNotice(update, `GraphLoom updated to ${decision.version} (from ${current}).${older > 0 ? ` ${older} run${older === 1 ? " stays" : "s stay"} on older versions; see graphloom self list.` : ""}${hubStays ? ` The hub keeps running ${current} until graphloom hub service --refresh restarts it.` : ""} Undo with graphloom self rollback.`);
     log(`installed and switched to ${decision.version}`);
     return "installed";
   } catch (err) {
