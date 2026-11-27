@@ -471,15 +471,21 @@ interface LoopCandidate { key: string; taskArgs: string[]; observedState?: strin
 | Reads per round | 8 | Reply refused as malformed |
 | Reads per tick | 20 | Tick blocked |
 | One result's bytes | 256 KiB | That read's result becomes `ok: false, error: "result too large"`, for the hook to handle |
-| All results' bytes | 1 MiB | Tick blocked |
+| All hook replies' and results' bytes | 1 MiB (counted once each, in bytes of their JSON form) | Tick blocked |
+| One hook reply's bytes | 256 KiB | Tick blocked ("hook reply too large"); a legitimate reply is far smaller, and 500 candidates with long args can exceed it by design, so a profile that matches that much fails visibly |
+| Wait a read may ask for (`retryAfterMs`) | capped at 24 h | The cap applies; see 14.5 |
 | One hook call | 10 s | Tick blocked with the plugin host's timeout message |
 | One read | the executor's own timeout (30 s) | `ok: false`, for the hook to handle |
 | The whole evaluation | 5 min | Tick blocked |
 
 "Tick blocked" means: no submissions this tick, loop state `blocked: <reason>`,
 shown by `loop status`, cleared by the next tick that succeeds. A thrown error,
-a malformed reply, `refused`, or a failed `validateLoopReply` all block the same
-way and name the bundle's message.
+a malformed reply, or a failed `validateLoopReply` block this way and name the
+bundle's message (the hook's own timeout reads "hook timed out after N ms at
+round R"). A `refused` reply is a separate outcome, `refused`, with the
+bundle's reason cut to 4096 characters; the loop shows it as `blocked: <reason>`
+in `loop status`. Any other failure inside an evaluation, including a value
+too deeply nested to copy, is a blocked tick `evaluation failed: <message>`.
 
 ### 14.5 Rate limits
 
@@ -492,7 +498,7 @@ GitHub's `retry-after` or `x-ratelimit-reset` headers
 evaluator therefore treats **any failed read that sets `retryAfterMs`** as a
 deferral signal for any executor, not just GitHub's:
 
-- The tick ends `deferred until now + retryAfterMs`, with no submissions. The
+- The tick ends `deferred until now + min(retryAfterMs, 24 h)`, with no submissions. The
   hook is not called again that tick, and the next tick before that time does
   not read.
 - Other failures reach the hook as `ok: false` with the summary, and the hook

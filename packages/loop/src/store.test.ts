@@ -255,6 +255,14 @@ describe("LoopStore review fixes", () => {
     await s.close();
   });
 
+  it("refuses 2026-02-29 and accepts milliseconds", async () => {
+    const s = await LoopStore.open(dir);
+    await expect(s.intent("a", "k", "2026-02-29T00:00:00.000Z")).rejects.toThrow(/UTC instant ending in Z/);
+    await s.intent("a", "k2", "2026-03-04T05:06:07.123Z");
+    expect(s.startsOn("2026-03-04")).toBe(1);
+    await s.close();
+  });
+
   it("accepts a real leap day", async () => {
     const s = await LoopStore.open(dir);
     await s.intent("a", "k", "2028-02-29T23:59:59Z");
