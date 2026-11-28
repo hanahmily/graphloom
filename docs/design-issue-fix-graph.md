@@ -32,10 +32,11 @@ supervisor-dispatched work run without one no longer crashes the graph
 Version 0.10.4 declares a 6 h `waitMs` in every profile, so a coding-agent harness's usage-limit reset can be waited out instead of stopping the run ([#189](https://github.com/hanahmily/graphloom/issues/189)).
 Version 0.11.0 reenters Fix itself when code review fails only on confirmed findings and the loop is converging, instead of handing every such failure to the supervisor ([#193](https://github.com/hanahmily/graphloom/issues/193); see [review failures](#review-failures-the-graph-reenters-fix-or-the-supervisor-decides)).
 Version 0.12.0 reads the profile's [context documents](#context-documents) once and gives them to the planner, the implementer and the code reviewers ([#195](https://github.com/hanahmily/graphloom/issues/195)), runs a profile's [`final` tier commands](#the-final-command-tier) once after review converged ([#196](https://github.com/hanahmily/graphloom/issues/196)), and ships the [banyandb-ql profile](#the-measure-ql-profile-and-benchmark-gates) with its `bench-gates` requirement and a delivery option that keeps a private tracker out of the commit and the pull request ([#197](https://github.com/hanahmily/graphloom/issues/197)).
-Proposed for 0.18.0: [code quality gates](#code-quality-gates) on the functions a change adds or modifies (complexity, nesting, CRAP, mutation), with the metrics defined in [code quality metrics](design-code-quality-metrics.md).
+Proposed for a later version (0.18.0 took test-first fixes): [code quality gates](#code-quality-gates) on the functions a change adds or modifies (complexity, nesting, CRAP, mutation), with the metrics defined in [code quality metrics](design-code-quality-metrics.md).
 Version 0.17.0, 2026-11-19, adds [Arbitrate](#arbitrate-designed-for-0170), a supervisor-only node in which an independent arbiter, or the operator, rules on design conflicts between review and implementation, and declares the Fix⇄Review loop as edges of the [graph topology](design-graph-topology.md) (`sdkProtocol: 2`; a 0.16 run cannot move to it with `--update-plugin`).
 Version 0.17.2, 2026-11-24, records the GitHub reads every rehearsal scenario makes, so `graphloom rehearse --offline` asks no GitHub: the issue the scenarios replay (`REHEARSAL_ISSUE`, apache/skywalking#14111 in the profile's issue repository), its comments, and a stand-in text for each context document the profile names in another repository; `rehearsalRequest(config)` in the rehearsal entry is the request a rehearsal task carries. The scenarios are designed for `--commands run` ([rehearsal design §8](design-graph-rehearsal.md#8-decisions-and-open-questions)).
 Version 0.17.3, 2026-11-24, rehearses every answer `arbitrate-operator`'s blocker names: `ruling=review-stands` (back to Fix), `ruling=implementation-stands` (to Review) and a decline (to Review), each a scenario answer ([rehearsal design §4.4](design-graph-rehearsal.md#44-scenarios)) that runs to a `ready` verdict; before, only implementation-stands was scripted, and the first answer the blocker suggests exhausted the scripted supervisor.
+Version 0.18.0, 2026-11-28, fixes behavioral review findings [test-first](#test-first-fixes-of-behavioral-findings-0180): the verifier judges whether a finding is behavioral; before Fix changes code for a confirmed behavioral finding, the implementer's test must fail on the reviewed change, and the fix must carry it unchanged and pass it; a finding the implementer cannot reproduce goes to the arbiter. A 0.17 run moved onto it with `--update-plugin` keeps its pinned verification schema, and so today's handling.
 
 ## Purpose
 
@@ -429,6 +430,10 @@ verifier, and one it cannot decide is disputed, so a real defect cannot slip
 through on a malformed comment. A finding the verification job gives no verdict
 for is disputed too, so one verification per pass is enough and the graph never
 loops on it.
+
+Since 0.18.0 every verdict also says whether the finding is `behavioral`
+(runtime behaviour a test can show). A confirmed behavioral finding is fixed
+[test-first](#test-first-fixes-of-behavioral-findings-0180).
 
 A refutation pins at most three quotes, and a confirmation without a `file:line`
 witness is disputed. The graph observes the files a refutation quotes; a quote
@@ -1066,7 +1071,7 @@ context document.
 
 ## Code quality gates
 
-Status: proposed, 2026-10-28, for 0.18.0 (moved from 0.17.0, which takes [Arbitrate](#arbitrate-designed-for-0170)). Not implemented.
+Status: proposed, 2026-10-28, for a later version (moved from 0.17.0, which took [Arbitrate](#arbitrate-designed-for-0170), and from 0.18.0, which took [test-first fixes](#test-first-fixes-of-behavioral-findings-0180)). Not implemented.
 
 The operator's two "ub-mode" rules become hard gates on the code issue-fix's
 agents write:
@@ -2284,5 +2289,220 @@ All six steps landed in 0.17.0.
 
 ### Open questions
 
-None. The version is settled: 0.17.0 takes Arbitrate, and the
-[code quality gates](#code-quality-gates) move to 0.18.0.
+None. The version is settled: 0.17.0 takes Arbitrate. The
+[code quality gates](#code-quality-gates) moved to 0.18.0, then to a later version when 0.18.0 took [test-first fixes](#test-first-fixes-of-behavioral-findings-0180).
+
+## Test-first fixes of behavioral findings (0.18.0)
+
+Status: implemented in issue-fix 0.18.0, 2026-11-28. The code is
+`src/test-first.ts` (the reproduction result, its checks and the job that runs
+a regression test), the ledger in `src/findings.ts` (`needsReproduction`,
+`applyReproduction`, `regressionHolds`), `testFirstStep` and `regressionStep`
+in `src/graph.ts`, the code review validator in `src/validators.ts`, and the
+arbiter's assignment in `src/arbiter.ts`.
+
+### The rule
+
+The owner decided it, and it is encoded as stated:
+
+1. **Scope: behavioral findings only.** A finding about runtime behaviour a
+   test can show: wrong output, a crash, a race, a leak, error handling.
+   Findings about the design, documentation, style or naming, or a missing
+   test, keep their handling. Design-level findings keep going to
+   [Arbitrate](#arbitrate-designed-for-0170).
+2. **Test-first fix.** A confirmed blocking behavioral finding still blocks,
+   but Fix first adds a test that fails on the reviewed change and then makes
+   it pass. Each fix of such a finding comes with that regression test.
+3. **Cannot reproduce.** When the implementer cannot produce a failing test,
+   it reports the attempt (what it tried, the test it wrote, what it
+   observed) instead of changing code for that finding. The finding then goes
+   to the arbiter, along the existing path the supervisor enters, where the
+   arbiter may run proof tests. `review-stands` sends it back to Fix;
+   `implementation-stands` dismisses it.
+
+No node, edge, requirement, statement, validator binding or route action is
+added.
+
+### Who classifies a finding as behavioral
+
+The verifier does, because it judges each finding against the code with its
+own witness. `finding-verification-v2` gains `behavioral` (boolean, required
+like every property), and the verifier's assignment states the scope above.
+The reviewer's `category` reaches the verifier inside the finding's text as a
+hint. `parseVerification` keeps `behavioral` only when it is `true` and the
+verdict is not `designLevel`, so a design-level finding is never behavioral.
+The ledger keeps the latest verdict's value on the finding (`behavioral`),
+and a ruling does not change it. A finding verified without the field is not
+behavioral and keeps today's handling.
+
+The contract keeps its name. A run keeps the result contracts it pinned at
+intake, and `--update-plugin` refreshes neither them nor anything else
+outside the plugin's code. A 0.17 run moved onto 0.18 therefore keeps the
+`finding-verification-v2` schema without `behavioral`: its verifier never
+judges a finding behavioral, and every finding keeps the handling it had.
+Renaming the contract would have refused the next verification job of such a
+run, because the name would not be declared in its pinned definition. The
+requirement statements and validator bindings are unchanged, so the update is
+admitted.
+
+### Reproduction
+
+A finding **needs a reproduction** when it is confirmed, behavioral, no
+ruling holds for it, and it has no regression test on the change it was last
+confirmed on (`needsReproduction`). When Review sends Fix back (the graph's
+reentry or the supervisor's), and before the implementer's run that answers
+the reentry, the graph:
+
+1. **Asks for the tests.** It dispatches one read-only `verify` job on the
+   implementer's harness, continuing its session (job key `implementer`),
+   with the findings and their witnesses. The worktree stays the reviewed
+   change. The implementer may try tests in the run's scratch directory and
+   returns `finding-reproduction-v1`:
+
+   ```text
+   reproductions: [{ finding: "I3",
+                     outcome: "reproduced" | "cannot-reproduce",
+                     test: { path, name, content },   the tried test for cannot-reproduce; empty strings when none
+                     attempt,                          what the test shows, or what it tried
+                     observed }]                       what the test reported when it ran it
+   ```
+
+   `path` is a new file at a test path the change does not touch, and `name`
+   is the test as the profile's regression runner selects it. The runner is
+   picked as for the arbiter's proof tests (`proofTestRef`): for `go-test`
+   the package is the file's directory, for `vitest` the file.
+2. **Runs each test on the reviewed change.** One read-only command job per
+   test, `finding-test` (a reserved command id), in a prepared checkout of
+   the candidate with exactly that file added
+   (`checkout: { from: "candidate", write: [{ path, content }] }`). The
+   candidate is still the reviewed change, so this checkout is the reviewed
+   change with only the test added. The checkout record digests the written
+   bytes (`written[].digest`), so the ledger matches the run to the test.
+3. **Judges the run** (the ledger, `applyReproduction`), by the RED contract
+   the arbiter's proof tests use (`proofProblem`): the test failed by
+   assertion, the package built, no panic, no timeout, no file changed. Then
+   the test becomes the finding's **regression test** (`reproduction`: the
+   test, the reviewed change's digest, the run). A test that passes there, or
+   fails any other way, does not reproduce the finding, and neither does a
+   test that cannot be added (not a test path, a path the change touches,
+   over 64 KiB). Such a test counts as an attempt that did not reproduce the
+   finding, with the run's result as what was observed.
+
+Then the implementer's run gets each finding with its regression test and
+the file's content, and is told to add the file byte for byte and make it
+pass.
+
+### Fails before, passes after: checked, not trusted
+
+- **Before**: the `finding-test` run in step 2, on the reviewed change's
+  digest, with the claimed bytes added. The implementer's own `observed` is
+  never evidence.
+- **After**: on every Fix candidate, once its other checks pass, the graph
+  observes each regression test's file and runs the test in a plain checkout
+  of the candidate (`regressionStep`). The test holds when the file is part
+  of the change with exactly the bytes that failed (the observed bytes
+  digest to the written digest) and the run passed clean. A missing, edited
+  or failing test is a Fix correction like any failing check
+  (`MAX_FIX_CORRECTIONS`, then the supervisor), so code review does not run
+  on a change without its regression tests. Fixed findings keep theirs, so
+  the delivered change carries every one.
+- **The ledger** counts a finding with a regression test as fixed only on a
+  candidate where its test holds: a pass that says `resolved` elsewhere
+  leaves it confirmed. The `open-code-review` validator (still v3) reads the
+  profile from the task config to judge the runs, and fails when a fixed
+  finding's regression test does not hold on the current change. Its
+  statement already requires that no finding is "confirmed and unfixed".
+
+### Cannot reproduce: the hand-over to the arbiter
+
+A `cannot-reproduce` entry, or a test that does not fail on the reviewed
+change, records the attempt on the finding (`unreproduced`) and disputes it.
+The implementer's run is told to change no code for it. A disputed finding is
+a design conflict (`designConflicts`), raised in Fix like the fixer's own
+conflict. Once Fix is accepted on its other work, the graph returns
+`supervise` from Fix, with the same hand-over as the fixer's conflict and the
+attempt in its reason. The supervisor can enter Arbitrate.
+
+The arbiter's assignment states the test-first rule and the attempt (what was
+tried, the test, what was observed). It asks for `review-stands` with a
+proof test that must `fail` when the finding is a real defect, and for
+`implementation-stands` when it does not hold. The ruling's requirements are
+unchanged ([the arbiter](#the-arbiter)), and the arbiter's proof tests run as
+before.
+
+- `implementation-stands`: the finding is dismissed by the ruling, and the
+  supervisor leaves to Review (a forward move from an accepted Fix).
+- `review-stands`: the finding is confirmed with the ruling as its witness,
+  and the supervisor leaves to Fix (one correction). Its regression test is
+  the ruling's proof test that failed by assertion as claimed: the
+  implementer adds it byte for byte and makes it pass, checked as above. A
+  ruling without such a test (the operator's, or one with only `pass` proof
+  tests) leaves the finding to be fixed as before.
+- A decline defers the point, as for any design conflict.
+
+### No loop
+
+- A finding with a holding ruling never needs a reproduction again: Fix sends
+  a review-stands finding back once, with the ruling's proof test as its
+  failing test, and the review loop's own rules and caps apply from there.
+- Reproduction jobs per Fix attempt, on one reviewed change:
+  `MAX_REPRODUCTION_RUNS` (2). The second carries why the first could not be
+  used (a job that did not finish, a result that cannot be read, a finding
+  without an entry). After two, the graph hands the findings to the
+  supervisor. A supervisor reentry starts a new attempt.
+- A regression-test job that the controller refuses (a path the base already
+  holds, for example) goes to the supervisor.
+- A reproduction that wrote to the worktree goes to the supervisor: the
+  change the test must fail on is gone. A finding confirmed on a change the
+  worktree has since left by other means (the supervisor's own work) keeps
+  today's handling.
+- Arbitrate's existing bounds hold: one ruling per design point,
+  `review.maxRulings`, the node's `maxVisits`, and the corrections budget.
+- A finding confirmed again on a later change, such as one the reviewer still
+  sees after the fix, needs a new reproduction on that change.
+
+### Ledger, issues file and pull request
+
+- Findings carry `behavioral`, `reproduction` (the regression test, the
+  reviewed change, the run, and who wrote it: the implementer or the ruling
+  `R<n>`) and `unreproduced` (the attempt). A new verdict clears the attempt.
+- Each issue of the issues file shows `regressionTest`, set only by the graph
+  like `ruling` (a fixer's edit to it is rejected): the test and the change
+  it failed on, or `not reproduced: …`.
+- The pull request gains "Regression tests": for each behavioral finding,
+  either its test that failed on the reviewed change and passes with the fix
+  (and, for a ruling's test, which ruling), or the attempt that did not
+  reproduce it and the ruling that settled it.
+
+### Budgets
+
+A behavioral finding costs one read-only agent job (shared by every finding
+of the round), and two `finding-test` checkouts per regression test: one on
+the reviewed change and one on each Fix candidate. The shipped profiles keep
+their measured budgets until a live run measures test-first.
+
+### Verification
+
+Graph tests (`test/arbitrate.test.ts`, "behavioral findings are fixed
+test-first") run the controller stand-in through:
+
+- the classification: `behavioral` is parsed, never together with
+  `designLevel`, and the schema requires it;
+- a reproduced finding: the read-only reproduction before any code change,
+  the test run on the reviewed change with only it added, the fix carrying
+  it, its passing run, the fixed finding, the issue's `regressionTest` and
+  the pull request section; and the code review validator failing the same
+  change without the passing run;
+- a fix that leaves the test out, which is sent back;
+- a test that passes on the reviewed change, which does not count: the
+  finding goes to the arbiter, whose review-stands proof test becomes the
+  regression test the next fix carries;
+- `cannot-reproduce`, handed over from Fix, with the attempt in the
+  arbiter's assignment, ruled implementation-stands and dismissed;
+- findings not judged behavioral, and verdicts without the field, which
+  keep today's handling;
+- two reproductions with no answer, which go to the supervisor.
+
+The rehearsal scenarios' verdicts declare `behavioral: false`, so they
+rehearse the paths they did before. No rehearsal scenario covers test-first
+yet.

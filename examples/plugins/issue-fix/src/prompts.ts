@@ -390,6 +390,8 @@ export function pullRequestDescription(
     rulings?: string[];
     /** The design points the operator left open, with both cases (rulings.ts deferredSectionLines). */
     openDesignQuestions?: string[];
+    /** Behavioral findings' regression tests, or the attempts that did not reproduce them (findings.ts regressionSectionLines). */
+    regressionTests?: string[];
   },
 ): string {
   const { record } = args;
@@ -431,6 +433,9 @@ export function pullRequestDescription(
       : []),
     ...(record.needsE2E === true && profile.pullRequest.e2eNote !== undefined ? [`- ${profile.pullRequest.e2eNote}`] : []),
     ...(args.sections ?? []).flatMap((s) => ["", `## ${s.heading}`, ...s.lines]),
+    ...((args.regressionTests ?? []).length > 0
+      ? ["", "## Regression tests", "Behavioral review findings were fixed test-first: each test failed by assertion on the reviewed change with only it added, and the delivered change keeps it, byte for byte, and passes it.", ...args.regressionTests!]
+      : []),
     ...((args.issues ?? []).length > 0
       ? ["", "## Review issues", "Critical and high code review findings, as the run tracked them: done ones the reviewer verified fixed, dismissed ones an independent verifier refuted.", "", ...args.issues!]
       : []),

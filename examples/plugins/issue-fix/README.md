@@ -170,6 +170,28 @@ request's "Design rulings"; deferred points under "Open design questions".
 The go-test profiles' rehearsal adds the scenarios `arbitrate-review`,
 `arbitrate-fixer`, `arbitrate-fixer-stands` and `arbitrate-operator`.
 
+## Test-first fixes of behavioral findings (0.18.0)
+
+The verifier also judges whether a finding is **behavioral**: about runtime
+behaviour a test can show (wrong output, a crash, a race, a leak, error
+handling), not about the design, documentation, style or naming, or a missing
+test (`finding-verification-v2` adds `behavioral`). When Review sends Fix back
+with a confirmed behavioral finding, the implementer first returns a test for
+it in a read-only job (`finding-reproduction-v1`). The graph runs the test on
+the reviewed change with only that file added (`finding-test`), where it must
+fail by assertion. The fix must then carry the file byte for byte and pass it,
+on every later candidate as well. A test that does not fail there does not
+count. A finding the implementer cannot reproduce is reported with its
+attempt and disputed, and no code changes for it. The graph hands it over from
+the accepted Fix, the supervisor can enter Arbitrate, and the arbiter rules:
+`review-stands` sends it back to Fix with the arbiter's failing proof test as
+its regression test, and `implementation-stands` dismisses it. The issues file
+shows each `regressionTest`, and the pull request lists them under
+"Regression tests"
+([design](../../../docs/design-issue-fix-graph.md#test-first-fixes-of-behavioral-findings-0180)).
+A 0.17 run moved onto 0.18 with `--update-plugin` keeps its pinned
+verification schema, and so the handling it had.
+
 ## Supervisor preference (0.16.0)
 
 Each profile declares which supervisor harness its runs prefer for recovery,

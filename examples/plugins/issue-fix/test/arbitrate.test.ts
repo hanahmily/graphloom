@@ -28,8 +28,12 @@ import {
   findingLedger,
   GRAPH_VERSION,
   issueFileJson,
+  needsReproduction,
   parseProfile,
+  parseReproduction,
   parseVerification,
+  VERIFICATION_SCHEMA,
+  verificationInstruction,
   pinnedTexts,
   pullRequestDescription,
   shippedProfile,
@@ -100,6 +104,8 @@ interface Scenario {
   supervisor?: Supervisor[];
   /** Outcomes of proof tests by test name. */
   proofs?: Record<string, "pass" | "fail">;
+  /** Outcomes of behavioral findings' regression tests by test name: on the reviewed change with the test added (red, default fail), and on the change (green, default pass). */
+  findingTests?: Record<string, { red?: "pass" | "fail"; green?: "pass" | "fail" }>;
   /** The operator's answer to a stop for a design ruling, in order. */
   approvals?: Array<{ decision: "approve" | "decline"; inputs?: Record<string, string>; reason?: string }>;
   /** GREEN's regression outcome for each candidate-checks run (1-based), when not a pass. */
@@ -293,6 +299,11 @@ function simulate(s: Scenario) {
           const fails = checkout.from === "base" || (s.greenFails ?? []).includes(candidates);
           text = report(TEST, fails ? "fail" : "pass");
           exitCode = fails ? 1 : 0;
+        } else if (c.id === "finding-test") {
+          const entry = Object.entries(s.findingTests ?? {}).find(([n]) => c.argv.join(" ").includes(n));
+          const outcome = written !== undefined ? (entry?.[1].red ?? "fail") : (entry?.[1].green ?? "pass");
+          text = report(entry?.[0] ?? /Test[A-Za-z0-9_]+/.exec(c.argv.join(" "))?.[0] ?? "TestUnknown", outcome);
+          exitCode = outcome === "fail" ? 1 : 0;
         } else if (c.id === "proof-test") {
           const name = c.argv.at(-2) === undefined ? "" : (job.checkout as { write: Array<{ path: string }> }).write[0]!.path;
           const t = Object.entries(s.proofs ?? {}).find(([n]) => c.argv.join(" ").includes(n));
@@ -429,6 +440,8 @@ describe("issue-fix 0.17.0 topology", () => {
       ["finding-verification-v2", "other"],
       ["code-review-v2", "review"],
       ["design-ruling-v1", "other"],
+      // 0.18.0: the implementer's failing tests for behavioral findings, before it fixes them.
+      ["finding-reproduction-v1", "other"],
     ]);
     expect(d.requirements.find((r) => r.id === "code-review")!.prerequisiteRequirementIds).toEqual(["design-ruling"]);
     expect(d.defaultValidators.filter((b) => ["code-review", "design-ruling"].includes(b.requirementId))).toEqual([
@@ -915,3 +928,202 @@ describe("the rehearsal scenarios", () => {
   });
 });
 
+
+describe("behavioral findings are fixed test-first (0.18.0)", () => {
+  const REGRESSION = {
+    path: "pkg/timestamp/status_running_test.go",
+    name: "TestStatusRunningAtLimit",
+    content: 'package timestamp\n\nimport "testing"\n\nfunc TestStatusRunningAtLimit(t *testing.T) {\n\tif Status(generatedLimit, true) != "running" {\n\t\tt.Fatal("a running action at the limit is not reported as running")\n\t}\n}\n',
+  };
+  const PROOF = { path: "pkg/timestamp/arbiter_running_test.go", name: "TestArbiterRunning", content: "package timestamp\n\n// the arbiter's proof\n", expect: "fail" as const, shows: "Status at the limit while running is wrong." };
+  const BEHAVIORAL = (finding = "F1") => verdict(finding, "confirmed", { behavioral: true });
+  const reproduced = (t = REGRESSION) => ({ reproductions: [{ finding: "I1", outcome: "reproduced", test: t, attempt: "Status at the limit while running.", observed: "--- FAIL: TestStatusRunningAtLimit" }] });
+  const CANNOT = { reproductions: [{ finding: "I1", outcome: "cannot-reproduce", test: { path: "pkg/timestamp/try_test.go", name: "TestTry", content: "package timestamp\n" }, attempt: "Called Status at the limit with running true and false.", observed: "Both cases pass: the code already reports running." }] };
+  const FIX_AGAIN = `${FIXED}// tells running apart at the limit\n`;
+  /** Round 1 confirms F1, behavioral; the graph sends Fix back. */
+  const scenario = (extra: { reproductions: Reply[]; fixes: Reply[]; reviews?: object[]; arbiter?: ArbiterResult } & Partial<Scenario>): Scenario => {
+    const { reproductions, fixes, reviews, arbiter, ...rest } = extra;
+    return {
+      results: {
+        "decision-record-v2": [...PLAN_AND_FIX(), ...fixes],
+        "code-review-v2": [{ output: pass([FINDING]) }, { output: pass([], [["F1", "still_present"]]) }, ...(reviews ?? [pass([], [["I1", "resolved"]])]).map((output) => ({ output }))],
+        "finding-verification-v2": [{ output: { verdicts: [BEHAVIORAL()] } }],
+        "finding-reproduction-v1": reproductions,
+        "design-ruling-v1": [{ output: arbiter ?? ruling() }],
+      },
+      ...rest,
+    };
+  };
+  const findingTestJobs = (jobs: JobSpec[]) => jobs.filter((j) => (j.input as { commands?: Array<{ id: string }> }).commands?.[0]?.id === "finding-test");
+
+  it("reads behavioral from the verifier, never together with designLevel; a verdict without it is not behavioral", () => {
+    const parsed = parseVerification({ verdicts: [BEHAVIORAL(), { ...DESIGN_LEVEL("F2"), behavioral: true }, verdict("F3", "confirmed")] });
+    expect("verdicts" in parsed && parsed.verdicts.get("F1")!.behavioral).toBe(true);
+    expect("verdicts" in parsed && parsed.verdicts.get("F2")!.behavioral).toBeUndefined();
+    expect("verdicts" in parsed && parsed.verdicts.get("F3")!.behavioral).toBeUndefined();
+    const schema = JSON.parse(VERIFICATION_SCHEMA) as { properties: { verdicts: { items: { required: string[] } } } };
+    expect(schema.properties.verdicts.items.required).toContain("behavioral");
+    const text = verificationInstruction(PROFILE, { findings: [], background: "b", changed: [] });
+    expect(text).toContain("Set `behavioral` to true when the finding is about runtime behaviour a test can show: wrong output, a crash, a race, a leak, or wrong error handling");
+    expect(text).toContain("a missing test");
+    // A finding confirmed by a verdict without the field (before 0.18.0, or a run that kept its pinned schema) keeps today's handling.
+    const agent = (purpose: string, output: unknown, ref: string): EvidenceRecord => ({
+      ref,
+      kind: "other",
+      candidateDigest: "d1",
+      payload: { codingAgent: { harness: "x", status: "completed", output }, producer: { operationId: ref, stageId: "review", purpose, readOnly: true, kind: "agent", executorId: "graphloom.coding-agent/run" } },
+    });
+    const old = findingLedger([agent("review", pass([FINDING]), "a"), agent("diagnostic", { verdicts: [verdict("F1", "confirmed")] }, "b")]);
+    expect(old.findings[0]).toMatchObject({ state: "confirmed" });
+    expect(needsReproduction(old.findings[0]!)).toBe(false);
+    const now = findingLedger([agent("review", pass([FINDING]), "a"), agent("diagnostic", { verdicts: [BEHAVIORAL()] }, "b")]);
+    expect(needsReproduction(now.findings[0]!)).toBe(true);
+  });
+
+  it("parses the reproduction result", () => {
+    expect(parseReproduction(reproduced())).toEqual({ entries: [{ finding: "F1", outcome: "reproduced", test: REGRESSION, attempt: "Status at the limit while running.", observed: "--- FAIL: TestStatusRunningAtLimit" }] });
+    expect(parseReproduction({})).toEqual({ problem: "the reproduction returned no reproductions" });
+  });
+
+  it("asks for a failing test first, runs it on the reviewed change with only it added, and holds the fix to the same bytes, passing", () => {
+    const sim = simulate(
+      scenario({
+        reproductions: [{ output: reproduced() }],
+        fixes: [{ output: RECORD, files: { [REGRESSION.path]: REGRESSION.content, [SCHEDULER]: FIX_AGAIN } }],
+      }),
+    );
+    expect(sim.decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(sim.supervised).toEqual([]);
+    // The reproduction: a read-only job continuing the implementer's session, before any code changes.
+    const repro = sim.jobs.find((j) => j.resultSchema === "finding-reproduction-v1")!;
+    expect(repro).toMatchObject({ jobId: "implementer", stageId: "fix", purpose: "verify", readOnly: true, input: { harness: "claude-code" } });
+    expect(repro.continueFrom).toBeDefined();
+    expect(assignmentOf(repro)).toContain("write for each finding a test that fails on the change as it is now");
+    expect(assignmentOf(repro)).toContain("I1 pkg/timestamp/scheduler.go:4-9");
+    // The failing half: the reviewed change with exactly the test added, before the implementer's next run.
+    const [red, green] = findingTestJobs(sim.jobs);
+    expect(red!.checkout).toEqual({ from: "candidate", write: [{ path: REGRESSION.path, content: REGRESSION.content }] });
+    expect((red!.input as { commands: Array<{ argv: string[] }> }).commands[0]!.argv).toEqual(PROFILE.runner.argv({ package: "./pkg/timestamp", name: REGRESSION.name }));
+    const works = sim.jobs.filter((j) => j.purpose === "work");
+    expect(sim.jobs.indexOf(repro)).toBeLessThan(sim.jobs.indexOf(red!));
+    expect(sim.jobs.indexOf(red!)).toBeLessThan(sim.jobs.indexOf(works[1]!));
+    expect(assignmentOf(works[1]!)).toContain("Test-first: its regression test is your test `TestStatusRunningAtLimit` in `pkg/timestamp/status_running_test.go`, which failed by assertion on the reviewed change. Add that file to your change byte for byte");
+    expect(assignmentOf(works[1]!)).toContain('t.Fatal("a running action at the limit is not reported as running")');
+    // The passing half: the change as it is, the test part of it.
+    expect(green!.checkout).toEqual({ from: "candidate" });
+    expect(sim.jobs.indexOf(green!)).toBeGreaterThan(sim.jobs.indexOf(works[1]!));
+    expect(sim.ledger.findings[0]).toMatchObject({ state: "fixed", behavioral: true, reproduction: { by: "implementer", test: REGRESSION } });
+    expect(sim.ledger.issues.issues[0]!.regressionTest).toContain("TestStatusRunningAtLimit (pkg/timestamp/status_running_test.go): fails on the reviewed change");
+    expect(sim.body).toContain("## Regression tests");
+    expect(sim.body).toContain("- I1 (`pkg/timestamp/scheduler.go:4`): `TestStatusRunningAtLimit` in `pkg/timestamp/status_running_test.go` failed by assertion on the reviewed change");
+    // The code review validator holds the delivered change to the test: without its passing run there, the finding is not fixed.
+    const digest = sim.evidence.at(-1)!.candidateDigest!;
+    const isGreen = (e: EvidenceRecord) => {
+      const p = e.payload as { command?: { id?: string }; checkout?: { written?: unknown } };
+      return p.command?.id === "finding-test" && p.checkout?.written === undefined;
+    };
+    const evaluate = (evidence: EvidenceRecord[]) =>
+      validatorById("open-code-review")!.evaluate({
+        requirementId: "code-review",
+        statement: "s",
+        evidence: evidence.filter((e) => e.candidateDigest === undefined || e.candidateDigest === digest),
+        history: evidence.filter((e) => e.candidateDigest !== undefined && e.candidateDigest !== digest),
+        candidateDigest: digest,
+        config: BANYANDB,
+        receipts: sim.receipts,
+        validatorBindings: createGraph().describe(BANYANDB).defaultValidators,
+      });
+    expect(evaluate(sim.evidence)).toMatchObject({ status: "passed" });
+    expect(evaluate(sim.evidence.filter((e) => !isGreen(e)))).toMatchObject({ status: "failed" });
+  });
+
+  it("sends the change back when the fix does not carry the regression test byte for byte", () => {
+    const sim = simulate(
+      scenario({
+        reproductions: [{ output: reproduced() }],
+        fixes: [
+          { output: RECORD, files: { [SCHEDULER]: FIX_AGAIN } },
+          { output: RECORD, files: { [REGRESSION.path]: REGRESSION.content } },
+        ],
+      }),
+    );
+    expect(sim.decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    const works = sim.jobs.filter((j) => j.purpose === "work");
+    expect(works).toHaveLength(3);
+    expect(assignmentOf(works[2]!)).toContain(
+      "I1's regression test `TestStatusRunningAtLimit` in `pkg/timestamp/status_running_test.go`: the regression test file pkg/timestamp/status_running_test.go must be part of the change with exactly the bytes that failed on the reviewed change; it is missing",
+    );
+  });
+
+  it("does not count a test that passes on the reviewed change; the arbiter's review-stands proof test becomes the regression test", () => {
+    const sim = simulate(
+      scenario({
+        reproductions: [{ output: reproduced() }],
+        fixes: [
+          // Nothing reproduced, so nothing to change.
+          { output: RECORD },
+          { output: RECORD, files: { [PROOF.path]: PROOF.content, [SCHEDULER]: FIX_AGAIN } },
+        ],
+        arbiter: ruling({ ruling: "review-stands", proofTests: [PROOF] }),
+        findingTests: { [REGRESSION.name]: { red: "pass" } },
+        proofs: { [PROOF.name]: "fail" },
+        supervisor: [enter, back, leaveTo("fix"), back],
+      }),
+    );
+    expect(sim.decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(sim.supervised[0]!.reason).toContain("the implementer could not reproduce 1 behavioral finding(s) with a test that fails on the reviewed change");
+    expect(sim.supervised[0]!.reason).toContain("enter arbitrate from Fix");
+    const works = sim.jobs.filter((j) => j.purpose === "work");
+    expect(assignmentOf(works[1]!)).toContain("You could not reproduce it with a test that fails on the reviewed change");
+    expect(assignmentOf(works[1]!)).toContain("Change no code for it in this round");
+    const arbiter = arbiterJobs(sim.jobs)[0]!;
+    expect(assignmentOf(arbiter)).toContain("which the verifier confirmed as a behavioral defect but the implementer could not reproduce");
+    expect(assignmentOf(arbiter)).toContain("but its run reports passed");
+    expect(assignmentOf(arbiter)).toContain("The test it wrote: `TestStatusRunningAtLimit` in `pkg/timestamp/status_running_test.go`");
+    expect(assignmentOf(works[2]!)).toContain("Test-first: its regression test is the proof test of design ruling R1 `TestArbiterRunning` in `pkg/timestamp/arbiter_running_test.go`");
+    expect(assignmentOf(works[2]!)).toContain("// the arbiter's proof");
+    expect(sim.ledger.findings[0]).toMatchObject({ state: "fixed", ruling: "R1", reproduction: { by: "R1", test: { path: PROOF.path, name: PROOF.name, content: PROOF.content } } });
+    // No second reproduction: the ruling's finding is not reproduced again.
+    expect(sim.jobs.filter((j) => j.resultSchema === "finding-reproduction-v1")).toHaveLength(1);
+    expect(sim.body).toContain("`TestArbiterRunning` in `pkg/timestamp/arbiter_running_test.go`, the proof test of design ruling R1, failed by assertion on the reviewed change");
+  });
+
+  it("hands a finding the implementer cannot reproduce to the arbiter, which may dismiss it (implementation-stands)", () => {
+    const sim = simulate(
+      scenario({
+        reproductions: [{ output: CANNOT }],
+        fixes: [{ output: RECORD }],
+        reviews: [pass()],
+        supervisor: [enter, back, leaveTo("review"), back],
+      }),
+    );
+    expect(sim.decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(findingTestJobs(sim.jobs)).toEqual([]);
+    expect(sim.supervised[0]!.reason).toContain("the implementer could not reproduce it with a failing test: Called Status at the limit with running true and false.");
+    const arbiter = arbiterJobs(sim.jobs)[0]!;
+    expect(assignmentOf(arbiter)).toContain("- What it tried: Called Status at the limit with running true and false.");
+    expect(assignmentOf(arbiter)).toContain("- What it observed: Both cases pass: the code already reports running.");
+    expect(sim.ledger.findings[0]).toMatchObject({ state: "dismissed", ruling: "R1" });
+    expect(sim.body).toContain("design ruling R1 (implementation-stands) settled it.");
+    expect(sim.body).toContain("not reproduced with a failing test (Called Status at the limit with running true and false.");
+  });
+
+  it("keeps today's handling for a finding the verifier did not judge behavioral", () => {
+    for (const v of [verdict("F1", "confirmed"), verdict("F1", "confirmed", { behavioral: false })]) {
+      const s = scenario({ reproductions: [], fixes: [{ output: RECORD, files: { [SCHEDULER]: FIX_AGAIN } }] });
+      s.results["finding-verification-v2"] = [{ output: { verdicts: [v] } }];
+      const sim = simulate(s);
+      expect(sim.decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+      expect(sim.jobs.filter((j) => j.purpose === "verify")).toEqual([]);
+      expect(findingTestJobs(sim.jobs)).toEqual([]);
+      expect(sim.ledger.findings[0]).toMatchObject({ state: "fixed" });
+      expect(sim.body).not.toContain("## Regression tests");
+    }
+  });
+
+  it("goes to the supervisor when the implementer answers no finding after two reproduction jobs", () => {
+    expect(() => simulate(scenario({ reproductions: [{ output: { reproductions: [] } }], fixes: [] }))).toThrow(
+      /no usable test-first reproduction for I1 after 2 reproduction job\(s\) on the reviewed change: no entry for I1/,
+    );
+  });
+});

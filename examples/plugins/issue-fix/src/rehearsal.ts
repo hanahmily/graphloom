@@ -236,8 +236,8 @@ const REENTRY_FINDING = {
   content: "Status reports an action still running at the limit as timed out when the caller cannot tell it is running.",
 };
 const REENTRY_SUMMARY = { total_files: 2, reviewed_files: 2, skipped: [] };
-/** A verdict's design fields (finding-verification-v2) when the claim turns on the code. */
-const CODE_LEVEL = { designLevel: false, designBasis: "", ruling: "" };
+/** A verdict's design fields (finding-verification-v2) when the claim turns on the code and is not behavioral (test-first does not apply). */
+const CODE_LEVEL = { behavioral: false, designLevel: false, designBasis: "", ruling: "" };
 
 /**
  * The Arbitrate scenarios (docs/design-issue-fix-graph.md, "Rehearsal and
@@ -267,7 +267,7 @@ function arbitrationScenarios(): GraphRehearsal["scenarios"] {
   const leave = (to: string) => ({ action: { type: "reenter" as const, reenter: { stageId: to, reason: `the ruling settles the point: leave arbitrate to ${to}` } }, reason: `leave arbitrate to ${to}` });
   const record = GO_IMPLEMENTATION!.output as Record<string, unknown>;
   const implementation = (effects: Array<{ path: string; bytes: string }>) => ({ output: record, effects: [...effects, { path: "CHANGES.md", bytes: CHANGES_AFTER }] });
-  const designLevel = { finding: "F1", verdict: "confirmed", reason: "The code reports running at the limit; whether a caller must be able to tell is a design question.", quotes: [{ path: "pkg/timestamp/scheduler.go", line: 8, text: "if running {" }], designLevel: true, designBasis: "Whether the status string must distinguish a running action at the limit is the issue's design decision, not a code defect.", ruling: "" };
+  const designLevel = { finding: "F1", verdict: "confirmed", reason: "The code reports running at the limit; whether a caller must be able to tell is a design question.", quotes: [{ path: "pkg/timestamp/scheduler.go", line: 8, text: "if running {" }], behavioral: false, designLevel: true, designBasis: "Whether the status string must distinguish a running action at the limit is the issue's design decision, not a code defect.", ruling: "" };
   const reviewRaised = (arbiter: unknown, supervisor: GraphDecision[], expect: RehearsalExpectation, answers?: RehearsalAnswer[]): RehearsalScenario => ({
     results: {
       "decision-record-v2": [GO_PLAN!, GO_IMPLEMENTATION!],
