@@ -140,7 +140,24 @@ export { designRuling, exitFor } from "./validators.js";
 export { chronological } from "./evidence.js";
 export { arbitration, judgeArbiterRun, type Arbitration, type JudgedRun } from "./arbitration.js";
 export { arbiterInstruction, arbiterRevisionInstruction, type ArbiterInputs } from "./arbiter.js";
-export { designConflicts, describeConflict, fixerRaised, holdingRulings, pointCases, settledAway, type LedgerOptions } from "./findings.js";
+export { designConflicts, describeConflict, fixerRaised, holdingRulings, needsReproduction, pointCases, regressionHolds, regressionNote, regressionSectionLines, settledAway, unreproducedInFix, type LedgerOptions, type Reproduction, type Unreproduced } from "./findings.js";
+export {
+  describeAttempt,
+  findingTestJob,
+  greenRun,
+  parseReproduction,
+  redProblem,
+  redRun,
+  regressionState,
+  REPRODUCTION_CONTRACT,
+  REPRODUCTION_SCHEMA,
+  reproductionInstruction,
+  reproductionRuns,
+  testProblem,
+  type FindingTest,
+  type RegressionState,
+  type ReproductionEntry,
+} from "./test-first.js";
 export { VERIFICATION_CONTRACT, quoteInText, type ParsedVerdict } from "./review-common.js";
 export { conflictNote, MAX_CONFLICT_NOTE } from "./issues.js";
 export { pinnedRefs, principlesRef } from "./profile.js";

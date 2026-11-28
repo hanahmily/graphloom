@@ -2,8 +2,8 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import type { EvidenceRecord } from "@graphloom/sdk";
-import { MAX_DISCOVERY_ROUNDS, MAX_SWEEP_PASSES, REVIEW_STAGE } from "./constants.js";
-import { agentRuns, type AgentRun } from "./evidence.js";
+import { COMMAND, MAX_DISCOVERY_ROUNDS, MAX_SWEEP_PASSES, REVIEW_STAGE } from "./constants.js";
+import { agentRuns, latestCheckoutRun, type AgentRun } from "./evidence.js";
 import { contextPrompt, type ContextDocument } from "./context.js";
 import type { Profile } from "./profile.js";
 import {
@@ -56,6 +56,7 @@ import {
   describeRuling,
   designPointBefore,
   parseArbiterResult,
+  proofProblem,
   proofResult,
   proofRun,
   rulingApproval,
@@ -64,6 +65,8 @@ import {
   type RulingContext,
   type RulingDecision,
 } from "./rulings.js";
+
+import { describeAttempt, describeTest, parseReproduction, redProblem, redRun, regressionState, reproductionRuns, testProblem, type FindingTest } from "./test-first.js";
 
 export {
   MAX_REFUTATION_QUOTES,
@@ -127,6 +130,41 @@ export interface Finding {
    * their texts.
    */
   merged?: MergedComment[];
+  /**
+   * The verifier's latest verdict judged it behavioral (finding-verification-v2's `behavioral`, since 0.18.0):
+   * about runtime behaviour a test can show. A confirmed behavioral finding is
+   * fixed test-first. Absent on findings verified before issue-fix 0.18.0.
+   */
+  behavioral?: boolean;
+  /** The test the implementer returned for it, waiting for its run on the reviewed change. */
+  claim?: { test: FindingTest; digest: string; ref: string; attempt: string };
+  /** Its regression test: a test that failed by assertion on the reviewed change, which the fix carries and must pass. */
+  reproduction?: Reproduction;
+  /** The implementer's attempt that did not reproduce it: the finding is disputed and goes to the arbiter. */
+  unreproduced?: Unreproduced;
+}
+
+/** A behavioral finding's regression test, and the run that showed it fails on the reviewed change. */
+export interface Reproduction {
+  test: FindingTest;
+  /** The reviewed change it failed on. */
+  digest: string;
+  /** The record the test came from: the implementer's reproduction, or the ruling's decision record. */
+  source: string;
+  /** The run that failed by assertion. */
+  red: string;
+  /** Who wrote it: the implementer, or the design ruling (`R<n>`) whose proof test it is. */
+  by: string;
+}
+
+/** An attempt that did not reproduce a behavioral finding. */
+export interface Unreproduced {
+  attempt: string;
+  test?: { path: string; name: string };
+  observed: string;
+  /** The reproduction record, and the reviewed change it was made on. */
+  ref: string;
+  digest: string;
 }
 
 /** A comment merged into an earlier finding of its round, and where it came from. */
@@ -205,8 +243,15 @@ export interface LedgerOptions extends RulingContext {
   profile?: Profile;
 }
 
+/** What applying a pass or a reproduction reads beyond the record itself: the run's evidence and its profile. */
+interface LedgerEnv {
+  evidence: EvidenceRecord[];
+  profile: Profile | undefined;
+}
+
 export function findingLedger(evidence: EvidenceRecord[], options: LedgerOptions = {}): FindingLedger {
   const files = fileIndex(evidence);
+  const env: LedgerEnv = { evidence, profile: options.profile };
   const entered = reviewedCandidates(evidence);
   const accepted = acceptedRulingSources(evidence, options);
   const ledger: FindingLedger = { findings: [], passes: [], verifications: [], followUps: [], reviewed: entered.map((c) => c.digest), issues: emptyIssueTable(), rulings: [], deferred: [] };
@@ -223,9 +268,11 @@ export function findingLedger(evidence: EvidenceRecord[], options: LedgerOptions
     if (receipt !== undefined) applyRuling(ledger, evidence, i, receipt, ctx, options.profile);
     if (record.candidateDigest === undefined) continue;
     const pass = agentRuns([record], REVIEW_STAGE, "review")[0];
-    if (pass !== undefined) applyPass(ledger, pass, digest, files, round);
+    if (pass !== undefined) applyPass(ledger, pass, digest, files, round, env);
     const verification = agentRuns([record], REVIEW_STAGE, "diagnostic")[0];
     if (verification !== undefined) applyVerification(ledger, verification, digest, files, ctx);
+    const reproduction = reproductionRuns([record])[0];
+    if (reproduction !== undefined) applyReproduction(ledger, reproduction, digest, i, env);
     const written = issueCommand(record, ISSUES_COMMAND.write);
     if (written?.ok === true) {
       const json = writtenJson(written.argv);
@@ -238,13 +285,103 @@ export function findingLedger(evidence: EvidenceRecord[], options: LedgerOptions
       applyFixerRead(ledger.issues, { present, ...(read.report !== undefined ? { text: read.report.text, truncated: read.report.truncated } : {}) }, ctx, (id) => findingById(ledger, findingIdOf(id))?.ruling);
     }
   }
-  // Each issue carries the ruling that holds for its finding.
+  // Each issue carries the ruling that holds for its finding, and a behavioral finding's regression test.
   for (const issue of ledger.issues.issues) {
-    const ruling = findingById(ledger, findingIdOf(issue.id))?.ruling;
+    const f = findingById(ledger, findingIdOf(issue.id));
+    const ruling = f?.ruling;
     if (ruling !== undefined) issue.ruling = ruling;
     else delete issue.ruling;
+    const test = f !== undefined ? regressionNote(f) : undefined;
+    if (test !== undefined) issue.regressionTest = test;
+    else delete issue.regressionTest;
   }
   return ledger;
+}
+
+/**
+ * A confirmed finding that is fixed test-first and has no regression test on
+ * the change it was last confirmed on: the verifier judged it behavioral, and
+ * no ruling holds for it (a design ruling's finding keeps today's handling,
+ * except the proof test of a review-stands ruling after a failed reproduction).
+ */
+export function needsReproduction(f: Finding): boolean {
+  return f.state === "confirmed" && f.behavioral === true && f.ruling === undefined && (f.reproduction === undefined || f.reproduction.digest !== f.confirmedOn);
+}
+
+/**
+ * The pull request's "Regression tests": for each behavioral finding with a
+ * test-first story, the regression test that failed on the reviewed change
+ * and passes with the fix, or the attempt that did not reproduce it and the
+ * ruling that settled it.
+ */
+export function regressionSectionLines(ledger: FindingLedger): string[] {
+  return ledger.findings.flatMap((f) => {
+    const id = `${issueIdOf(f.id)} (\`${f.comment.path}:${f.comment.start_line}\`)`;
+    const r = f.reproduction;
+    if (r !== undefined && f.state === "fixed") {
+      const by = r.by === "implementer" ? "" : `, the proof test of design ruling ${r.by},`;
+      return [`- ${id}: ${describeTest(r.test)}${by} failed by assertion on the reviewed change (${shortDigest(r.digest)}) with only it added, and passes with the fix.`];
+    }
+    if (f.unreproduced === undefined) return [];
+    const ruling = holdingRuling(ledger, f);
+    const settled = ruling !== undefined ? `design ruling ${ruling.id} (${ruling.decision}) settled it` : f.state === "deferred" ? "the operator left it open" : `it is ${f.state}`;
+    return [`- ${id}: not reproduced with a failing test (${clip(describeAttempt(f.unreproduced), 400)}); ${settled}.`];
+  });
+}
+
+/** The regression test the issue shows for a behavioral finding: its test, or why it has none. */
+export function regressionNote(f: Finding): string | undefined {
+  const r = f.reproduction;
+  if (r !== undefined) return `${r.test.name} (${r.test.path})${r.by !== "implementer" ? `, the proof test of design ruling ${r.by}` : ""}: fails on the reviewed change ${shortDigest(r.digest)}, must pass with the fix`;
+  if (f.unreproduced !== undefined) return `not reproduced: ${clip(describeAttempt(f.unreproduced), 300)}`;
+  return undefined;
+}
+
+/**
+ * The implementer's reproduction on the reviewed change `digest`: an attempt
+ * that did not reproduce a finding disputes it (the arbiter takes it up); a
+ * test whose run on the reviewed change, with only it added, failed by
+ * assertion becomes the finding's regression test; any other run, or a test
+ * that cannot be added there, is an attempt that did not reproduce it. A test
+ * not run yet waits as the finding's claim. Answers for a finding that does
+ * not need one on this change are ignored.
+ */
+function applyReproduction(ledger: FindingLedger, run: AgentRun, digest: string, at: number, env: LedgerEnv): void {
+  if (run.status !== "completed") return;
+  const parsed = parseReproduction(run.output);
+  if ("problem" in parsed) return;
+  const changed = latestCheckoutRun(env.evidence, COMMAND.regression, "candidate", digest)?.checkout?.paths ?? [];
+  for (const entry of parsed.entries) {
+    const f = findingById(ledger, entry.finding);
+    if (f === undefined || !needsReproduction(f) || f.confirmedOn !== digest) continue;
+    delete f.claim;
+    const tried = entry.test.path !== "" && entry.test.name !== "" ? { test: { path: entry.test.path, name: entry.test.name } } : {};
+    const unreproduced = (observed: string) => {
+      f.unreproduced = { attempt: entry.attempt, ...tried, observed, ref: run.record.ref, digest };
+      dispute(f, digest, `the implementer could not reproduce it with a test that fails on the reviewed change: ${describeAttempt(f.unreproduced)}`);
+    };
+    if (entry.outcome === "cannot-reproduce") {
+      unreproduced(entry.observed);
+      continue;
+    }
+    if (env.profile === undefined) {
+      f.claim = { test: entry.test, digest, ref: run.record.ref, attempt: entry.attempt };
+      continue;
+    }
+    const problem = testProblem(env.profile, entry.test, changed);
+    if (problem !== undefined) {
+      unreproduced(`the test cannot be added to the reviewed change: ${problem}`);
+      continue;
+    }
+    const red = redRun(env.evidence, env.profile, entry.test, digest, at);
+    if (red === undefined) {
+      f.claim = { test: entry.test, digest, ref: run.record.ref, attempt: entry.attempt };
+      continue;
+    }
+    const failed = redProblem(env.profile, entry.test, red);
+    if (failed !== undefined) unreproduced(`${failed}; a test that does not fail on the reviewed change does not reproduce it`);
+    else f.reproduction = { test: entry.test, digest, source: run.record.ref, red: red.record.ref, by: "implementer" };
+  }
 }
 
 /**
@@ -262,6 +399,9 @@ export function fixerRaised(ledger: FindingLedger, f: Finding): boolean {
   return issueById(ledger.issues, issueIdOf(f.id))?.status === "design-conflict";
 }
 
+/** Whether `f` is disputed because the implementer could not reproduce it: a point raised in Fix, like the fixer's conflict. */
+export const unreproducedInFix = (f: Finding): boolean => f.state === "disputed" && f.unreproduced !== undefined;
+
 /** A design conflict in one line, for the supervisor: its issue id, location, title and why it is a conflict. */
 export function describeConflict(ledger: FindingLedger, f: Finding): string {
   const issue = issueById(ledger.issues, issueIdOf(f.id));
@@ -271,7 +411,9 @@ export function describeConflict(ledger: FindingLedger, f: Finding): string {
   const why =
     contested !== undefined
       ? `the fixer contests it: ${clip(contested.note, 300)}`
-      : f.designBasis !== undefined && f.designBasis !== ""
+      : unreproducedInFix(f)
+        ? `the implementer could not reproduce it with a failing test: ${clip(describeAttempt(f.unreproduced!), 300)}`
+        : f.designBasis !== undefined && f.designBasis !== ""
         ? `the verifier judged it at the design level: ${clip(f.designBasis, 300)}`
         : `the verifier could not settle it: ${clip(f.dispute ?? "", 300)}`;
   return `${issueIdOf(f.id)} ${where} ${title} (${why})`;
@@ -284,7 +426,12 @@ export function pointCases(ledger: FindingLedger, f: Finding): { question: strin
   const verifier = f.designBasis !== undefined && f.designBasis !== "" ? ` The verifier: ${f.designBasis}` : f.dispute !== undefined ? ` The verifier: ${f.dispute}` : "";
   return {
     question: `Does ${issueIdOf(f.id)} (${f.comment.path}:${f.comment.start_line}) hold against the project's design, so that the change must address it?`,
-    implementation: contested !== undefined ? `The fixer: ${clip(contested.note, 1_200)}` : "The change as it stands; the implementer has not contested the finding.",
+    implementation:
+      contested !== undefined
+        ? `The fixer: ${clip(contested.note, 1_200)}`
+        : unreproducedInFix(f)
+          ? `The implementer could not reproduce it with a test that fails on the reviewed change: ${clip(describeAttempt(f.unreproduced!), 1_200)}`
+          : "The change as it stands; the implementer has not contested the finding.",
     review: clip(`${describeComment(f.comment)}${f.comment.evidence !== undefined ? ` ${f.comment.evidence}` : ""}${verifier}`, 1_200),
   };
 }
@@ -338,7 +485,11 @@ function applyRuling(ledger: FindingLedger, evidence: EvidenceRecord[], at: numb
     if (parsed === undefined || "problem" in parsed || parsed.result.ruling === "undecidable") return;
     const r = parsed.result;
     const harness = String((record.payload as { codingAgent?: { harness?: unknown } } | undefined)?.codingAgent?.harness ?? profile?.roles.arbiter ?? "codex");
-    const proofTests = r.proofTests.map((t) => ({ ...t, result: profile !== undefined ? proofResult(profile, t, proofRun(evidence, profile, t, record.candidateDigest, at)) : "recorded with the ruling" }));
+    const proofTests = r.proofTests.map((t) => {
+      if (profile === undefined) return { ...t, result: "recorded with the ruling" };
+      const run = proofRun(evidence, profile, t, record.candidateDigest, at);
+      return { ...t, result: proofResult(profile, t, run), ...(run !== undefined && proofProblem(profile, t, run) === undefined ? { run: run.record.ref } : {}) };
+    });
     ruling = {
       finding: r.finding,
       decision: r.ruling as RulingDecision,
@@ -388,6 +539,9 @@ function rule(ledger: FindingLedger, f: Finding, r: Ruling, ctx: EventContext): 
     f.confirmedOn = ctx.digest;
     f.verdict = { verdict: "confirmed", reason: note, quotes: r.code.map(asQuote) };
     f.ruling = r.id;
+    // After a failed reproduction, the ruling's proof test that failed on the change as claimed is the finding's regression test.
+    const proof = f.unreproduced !== undefined ? r.proofTests.find((t) => t.expect === "fail" && t.run !== undefined) : undefined;
+    if (proof !== undefined) f.reproduction = { test: { path: proof.path, name: proof.name, content: proof.content }, digest: r.digest ?? ctx.digest, source: r.source, red: proof.run!, by: r.id };
     moveOrCreate(ledger, f, "open", actor, note, ctx);
   }
 }
@@ -560,7 +714,7 @@ function reviewerLead(note: ReviewerNote, current: string | undefined): string {
   return `Reviewer, latest pass ${on} (${note.ref}): still present — ${clip(note.reason, 1_500).replace(/\.$/, "")}.`;
 }
 
-function applyPass(ledger: FindingLedger, run: AgentRun, digest: string, files: FileIndex, round: number): void {
+function applyPass(ledger: FindingLedger, run: AgentRun, digest: string, files: FileIndex, round: number, env: LedgerEnv): void {
   const parsed = run.status === "completed" ? parseCodeReview(run.output) : { problem: `the code reviewer did not finish (${run.status})` };
   const phase: ReviewPhase = verifyOnly(round) ? "verify-only" : "discovery";
   const pass: ReviewPass = { run, digest, round, raised: [], missingStatus: [], followUps: 0, ...("report" in parsed ? { report: parsed.report } : { problem: parsed.problem }) };
@@ -612,7 +766,7 @@ function applyPass(ledger: FindingLedger, run: AgentRun, digest: string, files: 
   for (const f of open) {
     const s = status.get(f.id);
     if (s === undefined) pass.missingStatus.push(f.id);
-    else applyStatus(f, s, digest);
+    else applyStatus(f, s, digest, env);
     // Rule 6: a review-stands ruling holds while the lines it cites match; once they are observed changed it lapses.
     const r = holdingRuling(ledger, f);
     if (r?.decision === "review-stands" && r.code.length > 0 && r.digest !== digest && checkQuotes(r.code.map(asQuote), digest, files) === "mismatch") delete f.ruling;
@@ -709,11 +863,14 @@ export function describeFollowUp(f: FollowUp): string {
   return `${describeComment(f.comment)} (raised in review round ${f.round}, after the ${MAX_DISCOVERY_ROUNDS} discovery rounds; not verified or fixed in this change)`;
 }
 
-/** How a pass's status for an open finding changes it; fixing needs a candidate other than the one it was last seen on. */
-function applyStatus(f: Finding, status: PriorStatus, digest: string): void {
+/**
+ * How a pass's status for an open finding changes it; fixing needs a candidate other than the one it was last seen on,
+ * and a finding with a regression test needs that test to hold on the candidate: its exact bytes in the change, passing.
+ */
+function applyStatus(f: Finding, status: PriorStatus, digest: string, env: LedgerEnv): void {
   if (f.state === "confirmed") {
     if (status === "resolved") {
-      if (f.confirmedOn !== digest) settle(f, "fixed", digest);
+      if (f.confirmedOn !== digest && regressionHolds(f, digest, env)) settle(f, "fixed", digest);
     } else if (status === "still_present") {
       f.on = digest;
       f.confirmedOn = digest;
@@ -727,6 +884,12 @@ function applyStatus(f: Finding, status: PriorStatus, digest: string): void {
     return;
   }
   reopen(f, digest);
+}
+
+/** A finding without a regression test, or whose test holds on `digest`. Without a profile a test cannot be judged, so it does not hold. */
+export function regressionHolds(f: Finding, digest: string, env: { evidence: EvidenceRecord[]; profile: Profile | undefined }): boolean {
+  if (f.reproduction === undefined) return true;
+  return env.profile !== undefined && regressionState(env.evidence, env.profile, f.reproduction.test, digest).kind === "holds";
 }
 
 /**
@@ -764,6 +927,11 @@ function applyVerification(ledger: FindingLedger, run: AgentRun, digest: string,
     f.verifiedOn = digest;
     if (v.designLevel === true) f.designBasis = v.designBasis ?? "";
     else delete f.designBasis;
+    if (v.behavioral === true) f.behavioral = true;
+    else delete f.behavioral;
+    // A new verdict starts the finding's test-first story over.
+    delete f.claim;
+    delete f.unreproduced;
     // A review-stands ruling that holds keeps the finding confirmed, its witness the ruling: only a matching refutation settles it otherwise.
     const stands = holdingRuling(ledger, f)?.decision === "review-stands";
     if (v.verdict === "uncertain") {
@@ -904,6 +1072,8 @@ export function verificationInstruction(profile: Profile, args: { findings: Find
     `- \`refuted\`: the claim is false. In \`quotes\`, give at most ${MAX_REFUTATION_QUOTES} lines of the current code that disprove it, such as the lock that is held, the caller that does not exist, or the check that covers the path. A refutation counts only if every quote matches the file.`,
     "- `uncertain`: you cannot decide. Give the argument for and against in `reason`.",
     "",
+    "Set `behavioral` to true when the finding is about runtime behaviour a test can show: wrong output, a crash, a race, a leak, or wrong error handling. Set it false for a finding about the design, the documentation, style or naming, or a missing test, and whenever `designLevel` is true. The reviewer's category is a hint, not the answer. A confirmed behavioral finding is fixed test-first: the implementer must first write a test that fails on the current code.",
+    "",
     "Set `designLevel` to true when the claim turns on the project's design rather than on the code: whether it is a defect depends on which reading of the issue, its discussion or the design documents is right (an intended behaviour, an API or format choice, a trade-off the design makes), not on what the code does. Then give in `designBasis` the design statement or decision it turns on, in one or two sentences. A design-level finding does not go to the implementer; an independent arbiter rules on it. Otherwise `designLevel` is false and `designBasis` is \"\".",
     ...(rulings.length > 0
       ? [
@@ -913,6 +1083,6 @@ export function verificationInstruction(profile: Profile, args: { findings: Find
         ]
       : ["", "No design ruling holds in this run: `ruling` is \"\"."]),
     "",
-    "Each quote is one line: `path` relative to the repository root, `line` its line number in the current file, and `text` copied from that line without the line number. Your result: `verdicts`, one for every finding listed, each with `finding` (its name), `verdict`, `reason`, `quotes`, `designLevel`, `designBasis` and `ruling`.",
+    "Each quote is one line: `path` relative to the repository root, `line` its line number in the current file, and `text` copied from that line without the line number. Your result: `verdicts`, one for every finding listed, each with `finding` (its name), `verdict`, `reason`, `quotes`, `behavioral`, `designLevel`, `designBasis` and `ruling`.",
   ].join("\n");
 }

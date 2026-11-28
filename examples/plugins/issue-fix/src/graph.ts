@@ -3,6 +3,7 @@
 
 import {
   dispatch,
+  executorFailureOf,
   MAX_EXECUTOR_INPUT_BYTES,
   isStaleFailure,
   jsonSchemaProblem,
@@ -41,6 +42,7 @@ import {
   LIST_ISSUE_COMMENTS,
   MAX_DISCOVERY_ROUNDS,
   MAX_FIX_CORRECTIONS,
+  MAX_REPRODUCTION_RUNS,
   MAX_SWEEP_PASSES,
   REQUIREMENT_BENCH,
   REQUIREMENT_BUILDS,
@@ -71,6 +73,7 @@ import {
   outputTail,
   sameCheckoutJob,
   succeeded,
+  type AgentRun,
   type CommandRun,
 } from "./evidence.js";
 import {
@@ -85,7 +88,9 @@ import {
   holdingRulings,
   isOpen,
   knownFindings,
+  needsReproduction,
   pointCases,
+  regressionSectionLines,
   passUsable,
   pathsToObserve,
   reviewPhase,
@@ -94,6 +99,7 @@ import {
   shortDigest,
   stillPresentNote,
   toVerify,
+  unreproducedInFix,
   VERIFICATION_SCHEMA,
   verificationInstruction,
   type Finding,
@@ -120,7 +126,7 @@ import {
   type IssueTable,
   type Rejection,
 } from "./issues.js";
-import { CODE_REVIEW_SCHEMA, clip, codeReviewInstruction, describeCoverage, isBlocking, reviewBackground } from "./ocr.js";
+import { CODE_REVIEW_SCHEMA, clip, codeReviewInstruction, describeComment, describeCoverage, isBlocking, reviewBackground } from "./ocr.js";
 import {
   checkCommands,
   commandLabel,
@@ -174,10 +180,24 @@ import {
   type Undecidable,
 } from "./rulings.js";
 import { arbiterInstruction, arbiterRevisionInstruction } from "./arbiter.js";
+import {
+  describeAttempt,
+  describeTest,
+  findingTestJob,
+  greenRun,
+  parseReproduction,
+  regressionState,
+  REPRODUCTION_CONTRACT,
+  REPRODUCTION_SCHEMA,
+  reproductionInstruction,
+  reproductionRuns,
+  testFile,
+  type FindingTest,
+} from "./test-first.js";
 import { cleanRun, codeReview, finalRun, implementerRecord, latestImplementerRecord, plannerRecord, reportText, validatorById, verifiedChecks } from "./validators.js";
 
 export const GRAPH_ID = "issue-fix";
-export const GRAPH_VERSION = "0.17.3";
+export const GRAPH_VERSION = "0.18.0";
 
 /** Graph bookkeeping; everything else is read back from recorded evidence. */
 export interface FixPrivateState {
@@ -317,6 +337,8 @@ export function definitionFor(profile: Profile): GraphDefinition {
       { name: "code-review-v2", schema: asSchema(CODE_REVIEW_SCHEMA), evidenceKind: "review" },
       // "other", so an arbiter's ruling never counts as the code review's independent review evidence.
       { name: RULING_CONTRACT, schema: asSchema(RULING_SCHEMA), evidenceKind: "other" },
+      // The implementer's failing tests for behavioral findings, before it fixes them (test-first.ts).
+      { name: REPRODUCTION_CONTRACT, schema: asSchema(REPRODUCTION_SCHEMA), evidenceKind: "other" },
     ],
     // Fix ⇄ Review, and Arbitrate, which only the supervisor enters and leaves (docs/design-issue-fix-graph.md, "The graph's topology").
     stages: [
@@ -441,14 +463,21 @@ function ledgerOf(view: RunView, profile: Profile, evidence: EvidenceRecord[] = 
  */
 function fixerHandover(ctx: Context, view: RunView, state: FixPrivateState): GraphDecision | undefined {
   const ledger = ledgerOf(view, ctx.profile);
-  const contested = designConflicts(ledger).filter((f) => fixerRaised(ledger, f));
+  // The fixer's conflicts, and the behavioral findings the implementer could not reproduce with a failing test.
+  const contested = designConflicts(ledger).filter((f) => fixerRaised(ledger, f) || unreproducedInFix(f));
   if (contested.length === 0) return undefined;
   const named = contested.slice(0, 3).map((f) => describeConflict(ledger, f));
   const more = contested.length > named.length ? `; and ${contested.length - named.length} more` : "";
   const reads = view.evidence.filter((e) => issueCommand(e, ISSUES_COMMAND.read)?.ok === true).map((e) => e.ref).slice(-1);
+  const fixer = contested.filter((f) => fixerRaised(ledger, f)).length;
+  const unreproduced = contested.length - fixer;
+  const what = [
+    ...(fixer > 0 ? [`the fixer contests ${fixer} finding(s) as contradicting the project's design`] : []),
+    ...(unreproduced > 0 ? [`the implementer could not reproduce ${unreproduced} behavioral finding(s) with a test that fails on the reviewed change, so it changed no code for them`] : []),
+  ].join(", and ");
   return supervise(
     {
-      reason: `Fix is accepted on its other work, and the fixer contests ${contested.length} finding(s) as contradicting the project's design, with no ruling for them: ${named.join("; ")}${more}. To have an independent arbiter rule on the first, enter ${ARBITRATE_STAGE} from Fix; a review-stands ruling leaves along ${ARBITRATE_STAGE} → ${FIX_STAGE} (one correction), implementation-stands along ${ARBITRATE_STAGE} → ${REVIEW_STAGE} (a forward move). If the fixer is avoiding work, reenter Fix with your own instruction, or stop for a maintainer.`,
+      reason: `Fix is accepted on its other work, and ${what}, with no ruling for them: ${named.join("; ")}${more}. To have an independent arbiter rule on the first, enter ${ARBITRATE_STAGE} from Fix; a review-stands ruling leaves along ${ARBITRATE_STAGE} → ${FIX_STAGE} (one correction), implementation-stands along ${ARBITRATE_STAGE} → ${REVIEW_STAGE} (a forward move). If the implementer is avoiding work, reenter Fix with your own instruction, or stop for a maintainer.`,
       evidenceRefs: reads,
     },
     "hand the fixer's design conflict to the supervisor from the accepted Fix",
@@ -515,6 +544,11 @@ function fix(ctx: Context, view: RunView, issue: number, state: FixPrivateState)
   // Every implementer job starts from the file as the graph last accepted it.
   const restore = issuesRestore(view, ledgerOf(view, profile), FIX_STAGE, state);
   const implementer = (job: JobSpec, summary: string, next: FixPrivateState): GraphDecision => restore ?? dispatchAgent(view, job, summary, next);
+  // Behavioral findings Review sent back are fixed test-first: their failing tests come before the implementer changes code.
+  if (stalePreReentry) {
+    const first = testFirstStep(ctx, view, state, restore);
+    if (first !== undefined) return first;
+  }
   if (implemented === undefined || implemented.status !== "completed" || stalePreReentry) {
     return implementer(
       implementJob(ctx, view, issue, plan.record, stalePreReentry ? reentryFeedback(ctx, view) : undefined),
@@ -647,6 +681,9 @@ function fix(ctx: Context, view: RunView, issue: number, state: FixPrivateState)
   }
 
   if (results.every((r) => r.result.status === "passed")) {
+    // Every behavioral finding's regression test is part of the change, byte for byte, and passes on it.
+    const regression = regressionStep(ctx, view, issue, state, record ?? plan.record, digest, implementer);
+    if (regression !== undefined) return regression;
     // Before the change is accepted, and so before code review is paid for: every acceptance item is covered.
     const uncovered = acceptanceStep(ctx, view, issue, state, plan.record, record, current, digest, implementer);
     if (uncovered !== undefined) return uncovered;
@@ -706,6 +743,160 @@ function acceptanceStep(
   return supervise(
     { reason: `the change still does not cover every acceptance item after ${state.corrections} corrections: ${problems.slice(0, 3).join("; ")}`, evidenceRefs: current.map((e) => e.ref).slice(-10) },
     "hand the unresolved acceptance coverage to the supervisor",
+    JSON.stringify(state),
+  );
+}
+
+/**
+ * Test-first (docs/design-issue-fix-graph.md, "Test-first fixes of behavioral
+ * findings"): before the implementer changes code for the findings Review
+ * sent back, each confirmed behavioral finding without a regression test on
+ * the reviewed change gets one. The implementer returns the tests in a
+ * read-only job (the worktree stays the reviewed change), and each runs on the
+ * reviewed change with only it added, where it must fail by assertion; the
+ * ledger judges the runs. Undefined when nothing needs a test, or every
+ * finding has its test or its failed attempt.
+ */
+function testFirstStep(ctx: Context, view: RunView, state: FixPrivateState, restore: GraphDecision | undefined): GraphDecision | undefined {
+  const { profile } = ctx;
+  const digest = view.candidateDigest;
+  if (digest === undefined) return undefined;
+  const ledger = ledgerOf(view, profile);
+  const due = ledger.findings.filter(needsReproduction);
+  if (due.length === 0) return undefined;
+  // This attempt's reproduction jobs since the last review: a supervisor's reentry starts the count over.
+  const lastReview = lastIndexWhere(view.evidence, (e) => agentRuns([e], REVIEW_STAGE, "review").length > 0);
+  const runs = reproductionRuns(view.evidence).filter((r) => indexOf(view, r.record) > lastReview && (r.record.generation ?? 0) >= state.attemptGeneration);
+  const here = due.filter((f) => f.confirmedOn === digest);
+  const ids = (list: Finding[]) => list.map((f) => issueIdOf(f.id)).join(", ");
+  if (here.length < due.length && runs.length > 0) {
+    // A reproduction job wrote to the worktree: the change the tests must fail on is gone.
+    return supervise(
+      { reason: `the behavioral finding(s) ${ids(due.filter((f) => f.confirmedOn !== digest))} are fixed test-first on the reviewed change, but the worktree changed after the implementer's reproduction (now ${shortDigest(digest)}); a reproduction must not write to the worktree. Restore the reviewed change and reenter Fix, or stop for a maintainer.`, evidenceRefs: runs.map((r) => r.record.ref).slice(-3) },
+      "escalate a reproduction that changed the worktree",
+      JSON.stringify(state),
+    );
+  }
+  // A finding confirmed on a change the worktree has since left (a supervisor's own work) keeps the handling it had.
+  if (here.length === 0) return undefined;
+  const since = runs.length > 0 ? indexOf(view, runs.at(-1)!.record) : lastReview;
+  const claimed = here.filter((f) => f.claim !== undefined);
+  if (claimed.length > 0) {
+    const failures = view.evidence.slice(since + 1).flatMap((e) => {
+      const failure = executorFailureOf(e);
+      return failure !== undefined && failure.stageId === FIX_STAGE && failure.purpose === "check" && !isStaleFailure(e, view) ? [{ e, failure }] : [];
+    });
+    if (failures.length > 0) {
+      return supervise(
+        { reason: `a behavioral finding's regression test could not run on the reviewed change with only it added: ${failures.map((x) => clip(x.failure.summary, 300)).join("; ")}`, evidenceRefs: failures.map((x) => x.e.ref).slice(-3) },
+        "escalate a regression test that could not run on the reviewed change",
+        JSON.stringify(state),
+      );
+    }
+    const f = claimed[0]!;
+    const t = f.claim!.test;
+    return withPrivate(
+      dispatch(findingTestJob(profile, t, true), `run ${issueIdOf(f.id)}'s regression test ${t.name} (${t.path}) on the reviewed change with only it added: it must fail by assertion`),
+      state,
+    );
+  }
+  if (runs.length >= MAX_REPRODUCTION_RUNS) {
+    return supervise(
+      {
+        reason: `the implementer returned no usable test-first reproduction for ${ids(here)} after ${runs.length} reproduction job(s) on the reviewed change: ${reproductionProblems(runs.at(-1)!, here).join("; ") || "no answer for them"}. Reenter Fix with your own instruction, or stop for a maintainer.`,
+        evidenceRefs: runs.map((r) => r.record.ref),
+      },
+      "escalate a missing reproduction",
+      JSON.stringify(state),
+    );
+  }
+  const changed = latestCheckoutRun(view.evidence, COMMAND.regression, "candidate", digest)?.checkout?.paths ?? [];
+  const assignment = reproductionInstruction(profile, {
+    findings: here.map((f) => ({ id: issueIdOf(f.id), text: describeFinding(f, digest) })),
+    changed,
+    ...(runs.length > 0 ? { problems: reproductionProblems(runs.at(-1)!, here) } : {}),
+  });
+  return restore ?? dispatchAgent(view, reproductionJob(ctx, view, assignment), `ask the implementer for tests of ${ids(here)} that fail on the reviewed change, before it fixes them (read-only)`, state);
+}
+
+/** Why the last reproduction left findings without an answer. */
+function reproductionProblems(run: AgentRun, findings: Finding[]): string[] {
+  if (run.status !== "completed") return [`the reproduction job did not finish (${run.status})`];
+  const parsed = parseReproduction(run.output);
+  if ("problem" in parsed) return [parsed.problem];
+  return findings.filter((f) => !parsed.entries.some((e) => e.finding === f.id)).map((f) => `no entry for ${issueIdOf(f.id)}`);
+}
+
+/** The implementer's reproduction: a read-only job continuing its own session, on its harness. */
+function reproductionJob(ctx: Context, view: RunView, assignment: string): JobSpec {
+  const from = implementerSession(view);
+  return {
+    jobId: IMPLEMENTER_JOB,
+    stageId: FIX_STAGE,
+    kind: "agent",
+    purpose: "verify",
+    readOnly: true,
+    instruction: "Write failing tests for the behavioral findings",
+    resultSchema: REPRODUCTION_CONTRACT,
+    executor: CODING_AGENT,
+    input: { assignment, harness: ctx.profile.roles.implementer },
+    ...agentClock(ctx.profile),
+    ...(from !== undefined ? { continueFrom: from } : {}),
+  };
+}
+
+/**
+ * Every behavioral finding's regression test holds on the change: its file is
+ * part of the change with exactly the bytes that failed on the reviewed
+ * change, and it passes there. Fixed findings keep theirs, so the delivered
+ * change carries every one. Undefined when each holds; otherwise the
+ * observation or run still needed, or a correction like any failing check.
+ */
+function regressionStep(
+  ctx: Context,
+  view: RunView,
+  issue: number,
+  state: FixPrivateState,
+  record: DecisionRecord,
+  digest: string,
+  implementer: (job: JobSpec, summary: string, next: FixPrivateState) => GraphDecision,
+): GraphDecision | undefined {
+  const { profile } = ctx;
+  const ledger = ledgerOf(view, profile);
+  const pinned = ledger.findings.filter((f) => f.reproduction !== undefined && (f.state === "confirmed" || f.state === "fixed"));
+  if (pinned.length === 0) return undefined;
+  const states = pinned.map((f) => ({ f, t: f.reproduction!.test, s: regressionState(view.evidence, profile, f.reproduction!.test, digest) }));
+  const unobserved = [...new Set(states.filter((x) => x.s.kind === "observe").map((x) => x.t.path))];
+  if (unobserved.length > 0) return withPrivate(observe({ paths: unobserved }, "observe the behavioral findings' regression tests on the current change"), state);
+  const toRun = states.find((x) => x.s.kind === "run");
+  // A check job that failed since the implementer's last run (a checkout that could not be prepared) is not retried here.
+  const failures = view.evidence.slice(lastWork(view) + 1).flatMap((e) => {
+    const failure = executorFailureOf(e);
+    return failure !== undefined && failure.stageId === FIX_STAGE && failure.purpose === "check" && !isStaleFailure(e, view) ? [{ e, failure }] : [];
+  });
+  if (toRun !== undefined && failures.length > 0) {
+    return supervise(
+      { reason: `a behavioral finding's regression test could not run on the current change: ${failures.map((x) => clip(x.failure.summary, 300)).join("; ")}`, evidenceRefs: failures.map((x) => x.e.ref).slice(-3) },
+      "escalate a regression test that could not run on the current change",
+      JSON.stringify(state),
+    );
+  }
+  if (toRun !== undefined) {
+    return withPrivate(dispatch(findingTestJob(profile, toRun.t, false), `run ${issueIdOf(toRun.f.id)}'s regression test ${toRun.t.name} on the current change: it must pass`), state);
+  }
+  const failing = states.filter((x) => x.s.kind === "problem");
+  if (failing.length === 0) return undefined;
+  const feedback = failing.map((x) => {
+    const run = greenRun(view.evidence, profile, x.t, digest);
+    const output = run !== undefined && !succeeded(run.command) ? `:\n${outputTail(run.command, 2_000, profile.runner.reportOutput)}` : "";
+    return `${issueIdOf(x.f.id)}'s regression test ${describeTest(x.t)}: ${(x.s as { problem: string }).problem}. Keep that file byte for byte as it failed on the reviewed change, and make it pass${output}`;
+  });
+  if (state.corrections < MAX_FIX_CORRECTIONS && view.budgets.corrections > 0) {
+    return implementer(implementJob(ctx, view, issue, record, feedback), "send the change back: a behavioral finding's regression test does not hold on it", { ...state, corrections: state.corrections + 1 });
+  }
+  return supervise(
+    { reason: `a behavioral finding's regression test still does not hold after ${state.corrections} corrections: ${feedback.slice(0, 3).map((f) => clip(f, 400)).join("; ")}`, evidenceRefs: view.evidence.filter((e) => e.candidateDigest === digest).map((e) => e.ref).slice(-10) },
+    "hand the failing regression tests to the supervisor",
     JSON.stringify(state),
   );
 }
@@ -800,7 +991,7 @@ function review(ctx: Context, view: RunView, issue: number, state: FixPrivateSta
 
   const statement = definition.requirements.find((r) => r.id === REQUIREMENT_REVIEW)!.statement;
   const history = view.evidence.filter((e) => e.candidateDigest !== undefined && e.candidateDigest !== view.candidateDigest);
-  const result = codeReview.evaluate({ requirementId: REQUIREMENT_REVIEW, statement, evidence: current, history, candidateDigest: digest, receipts: view.receipts, validatorBindings: view.validatorBindings }) as ValidationResult;
+  const result = codeReview.evaluate({ requirementId: REQUIREMENT_REVIEW, statement, evidence: current, history, candidateDigest: digest, receipts: view.receipts, validatorBindings: view.validatorBindings, config: view.config }) as ValidationResult;
   if (result.status === "passed") {
     // The final tier runs once, here: review converged, delivery has not happened.
     const final = finalStep(ctx, view, state, digest, current);
@@ -1195,6 +1386,7 @@ function deliver(ctx: Context, view: RunView, issue: number, state: FixPrivateSt
       ...(ledger.issues.issues.length > 0 ? { issues: issueTableRows(ledger.issues.issues) } : {}),
       ...(ledger.rulings.length > 0 ? { rulings: ledger.rulings.flatMap((r) => rulingSectionLines(r, issueIdOf(r.finding))) } : {}),
       ...(ledger.deferred.length > 0 ? { openDesignQuestions: ledger.deferred.flatMap((d) => deferredSectionLines(d, issueIdOf(d.finding))) } : {}),
+      ...(regressionSectionLines(ledger).length > 0 ? { regressionTests: regressionSectionLines(ledger) } : {}),
     });
     return withPrivate(
       dispatch(
@@ -1349,9 +1541,16 @@ function reentryFeedback(ctx: Context, view: RunView): string[] {
   const status = (f: Finding) => issueById(ledger.issues, issueIdOf(f.id))?.status ?? "open";
   const unsettled = ledger.findings.filter((f) => f.state === "confirmed");
   const confirmed = [...unsettled.filter((f) => status(f) !== "fixed"), ...unsettled.filter((f) => status(f) === "fixed")];
+  // Behavioral findings the implementer could not reproduce with a failing test: no code changes for them; the arbiter rules.
+  const unreproduced = ledger.findings
+    .filter((f) => unreproducedInFix(f) && f.ruling === undefined)
+    .map((f) => `${issueIdOf(f.id)} ${describeComment(f.comment)} You could not reproduce it with a test that fails on the reviewed change (${clip(describeAttempt(f.unreproduced!), 600)}). Change no code for it in this round: an independent arbiter rules on it once Fix is accepted, and you fix it only if the ruling goes against the change.`);
   const final = confirmed.length === 0 ? latestFinalFailure(ctx, view) : undefined;
   if (final !== undefined) {
     return ["Code review passed, but the final checks, which run once on the reviewed change, failed. Fix what they report and keep everything that already passes:", ...final];
+  }
+  if (confirmed.length === 0 && unreproduced.length > 0) {
+    return ["Code review confirmed behavioral findings you could not reproduce with a failing test, and nothing else is open:", ...unreproduced, "Return your decision record (status ready) without changing code for them."];
   }
   if (confirmed.length === 0) {
     return ["The run returned to Fix after a resume or a supervisor decision. Check the plan against the current code and the change in the working tree."];
@@ -1362,7 +1561,8 @@ function reentryFeedback(ctx: Context, view: RunView): string[] {
   const line = (f: Finding) => {
     const s = status(f);
     const label = s === "fixed" ? "fixed by you, not yet verified by the reviewer" : s;
-    return tracked ? describeFinding(f, current).replace(/^(I\d+) /, `$1 [${label}] `) : describeFinding(f, current);
+    const text = tracked ? describeFinding(f, current).replace(/^(I\d+) /, `$1 [${label}] `) : describeFinding(f, current);
+    return f.reproduction !== undefined ? `${text} ${testFirstNote(f.reproduction.test, f.reproduction.by)}` : text;
   };
   // The implementer's last pass left the candidate byte-identical while the
   // reviewer, reading that very code, still reports findings: repeating the
@@ -1378,7 +1578,16 @@ function reentryFeedback(ctx: Context, view: RunView): string[] {
       : []),
     ...(tracked ? [`They are the open, reopened and fixed issues in ${ISSUES_FILE}; when you fix one, mark it there as described below.`] : []),
     ...shown.map(line),
+    ...unreproduced,
   ];
+}
+
+/** Test-first, for the implementer: the regression test that failed on the reviewed change goes into the change unchanged and must pass. */
+function testFirstNote(t: FindingTest, by: string): string {
+  const whose = by === "implementer" ? "your test" : `the proof test of design ruling ${by}`;
+  // The implementer's own test is in its session; a long one is not repeated, a ruling's always is.
+  const file = by !== "implementer" || t.content.length <= 12_000 ? ` The file:\n${testFile(t)}` : " Use the file exactly as you returned it.";
+  return `Test-first: its regression test is ${whose} ${describeTest(t)}, which failed by assertion on the reviewed change. Add that file to your change byte for byte, do not edit it, and fix the code so it passes; the controller checks its bytes and runs it on your change.${file}`;
 }
 
 /** The newest completed implementer pass left the candidate as the one before it did. */

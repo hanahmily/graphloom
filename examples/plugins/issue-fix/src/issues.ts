@@ -75,6 +75,8 @@ export interface Issue {
   round: number;
   /** The design ruling that holds for the issue's finding, `R<n>`. */
   ruling?: string;
+  /** A behavioral finding's regression test, which failed on the reviewed change and the fix must pass, or why it has none. */
+  regressionTest?: string;
   history: IssueEvent[];
 }
 
@@ -207,6 +209,7 @@ export const FILE_PROTOCOL = [
   "Statuses: open (confirmed by an independent verifier), fixed (the fixer says it is fixed; not yet verified), done (the reviewer verified the fix), reopened (the reviewer found it still present after a fix), dismissed (the verifier refuted it, or a design ruling dismissed it), design-conflict (the fixer contests it as contradicting the project's design; an independent arbiter rules), deferred (the operator left the design point open; it does not block).",
   "The fixer may only change an open or reopened issue's status to fixed, and append to its history one entry {\"actor\": \"fixer\", \"from\": <old status>, \"to\": \"fixed\", \"note\": <what you changed, with file:line>}; or, for an issue with no ruling, to design-conflict, with one entry {\"actor\": \"fixer\", \"from\": <old status>, \"to\": \"design-conflict\", \"note\": <the design statement or decision the issue contradicts, quoted, and where>}. Any other edit (another status, a new, deleted or reworded issue) is rejected and the file is restored.",
   "The code reviewer verifies each fixed issue in its result (resolved makes it done; still_present reopens it with the reviewer's note) and reports new issues there; it does not edit this file.",
+  "regressionTest, set by the graph on a behavioral finding's issue: the test that failed on the reviewed change, which the fix keeps byte for byte and makes pass, or why the finding has none.",
 ];
 
 /** The command executor keeps 64 KiB of a report: a larger file could not be read back whole. */
@@ -269,7 +272,7 @@ export function issueMarkdown(table: IssueTable, extra: { round?: number; phase?
     ...issueTableRows(table.issues),
   ];
   for (const i of table.issues) {
-    lines.push("", `## ${i.id}: ${i.title}`, "", `${i.severity} (${SEVERITY_WORD[i.severity]}), ${i.status}${i.ruling !== undefined ? ` (design ruling ${i.ruling})` : ""}, \`${where(i.location)}\`, raised in review round ${i.round}.`, "", i.description, "", "History:");
+    lines.push("", `## ${i.id}: ${i.title}`, "", `${i.severity} (${SEVERITY_WORD[i.severity]}), ${i.status}${i.ruling !== undefined ? ` (design ruling ${i.ruling})` : ""}, \`${where(i.location)}\`, raised in review round ${i.round}.`, "", i.description, ...(i.regressionTest !== undefined ? ["", `Regression test: ${i.regressionTest}.`] : []), "", "History:");
     for (const h of i.history) {
       lines.push(`- round ${h.round}, ${h.actor}: ${h.from ?? "new"} → ${h.to} (${h.evidence}, candidate ${h.candidate.slice(0, 8)})${h.note !== "" ? `: ${h.note.replace(/\s+/g, " ")}` : ""}`);
     }
@@ -416,7 +419,7 @@ export function parseIssueFile(text: string): { issues: Map<string, Record<strin
 }
 
 /** Fields only the graph sets; the fixer changing one is a reword. */
-const FIXED_FIELDS = ["severity", "location", "title", "description", "round", "ruling"] as const;
+const FIXED_FIELDS = ["severity", "location", "title", "description", "round", "ruling", "regressionTest"] as const;
 
 /**
  * Apply the fixer's edits, as a read of the file shows them, to the table:

@@ -102,7 +102,14 @@ export const VERIFICATION_CONTRACT = "finding-verification-v2";
  * none extra. Over v1 each verdict adds `designLevel` (the claim turns on the
  * project's design, not on the code), `designBasis` (the design statement or
  * decision it turns on, empty when not design-level) and `ruling` (the design
- * ruling a refutation cites, `R<n>`, empty when none).
+ * ruling a refutation cites, `R<n>`, empty when none). Since issue-fix 0.18.0
+ * it adds `behavioral` (the finding is about runtime behaviour a test can
+ * show: wrong output, a crash, a race, a leak, error handling), under the same
+ * name: a run keeps the contracts it pinned at intake, so a run moved onto
+ * 0.18 with `--update-plugin` keeps the schema without `behavioral`, its
+ * verifier never judges a finding behavioral, and its findings keep the
+ * handling they had (docs/design-issue-fix-graph.md, "Test-first fixes of
+ * behavioral findings").
  */
 export const VERIFICATION_SCHEMA = JSON.stringify({
   type: "object",
@@ -114,12 +121,13 @@ export const VERIFICATION_SCHEMA = JSON.stringify({
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["finding", "verdict", "reason", "quotes", "designLevel", "designBasis", "ruling"],
+        required: ["finding", "verdict", "reason", "quotes", "behavioral", "designLevel", "designBasis", "ruling"],
         properties: {
           finding: { type: "string" },
           verdict: { type: "string", enum: VERDICTS },
           reason: { type: "string" },
           quotes: { type: "array", items: QUOTE_SCHEMA },
+          behavioral: { type: "boolean" },
           designLevel: { type: "boolean" },
           designBasis: { type: "string" },
           ruling: { type: "string" },
@@ -129,11 +137,13 @@ export const VERIFICATION_SCHEMA = JSON.stringify({
   },
 });
 
-/** One verdict as the ledger reads it; a v1 verdict has no design fields and is not design-level. */
+/** One verdict as the ledger reads it; a v1 verdict has no design fields and is not design-level; a v1 or v2 verdict is not behavioral. */
 export interface ParsedVerdict {
   verdict: Verdict;
   reason: string;
   quotes: Quote[];
+  /** The finding is about runtime behaviour a test can show (since 0.18.0); never together with `designLevel`. */
+  behavioral?: boolean;
   designLevel?: boolean;
   designBasis?: string;
   /** The ruling a refutation cites, `R<n>`. */
@@ -158,6 +168,8 @@ export function parseVerification(output: unknown): { verdicts: Map<string, Pars
     const reason = String(v.reason ?? "");
     const designLevel = v.designLevel === true;
     const design = {
+      // A design-level finding is never behavioral: it keeps going to Arbitrate.
+      ...(v.behavioral === true && !designLevel ? { behavioral: true } : {}),
       ...(designLevel ? { designLevel: true, designBasis: typeof v.designBasis === "string" ? v.designBasis.trim() : "" } : {}),
       ...(typeof v.ruling === "string" && /^R\d+$/.test(v.ruling.trim()) ? { ruling: v.ruling.trim() } : {}),
     };

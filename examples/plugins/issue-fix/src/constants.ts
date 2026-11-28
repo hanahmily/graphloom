@@ -66,4 +66,12 @@ export const COMMAND = {
   deliver: "deliver",
   /** An arbiter's proof test, run by the profile's regression runner in a checkout with the test added. */
   proof: "proof-test",
+  /**
+   * A behavioral finding's regression test, run by the profile's regression runner: on the reviewed change with
+   * only the test added (it must fail by assertion), then on the fix (it must pass) (test-first.ts).
+   */
+  findingTest: "finding-test",
 } as const;
+
+/** Reproduction jobs per reviewed change before the graph hands an unreproduced finding's missing answer to the supervisor. */
+export const MAX_REPRODUCTION_RUNS = 2;

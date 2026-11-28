@@ -315,7 +315,7 @@ export function checkRuling(result: ArbiterResult, args: { point: string; pinned
 // ---- Proof tests ---------------------------------------------------------------------
 
 /** The regression runner's reference for a proof test: a Go test's package is its directory; a vitest test's is its file. */
-export function proofTestRef(profile: Profile, t: ProofTest): RegressionTestRef {
+export function proofTestRef(profile: Profile, t: Pick<ProofTest, "path" | "name">): RegressionTestRef {
   if (profile.runner.id === "go-test") {
     const dir = t.path.split("/").slice(0, -1).join("/");
     return { package: dir === "" ? "." : `./${dir}`, name: t.name };
@@ -338,19 +338,22 @@ export function proofRun(evidence: EvidenceRecord[], profile: Profile, t: ProofT
     .at(-1);
 }
 
-/** Why a proof test's run does not behave as the arbiter claimed, or undefined when it does: `fail` under RED's contract, `pass` ran and passed clean. */
-export function proofProblem(profile: Profile, t: ProofTest, run: CommandRun | undefined): string | undefined {
+/**
+ * Why a proof test's run does not behave as the arbiter claimed, or undefined when it does: `fail` under RED's contract, `pass` ran and passed clean.
+ * `as` names the test and the code it ran on in the messages: a test-first regression test (test-first.ts) is judged by the same rule.
+ */
+export function proofProblem(profile: Profile, t: Pick<ProofTest, "path" | "name" | "expect">, run: CommandRun | undefined, as: { what: string; on: string } = { what: "proof test", on: "the candidate" }): string | undefined {
   const ref = proofTestRef(profile, t);
-  const label = `proof test ${profile.runner.label(ref)} (${t.path})`;
-  if (run === undefined) return `${label} has not run in a checkout of the candidate`;
+  const label = `${as.what} ${profile.runner.label(ref)} (${t.path})`;
+  if (run === undefined) return `${label} has not run in a checkout of ${as.on}`;
   if (run.checkout?.prepared !== true) return `${label} ran in an unprepared checkout`;
   if (run.checkout.mutations.length > 0) return `${label}'s run left files changed: ${run.checkout.mutations.slice(0, 5).join(", ")}`;
   if (run.command.timedOut === true || run.command.aborted === true || run.command.spawnError !== undefined) return `${label} did not finish (${describeCommand(run.command)})`;
   const outcome = profile.runner.outcome(run.command.report?.text ?? run.command.stdoutTail, ref);
   if (t.expect === "fail") {
-    return outcome === "failed" && !succeeded(run.command) ? undefined : `${label} was to fail by assertion on the candidate, but its run reports ${outcome} (${describeCommand(run.command)})`;
+    return outcome === "failed" && !succeeded(run.command) ? undefined : `${label} was to fail by assertion on ${as.on}, but its run reports ${outcome} (${describeCommand(run.command)})`;
   }
-  return outcome === "passed" && succeeded(run.command) ? undefined : `${label} was to pass on the candidate, but its run reports ${outcome} (${describeCommand(run.command)})`;
+  return outcome === "passed" && succeeded(run.command) ? undefined : `${label} was to pass on ${as.on}, but its run reports ${outcome} (${describeCommand(run.command)})`;
 }
 
 /** A proof test's recorded result, for the ledger and the pull request. */
@@ -373,7 +376,8 @@ export interface Ruling {
   design: DesignStatement[];
   /** The candidate lines it cites; empty for the operator's ruling, which holds for the rest of the run. */
   code: CodeCitation[];
-  proofTests: Array<ProofTest & { result: string }>;
+  /** Each with its recorded result, and `run`, the run that behaved as claimed, when one did. */
+  proofTests: Array<ProofTest & { result: string; run?: string }>;
   /** The decision record and the receipt that accepted it. */
   source: string;
   receipt: string;

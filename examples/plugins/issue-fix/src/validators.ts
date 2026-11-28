@@ -19,6 +19,7 @@ import {
 import { benchGateFailures, benchIncomplete, benchPassedReason, parseBenchReport } from "./bench.js";
 import { arbitration, judgeArbiterRun } from "./arbitration.js";
 import { describeFinding, findingById, findingLedger, settledAway } from "./findings.js";
+import { describeTest, regressionState } from "./test-first.js";
 import { isUnsettled, issueIdOf } from "./issues.js";
 import { describeCoverage, isBlocking, reviewComplete } from "./ocr.js";
 import { commandsFor, finalCommands, isTestPath, parseProfile, ProfileError, type Profile, type ProfileCommand } from "./profile.js";
@@ -331,8 +332,16 @@ export const codeReview: Validator = {
     if (run === undefined) return inconclusive("the code has not been reviewed on the current change");
     if (!run.producer.readOnly) return failed("the code review must come from a read-only review job");
     if (run.status !== "completed") return failed(`the code reviewer did not finish (${run.status})`);
+    // The profile's regression runner judges the behavioral findings' regression tests; without a profile none can hold.
+    let profile: Profile | undefined;
+    try {
+      profile = input.config !== undefined ? parseProfile(input.config) : undefined;
+    } catch (err) {
+      if (!(err instanceof ProfileError)) throw err;
+    }
+    const all = chronological([...(input.history ?? []), ...input.evidence]);
     // Rulings count only on a design-ruling receipt minted under the binding admitted now.
-    const ledger = findingLedger(chronological([...(input.history ?? []), ...input.evidence]), { ...(input.receipts !== undefined ? { receipts: input.receipts } : {}), ...(input.validatorBindings !== undefined ? { bindings: input.validatorBindings } : {}) });
+    const ledger = findingLedger(all, { ...(input.receipts !== undefined ? { receipts: input.receipts } : {}), ...(input.validatorBindings !== undefined ? { bindings: input.validatorBindings } : {}), ...(profile !== undefined ? { profile } : {}) });
     const pass = ledger.passes.find((p) => p.run.record.ref === run.record.ref)!;
     if (pass.report === undefined) return failed(pass.problem!);
     const { report } = pass;
@@ -350,6 +359,12 @@ export const codeReview: Validator = {
     // A finding a ruling dismissed counts as dismissed; one the operator deferred no longer blocks.
     const survived = pass.raised.filter((id) => !settledAway(findingById(ledger, id)));
     if (survived.length > 0) return failed(`the latest pass raised finding(s) ${survived.map(issueIdOf).join(", ")} that verification did not dismiss`);
+    // Test-first: a fixed behavioral finding's regression test is part of this change, byte for byte as it failed on the reviewed change, and passes on it.
+    const digest = input.candidateDigest;
+    const dropped = ledger.findings.filter((f) => f.state === "fixed" && f.reproduction !== undefined && (profile === undefined || digest === undefined || regressionState(all, profile, f.reproduction.test, digest).kind !== "holds"));
+    if (dropped.length > 0) {
+      return failed(`the regression test of ${dropped.map((f) => `${issueIdOf(f.id)} (${describeTest(f.reproduction!.test)})`).join(", ")} does not hold on the current change: its file must be part of it, byte for byte as it failed on the reviewed change, and pass`);
+    }
     const fixed = ledger.findings.filter((f) => f.state === "fixed").length;
     const dismissed = ledger.findings.filter((f) => f.state === "dismissed").length;
     const deferred = ledger.findings.filter((f) => f.state === "deferred").length;

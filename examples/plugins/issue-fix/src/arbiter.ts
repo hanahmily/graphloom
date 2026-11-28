@@ -15,6 +15,7 @@ import { clip, describeComment } from "./ocr.js";
 import type { Profile } from "./profile.js";
 import type { ParsedVerdict } from "./review-common.js";
 import { MAX_PROOF_TESTS, MAX_RULING_CITES } from "./rulings.js";
+import { describeTest } from "./test-first.js";
 
 export interface ArbiterInputs {
   /** `owner/repo#N`. */
@@ -53,10 +54,17 @@ export function arbiterInstruction(profile: Profile, args: ArbiterInputs): strin
   const id = issueIdOf(f.id);
   const contested = args.issueEntry?.history.filter((h) => h.actor === "fixer" && h.to === "design-conflict").at(-1);
   const history = (args.issueEntry?.history ?? []).map((h) => `- round ${h.round}, ${h.actor}: ${h.from ?? "new"} → ${h.to}${h.note !== "" ? `: ${clip(h.note.replace(/\s+/g, " "), 600)}` : ""}`);
+  const unreproduced = f.state === "disputed" ? f.unreproduced : undefined;
+  const raised =
+    unreproduced !== undefined
+      ? "which the verifier confirmed as a behavioral defect but the implementer could not reproduce with a test that fails on the change"
+      : f.designBasis !== undefined || contested === undefined
+        ? "which the code review raised and an independent verifier could not settle on the code alone"
+        : "which the implementer contests as contradicting the project's design";
   return [
     `You are an independent arbiter of a design question about the uncommitted change in this worktree (${profile.project}), which fixes ${args.issue}. You did not write, review or verify the change. Do not modify any file in the worktree. Read the code with your file tools.`,
     "",
-    `The point: finding ${f.id} (issue ${id}), ${f.designBasis !== undefined || contested === undefined ? "which the code review raised and an independent verifier could not settle on the code alone" : "which the implementer contests as contradicting the project's design"}. Decide whether it holds against the project's design, as the issue, its discussion and the pinned documents state it.`,
+    `The point: finding ${f.id} (issue ${id}), ${raised}. Decide whether it holds against the project's design, as the issue, its discussion and the pinned documents state it.`,
     "",
     "The finding, as the code reviewer raised it:",
     `- ${describeComment(f.original ?? f.comment)}`,
@@ -72,6 +80,16 @@ export function arbiterInstruction(profile: Profile, args: ArbiterInputs): strin
         )
       : ["- none recorded"]),
     ...(contested !== undefined ? ["", "The implementer's argument for contesting it:", clip(contested.note, 2_000)] : []),
+    ...(unreproduced !== undefined
+      ? [
+          "",
+          "Behavioral findings are fixed test-first: before changing code, the implementer must add a test that fails by assertion on the reviewed change. For this finding it reported this attempt instead:",
+          `- What it tried: ${clip(unreproduced.attempt || "not described", 1_500)}`,
+          `- The test it wrote: ${unreproduced.test !== undefined ? describeTest(unreproduced.test) : "none"}`,
+          `- What it observed: ${clip(unreproduced.observed || "nothing reported", 1_500)}`,
+          "Rule `review-stands` when the finding is a real defect of the change: give a proof test that must `fail` and fails by assertion on the current code; it becomes the finding's regression test, which the implementer must then add unchanged and make pass. Rule `implementation-stands` when the finding does not hold.",
+        ]
+      : []),
     ...(history.length > 0 ? ["", `The issue's history in the run's issues file:`, ...history] : []),
     "",
     ...(args.rulings.length > 0 ? ["Design rulings that already hold in this run; do not contradict them:", ...args.rulings.map((r) => `- ${r}`), ""] : []),
