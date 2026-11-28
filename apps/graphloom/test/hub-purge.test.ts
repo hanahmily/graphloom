@@ -191,6 +191,20 @@ describe("hub purge", () => {
     expect(existsSync(run.record)).toBe(false);
   });
 
+  it("previews and, only with force, removes the recorded worktree of a run that never saved state", async () => {
+    const hub = await purgeHub();
+    const item = await finishedAndArchived(hub, "stateless");
+    const run = await runFor(hub, item);
+    await rm(path.join(run.stateDir, "state.json"));
+    const dry = await purge(hub.socket, item.id, { dryRun: true, force: true });
+    expect(dry).toMatchObject({ worktreePath: run.worktreePath, branch: run.branch, dryRun: true });
+    await expect(purge(hub.socket, item.id)).rejects.toThrow(`cannot delete run ${item.runId}: it has no saved state but ${hub.repo} still has its worktree; pass force to discard it`);
+    expect(existsSync(run.worktreePath)).toBe(true);
+    await purge(hub.socket, item.id, { force: true });
+    expect(existsSync(run.stateDir) || existsSync(run.worktreePath)).toBe(false);
+    expect(await git(hub.repo, "branch", "--list", "graphloom/*")).toBe("");
+  });
+
   it("purges in bulk only archived, unpurged entries matching the filters, and lists them on a dry run", async () => {
     const hub = await purgeHub();
     const widgets = await finishedAndArchived(hub, "fix-widgets-7");

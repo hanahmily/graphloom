@@ -8,13 +8,17 @@
  * run's owning version nor a version its plugin link resolves into stays pinned
  * for `self prune`. The archive index entry is kept and marked by the caller.
  */
+import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
+import { promisify } from "node:util";
 import { lstat, readdir, readlink } from "node:fs/promises";
 import path from "node:path";
 import { assertSafeRunId, deleteManagedRun } from "@graphloom/controller";
 import type { HubPurgeReport } from "@graphloom/sdk";
 import { boundedText } from "./hub-input.js";
 import { removeOwnershipRecord } from "./ownership.js";
+
+const execFileAsync = promisify(execFile);
 
 export interface PurgeTarget {
   hubDirectory: string;
@@ -51,6 +55,21 @@ async function runFacts(stateDir: string, runId: string): Promise<RunFacts> {
   };
 }
 
+/**
+ * For a run without readable state: the worktree and branch the repository records
+ * for this state directory, which a forced purge removes (deleteManagedRun's fallback).
+ */
+async function recordedWorktree(stateDir: string, runId: string, repoPath: string | undefined): Promise<Pick<RunFacts, "worktreePath" | "branch">> {
+  if (repoPath === undefined || !path.isAbsolute(repoPath) || existsSync(path.join(stateDir, "state.json"))) return {};
+  const branch = `graphloom/${runId}`;
+  try {
+    const recorded = (await execFileAsync("git", ["config", "--get", `branch.${branch}.graphloomStateDir`], { cwd: repoPath })).stdout.trim();
+    if (path.resolve(recorded) !== path.resolve(stateDir)) return {};
+  } catch { return {}; }
+  const worktreePath = path.join(repoPath, "graphloom", runId);
+  return { ...(existsSync(worktreePath) ? { worktreePath } : {}), branch };
+}
+
 /** Disk use (allocated blocks) of a tree, not following links; 0 when it is missing. */
 export async function treeBytes(root: string): Promise<number> {
   let total = 0;
@@ -76,8 +95,9 @@ export async function purgeRunFiles(target: PurgeTarget, options: PurgeOptions =
   const runId = assertSafeRunId(target.runId);
   const hubDirectory = path.resolve(target.hubDirectory);
   const stateDir = path.join(hubDirectory, "runs", runId);
-  const facts = await runFacts(stateDir, runId);
-  const repoPath = target.repoPath ?? facts.repoPath ?? await readlink(path.join(hubDirectory, "submissions", target.submissionId, "repo")).catch(() => undefined);
+  const state = await runFacts(stateDir, runId);
+  const repoPath = target.repoPath ?? state.repoPath ?? await readlink(path.join(hubDirectory, "submissions", target.submissionId, "repo")).catch(() => undefined);
+  const facts = { ...state, ...await recordedWorktree(stateDir, runId, repoPath) };
   const present = existsSync(stateDir);
   const bytes = (await treeBytes(stateDir)) + (facts.worktreePath !== undefined ? await treeBytes(facts.worktreePath) : 0);
   const base: HubPurgeReport = {
