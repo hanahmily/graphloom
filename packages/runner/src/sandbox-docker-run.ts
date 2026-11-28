@@ -15,6 +15,17 @@ import { lstatSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 const KILL_WAIT_MS = 10_000;
+/**
+ * The daemon records `State.OOMKilled` from the cgroup's oom event, which is handled apart from the
+ * container's exit event that ends the `docker run` client. On a loaded host the client can return
+ * (exit 137) before the flag is set, so one immediate `docker inspect` can read false for a container
+ * the kernel did OOM-kill. After an exit 137 the wrapper therefore re-reads, every
+ * OOM_POLL_MS, until the flag is true, or the container is final (`exited`/`dead`) and the flag read
+ * false OOM_STABLE_READS times in a row, or OOM_WAIT_MS has passed. Only exit 137 pays this wait.
+ */
+const OOM_WAIT_MS = 2_000;
+const OOM_POLL_MS = 100;
+const OOM_STABLE_READS = 5;
 
 interface Spec {
   name: string;
@@ -87,10 +98,26 @@ child.once("error", (err) => {
   process.stderr.write(`graphloom: cannot start docker: ${err.message}\n`);
   process.exit(127);
 });
+const sleepSync = (ms: number): void => {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+};
 /** Whether Docker records the container as killed by the kernel's OOM killer (exit 137 alone could be any SIGKILL). */
 const oomKilled = (): boolean => {
-  const inspect = spawnSync("docker", ["inspect", "--format", "{{.State.OOMKilled}}", spec.name], { encoding: "utf8", timeout: KILL_WAIT_MS });
-  return inspect.status === 0 && inspect.stdout.trim() === "true";
+  const deadline = Date.now() + OOM_WAIT_MS;
+  let stable = 0;
+  for (;;) {
+    const inspect = spawnSync("docker", ["inspect", "--format", "{{.State.OOMKilled}} {{.State.Status}}", spec.name], { encoding: "utf8", timeout: KILL_WAIT_MS });
+    if (inspect.status === 0) {
+      const [flag, status] = inspect.stdout.trim().split(/\s+/);
+      if (flag === "true") return true;
+      stable = flag === "false" && (status === "exited" || status === "dead") ? stable + 1 : 0;
+      if (stable >= OOM_STABLE_READS) return false;
+    } else {
+      stable = 0;
+    }
+    if (Date.now() + OOM_POLL_MS >= deadline) return false;
+    sleepSync(OOM_POLL_MS);
+  }
 };
 /** The container runs without --rm, so its state can be read: it is removed here once it ended. */
 const removeContainer = (): void => {
