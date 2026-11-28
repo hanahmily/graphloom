@@ -889,6 +889,13 @@ export interface GraphPlugin {
    * input: it reads no file, runs no process and has no network.
    */
   prepareTask?(input: import("./task-plan.js").PrepareTaskInput): import("./task-plan.js").PrepareTaskReply;
+  /**
+   * Optional: what could a loop start now (docs/design-loop.md section 14). One round of a stateless,
+   * multi-round exchange: the reply asks for reads, refuses, or lists candidates. Pure over its input:
+   * no file, process, network or clock (`input.now` is the only clock). The manifest's `loop` key
+   * declares the bundle loopable; a bundle without one is not looped.
+   */
+  loopCandidates?(input: import("./loop.js").LoopCandidatesInput): import("./loop.js").LoopCandidatesReply | Promise<import("./loop.js").LoopCandidatesReply>;
 }
 
 export interface Validator {
@@ -915,7 +922,8 @@ export type WireRequest =
       input: ValidationInput;
     })
   | (WireEnvelope & { kind: "rehearsal"; entry: string; config?: unknown })
-  | (WireEnvelope & { kind: "prepare_task"; input: import("./task-plan.js").PrepareTaskInput });
+  | (WireEnvelope & { kind: "prepare_task"; input: import("./task-plan.js").PrepareTaskInput })
+  | (WireEnvelope & { kind: "loop_candidates"; input: import("./loop.js").LoopCandidatesInput });
 
 export type WireResponse =
   | (WireEnvelope & { kind: "describe_ok"; definition: GraphDefinition })
@@ -923,6 +931,7 @@ export type WireResponse =
   | (WireEnvelope & { kind: "evaluate_ok"; result: ValidationResult })
   | (WireEnvelope & { kind: "rehearsal_ok"; rehearsal?: GraphRehearsal })
   | (WireEnvelope & { kind: "prepare_task_ok"; reply?: import("./task-plan.js").PrepareTaskReply })
+  | (WireEnvelope & { kind: "loop_candidates_ok"; reply?: unknown })
   | (WireEnvelope & {
       kind: "error";
       code: "malformed" | "stale" | "oversized" | "unknown" | "internal" | "evidence_unavailable";

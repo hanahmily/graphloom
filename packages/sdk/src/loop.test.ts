@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { describe, expect, it } from "vitest";
-import { LoopReplyError, validateLoopReply } from "./index.js";
+import { assertWireRequest, assertWireResponse, LoopReplyError, validateLoopManifest, validateLoopReply, WireValidationError } from "./index.js";
 
 const limits = { maxReadsPerRound: 8, maxCandidates: 500 };
 const cand = (key: string, extra: object = {}) => ({ key, taskArgs: [], ...extra });
@@ -63,5 +63,54 @@ describe("validateLoopReply", () => {
   it("allows exactly the limits", () => {
     expect(() => validateLoopReply({ reads: Array.from({ length: 8 }, (_, i) => read(`r${i}`)) }, limits)).not.toThrow();
     expect(() => validateLoopReply({ candidates: Array.from({ length: 500 }, (_, i) => cand(`k${i}`, { taskArgs: Array(16).fill("x".repeat(512)) })) }, limits)).not.toThrow();
+  });
+});
+
+describe("validateLoopManifest", () => {
+  it("accepts a protocol and a list of reads, none or up to 16", () => {
+    expect(validateLoopManifest({ protocol: 1, reads: [] })).toEqual({ protocol: 1, reads: [] });
+    expect(validateLoopManifest({ protocol: 1, reads: ["a/list", "b/get"] })).toEqual({ protocol: 1, reads: ["a/list", "b/get"] });
+    expect(() => validateLoopManifest({ protocol: 1, reads: Array.from({ length: 16 }, (_, i) => `x/${i}`) })).not.toThrow();
+    expect(() => validateLoopManifest({ protocol: 1, reads: ["x".repeat(200)] })).not.toThrow();
+  });
+
+  it("leaves an unsupported protocol level to the caller", () => {
+    expect(validateLoopManifest({ protocol: 2, reads: [] }).protocol).toBe(2);
+  });
+
+  const refusals: Array<[string, unknown, RegExp]> = [
+    ["not an object", [], /must be an object/],
+    ["null", null, /must be an object/],
+    ["an unknown property", { protocol: 1, reads: [], extra: 1 }, /unknown property "extra"/],
+    ["no protocol", { reads: [] }, /protocol must be a positive integer/],
+    ["a string protocol", { protocol: "1", reads: [] }, /protocol must be/],
+    ["a fractional protocol", { protocol: 1.5, reads: [] }, /protocol must be/],
+    ["no reads", { protocol: 1 }, /reads must be an array/],
+    ["too many reads", { protocol: 1, reads: Array.from({ length: 17 }, (_, i) => `x/${i}`) }, /more than 16/],
+    ["a duplicate", { protocol: 1, reads: ["a", "a"] }, /twice/],
+    ["an empty id", { protocol: 1, reads: [""] }, /reads\[0\]/],
+    ["a long id", { protocol: 1, reads: ["x".repeat(201)] }, /1 to 200/],
+    ["whitespace", { protocol: 1, reads: ["a b"] }, /no whitespace/],
+    ["a newline", { protocol: 1, reads: ["a\nb"] }, /no whitespace/],
+    ["a non-string", { protocol: 1, reads: [3] }, /reads\[0\]/],
+  ];
+  it.each(refusals)("refuses %s", (_name, value, message) => {
+    expect(() => validateLoopManifest(value)).toThrow(LoopReplyError);
+    expect(() => validateLoopManifest(value)).toThrow(message);
+  });
+});
+
+describe("the loop_candidates wire messages", () => {
+  const envelope = { protocolVersion: 1, runId: "r", operationId: "o", generation: 1, expectedStateRevision: 0, activeVersion: "v" };
+  const input = { protocol: 1, profile: {}, now: "2026-01-01T00:00:00.000Z", round: 0, results: [] };
+
+  it("accepts a request and a response, with or without a reply", () => {
+    expect(() => assertWireRequest({ ...envelope, kind: "loop_candidates", input })).not.toThrow();
+    expect(() => assertWireResponse({ ...envelope, kind: "loop_candidates_ok" })).not.toThrow();
+    expect(() => assertWireResponse({ ...envelope, kind: "loop_candidates_ok", reply: { candidates: [] } })).not.toThrow();
+  });
+
+  it("refuses a request without results", () => {
+    expect(() => assertWireRequest({ ...envelope, kind: "loop_candidates", input: { protocol: 1 } })).toThrow(WireValidationError);
   });
 });
