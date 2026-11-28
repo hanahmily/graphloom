@@ -7,9 +7,10 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { HubStoredInput } from "@graphloom/sdk";
-import { parseTaskYaml } from "@graphloom/controller";
+import { parseTaskYaml, PRIVATE_REPOSITORY_COMMIT } from "@graphloom/controller";
+import { createNoRepositoryFixture, createScope } from "@graphloom/testkit";
 import { digestExecutorSource } from "@graphloom/runner";
-import { boundedText, captureHubInput, materializeHubTask, runtimeDigest, verifyHubInput, writePrivateJsonOrText } from "../src/hub-input.js";
+import { boundedText, captureHubInput, inputDigest, materializeHubTask, runtimeDigest, verifyHubInput, writePrivateJsonOrText } from "../src/hub-input.js";
 import { makeCliEnv } from "./cli-env.js";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -39,6 +40,51 @@ describe("hub immutable input capture", () => {
     expect(captured.runtimeConfig?.runner).toMatchObject({ path: runner, digest: digest("{}\n") });
     await expect(stat(env.stateRoot)).rejects.toMatchObject({ code: "ENOENT" });
     expect(await env.git("status", "--porcelain")).toBe("");
+  });
+
+  it("captures a task with no repository as its own directory and the private repository's commit, deterministically", async () => {
+    const scope = createScope(); cleanups.push(() => scope.dispose());
+    const env = await makeCliEnv(cleanups); const runner = path.join(env.dir, "runner.json"); await writeFile(runner, "{}\n");
+    const f = await createNoRepositoryFixture(scope);
+    const first = await captureHubInput(f.taskPath, { runnerConfig: runner }, env.env);
+    expect(first.repoPath).toBe(await realpath(f.taskDir));
+    expect(first.baseCommit).toBe(PRIVATE_REPOSITORY_COMMIT);
+    expect(first.task).not.toMatch(/^repo:/m);
+    await expect(stat(f.stateRoot)).rejects.toMatchObject({ code: "ENOENT" });
+    // A second submission of the same task is the same request.
+    expect(inputDigest(await captureHubInput(f.taskPath, { runnerConfig: runner }, env.env))).toBe(inputDigest(first));
+  });
+
+  it("materializes a task with no repository without a repo link or a base", async () => {
+    const f = await captured();
+    const text = "graph: hello\nrequest: Survey.\nbudgets:\n  jobs: 10\n";
+    await writeFile(f.input.taskFile, text);
+    const input = { ...f.input, taskDigest: digest(text), baseCommit: PRIVATE_REPOSITORY_COMMIT };
+    const launch = await materializeHubTask(input);
+    const launched = await readFile(launch, "utf8");
+    expect(launched).not.toMatch(/^(repo|base):/m);
+    expect(parseTaskYaml(launched)).toMatchObject({ graph: "hello", request: "Survey.", config: "config.json", budgets: { jobs: 10 } });
+    await expect(stat(path.join(f.directory, "repo"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await realpath(path.join(f.directory, "plugins", "hello"))).toBe(f.input.bundlePath);
+  });
+
+  it("does not capture a task for a graph that needs a repository when its repo: is empty", async () => {
+    const env = await makeCliEnv(cleanups); const runner = path.join(env.dir, "runner.json"); await writeFile(runner, "{}\n");
+    const taskPath = path.join(env.dir, "task.yaml");
+    for (const line of ['repo: ""', "repo: ''"]) {
+      await writeFile(taskPath, (await readFile(taskPath, "utf8")).replace(/^repo:.*$/m, line));
+      await expect(captureHubInput(taskPath, { runnerConfig: runner }, env.env)).rejects.toThrow("graph hello needs a repository: name it with repo: in the task file");
+    }
+  });
+
+  it("materializes a task whose empty repo: names nothing without inventing a repo link", async () => {
+    const f = await captured();
+    const text = 'graph: hello\nrepo: ""\nrequest: Survey.\n';
+    await writeFile(f.input.taskFile, text);
+    const launch = await materializeHubTask({ ...f.input, taskDigest: digest(text), baseCommit: PRIVATE_REPOSITORY_COMMIT });
+    expect(await readFile(launch, "utf8")).not.toMatch(/^repo: repo$/m);
+    expect(parseTaskYaml(await readFile(launch, "utf8")).repo).toBeUndefined();
+    await expect(stat(path.join(f.directory, "repo"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("verifies captured task/config/runtime bytes and rejects changed queued bundles", async () => {

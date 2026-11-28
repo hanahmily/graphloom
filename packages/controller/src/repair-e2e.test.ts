@@ -1859,6 +1859,12 @@ describe("qualified repair + same-run activation (#29)", () => {
         /candidate manifest alters pinned repairContract/,
       ],
       [
+        "makes the graph work without a repository",
+        "graphloom.manifest.json",
+        (raw: string) => raw.replace('"repairContract"', '"repository": "none", "repairContract"'),
+        /candidate manifest alters pinned repository/,
+      ],
+      [
         "adds a declared dependency",
         "package.json",
         (raw: string) => {

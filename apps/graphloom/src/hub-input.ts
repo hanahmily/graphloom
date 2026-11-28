@@ -5,7 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readFile, readdir, realpath, rename, symlink, unlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { intakeTask, parseTaskYaml } from "@graphloom/controller";
+import { parseTaskYaml, readTaskIntake } from "@graphloom/controller";
 import { digestExecutorSource } from "@graphloom/runner";
 import type { HubInput, HubRehearsal, HubStoredInput } from "@graphloom/sdk";
 import { stableHash } from "@graphloom/sdk";
@@ -19,7 +19,7 @@ const MAX_TASK_BYTES = 256 * 1024;
 export async function captureHubInput(taskPath: string, config: Pick<HubServiceConfig, "runnerConfig" | "supervisorConfig">, env: NodeJS.ProcessEnv = process.env, rehearsal?: HubRehearsal): Promise<HubInput> {
   const absolute = await realpath(taskPath);
   const task = await boundedText(absolute, MAX_TASK_BYTES);
-  const intake = await intakeTask(absolute);
+  const intake = await readTaskIntake(absolute);
   if (task !== await boundedText(absolute, MAX_TASK_BYTES) || JSON.stringify(parseTaskYaml(task)) !== JSON.stringify(intake.task)) throw new Error("task changed during submission; submit again");
   const self = selfInstall();
   const runnerPath = config.runnerConfig ?? runnerConfigPath(env).file;
@@ -31,7 +31,9 @@ export async function captureHubInput(taskPath: string, config: Pick<HubServiceC
   return {
     task, taskDigest: createHash("sha256").update(task).digest("hex"), taskPath: absolute,
     ...(intake.config !== undefined ? { config: intake.config.text, configDigest: intake.config.sha256 } : {}),
-    repoPath: await realpath(intake.repoPath), baseCommit: intake.pinnedHead,
+    // A graph that works without a repository has none to link: the run makes a private one in its own state
+    // directory, so the submission records the task's directory and the commit that repository always pins.
+    repoPath: await realpath(intake.repository.mode === "git" ? intake.repository.repoPath : path.dirname(absolute)), baseCommit: intake.repository.pinnedHead,
     bundlePath: await realpath(intake.bundle.bundlePath), bundleDigest: await digestExecutorSource(intake.bundle.bundlePath),
     // Unresolved, so a later --update-plugin follows the link to the plugin the task names then.
     pluginLink: intake.bundle.bundlePath,
@@ -66,18 +68,20 @@ export async function materializeHubTask(input: HubStoredInput): Promise<string>
   const captured = await boundedText(input.taskFile, MAX_TASK_BYTES);
   const task = parseTaskYaml(captured);
   await mkdir(path.join(directory, "plugins"), { recursive: true, mode: 0o700 });
-  await checkedLink(input.repoPath, path.join(directory, "repo"));
+  // A task without `repo:` (a graph that needs no repository) has no repository to link or pin.
+  if (task.repo !== undefined) await checkedLink(input.repoPath, path.join(directory, "repo"));
   await checkedLink(input.bundlePath, path.join(directory, "plugins", task.graph));
   // Preserve the request's original representation, including indentation and tabs.
   // Intake accepts a deliberately small YAML subset; serializing its strings again
   // can change their meaning even when a general YAML serializer would round-trip.
-  let text = captured.replace(/^repo:.*$/gm, "repo: repo");
+  // An empty `repo:` names nothing (the parser reads it as absent), so it is left as the task wrote it.
+  let text = task.repo !== undefined ? captured.replace(/^repo:.*$/gm, "repo: repo") : captured;
   const pin = (key: string, value: string) => {
     const field = new RegExp(`^${key}:.*$`, "gm");
     if (field.test(text)) text = text.replace(field, `${key}: ${value}`);
     else text = `${text.replace(/\n?$/, "\n")}${key}: ${value}\n`;
   };
-  pin("base", input.baseCommit);
+  if (task.repo !== undefined) pin("base", input.baseCommit);
   if (input.configFile !== undefined) pin("config", path.basename(input.configFile));
   const rewritten = parseTaskYaml(text);
   if (rewritten.request !== task.request) throw new Error("captured request changed during materialization");

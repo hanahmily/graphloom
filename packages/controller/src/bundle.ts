@@ -5,7 +5,7 @@ import path from "node:path";
 import type { IntakePin } from "./intake.js";
 
 /** Resolve the pinned createGraph entry module from the bundle manifest. */
-export function resolveBundleEntry(intake: IntakePin): string {
+export function resolveBundleEntry(intake: Pick<IntakePin, "bundle">): string {
   return resolveBundleEntryFromManifest(intake.bundle.bundlePath, intake.bundle.manifestRaw);
 }
 
@@ -25,7 +25,7 @@ export function resolveBundleEntryFromManifest(
  * §4.4), a module exporting `GraphRehearsal`. `undefined` when the manifest
  * declares none — every graph is still rehearsable on schema synthesis alone.
  */
-export function resolveBundleRehearsalEntry(intake: IntakePin): string | undefined {
+export function resolveBundleRehearsalEntry(intake: Pick<IntakePin, "bundle">): string | undefined {
   const manifest = JSON.parse(intake.bundle.manifestRaw) as {
     entryPoints?: { rehearsal?: string };
   };

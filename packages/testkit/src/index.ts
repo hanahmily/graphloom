@@ -67,3 +67,13 @@ export {
   topologyBundle,
 } from "./topology.js";
 export { startHttpsGit, type HttpsGitServer } from "./https-git.js";
+export {
+  NO_REPOSITORY_GRAPH,
+  NO_REPOSITORY_REQUEST,
+  NO_REPOSITORY_VERSION,
+  createNoRepositoryFixture,
+  noRepositoryBundle,
+  type NoRepositoryBundleOptions,
+  type NoRepositoryFixture,
+  type NoRepositoryFixtureOptions,
+} from "./no-repository.js";

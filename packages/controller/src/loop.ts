@@ -1926,7 +1926,7 @@ export function toRunView(state: DurableRunState, options: { inline?: boolean; r
     resumeCommand: options.resumeCommand ?? `graphloom resume ${state.runId}`,
     task: {
       request: state.intake.task.request,
-      repo: state.intake.task.repo,
+      ...(state.intake.task.repo !== undefined ? { repo: state.intake.task.repo } : {}),
     },
     current: structuredClone(state.current),
     receipts: structuredClone(state.receipts),

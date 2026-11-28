@@ -20,7 +20,7 @@ import { selfInstall } from "../src/ownership.js";
 import { launchEndLine, parseRemedy, remedyArgs } from "../src/hub-managed.js";
 import { observeInitialization } from "../src/hub-initialization.js";
 import { readLaunchReport, refusalOf } from "../src/hub-launch-report.js";
-import { IntakeError, UpgradeRefusedError } from "@graphloom/controller";
+import { IntakeError, PRIVATE_REPOSITORY_COMMIT, UpgradeRefusedError } from "@graphloom/controller";
 import { RequestRefusedError } from "@graphloom/sdk";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -34,7 +34,8 @@ afterEach(async () => {
   await new Promise((resolve) => setTimeout(resolve, 20));
   await Promise.all(folders.splice(0).map((folder) => rm(folder, { recursive: true, force: true })));
 });
-async function fixture(mode: HubLaunch["mode"] = "initial", actualRun = false, actualMain = false, failInitialStateWrite = false, body = "await context.grant.verify();", command?: HubLaunch["command"]) {
+/** `noRepository`: the zero-agent graph declares `repository: "none"`, so its task names no repo and the run makes a private one in its state directory. */
+async function fixture(mode: HubLaunch["mode"] = "initial", actualRun = false, actualMain = false, failInitialStateWrite = false, body = "await context.grant.verify();", command?: HubLaunch["command"], noRepository = false) {
   const directory = await mkdtemp(path.join(tmpdir(), "graphloom-bootstrap-")); folders.push(directory);
   const repo = path.join(directory, "repo"); await mkdir(repo);
   for (const args of [["init", "-q"], ["config", "user.name", "Test"], ["config", "user.email", "test@example.com"], ["config", "commit.gpgsign", "false"]]) await exec("git", args, { cwd: repo });
@@ -50,15 +51,15 @@ async function fixture(mode: HubLaunch["mode"] = "initial", actualRun = false, a
   const bundle = actualMain ? path.join(directory, "noop") : path.join(root, "examples/plugins/hello");
   if (actualMain) {
     await mkdir(bundle);
-    await writeFile(path.join(bundle, "graphloom.manifest.json"), JSON.stringify({ graphId: "noop", version: "1.0.0", sdkProtocol: 1, repairContract: "opaque", entryPoints: { createGraph: "./index.mjs" } }));
+    await writeFile(path.join(bundle, "graphloom.manifest.json"), JSON.stringify({ graphId: "noop", version: "1.0.0", sdkProtocol: 1, repairContract: "opaque", ...(noRepository ? { repository: "none" } : {}), entryPoints: { createGraph: "./index.mjs" } }));
     await writeFile(path.join(bundle, "index.mjs"), `export function createGraph() { return { describe() { return { graphId: 'noop', version: '1.0.0', stages: [{id:'done', name:'Done', requirementIds:[]}], requirements: [], defaultValidators: [] }; }, advance() { return {action:{type:'stop',stop:{reason:'complete',blocker:'none'}},reason:'No work required'}; } }; }`);
   }
   const runnerFile = path.join(directory, "runner.json");
   const runnerBytes = JSON.stringify({ harness: "claude-code", allowUnrestricted: true, claude: { command: process.execPath } });
   await writeFile(runnerFile, runnerBytes);
-  const task = `graph: ${actualMain ? "noop" : "hello"}\nrepo: ./repo\nrequest: Create GREETING.txt.\n`;
+  const task = `graph: ${actualMain ? "noop" : "hello"}\n${noRepository ? "" : "repo: ./repo\n"}request: Create GREETING.txt.\n`;
   const result = await hub.submit({ requestDigest: "a".repeat(64), input: {
-    task, taskDigest: createHash("sha256").update(task).digest("hex"), taskPath: path.join(directory, "task.yaml"), repoPath: repo, baseCommit: head.trim(),
+    task, taskDigest: createHash("sha256").update(task).digest("hex"), taskPath: path.join(directory, "task.yaml"), repoPath: noRepository ? directory : repo, baseCommit: noRepository ? PRIVATE_REPOSITORY_COMMIT : head.trim(),
     bundlePath: bundle, bundleDigest: await digestExecutorSource(bundle),
     runtimePath: path.join(runtime.root, "apps/graphloom/dist/main.js"), runtimeRoot: runtime.root, runtimeVersion: runtime.version, runtimeDigest: await runtimeDigest(runtime.root), runtimeNode: process.execPath, runtimeConfig: { runner: { path: runnerFile, digest: createHash("sha256").update(runnerBytes).digest("hex") } },
   } });
@@ -149,6 +150,38 @@ describe("managed CLI fd3 bootstrap", () => {
     f.driver.inspect = async () => ({ execution: "drained", ownerGone: true, externalStopped: true, observation: { protocolVersion: 1, observedAt: new Date().toISOString(), stateRevision: state.stateRevision, progressRevision: 0, status: "succeeded", continuation: { kind: "complete" } } });
     await f.hub.tick(); expect(f.hub.inspect(next.id).state).toBe("succeeded");
   });
+  it("runs a graph that works without a repository in a private repository inside the run's state directory", async () => {
+    const f = await fixture("initial", false, true, false, undefined, undefined, true); f.send(f.grant);
+    const result = await f.done; expect(result.code, result.stderr).toBe(0);
+    const stateDir = path.join(f.hubDirectory, "runs", f.submission.runId);
+    const state = JSON.parse(await readFile(path.join(stateDir, "state.json"), "utf8"));
+    expect(state).toMatchObject({ runId: f.submission.runId, status: "succeeded", intake: { repoPath: path.join(stateDir, "repository"), pinnedHead: PRIVATE_REPOSITORY_COMMIT }, worktreePath: path.join(stateDir, "repository", "graphloom", f.submission.runId) });
+    expect(state.intake.task.repo).toBeUndefined();
+    // The launch task has no repository link or base, and the submission's own repository was never touched.
+    const launchDirectory = path.dirname(f.submission.input.taskFile);
+    expect(await readFile(path.join(launchDirectory, "launch-task.yaml"), "utf8")).not.toMatch(/^(repo|base):/m);
+    await expect(lstat(path.join(launchDirectory, "repo"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lstat(path.join(f.directory, "graphloom"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+  it("retries a failed initial state write of a graph without a repository, keeping its private repository and worktree", async () => {
+    const f = await fixture("initial", false, true, true, undefined, undefined, true); f.send(f.grant);
+    const first = await f.done; expect(first).toMatchObject({ code: 1, stderr: expect.stringContaining("fixture initial state persistence failure") });
+    const stateDir = path.join(f.hubDirectory, "runs", f.submission.runId);
+    await expect(readFile(path.join(stateDir, "state.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    const worktree = path.join(stateDir, "repository", "graphloom", f.submission.runId);
+    const before = await lstat(worktree);
+    const observed = await observeInitialization(stateDir, f.submission, f.submission.launch!);
+    expect(observed).toMatchObject({ continuation: { kind: "automatic", cause: "initialization-failed" } });
+    f.driver.inspect = async () => ({ execution: "drained", ownerGone: true, externalStopped: true, observation: observed });
+    await f.hub.tick();
+    const next = f.hub.inspect(f.submission.id);
+    expect(next).toMatchObject({ automaticResumes: 1, launch: { mode: "initial", generation: 2, automatic: true } });
+    const child = await f.startAgain(); child.send({ ...f.grant, launchId: next.launch!.id, generation: next.generation, automatic: true });
+    const second = await child.done; expect(second.code, second.stderr).toBe(0);
+    const state = JSON.parse(await readFile(path.join(stateDir, "state.json"), "utf8"));
+    expect(state).toMatchObject({ status: "succeeded", worktreePath: worktree, intake: { pinnedHead: PRIVATE_REPOSITORY_COMMIT } });
+    expect((await lstat(worktree)).ino).toBe(before.ino);
+  });
   it("rejects a mismatched generation without invoking execution", async () => {
     const f = await fixture(); f.send({ ...f.grant, generation: 2 });
     expect(await f.done).toMatchObject({ code: 1, stderr: expect.stringMatching(/does not match/) });
@@ -234,7 +267,7 @@ describe("a managed launch's report of its own end (docs/design-run-hub.md §6.1
   });
   it("classifies refusals by error type, never by message text", () => {
     expect(refusalOf(new RequestRefusedError("no scenario named \"x\"", "invalid-scenario"))).toEqual({ cause: "invalid-scenario", reason: "no scenario named \"x\"" });
-    expect(refusalOf(new IntakeError("task.yaml must declare graph, repo, and request"))).toMatchObject({ cause: "invalid-task" });
+    expect(refusalOf(new IntakeError("task.yaml must declare graph and request"))).toMatchObject({ cause: "invalid-task" });
     expect(refusalOf(new UpgradeRefusedError("older release"))).toMatchObject({ cause: "upgrade-refused" });
     expect(refusalOf(new Error("no scenario named \"x\"; this bundle declares: happy"))).toBeUndefined();
   });

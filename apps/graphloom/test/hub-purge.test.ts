@@ -15,7 +15,9 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { HubPurgeReport, HubStatus, HubSubmission } from "@graphloom/sdk";
+import { createPrivateRepository, PRIVATE_REPOSITORY_COMMIT } from "@graphloom/controller";
 import { hubCommand } from "../src/hub-cli.js";
+import { treeBytes } from "../src/hub-purge.js";
 import { hubRequest } from "../src/hub-client.js";
 import { fakeInput, socketEnvironment } from "./hub-test-env.js";
 
@@ -240,6 +242,62 @@ describe("hub purge", () => {
     expect(hub.service.hub.archivedSubmission(live.id)).toBeUndefined();
     const search = await hubRequest<HubStatus>("GET", "/v1/submissions?archived=true", undefined, hub.socket);
     expect(Object.fromEntries((search.archived ?? []).map((entry) => [entry.id, entry.purgedAt !== undefined]))).toEqual({ [widgets.id]: true, [gadgets.id]: false, [rehearsal.id]: true });
+  });
+
+  it("purges a run of a graph without a repository through its private repository, never the submission's recorded path", async () => {
+    const hub = await purgeHub();
+    const item = await finishedAndArchived(hub, "survey-1");
+    const stateDir = path.join(hub.directory, "runs", item.runId);
+    const repository = path.join(stateDir, "repository");
+    const worktreePath = path.join(repository, "graphloom", item.runId);
+    const branch = `graphloom/${item.runId}`;
+    await createPrivateRepository(repository);
+    await git(repository, "worktree", "add", "-q", "-b", branch, worktreePath, PRIVATE_REPOSITORY_COMMIT);
+    await git(repository, "config", `branch.${branch}.graphloomStateDir`, stateDir);
+    await writeFile(path.join(stateDir, "state.json"), JSON.stringify({ runId: item.runId, status: "succeeded", intake: { repoPath: repository, pinnedHead: PRIVATE_REPOSITORY_COMMIT }, worktreePath, worktreeBranch: branch }));
+    await writeFile(path.join(stateDir, "managed-run.json"), JSON.stringify({ protocolVersion: 1, hubId: "h-test", hubStateDir: hub.directory, submissionId: item.id, runId: item.runId, generation: 1, launchId: "l-test" }));
+    await writeFile(path.join(worktreePath, "report.txt"), "unsaved\n");
+
+    const dry = await purge(hub.socket, item.id, { dryRun: true });
+    expect(dry).toMatchObject({ stateDir, worktreePath, branch, dryRun: true });
+    await expect(purge(hub.socket, item.id)).rejects.toThrow(/uncommitted changes \(report\.txt\)/);
+    expect(existsSync(worktreePath)).toBe(true);
+    await purge(hub.socket, item.id, { force: true });
+    expect(existsSync(stateDir)).toBe(false);
+    // The repository the hub recorded for the submission is untouched.
+    expect(existsSync(path.join(hub.repo, "README.md"))).toBe(true);
+    expect(await git(hub.repo, "branch", "--list", "graphloom/*")).toBe("");
+  });
+
+  it("counts a private repository's bytes once: its worktree is already inside the state directory", async () => {
+    const hub = await purgeHub();
+    const item = await finishedAndArchived(hub, "survey-bytes");
+    const stateDir = path.join(hub.directory, "runs", item.runId);
+    const repository = path.join(stateDir, "repository");
+    const worktreePath = path.join(repository, "graphloom", item.runId);
+    const branch = `graphloom/${item.runId}`;
+    await createPrivateRepository(repository);
+    await git(repository, "worktree", "add", "-q", "-b", branch, worktreePath, PRIVATE_REPOSITORY_COMMIT);
+    await git(repository, "config", `branch.${branch}.graphloomStateDir`, stateDir);
+    await writeFile(path.join(worktreePath, "big.txt"), "x".repeat(200_000));
+    await writeFile(path.join(stateDir, "state.json"), JSON.stringify({ runId: item.runId, status: "succeeded", intake: { repoPath: repository, pinnedHead: PRIVATE_REPOSITORY_COMMIT }, worktreePath, worktreeBranch: branch }));
+    const dry = await purge(hub.socket, item.id, { dryRun: true });
+    expect(dry.worktreePath).toBe(worktreePath);
+    expect(dry.bytes).toBe(await treeBytes(stateDir));
+  });
+
+  it("finishes a purge interrupted after the private repository was removed but before state.json was", async () => {
+    const hub = await purgeHub();
+    const item = await finishedAndArchived(hub, "survey-gone");
+    const stateDir = path.join(hub.directory, "runs", item.runId);
+    const repository = path.join(stateDir, "repository");
+    const branch = `graphloom/${item.runId}`;
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(path.join(stateDir, "state.json"), JSON.stringify({ runId: item.runId, status: "succeeded", intake: { repoPath: repository, pinnedHead: PRIVATE_REPOSITORY_COMMIT }, worktreePath: path.join(repository, "graphloom", item.runId), worktreeBranch: branch }));
+    await writeFile(path.join(stateDir, "managed-run.json"), JSON.stringify({ protocolVersion: 1, hubId: "h-test", hubStateDir: hub.directory, submissionId: item.id, runId: item.runId, generation: 1, launchId: "l-test" }));
+    expect(existsSync(repository)).toBe(false);
+    await purge(hub.socket, item.id);
+    expect(existsSync(stateDir)).toBe(false);
   });
 
   it("names purge in hub --help", async () => {
