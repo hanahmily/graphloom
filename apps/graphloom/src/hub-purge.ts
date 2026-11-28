@@ -13,7 +13,7 @@ import { existsSync } from "node:fs";
 import { promisify } from "node:util";
 import { lstat, readdir, readlink } from "node:fs/promises";
 import path from "node:path";
-import { assertSafeRunId, deleteManagedRun } from "@graphloom/controller";
+import { assertSafeRunId, deleteManagedRun, PRIVATE_REPOSITORY_DIRECTORY } from "@graphloom/controller";
 import type { HubPurgeReport } from "@graphloom/sdk";
 import { boundedText } from "./hub-input.js";
 import { removeOwnershipRecord } from "./ownership.js";
@@ -96,10 +96,15 @@ export async function purgeRunFiles(target: PurgeTarget, options: PurgeOptions =
   const hubDirectory = path.resolve(target.hubDirectory);
   const stateDir = path.join(hubDirectory, "runs", runId);
   const state = await runFacts(stateDir, runId);
-  const repoPath = target.repoPath ?? state.repoPath ?? await readlink(path.join(hubDirectory, "submissions", target.submissionId, "repo")).catch(() => undefined);
+  // A run of a graph that works without a repository keeps a private one in its state directory; the
+  // submission's own repository path is then only the task's directory.
+  const privateRepository = path.join(stateDir, PRIVATE_REPOSITORY_DIRECTORY);
+  const repoPath = existsSync(path.join(privateRepository, ".git")) ? privateRepository : target.repoPath ?? state.repoPath ?? await readlink(path.join(hubDirectory, "submissions", target.submissionId, "repo")).catch(() => undefined);
   const facts = { ...state, ...await recordedWorktree(stateDir, runId, repoPath) };
   const present = existsSync(stateDir);
-  const bytes = (await treeBytes(stateDir)) + (facts.worktreePath !== undefined ? await treeBytes(facts.worktreePath) : 0);
+  // A private repository's worktree is inside the state directory, so its bytes are already in the total.
+  const insideState = facts.worktreePath !== undefined && path.relative(stateDir, facts.worktreePath).split(path.sep)[0] !== "..";
+  const bytes = (await treeBytes(stateDir)) + (facts.worktreePath !== undefined && !insideState ? await treeBytes(facts.worktreePath) : 0);
   const base: HubPurgeReport = {
     id: target.submissionId, runId, stateDir,
     ...(facts.worktreePath !== undefined ? { worktreePath: facts.worktreePath } : {}),

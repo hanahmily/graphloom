@@ -9,6 +9,8 @@ import { promisify } from "node:util";
 import { PROTOCOL_VERSION, type GraphBudgetDefaults, type GraphDefinition } from "@graphloom/sdk";
 import { assertSafeGraphId } from "./ids.js";
 import { resolveBundleEntryFromManifest } from "./bundle.js";
+import { IntakeError } from "./intake-error.js";
+import { createPrivateRepository, PRIVATE_REPOSITORY_COMMIT } from "./private-repository.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -97,7 +99,7 @@ export function resolveRunBudgets(taskBudgets?: Partial<RunBudgets>, graphDefaul
  * result. Called once, after the plugin first describes itself, whether or
  * not it declares any; a resumed run keeps the budgets it was intaken with.
  */
-export function applyGraphDefaultBudgets(intake: IntakePin, definition: Pick<GraphDefinition, "defaultBudgets">): IntakePin {
+export function applyGraphDefaultBudgets<T extends Pick<IntakePin, "task" | "budgets">>(intake: T, definition: Pick<GraphDefinition, "defaultBudgets">): T & Pick<IntakePin, "graphDefaultBudgets"> {
   const defaults = definition.defaultBudgets;
   const declared = defaults !== undefined && Object.keys(defaults).length > 0;
   const budgets = resolveRunBudgets(intake.task.budgets, declared ? defaults : undefined);
@@ -106,7 +108,12 @@ export function applyGraphDefaultBudgets(intake: IntakePin, definition: Pick<Gra
 
 export interface TaskFile {
   graph: string;
-  repo: string;
+  /**
+   * The task repository: any directory inside a git repository. Required by a
+   * graph whose manifest declares `repository: "required"` (the default),
+   * refused for one that declares `"none"`; parsing alone does not decide.
+   */
+  repo?: string;
   request: string;
   /** Operator-authorized repair grants (plugin metadata alone is not authority). */
   grants?: RepairGrants;
@@ -300,14 +307,9 @@ export interface IntakePin {
   };
 }
 
-export class IntakeError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "IntakeError";
-  }
-}
+export { IntakeError };
 
-/** Parse minimal task.yaml (graph / repo / request [, grants] [, budgets]). */
+/** Parse minimal task.yaml (graph / request [, repo] [, grants] [, budgets]); whether `repo` is needed is the bundle's say (`manifestRepository`). */
 export function parseTaskYaml(text: string): TaskFile {
   const lines = text.replace(/\r\n/g, "\n").split("\n");
   let graph: string | undefined;
@@ -418,15 +420,18 @@ export function parseTaskYaml(text: string): TaskFile {
     }
   }
 
-  if (!graph || !repo || request === undefined || request === "") {
-    throw new IntakeError("task.yaml must declare graph, repo, and request");
+  if (!graph || request === undefined || request === "") {
+    throw new IntakeError("task.yaml must declare graph and request");
   }
   try {
     assertSafeGraphId(graph);
   } catch (err) {
     throw new IntakeError(err instanceof Error ? err.message : String(err));
   }
-  const task: TaskFile = { graph, repo, request };
+  // Key order is the task's wire shape (the managed intake digest hashes it unsorted): graph, repo, request, ...
+  // An empty or blank `repo:` names nothing, so it reads as no `repo:` at all, for a graph that
+  // needs a repository (refused as "needs a repository") and for one that needs none alike.
+  const task: TaskFile = { graph, ...(repo !== undefined && repo.trim() !== "" ? { repo } : {}), request };
   if (sourceRepair !== undefined || validatorSubstitution !== undefined || executorRepair !== undefined || hostRepair !== undefined) {
     task.grants = {
       sourceRepair: sourceRepair ?? false,
@@ -455,18 +460,71 @@ function parseBoolYaml(value: string): boolean {
   throw new IntakeError(`grants value must be boolean, got ${JSON.stringify(value)}`);
 }
 
-export async function intakeTask(taskPath: string): Promise<IntakePin> {
+/** Where a task's run gets its repository: the one `repo:` names, or (mode `none`) a private one the controller makes. */
+export type TaskRepository =
+  | { mode: "git"; repoPath: string; pinnedHead: string }
+  | { mode: "none"; pinnedHead: typeof PRIVATE_REPOSITORY_COMMIT };
+
+/** What intake reads from a task file, its bundle and its repository; nothing is written. */
+export interface TaskIntakeRead extends Omit<IntakePin, "repoPath" | "pinnedHead"> {
+  repository: TaskRepository;
+}
+
+/**
+ * The bundle manifest as read once for the whole intake: its bytes (pinned
+ * later) and the repository mode they declare. `raw` is undefined when the
+ * manifest cannot be read, and the mode is then `required`, so the checks that
+ * follow report the problem in their usual order; so it is for bytes that are
+ * not a JSON object. An invalid `repository` declaration is refused.
+ */
+async function readManifestOnce(taskDir: string, graph: string): Promise<{ raw: string | undefined; mode: RepositoryMode }> {
+  let raw: string;
+  try {
+    raw = await readFile(path.join(resolveUnderBase(path.join(taskDir, "plugins"), graph, "graph bundle"), "graphloom.manifest.json"), "utf8");
+  } catch {
+    return { raw: undefined, mode: "required" };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { raw, mode: "required" };
+  }
+  if (!isJsonObject(parsed)) return { raw, mode: "required" };
+  return { raw, mode: manifestRepository(raw) };
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Read a task: parse it, resolve its repository (or note that the run needs a
+ * private one), pin its bundle and config, check its budgets. Writes nothing,
+ * so the gate, the hub, rehearsal and `check` use it too.
+ */
+export async function readTaskIntake(taskPath: string): Promise<TaskIntakeRead> {
   const absoluteTask = path.resolve(taskPath);
   await assertExists(absoluteTask, "file");
   const taskDir = path.dirname(absoluteTask);
   const task = parseTaskYaml(await readFile(absoluteTask, "utf8"));
 
-  const named = resolveUnderBase(taskDir, task.repo, "repo");
-  await assertExists(named, "directory");
-  // `repo` may name any directory inside the repository (e.g. `repo: .` from
-  // a task file in a subdirectory); the run works on the whole repository, and
-  // a `git clone` of a subdirectory fails, so pin its top level.
-  const repoPath = await gitTopLevel(named);
+  // The mode comes from the very bytes pinned below: one read, so a bundle swapped meanwhile cannot give the
+  // gate and the hub one mode and the controller another.
+  const { raw: manifestRead, mode } = await readManifestOnce(taskDir, task.graph);
+  let repoPath: string | undefined;
+  if (mode === "none") {
+    if (task.repo !== undefined) throw new IntakeError(`graph ${task.graph} works without a repository; remove repo: from the task file`);
+    if (task.base !== undefined) throw new IntakeError(`graph ${task.graph} works without a repository, so base: names nothing; remove it`);
+  } else {
+    if (task.repo === undefined) throw new IntakeError(`graph ${task.graph} needs a repository: name it with repo: in the task file`);
+    const named = resolveUnderBase(taskDir, task.repo, "repo");
+    await assertExists(named, "directory");
+    // `repo` may name any directory inside the repository (e.g. `repo: .` from
+    // a task file in a subdirectory); the run works on the whole repository, and
+    // a `git clone` of a subdirectory fails, so pin its top level.
+    repoPath = await gitTopLevel(named);
+  }
 
   const bundlePath = resolveUnderBase(
     path.join(taskDir, "plugins"),
@@ -477,7 +535,9 @@ export async function intakeTask(taskPath: string): Promise<IntakePin> {
 
   const manifestPath = path.join(bundlePath, "graphloom.manifest.json");
   await assertExists(manifestPath, "file");
-  const manifestRaw = await readFile(manifestPath, "utf8");
+  // Unreadable at the first look (so the mode defaulted to required) but present now: the bytes are read again
+  // and must still say so.
+  const manifestRaw = manifestRead ?? await readFile(manifestPath, "utf8");
   let manifest: {
     graphId?: string;
     version?: string;
@@ -489,6 +549,8 @@ export async function intakeTask(taskPath: string): Promise<IntakePin> {
   } catch {
     throw new IntakeError("manifest is not valid JSON");
   }
+  if (!isJsonObject(manifest)) throw new IntakeError("manifest is not valid JSON");
+  if (manifestRead === undefined && manifestRepository(manifestRaw) !== mode) throw new IntakeError("the bundle's manifest changed while the task was read; try again");
   if (manifest.graphId !== task.graph) {
     throw new IntakeError(
       `manifest graphId ${JSON.stringify(manifest.graphId)} does not match task graph ${JSON.stringify(task.graph)}`,
@@ -505,7 +567,9 @@ export async function intakeTask(taskPath: string): Promise<IntakePin> {
     throw new IntakeError(`graph ${task.graph} needs a task config: name a JSON file with config: in the task file`);
   }
 
-  const pinnedHead = task.base !== undefined ? await resolveBaseCommit(repoPath, task.base) : await gitRevParse(repoPath, "HEAD");
+  const repository: TaskRepository = repoPath === undefined
+    ? { mode: "none", pinnedHead: PRIVATE_REPOSITORY_COMMIT }
+    : { mode: "git", repoPath, pinnedHead: task.base !== undefined ? await resolveBaseCommit(repoPath, task.base) : await gitRevParse(repoPath, "HEAD") };
   const entryPath = resolveBundleEntryFromManifest(bundlePath, manifestRaw);
   let entryBytes: Buffer;
   try {
@@ -523,8 +587,7 @@ export async function intakeTask(taskPath: string): Promise<IntakePin> {
     taskPath: absoluteTask,
     taskDir,
     task,
-    repoPath,
-    pinnedHead,
+    repository,
     bundle: {
       graphId: manifest.graphId,
       version: manifest.version,
@@ -538,6 +601,33 @@ export async function intakeTask(taskPath: string): Promise<IntakePin> {
     ...(config !== undefined ? { config } : {}),
     grants: task.grants ?? { sourceRepair: false, validatorSubstitution: false },
     budgets,
+  };
+}
+
+/**
+ * Intake a task into a run's pin. A graph that works without a repository
+ * (`repository: "none"`) needs `privateRepository`, the path the run's private
+ * repository will have (`<stateDir>/repository`, made by `createPrivateRepository`
+ * once the run is authorized); intake itself writes nothing.
+ */
+export async function intakeTask(taskPath: string, options: { privateRepository?: string } = {}): Promise<IntakePin> {
+  const read = await readTaskIntake(taskPath);
+  const { repository } = read;
+  if (repository.mode === "none" && options.privateRepository === undefined) {
+    throw new IntakeError(`graph ${read.task.graph} works without a repository, so its runs have no default state root; pass --state-root <dir>`);
+  }
+  const repoPath = repository.mode === "git" ? repository.repoPath : path.resolve(options.privateRepository!);
+  // Key order is the saved state's: it is not reshuffled for runs that have a repository.
+  return {
+    taskPath: read.taskPath,
+    taskDir: read.taskDir,
+    task: read.task,
+    repoPath,
+    pinnedHead: repository.pinnedHead,
+    bundle: read.bundle,
+    ...(read.config !== undefined ? { config: read.config } : {}),
+    grants: read.grants,
+    budgets: read.budgets,
   };
 }
 
@@ -583,6 +673,35 @@ export function manifestRequiresConfig(manifestRaw: string): boolean {
   if (declared === undefined || declared === "optional") return false;
   if (declared === "required") return true;
   throw new IntakeError(`manifest taskConfig must be "required" or "optional", got ${JSON.stringify(declared)}`);
+}
+
+/** Whether a graph's runs need a git repository: `required` (the default) or `none` (a private one, made by the controller). */
+export type RepositoryMode = "required" | "none";
+
+/**
+ * A manifest's `repository` key, as `taskConfig` is: `"required"` when absent.
+ * `"optional"` (a task's own folder, snapshotted) is not built yet and is
+ * refused, so no bundle can depend on it before it exists.
+ */
+export function manifestRepository(manifestRaw: string): RepositoryMode {
+  const parsed: unknown = JSON.parse(manifestRaw);
+  if (!isJsonObject(parsed)) throw new IntakeError("manifest is not valid JSON");
+  const declared = parsed.repository;
+  if (declared === undefined || declared === "required") return "required";
+  if (declared === "none") return "none";
+  throw new IntakeError(`manifest repository must be "required" or "none", got ${JSON.stringify(declared)}`);
+}
+
+/**
+ * Why a plugin update to the bundle with `installedManifestRaw` is refused
+ * because it changes how the run got its repository, or undefined. A run's
+ * repository is fixed at intake; the pinned manifest says which kind it has.
+ */
+export function repositoryModeChange(pinnedManifestRaw: string, installedManifestRaw: string): string | undefined {
+  const started = manifestRepository(pinnedManifestRaw);
+  const installed = manifestRepository(installedManifestRaw);
+  if (started === installed) return undefined;
+  return `the installed bundle declares repository ${JSON.stringify(installed)} but this run was started with ${JSON.stringify(started)}; a plugin update cannot change it`;
 }
 
 /** Resolve relative path under base; reject traversal and absolute escapes. */

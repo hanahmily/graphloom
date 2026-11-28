@@ -42,6 +42,8 @@ export {
   resolveStateDir,
 } from "./controller.js";
 export { readInstalledBundlePin } from "./pin.js";
+export { manifestRepository, readTaskIntake, repositoryModeChange, type RepositoryMode, type TaskIntakeRead, type TaskRepository } from "./intake.js";
+export { createPrivateRepository, PRIVATE_REPOSITORY_COMMIT, PRIVATE_REPOSITORY_DIRECTORY } from "./private-repository.js";
 export { deleteManagedRun, type DeleteOptions } from "./delete-run.js";
 export { removeTree } from "./remove-tree.js";
 export type { DurableRunState, RunStatus, IntakePin, SupervisorOutcomeRecord, TaskConfigPin, VersionRecord } from "./controller.js";

@@ -17,7 +17,7 @@
  */
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { defaultStateRoot, intakeTask, type RehearsalReport } from "@graphloom/controller";
+import { defaultStateRoot, IntakeError, readTaskIntake, type RehearsalReport } from "@graphloom/controller";
 import { PROTOCOL_VERSION, stableHash } from "@graphloom/sdk";
 import { digestExecutorSource, packageRootOf } from "@graphloom/runner";
 import { codingAgentExecutorPackage } from "@graphloom/executor-coding-agent";
@@ -109,8 +109,13 @@ export async function runGate(taskPath: string, options: GateOptions = {}): Prom
     return { fingerprint: "", verdict: "skipped", notes: ["--skip-rehearsal: L0/L1 were not run"] };
   }
 
-  const intake = await intakeTask(taskPath);
-  const stateRoot = options.stateRoot ?? defaultStateRoot(intake.repoPath);
+  const intake = await readTaskIntake(taskPath);
+  // A graph that works without a repository has no default state root (it lives in the run's private repository).
+  let stateRoot = options.stateRoot;
+  if (stateRoot === undefined) {
+    if (intake.repository.mode === "none") throw new IntakeError(`graph ${intake.task.graph} works without a repository, so its runs have no default state root; pass --state-root <dir>`);
+    stateRoot = defaultStateRoot(intake.repository.repoPath);
+  }
   const runnerConfig = await loadRunnerConfig().catch(() => undefined);
   const checkReport = await check(taskPath);
 
@@ -124,8 +129,9 @@ export async function runGate(taskPath: string, options: GateOptions = {}): Prom
     // pinned repository revision: two tasks sharing a bundle/config/
     // environment but a different request or checkout can converge
     // differently, so a cached "ready" must not cross either boundary.
-    repoPath: intake.repoPath,
-    pinnedHead: intake.pinnedHead,
+    // A graph without a repository pins the private repository's constant commit; no path is part of it.
+    repoPath: intake.repository.mode === "git" ? intake.repository.repoPath : "none",
+    pinnedHead: intake.repository.pinnedHead,
     request: intake.task.request,
     // The task config changes what the graph describes and decides.
     ...(intake.config !== undefined ? { taskConfig: intake.config.sha256 } : {}),

@@ -8,6 +8,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import {
   IntakeError,
+  manifestRepository,
   MAX_TASK_CONFIG_BYTES,
   parseTaskYaml,
   resolveBundleEntryFromManifest,
@@ -158,6 +159,8 @@ export interface Loaded {
   version: string;
   entry: string;
   requiresConfig: boolean;
+  /** The manifest's `repository` mode: whether the graph's runs need a repository of the task's. */
+  repository: ReturnType<typeof manifestRepository>;
   /** The manifest's `loop` value as written, unchecked; undefined when the bundle declares none. */
   loop?: unknown;
 }
@@ -177,12 +180,19 @@ export async function loadBundle(out: string, graph: string): Promise<Loaded> {
   if (typeof manifest.version !== "string") throw new Refused("manifest has no version");
   const protocolProblem = sdkProtocolProblem(manifest.sdkProtocol);
   if (protocolProblem !== undefined) throw new Refused(protocolProblem);
+  let repository: ReturnType<typeof manifestRepository>;
+  try {
+    repository = manifestRepository(manifestRaw);
+  } catch (error) {
+    throw new Refused(error instanceof Error ? error.message : String(error));
+  }
   return {
     bundle,
     manifestRaw,
     version: manifest.version,
     entry: resolveBundleEntryFromManifest(bundle, manifestRaw),
     requiresConfig: manifest.taskConfig === "required",
+    repository,
     ...(manifest.loop !== undefined ? { loop: manifest.loop } : {}),
   };
 }
@@ -259,6 +269,9 @@ async function run(options: TaskNewOptions, out: (line: string) => void): Promis
   const outDir = path.resolve(cwd, options.out ?? ".");
   const graph = options.graph;
   const loaded = await loadBundle(outDir, graph);
+  // A task for such a graph names no repository, which `task new` (it composes `repo:` from `--repo`) does not write.
+  // Only `task new` refuses: `loop evaluate` reads the same bundle and has no use for a task.
+  if (loaded.repository === "none") throw new Refused(`graph ${graph} works without a repository; write task.yaml by hand`);
 
   let profileFile: string | undefined;
   let profile: unknown;

@@ -20,8 +20,10 @@ import {
   defaultRecoveryReserve,
   classifyAgentResult,
   createController,
+  createPrivateRepository,
   evaluateRehearsal,
-  intakeTask,
+  PRIVATE_REPOSITORY_COMMIT,
+  readTaskIntake,
   isClaimStale,
   loadRunState,
   readOwnerClaim,
@@ -37,6 +39,8 @@ import {
   type ContractOutcome,
   type DurableRunState,
   type InstallRecord,
+  type IntakePin,
+  type TaskIntakeRead,
   type ManagedRunGrant,
   type RehearsalReport,
   type ReplayReport,
@@ -205,7 +209,7 @@ function configOption(intake: Pick<DurableRunState["intake"], "config">): { conf
   return config !== undefined ? { config } : {};
 }
 
-async function describeBundle(intake: Awaited<ReturnType<typeof intakeTask>>): Promise<GraphDefinition> {
+async function describeBundle(intake: Pick<IntakePin, "bundle" | "config">): Promise<GraphDefinition> {
   const host = await createChildPluginHost({
     entryModule: resolveBundleEntry(intake),
     activeVersion: `${intake.bundle.graphId}@${intake.bundle.version}`,
@@ -231,7 +235,7 @@ async function describeBundle(intake: Awaited<ReturnType<typeof intakeTask>>): P
  * CLI process, which would run arbitrary bundle code with the CLI's own
  * full environment and filesystem access.
  */
-async function loadRehearsal(intake: Awaited<ReturnType<typeof intakeTask>>): Promise<GraphRehearsal | undefined> {
+async function loadRehearsal(intake: Pick<IntakePin, "bundle" | "config">): Promise<GraphRehearsal | undefined> {
   const entry = resolveBundleRehearsalEntry(intake);
   if (entry === undefined) return undefined;
   const host = await createChildPluginHost({
@@ -300,8 +304,26 @@ export interface EnvironmentCheckResult {
   error?: string;
 }
 
+/**
+ * Run `fn` with a repository for the task: the one it names, or (for a graph
+ * that works without one) a private repository made in a temporary directory,
+ * removed afterwards. Environment checks and probes use it; a run makes its own.
+ */
+async function withTaskRepository<T>(intake: Pick<TaskIntakeRead, "repository">, fn: (repoPath: string, pinnedHead: string) => Promise<T>): Promise<T> {
+  const { repository } = intake;
+  if (repository.mode === "git") return fn(repository.repoPath, repository.pinnedHead);
+  const scratch = await mkdtemp(path.join(os.tmpdir(), "graphloom-private-repository-"));
+  try {
+    const repoPath = path.join(scratch, "repository");
+    await createPrivateRepository(repoPath);
+    return await fn(repoPath, PRIVATE_REPOSITORY_COMMIT);
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
+}
+
 /** The graph's environment checks in the task's repository, with the bundle root a run's checks get. */
-export async function runEnvironmentChecks(intake: Awaited<ReturnType<typeof intakeTask>>, definition: GraphDefinition): Promise<EnvironmentCheckResult[]> {
+export async function runEnvironmentChecks(intake: Pick<IntakePin, "bundle">, definition: GraphDefinition, cwd: string): Promise<EnvironmentCheckResult[]> {
   const results: EnvironmentCheckResult[] = [];
   for (const c of definition.environment?.checks ?? []) {
     const [cmd, ...args] = c.argv;
@@ -312,7 +334,7 @@ export async function runEnvironmentChecks(intake: Awaited<ReturnType<typeof int
     try {
       // The same `$GRAPHLOOM_PLUGIN_ROOT` a run's checks get (packages/controller/src/prepare-cache.ts).
       const { stdout } = await execFileAsync(cmd, args, {
-        cwd: intake.repoPath,
+        cwd,
         timeout: c.timeoutMs ?? 10_000,
         env: { ...process.env, [PLUGIN_ROOT_ENV]: path.resolve(intake.bundle.bundlePath) },
       });
@@ -326,9 +348,9 @@ export async function runEnvironmentChecks(intake: Awaited<ReturnType<typeof int
 
 /** What `doctor --task` needs of a task (docs/design-release.md §4.4): its plugin loaded as `check` loads it, and its environment checks. */
 export async function describeTask(taskPath: string): Promise<{ definition: GraphDefinition; config?: string; environment: EnvironmentCheckResult[] }> {
-  const intake = await intakeTask(taskPath);
+  const intake = await readTaskIntake(taskPath);
   const definition = await describeBundle(intake);
-  const environment = await runEnvironmentChecks(intake, definition);
+  const environment = await withTaskRepository(intake, (repoPath) => runEnvironmentChecks(intake, definition, repoPath));
   return { definition, ...(intake.task.config !== undefined ? { config: intake.task.config } : {}), environment };
 }
 
@@ -425,7 +447,7 @@ export function scenarioTopologyProblems(definition: GraphDefinition, name: stri
 
 /** L0 (§3.1): the declared data agrees with itself and the environment's tools are present, for zero provider calls. */
 export async function check(taskPath: string): Promise<CheckReport> {
-  const intake = await intakeTask(taskPath);
+  const intake = await readTaskIntake(taskPath);
   const problems: string[] = [];
   const definition = await describeBundle(intake);
   // The run's final budgets: the graph's defaultBudgets under the task's, checked across budgets.
@@ -536,7 +558,7 @@ export async function check(taskPath: string): Promise<CheckReport> {
   }
 
   const environmentOutputs: Record<string, string> = {};
-  for (const result of await runEnvironmentChecks(intake, definition)) {
+  for (const result of await withTaskRepository(intake, (repoPath) => runEnvironmentChecks(intake, definition, repoPath))) {
     if (result.error !== undefined) problems.push(result.argv.length === 0 ? `environment check ${result.id}: empty argv` : `environment check ${result.id} failed: ${result.error}`);
     else environmentOutputs[result.id] = result.stdout ?? "";
   }
@@ -604,7 +626,7 @@ async function performRehearsal(
   const managed = options.managed;
   const absoluteTaskPath = path.resolve(taskPath);
   const taskDir = path.dirname(absoluteTaskPath);
-  const intake = await intakeTask(absoluteTaskPath);
+  const intake = await readTaskIntake(absoluteTaskPath);
   const rehearsalData = await loadRehearsal(intake);
   const definition = await describeBundle(intake);
   const scenarioName = options.scenario ?? "happy";
@@ -643,7 +665,7 @@ async function performRehearsal(
     tempTaskPath,
     // The task's own config path: the temporary task sits beside it, so the
     // rehearsal intakes the same config (and digest) a live run would.
-    `graph: ${intake.task.graph}\nrepo: ${intake.task.repo}\n${intake.task.base !== undefined ? `base: ${JSON.stringify(intake.task.base)}\n` : ""}${intake.task.config !== undefined ? `config: ${JSON.stringify(intake.task.config)}\n` : ""}request: |\n${requestBody}\nbudgets:\n${budgetLines}\n`,
+    `graph: ${intake.task.graph}\n${intake.task.repo !== undefined ? `repo: ${intake.task.repo}\n` : ""}${intake.task.base !== undefined ? `base: ${JSON.stringify(intake.task.base)}\n` : ""}${intake.task.config !== undefined ? `config: ${JSON.stringify(intake.task.config)}\n` : ""}request: |\n${requestBody}\nbudgets:\n${budgetLines}\n`,
     "utf8",
   );
 
@@ -1299,7 +1321,7 @@ export async function probe(
 ): Promise<ProbeReport> {
   // A probe cannot work without the runner config: refuse before the rehearsal it starts with (docs/design-release.md §4.5).
   const runnerConfig = overrideRunner === undefined ? await requireRunnerConfig() : undefined;
-  const intake = await intakeTask(path.resolve(taskPath));
+  const intake = await readTaskIntake(path.resolve(taskPath));
   const definition = await describeBundle(intake);
   const contract = definition.resultContracts?.find((c) => c.name === options.contract);
   if (contract === undefined) {
@@ -1329,7 +1351,7 @@ export async function probe(
   let providerCalls = 0;
   const probeDir = await mkdtemp(path.join(os.tmpdir(), "graphloom-probe-"));
   try {
-    return await withDisposableWorktree(intake.repoPath, intake.pinnedHead, async (worktreePath) => {
+    return await withTaskRepository(intake, (repoPath, pinnedHead) => withDisposableWorktree(repoPath, pinnedHead, async (worktreePath) => {
       const result = await runner.runJob(
         {
           stageId: "probe",
@@ -1374,7 +1396,7 @@ export async function probe(
         providerCalls,
         ...(output !== undefined ? { check: checkContract(output, contract, knownReferences) } : {}),
       };
-    });
+    }));
   } finally {
     await rm(probeDir, { recursive: true, force: true });
   }

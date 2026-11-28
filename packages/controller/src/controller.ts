@@ -36,7 +36,7 @@ import type { AdmissionValidator } from "./admit.js";
 import { resolveBundleEntry } from "./bundle.js";
 import { createHostValidators } from "./host-validators.js";
 import { applyApproval, approvalRefusal, type ApprovalRequest } from "./approvals.js";
-import { applyGraphDefaultBudgets, intakeTask, protocolLevelChange, sdkProtocolProblem, taskConfigValue, topologyLevelProblem, type IntakePin } from "./intake.js";
+import { applyGraphDefaultBudgets, intakeTask, manifestRepository, protocolLevelChange, repositoryModeChange, sdkProtocolProblem, taskConfigValue, topologyLevelProblem, type IntakePin } from "./intake.js";
 import { assertSafeRunId } from "./ids.js";
 import { withDirectoryLock } from "./lock.js";
 import { deleteRun, type DeleteReport } from "./delete-run.js";
@@ -51,6 +51,7 @@ import {
 import { sanitizedPluginEnv } from "./plugin-env.js";
 import { evidenceReaderFor, evidenceStoreDir, validatorInput } from "./evidence.js";
 import { assertPinnedBundleUnchanged, readInstalledBundlePin } from "./pin.js";
+import { createPrivateRepository, PRIVATE_REPOSITORY_DIRECTORY } from "./private-repository.js";
 import {
   claimRunOwner,
   clearOwnerClaim,
@@ -442,9 +443,16 @@ export function defaultStateRoot(repoPath: string): string {
 export function createController(): Controller {
   return {
     async run(request: RunRequest): Promise<RunReport> {
-      const taskIntake = await intakeTask(request.taskPath);
+      // A graph that works without a repository gets a private one inside the
+      // run's state directory, so its path needs the run id; with no state root
+      // there is none (intake refuses). It is made below, once the run is authorized.
+      const proposedRunId = request.runId ?? randomUUID().slice(0, 12);
+      const taskIntake = await intakeTask(
+        request.taskPath,
+        request.stateRoot !== undefined ? { privateRepository: path.join(request.stateRoot, proposedRunId, PRIVATE_REPOSITORY_DIRECTORY) } : {},
+      );
       const intake = request.rehearsalGate !== undefined ? { ...taskIntake, rehearsalGate: request.rehearsalGate } : taskIntake;
-      const runId = assertSafeRunId(request.runId ?? randomUUID().slice(0, 12));
+      const runId = assertSafeRunId(proposedRunId);
       const stateRoot = request.stateRoot ?? defaultStateRoot(intake.repoPath);
       return withDirectoryLock(stateRoot, `intake-${runId}.lock`, async () => {
         const intakeDir = path.join(stateRoot, runId);
@@ -517,6 +525,7 @@ export function createController(): Controller {
             },
           );
 
+          if (manifestRepository(intake.bundle.manifestRaw) === "none") await createPrivateRepository(intake.repoPath);
           const sourceDirtyBefore = await listDirtyPaths(intake.repoPath);
           const { worktreePath, branchName } = await createRunWorktree(
             intake.repoPath,
@@ -820,6 +829,8 @@ export function createController(): Controller {
             if (installed.manifestDigest !== state.intake.bundle.manifestDigest || installed.entryDigest !== state.intake.bundle.entryDigest) {
               const levelChange = protocolLevelChange(state.intake.bundle.sdkProtocol, installed.sdkProtocol);
               if (levelChange !== undefined) throw new Error(levelChange);
+              const repositoryChange = repositoryModeChange(state.intake.bundle.manifestRaw, installed.manifestRaw);
+              if (repositoryChange !== undefined) throw new Error(repositoryChange);
               pluginUpdate = installed;
             }
           }
@@ -1623,6 +1634,8 @@ async function checkPluginUpdate(state: DurableRunState, request: ResumeRequest)
     if (protocolProblem !== undefined) return `the installed bundle: ${protocolProblem}`;
     const levelChange = protocolLevelChange(state.intake.bundle.sdkProtocol, installed.sdkProtocol);
     if (levelChange !== undefined) return levelChange;
+    const repositoryChange = repositoryModeChange(state.intake.bundle.manifestRaw, installed.manifestRaw);
+    if (repositoryChange !== undefined) return repositoryChange;
     const intake: IntakePin = { ...state.intake, bundle: installed };
     host = await openHost({
       intake,

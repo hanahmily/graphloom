@@ -519,6 +519,39 @@ describe("resume --upgrade (docs/design-release.md §5.2)", () => {
     expect(await snapshot(stateDir)).toEqual(before);
   });
 
+  it("refuses --upgrade --update-plugin to a bundle that stops needing a repository, with the run unchanged", async () => {
+    const { env, stateDir } = await stoppedRun("up-repo");
+    // The run has its task's repository; the installed bundle now says it works without one.
+    await writeFile(path.join(env.taskDir, "plugins", "fixture", "graphloom.manifest.json"), manifestAt(1, { repository: "none" }), "utf8");
+    const before = await snapshot(stateDir);
+    await expect(
+      createController().resume({
+        runRef: stateDir,
+        plugin: createScriptedGraph({ definition, advances: REVIEW_STEPS }),
+        validators,
+        runner: reviewRunner(),
+        updatePlugin: true,
+        upgrade: { install: target },
+      }),
+    ).rejects.toThrow('--update-plugin: the installed bundle declares repository "none" but this run was started with "required"; a plugin update cannot change it');
+    expect(await snapshot(stateDir)).toEqual(before);
+  });
+
+  it("refuses a plain --update-plugin resume to a bundle that stops needing a repository, stopping the run on its pin", async () => {
+    const { env, stateDir } = await stoppedRun("up-repo-plain");
+    await writeFile(path.join(env.taskDir, "plugins", "fixture", "graphloom.manifest.json"), manifestAt(1, { repository: "none" }), "utf8");
+    const report = await createController().resume({
+      runRef: stateDir,
+      plugin: createScriptedGraph({ definition, advances: REVIEW_STEPS }),
+      validators,
+      runner: reviewRunner(),
+      updatePlugin: true,
+    });
+    expect(report).toMatchObject({ status: "stopped", stopReason: "pin mismatch" });
+    expect(report.blocker).toBe('the installed bundle declares repository "none" but this run was started with "required"; a plugin update cannot change it');
+    expect((await loadRunState(stateDir)).intake.bundle.manifestRaw).not.toContain('"repository"');
+  });
+
   it("refuses --upgrade --update-plugin to a graph that declares edges, with the run unchanged (docs/design-graph-topology.md §7.3)", async () => {
     // A level-2 bundle without edges runs as an implicit chain; an update that declares edges would change its topology.
     const { env, stateDir } = await stoppedRun("up-edges", { ...BUNDLE_FILES, "graphloom.manifest.json": manifestAt(2) });
