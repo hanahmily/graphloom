@@ -17,11 +17,11 @@ import { readFile, readlink, realpath } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs, runMain, walk } from "./lib.mjs";
-import { CORE_PACKAGES } from "./assemble.mjs";
+import { corePackages } from "./assemble.mjs";
 import { foreignPackages, parseTarget } from "./prune-tree.mjs";
 
 /** Core packages ship only `package.json` and `dist/` (§2.3). */
-export const DIST_ONLY = CORE_PACKAGES;
+export const distOnly = corePackages;
 
 /** Paths §2.3 excludes, relative to the tree root. */
 export const EXCLUDED = ["packages/testkit", "docs", ".github", "examples/skywalking-banyandb", "graphloom", "examples/graphloom", "release-out"];
@@ -62,7 +62,7 @@ export async function checkTree(root, { forbid = [], platform = "linux-x64", lib
   for (const prefix of EXCLUDED) {
     if (entries.some((e) => isUnder(e.rel, prefix))) problems.push(`excluded path present: ${prefix}`);
   }
-  for (const pkg of DIST_ONLY) {
+  for (const pkg of distOnly(rootAbs)) {
     for (const e of entries) {
       if (!e.rel.startsWith(`${pkg}/`)) continue;
       const sub = e.rel.slice(pkg.length + 1);

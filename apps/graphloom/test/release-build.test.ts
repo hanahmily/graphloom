@@ -266,7 +266,8 @@ describe("the release tree content checks (§2.3, §6 step 6)", () => {
   /** The smallest tree that passes: a core package with dist/ only, a dependency with a portable shebang and a relative .bin link. */
   async function cleanTree() {
     const root = await tempDir();
-    await writeFile(path.join(root, "package.json"), "{}");
+    // The real tree keeps the root package.json's workspaces: the core packages are derived from them.
+    await writeFile(path.join(root, "package.json"), JSON.stringify({ workspaces: ["packages/*", "executors/*", "apps/*", "examples/plugins/*"] }));
     await writePackage(path.join(root, "packages", "sdk"), { name: "@graphloom/sdk" });
     await mkdir(path.join(root, "packages", "sdk", "dist"));
     await writeFile(path.join(root, "packages", "sdk", "dist", "index.js"), "export {};\n");
@@ -346,8 +347,8 @@ describe("the release tree content checks (§2.3, §6 step 6)", () => {
 
 describe("the shipped source holds no credential-shaped string (§2.3, §6 step 6)", () => {
   it("finds none in the tracked files a release copies from source, so a fixture fails here and not at release time", async () => {
-    const { CREDENTIAL_PATTERNS, DIST_ONLY, EXCLUDED } = (await import(path.join(repoRoot, "scripts", "release", "check-tree.mjs"))) as { CREDENTIAL_PATTERNS: { name: string; re: RegExp }[]; DIST_ONLY: string[]; EXCLUDED: string[] };
-    const skipped = [...EXCLUDED, ...DIST_ONLY].map((p) => `${p}/`);
+    const { CREDENTIAL_PATTERNS, distOnly, EXCLUDED } = (await import(path.join(repoRoot, "scripts", "release", "check-tree.mjs"))) as { CREDENTIAL_PATTERNS: { name: string; re: RegExp }[]; distOnly: (root: string) => string[]; EXCLUDED: string[] };
+    const skipped = [...EXCLUDED, ...distOnly(repoRoot)].map((p) => `${p}/`);
     const files = spawnSync("git", ["ls-files", "-z"], { cwd: repoRoot, encoding: "utf8" }).stdout.split("\0").filter((f) => f !== "" && !skipped.some((p) => f.startsWith(p)));
     expect(files.length).toBeGreaterThan(100);
     const found: string[] = [];

@@ -20,7 +20,7 @@
     "@graphloom/executor-github": "0.2.3",
     "@graphloom/controller": "0.2.0",
     "@graphloom/hub": "0.2.0",
-    "@graphloom/loop": "0.1.0",
+    "@graphloom/loop": "0.2.0",
     "@graphloom/monitor": "0.2.0",
     "@graphloom/plugin-host": "0.2.0",
     "@graphloom/runner": "0.2.0",

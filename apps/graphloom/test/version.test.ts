@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { execFile, execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -92,8 +92,24 @@ describe("the product version (§3)", () => {
   it("is the root package.json version, carried in lockstep by every core package, the SDK, and the CLI", async () => {
     const version = (rel: string) => readFile(path.join(repoRoot, rel, "package.json"), "utf8").then((raw) => (JSON.parse(raw) as { version: string }).version);
     const product = await version(".");
-    for (const rel of ["packages/sdk", "packages/agent-harness", "packages/controller", "packages/plugin-host", "packages/supervisor", "packages/runner", "packages/hub", "packages/monitor", "apps/graphloom"]) {
+    const { corePackages } = (await import(path.join(repoRoot, "scripts", "release", "assemble.mjs"))) as { corePackages: (root: string) => string[] };
+    const core = corePackages(repoRoot);
+    expect(core).toEqual(expect.arrayContaining(["packages/sdk", "packages/hub", "packages/loop", "apps/graphloom"]));
+    expect(core).not.toContain("packages/testkit");
+    for (const rel of core) {
       expect(`${rel} ${await version(rel)}`).toBe(`${rel} ${product}`);
     }
+  });
+
+  it("ships every GraphLoom package the CLI depends on: a core package or an executor", async () => {
+    const { corePackages } = (await import(path.join(repoRoot, "scripts", "release", "assemble.mjs"))) as { corePackages: (root: string) => string[] };
+    const nameOf = async (rel: string) => (JSON.parse(await readFile(path.join(repoRoot, rel, "package.json"), "utf8")) as { name: string }).name;
+    const shipped = new Set<string>();
+    for (const rel of corePackages(repoRoot)) shipped.add(await nameOf(rel));
+    for (const entry of await readdir(path.join(repoRoot, "executors"), { withFileTypes: true })) {
+      if (entry.isDirectory()) shipped.add(await nameOf(`executors/${entry.name}`));
+    }
+    const cliDeps = Object.keys((JSON.parse(await readFile(path.join(repoRoot, "apps/graphloom/package.json"), "utf8")) as { dependencies: Record<string, string> }).dependencies);
+    expect(cliDeps.filter((dep) => dep.startsWith("@graphloom/") && !shipped.has(dep))).toEqual([]);
   });
 });
