@@ -35,7 +35,7 @@ async function stubDocker(runExit: number, oomKilled: boolean) {
 printf '%s\\n' "$*" >> "${dir}/calls"
 case "$1" in
   run) exit ${runExit} ;;
-  inspect) echo ${oomKilled ? "true" : "false"}; exit 0 ;;
+  inspect) echo ${oomKilled ? "true" : "false"} exited; exit 0 ;;
   info) echo '[]'; exit 0 ;;
   *) exit 0 ;;
 esac
@@ -95,7 +95,7 @@ describe("docker-confined jobs' memory", () => {
     const run = calls.find((call) => call.startsWith("run "))!;
     expect(run).toContain("--memory 6g --memory-swap 6g");
     expect(run).not.toContain("--rm");
-    expect(calls).toContainEqual(expect.stringMatching(/^inspect --format \{\{\.State\.OOMKilled\}\} graphloom-run-memory-/));
+    expect(calls).toContainEqual(expect.stringMatching(/^inspect --format \{\{\.State\.OOMKilled\}\} \{\{\.State\.Status\}\} graphloom-run-memory-/));
     expect(calls).toContainEqual(expect.stringMatching(/^rm -f -v graphloom-run-memory-/));
   });
 
@@ -106,5 +106,53 @@ describe("docker-confined jobs' memory", () => {
     const sandbox = (result.evidence![0]!.payload as { command: { sandbox: Record<string, unknown> } }).command.sandbox;
     expect(sandbox).toEqual({ kind: "docker", image: IMAGE, memory: "4g" });
     expect((await stub.calls()).find((call) => call.startsWith("run "))).toContain("--memory 4g --memory-swap 4g");
+  });
+});
+
+/** A stub whose `inspect` says `false exited` for its first `falseReads` calls and `true exited` after (never true if `Infinity`). */
+async function lateOomDocker(runExit: number, falseReads: number) {
+  const stub = await stubDocker(runExit, false);
+  await writeFile(path.join(stub.dir, "docker"), `#!/bin/sh
+printf '%s\\n' "$*" >> "${stub.dir}/calls"
+case "$1" in
+  run) exit ${runExit} ;;
+  inspect)
+    n=$(grep -c '^inspect ' "${stub.dir}/calls")
+    if [ "$n" -le ${Number.isFinite(falseReads) ? falseReads : 1_000_000} ]; then echo "false exited"; else echo "true exited"; fi
+    exit 0 ;;
+  *) exit 0 ;;
+esac
+`);
+  return { ...stub, inspects: async () => (await stub.calls()).filter((call) => call.startsWith("inspect ")).length };
+}
+
+describe("the wrapper reads the OOM flag after an exit 137", () => {
+  it("re-reads it until the daemon has set it, when the first reads say false", async () => {
+    const stub = await lateOomDocker(137, 3);
+    const result = await withDockerConfinement(commandRunner, { maxMemory: "6g" }).runJob(job("4g"), context(stub.dir, stub.work));
+    expect(result.summary).toContain("test: the container was killed at its memory limit");
+    const sandbox = (result.evidence![0]!.payload as { command: { sandbox: Record<string, unknown> } }).command.sandbox;
+    expect(sandbox).toMatchObject({ oomKilled: true });
+    expect(await stub.inspects()).toBe(4);
+    expect(await stub.calls()).toContainEqual(expect.stringMatching(/^rm -f -v graphloom-run-memory-/));
+  });
+
+  it("gives up within its bound when the flag is never set, and reports exit 137 alone", async () => {
+    const stub = await lateOomDocker(137, Infinity);
+    const started = Date.now();
+    const result = await withDockerConfinement(commandRunner, { maxMemory: "6g" }).runJob(job("4g"), context(stub.dir, stub.work));
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(result.summary).toBe("test exited 137");
+    const sandbox = (result.evidence![0]!.payload as { command: { sandbox: Record<string, unknown> } }).command.sandbox;
+    expect(sandbox).not.toHaveProperty("oomKilled");
+    expect(await stub.inspects()).toBe(5);
+    expect(await stub.calls()).toContainEqual(expect.stringMatching(/^rm -f -v graphloom-run-memory-/));
+  });
+
+  it("does not inspect at all after an exit other than 137", async () => {
+    const stub = await lateOomDocker(1, 0);
+    const result = await withDockerConfinement(commandRunner, { maxMemory: "6g" }).runJob(job("4g"), context(stub.dir, stub.work));
+    expect(result.summary).toBe("test exited 1");
+    expect(await stub.inspects()).toBe(0);
   });
 });
