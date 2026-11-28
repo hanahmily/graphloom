@@ -13,6 +13,7 @@ import { withDirectoryLock } from "./lock.js";
 import { isClaimStale, readOwnerClaim } from "./owner.js";
 import { loadRunState } from "./state.js";
 import { runStateDirKey, workspaceChangeManifest } from "./worktree.js";
+import { PRIVATE_REPOSITORY_DIRECTORY, isPrivateRepository } from "./private-repository.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -57,7 +58,13 @@ export async function deleteRun(stateDir: string, options: DeleteOptions = {}): 
     if (state.worktreePath !== worktreePath) throw refuse(`its worktree ${state.worktreePath} is not ${worktreePath}`);
     if (state.worktreeBranch !== branch) throw refuse(`its branch ${state.worktreeBranch} is not ${branch}`);
 
-    await withDirectoryLock(repo, ".graphloom-repo.lock", async () => {
+    // A run of a graph that works without a repository keeps a private one in its state directory. If an
+    // interrupted delete took it before `state.json`, there is nothing to unregister, and taking the lock
+    // would recreate it as an empty directory that `git worktree prune` then fails in: skip the git steps.
+    const isPrivate = path.resolve(repo) === path.join(path.resolve(stateDir), PRIVATE_REPOSITORY_DIRECTORY);
+    // Only a private repository that is still whole (GraphLoom's marker and its fixed commit) is asked about branches and
+    // worktrees; one a crash left half-removed has no owner record to read, and everything in it goes with the state directory.
+    if (!isPrivate || (await isGitRepository(repo) && await isPrivateRepository(repo))) await withDirectoryLock(repo, ".graphloom-repo.lock", async () => {
       const hasWorktree = existsSync(worktreePath);
       const tip = await git(repo, "rev-parse", "--verify", "--quiet", `refs/heads/${branch}`).catch(() => undefined);
       if (hasWorktree || tip !== undefined) {
@@ -91,9 +98,11 @@ export async function deleteRun(stateDir: string, options: DeleteOptions = {}): 
       await git(repo, "config", "--unset", runStateDirKey(branch)).catch(() => undefined);
     });
 
+    // The private repository goes last, just before `state.json`: until then it is whole for a retry.
     for (const entry of await readdir(stateDir)) {
-      if (entry !== "state.json" && entry !== "run.exec.lock") await removeTree(path.join(stateDir, entry));
+      if (entry !== "state.json" && entry !== "run.exec.lock" && entry !== PRIVATE_REPOSITORY_DIRECTORY) await removeTree(path.join(stateDir, entry));
     }
+    await removeTree(path.join(stateDir, PRIVATE_REPOSITORY_DIRECTORY));
     await removeTree(path.join(stateDir, "state.json"));
     return { runId, stateDir, worktreePath, branch };
   });
@@ -115,7 +124,9 @@ export async function deleteManagedRun(stateDir: string, options: { hubStateDir:
   if (!existsSync(stateDir)) return undefined;
   const managed = { hubStateDir: options.hubStateDir, submissionId: options.submissionId };
   if (existsSync(path.join(stateDir, "state.json"))) return deleteRun(stateDir, { managed, ...(options.force === true ? { force: true } : {}) });
-  const repo = options.repoPath;
+  // A run of a graph that works without a repository keeps a private one inside its state directory.
+  const privateRepository = path.join(stateDir, PRIVATE_REPOSITORY_DIRECTORY);
+  const repo = existsSync(path.join(privateRepository, ".git")) ? privateRepository : options.repoPath;
   const worktreePath = path.join(repo, "graphloom", runId);
   const branch = `graphloom/${runId}`;
   await withDirectoryLock(stateDir, "run.exec.lock", async () => {
@@ -172,6 +183,12 @@ async function isRegisteredWorktree(repo: string, worktreePath: string): Promise
   const wanted = await canonical(worktreePath);
   for (const item of listed) if (item === worktreePath || await canonical(item) === wanted) return true;
   return false;
+}
+
+/** Whether `dir` is itself a git repository (not a directory inside one, nor an empty one). */
+async function isGitRepository(dir: string): Promise<boolean> {
+  if (!existsSync(path.join(dir, ".git"))) return false;
+  return git(dir, "rev-parse", "--git-dir").then((out) => out === ".git", () => false);
 }
 
 async function canonical(dir: string): Promise<string> {

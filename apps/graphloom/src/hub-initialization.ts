@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import type { HubLaunch, HubObservation, HubSubmission } from "@graphloom/sdk";
+import { parseTaskYaml } from "@graphloom/controller";
 import { boundedText } from "./hub-input.js";
 
 /** Missing state authorizes replay only before the controller's durable execution marker. */
@@ -33,7 +34,12 @@ export async function observeInitialization(stateDir: string, submission: HubSub
           binding.generation === launch.generation && binding.launchId !== launch.id) throw new Error("managed initialization binding does not match its launch");
       if (typeof binding.intakeDigest !== "string" || !/^[a-f0-9]{64}$/.test(binding.intakeDigest)) throw new Error("managed initialization intake identity is missing");
       intakeDigest = binding.intakeDigest;
+      // A task with no `repo:` runs in a private repository the controller makes inside the state directory.
+      const ownsRepository = await boundedText(submission.input.taskFile, 256 * 1024).then((text) => parseTaskYaml(text).repo === undefined, () => false);
       for (const entry of entries) {
+        if (ownsRepository && entry.name === "repository" && entry.isDirectory()) continue;
+        // A crash inside createPrivateRepository leaves its building directory; the replay removes it before building again.
+        if (ownsRepository && entry.name === "repository.creating" && entry.isDirectory()) continue;
         if (entry.name === "artifacts" && entry.isDirectory() && (await readdir(path.join(stateDir, entry.name))).length === 0) continue;
         if (entry.isFile() && (["managed-run.json", "run.owner.json"].includes(entry.name) || /^state\.\d+\.[a-f0-9-]{36}\.tmp$/.test(entry.name))) continue;
         throw new Error(`initialization contains an unexpected artifact: ${entry.name}`);

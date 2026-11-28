@@ -159,6 +159,16 @@ describe("graphloom loop evaluate: a bundle with no reads", () => {
     expect(r.text).toContain("day:2026-03-04");
   });
 
+  it("evaluates a graph that works without a repository (repository none), the hub janitor's shape", async () => {
+    const w = await world();
+    await bundle(w.out, "janitor", DAILY.replace('graphId: "daily"', 'graphId: "janitor"'), { protocol: 1, reads: [] });
+    const manifest = path.join(w.out, "plugins", "janitor", "graphloom.manifest.json");
+    await writeFile(manifest, JSON.stringify({ ...JSON.parse(await readFile(manifest, "utf8")), repository: "none" }));
+    const r = await evaluateCli(w, { graph: "janitor", now: NOW });
+    expect(r).toMatchObject({ code: 0 });
+    expect(r.text).toContain("day:2026-03-04");
+  });
+
   it("uses the current UTC instant without --now", async () => {
     const w = await world();
     const before = new Date().toISOString().slice(0, 10);

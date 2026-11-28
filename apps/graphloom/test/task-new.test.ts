@@ -302,13 +302,26 @@ describe("graphloom task new: dry runs, overwrites and refusals", () => {
     expect(text).toContain("Report at ${headSha}.");
   }, 60_000);
 
+  it("refuses a graph that works without a repository, before any step runs", async () => {
+    const w = await worldWithMain();
+    const dir = await stubBundle(w.out, "stub");
+    const manifest = path.join(dir, "graphloom.manifest.json");
+    await writeFile(manifest, JSON.stringify({ ...JSON.parse(await readFile(manifest, "utf8")), repository: "none" }));
+    for (const dryRun of [false, true]) {
+      const r = await run({ graph: "stub", args: ["plan", fetchPlan(w, [], {})], repo: w.repo.path, out: w.out, dryRun });
+      expect(r.code).toBe(2);
+      expect(r.errors.join("\n")).toContain("graph stub works without a repository; write task.yaml by hand");
+    }
+    expect(await w.repo.git("for-each-ref", "--format=%(refname)", "refs/graphloom")).toBe("");
+  }, 60_000);
+
   it("refuses a plan whose task cannot be composed before any step runs, in a dry run too", async () => {
     const w = await worldWithMain();
     await stubBundle(w.out, "stub");
     for (const dryRun of [false, true]) {
       const r = await run({ graph: "stub", args: ["plan", fetchPlan(w, [], {})], repo: w.repo.path, out: w.out, dryRun });
       expect(r.code).toBe(2);
-      expect(r.errors.join("\n")).toMatch(/must declare graph, repo, and request|cannot be written/);
+      expect(r.errors.join("\n")).toMatch(/must declare graph and request|cannot be written/);
     }
     expect(await w.repo.git("for-each-ref", "--format=%(refname)", "refs/graphloom")).toBe("");
   }, 60_000);

@@ -59,4 +59,21 @@ describe("incomplete managed initialization observations", () => {
     await mkdir(path.join(f.submission.input.repoPath, "graphloom", f.submission.runId), { recursive: true });
     expect(await observeInitialization(f.stateDir, f.submission, f.launch)).toMatchObject({ continuation: { kind: "terminal" } });
   });
+  it("treats the private repository's half-made sibling as the leftover of a crash the replay clears, for a task with no repo only", async () => {
+    const withTask = async (text: string) => {
+      const f = await fixture(); await f.bind();
+      await mkdir(path.dirname(f.submission.input.taskFile), { recursive: true }); await writeFile(f.submission.input.taskFile, text);
+      await mkdir(path.join(f.stateDir, "repository.creating", ".git"), { recursive: true });
+      return f;
+    };
+    const none = await withTask("graph: tidy\nrequest: x\n");
+    expect(await observeInitialization(none.stateDir, none.submission, none.launch)).toMatchObject({ continuation: { kind: "automatic", cause: "initialization-failed" } });
+    // A task that names a repository never makes one in the state directory.
+    const named = await withTask("graph: tidy\nrepo: ./repo\nrequest: x\n");
+    expect(await observeInitialization(named.stateDir, named.submission, named.launch)).toMatchObject({ continuation: { kind: "terminal", cause: "initialization-failed" }, blocker: expect.stringContaining("repository.creating") });
+    // Only that exact name, and only a directory.
+    const other = await withTask("graph: tidy\nrequest: x\n");
+    await writeFile(path.join(other.stateDir, "repository.creating.old"), "x");
+    expect(await observeInitialization(other.stateDir, other.submission, other.launch)).toMatchObject({ continuation: { kind: "terminal" } });
+  });
 });

@@ -19,7 +19,7 @@ import { hydrateEvidenceBestEffort } from "./evidence.js";
 import { type AdmissionValidator } from "./admit.js";
 import { nodeChanges, restartAtStart, topologyChanges } from "./traversal.js";
 import { resolveBundleEntryFromManifest } from "./bundle.js";
-import { manifestRepairContract } from "./intake.js";
+import { manifestRepairContract, manifestRepository } from "./intake.js";
 import { activateRefusal, inadmissible, qualifyRefusal } from "./inadmissible.js";
 import {
   assertCandidateFullyReviewed,
@@ -548,6 +548,10 @@ async function assertCandidateManifestCompatible(
     if (JSON.stringify(manifest[field]) !== JSON.stringify(pinned[field])) {
       throw new Error(`candidate manifest alters pinned ${field}`);
     }
+  }
+  // How the run got its repository is fixed at intake (absent and "required" are the same).
+  if (manifestRepository(JSON.stringify(manifest)) !== manifestRepository(state.intake.bundle.manifestRaw)) {
+    throw new Error("candidate manifest alters pinned repository");
   }
   if (manifest.requirements === undefined) {
     if (pinned.requirements !== undefined) {
