@@ -50,12 +50,15 @@ export function confinementUnsupported(): Promise<string | undefined> {
   return bubblewrap;
 }
 
+/** The longest the namespace probe may run; it normally takes milliseconds. */
+const BWRAP_PROBE_TIMEOUT_MS = 10_000;
+
 async function probeBubblewrap(): Promise<string | undefined> {
   if (process.platform !== "linux") {
     return `write confinement needs Linux bubblewrap and is not available on ${process.platform}`;
   }
   const once = () =>
-    new Promise<{ code: number | null; stderr: string; status: BwrapStatus } | "missing">((resolve) => {
+    new Promise<{ code: number | null; stderr: string; status: BwrapStatus; timedOut?: true } | "missing">((resolve) => {
       const child = spawn(
         "bwrap",
         ["--ro-bind", "/", "/", "--dev", "/dev", "--unshare-pid", "--proc", "/proc", "--json-status-fd", "3", "true"],
@@ -66,8 +69,19 @@ async function probeBubblewrap(): Promise<string | undefined> {
       child.stderr!.setEncoding("utf8");
       child.stderr!.on("data", (c: string) => stderr.push(c));
       status.read(child.stdio[3] as NodeJS.ReadableStream);
-      child.once("error", () => resolve("missing"));
-      child.once("close", (code) => resolve({ code, stderr: stderr.join(""), status }));
+      // A bwrap that never returns would hang every caller (`graphloom doctor`, a run's first confined job).
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        resolve({ code: null, stderr: stderr.join(""), status, timedOut: true });
+      }, BWRAP_PROBE_TIMEOUT_MS);
+      child.once("error", () => {
+        clearTimeout(timer);
+        resolve("missing");
+      });
+      child.once("close", (code) => {
+        clearTimeout(timer);
+        resolve({ code, stderr: stderr.join(""), status });
+      });
     });
   for (let attempt = 1; ; attempt += 1) {
     const result = await once();
@@ -78,6 +92,7 @@ async function probeBubblewrap(): Promise<string | undefined> {
       await delay(sandboxSetupBackoffMs(attempt));
       continue;
     }
+    if (result.timedOut === true) return `bubblewrap (bwrap) did not finish its probe within ${BWRAP_PROBE_TIMEOUT_MS} ms, so write confinement is treated as unavailable`;
     return "bubblewrap (bwrap) cannot create a mount namespace here (unprivileged user namespaces may be disabled)";
   }
 }
