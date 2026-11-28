@@ -105,3 +105,29 @@ export function validateLoopReply(reply: unknown, limits: LoopReplyLimits): Loop
   }
   return reply as LoopCandidatesReply;
 }
+
+/** A bundle's manifest `loop` key: the hook's protocol level and the executors its hook may ask to read. */
+export interface LoopManifest { protocol: number; reads: string[] }
+
+export const MAX_LOOP_MANIFEST_READS = 16;
+const MAX_READ_EXECUTOR_LENGTH = 200;
+
+/**
+ * Check a manifest's `loop` value; returns it typed, or throws a LoopReplyError naming the rule.
+ * A protocol level other than 1 is not refused here as malformed: the caller reads `protocol` and
+ * says which levels it supports; this only checks the shape.
+ */
+export function validateLoopManifest(value: unknown): LoopManifest {
+  if (!plain(value)) throw new LoopReplyError("manifest loop must be an object");
+  extras("manifest loop", value, ["protocol", "reads"]);
+  if (typeof value.protocol !== "number" || !Number.isInteger(value.protocol) || value.protocol < 1) throw new LoopReplyError("manifest loop.protocol must be a positive integer");
+  if (!Array.isArray(value.reads)) throw new LoopReplyError("manifest loop.reads must be an array");
+  if (value.reads.length > MAX_LOOP_MANIFEST_READS) throw new LoopReplyError(`manifest loop.reads has more than ${MAX_LOOP_MANIFEST_READS} entries`);
+  const seen = new Set<string>();
+  for (const [i, id] of value.reads.entries()) {
+    if (typeof id !== "string" || id === "" || id.length > MAX_READ_EXECUTOR_LENGTH || /\s/.test(id)) throw new LoopReplyError(`manifest loop.reads[${i}] must be a string of 1 to ${MAX_READ_EXECUTOR_LENGTH} characters with no whitespace`);
+    if (seen.has(id)) throw new LoopReplyError(`manifest loop.reads lists ${JSON.stringify(id)} twice`);
+    seen.add(id);
+  }
+  return value as unknown as LoopManifest;
+}

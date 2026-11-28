@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
-import type { EvidencePartReader, GraphDecision, GraphDefinition, GraphRehearsal, PrepareTaskInput, PrepareTaskReply, RunView, ValidationInput, ValidationResult } from "@graphloom/sdk";
+import type { EvidencePartReader, GraphDecision, GraphDefinition, GraphRehearsal, LoopCandidatesInput, PrepareTaskInput, PrepareTaskReply, RunView, ValidationInput, ValidationResult } from "@graphloom/sdk";
 
 /** Non-durable observation returned instead of applying a plugin result. */
 export interface ChildObservation {
@@ -60,6 +60,11 @@ export interface PluginHost {
    * returned it, unvalidated, or undefined when the graph has no such hook.
    */
   prepareTask?(ctx: CallContext, input: PrepareTaskInput): Promise<HostResult<PrepareTaskReply | undefined>>;
+  /**
+   * The graph's `loopCandidates` hook (docs/design-loop.md section 14): the reply as the plugin returned it,
+   * unvalidated, or undefined when the graph has no such hook.
+   */
+  loopCandidates?(ctx: CallContext, input: LoopCandidatesInput): Promise<HostResult<unknown>>;
   close(): Promise<void>;
 }
 
@@ -74,6 +79,13 @@ export interface ChildPluginHostOptions {
   workerModule?: string;
   env?: NodeJS.ProcessEnv;
   cwd?: string;
+  /**
+   * Wraps the command that starts the worker: given `[node, workerModule, entryModule]`, it returns the command
+   * to spawn instead (for example a sandbox launcher that ends with those three). The worker protocol stays on
+   * the child's stdin and stdout. The host does not know what the wrapper is; unset, the child is the plain
+   * worker, as for every caller that does not confine it.
+   */
+  launcher?: (worker: readonly [string, string, string]) => { command: string; args: readonly string[] };
   /**
    * The run's pinned task config, attached to every describe, advance
    * (`RunView.config`), evaluate (`ValidationInput.config`) and rehearsal

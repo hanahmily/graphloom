@@ -27,6 +27,7 @@ import { discover, probeEnabledSupervisors } from "./discovery.js";
 import { doctorReport, formatDoctor, taskProfile, type TaskInputs } from "./doctor.js";
 import { describeTask } from "./rehearsal.js";
 import { SANDBOX_USAGE, sandboxCommand } from "./sandbox.js";
+import { loopCommand, LOOP_USAGE } from "./loop-cli.js";
 import { parseTaskNewArgs, taskNew, TASK_NEW_USAGE } from "./task-new.js";
 import { SESSION_USAGE, sessionCommand } from "./session.js";
 import { locateRun } from "./run-ref.js";
@@ -176,6 +177,11 @@ async function main(args = process.argv.slice(2), launch?: ManagedExecution): Pr
       return;
     }
     process.exitCode = await taskNew(parsed.options);
+    return;
+  }
+
+  if (cmd === "loop") {
+    process.exitCode = await loopCommand(args.slice(1));
     return;
   }
 
@@ -805,6 +811,7 @@ Usage:
   graphloom run <task.yaml> [--state-root <dir>] [--supervisor <harness>] [--on-stop <command>]
   graphloom check <task.yaml>
   ${TASK_NEW_USAGE}
+  ${LOOP_USAGE.join("\n  ")}
   ${SESSION_USAGE.join("\n  ")}
   graphloom rehearse <task.yaml> [--scenario <name>] [--commands <stub|run>] [--offline] [--synthesized] [--adversarial] [--keep] [--stop-at <stage>]
   graphloom rehearse --record-from <stateDir|runId> [--state-root <dir>] [--name <name>] [--out <path>]
@@ -849,6 +856,13 @@ task new asks the graph's own prepareTask hook what its arguments mean (for pr-r
 request: pr-review owner/repo#N --repo <clone> --profile <name>), validates the plan it returns, fetches
 the refs under refs/graphloom/<graph>/ over https with no hook or user configuration, and writes the task.
 --dry-run prints the plan and the task and changes nothing; --force replaces an existing task file.
+
+loop evaluate runs a graph's loopCandidates hook (the manifest's loop key names the reads it may ask for, run with the runner
+config's read token) in a bubblewrap sandbox (no network, no home, no credentials; it refuses where bubblewrap is not usable)
+and prints the candidates it found. Exits 0 candidates (or a replay that reproduced), 1 the evaluator could
+not run (usage, a bundle that cannot be looped, a replay that differs), 2 the hook refused the profile, 3 blocked (hook error or
+limit), 4 deferred (a read asked to wait; the output names the time). --json prints { outcome, transcript } (a replay verdict, or a failure, as one JSON object); --replay <file>
+re-runs the hook on a recorded transcript with no reads and checks its replies are the same.
 
 sandbox pull puts a docker sandbox image, pinned by digest, in the local image
 store before a run; a graph's environment check calls it for the image its

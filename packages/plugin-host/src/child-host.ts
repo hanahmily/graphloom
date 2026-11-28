@@ -13,6 +13,7 @@ import {
   type GraphDecision,
   type GraphDefinition,
   type GraphRehearsal,
+  type LoopCandidatesInput,
   type PrepareTaskInput,
   type PrepareTaskReply,
   type RunView,
@@ -42,9 +43,11 @@ export async function createChildPluginHost(
     options.workerModule ?? fileURLToPath(new URL("./worker.js", import.meta.url));
   const entryModule = resolveEntryPath(options.entryModule);
 
+  const worker = [process.execPath, workerModule, entryModule] as const;
+  const launch = options.launcher?.(worker) ?? { command: worker[0], args: worker.slice(1) };
   const child = spawn(
-    process.execPath,
-    [workerModule, entryModule],
+    launch.command,
+    [...launch.args],
     {
       stdio: ["pipe", "pipe", "pipe"],
       env: options.env ?? process.env,
@@ -236,6 +239,15 @@ class ChildSession implements PluginHost {
     });
   }
 
+  loopCandidates(ctx: CallContext, input: LoopCandidatesInput): Promise<HostResult<unknown>> {
+    return this.call(ctx, { kind: "loop_candidates", input }, (res) => {
+      if (res.kind !== "loop_candidates_ok") {
+        throw new WireValidationError("malformed", `expected loop_candidates_ok, got ${res.kind}`);
+      }
+      return res.reply;
+    });
+  }
+
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
@@ -308,7 +320,8 @@ class ChildSession implements PluginHost {
       | { kind: "advance"; view: RunView }
       | { kind: "evaluate"; validatorId: string; input: ValidationInput }
       | { kind: "rehearsal"; entry: string; config?: unknown }
-      | { kind: "prepare_task"; input: PrepareTaskInput },
+      | { kind: "prepare_task"; input: PrepareTaskInput }
+      | { kind: "loop_candidates"; input: LoopCandidatesInput },
     extract: (res: WireResponse) => T,
   ): Promise<HostResult<T>> {
     // A child that already exited may have left the reason it failed (a load

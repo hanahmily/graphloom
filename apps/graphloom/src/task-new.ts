@@ -3,7 +3,7 @@
 
 import { execFile } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
-import { link, lstat, mkdir, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import {
@@ -63,7 +63,7 @@ export interface TaskNewOptions {
 /** A failure of a plan step (exit 1), as opposed to a refusal (exit 2). */
 class StepFailed extends Error {}
 /** A usage error, a refusal or an invalid plan (exit 2). */
-class Refused extends Error {}
+export class Refused extends Error {}
 
 /** The CLI's own flags; everything else after `<graph>` is the plugin's. */
 export function parseTaskNewArgs(argv: string[]): { options: Omit<TaskNewOptions, "env" | "cwd" | "hookTimeoutMs">; error?: string } {
@@ -152,20 +152,22 @@ async function realUnder(root: string, p: string): Promise<boolean> {
   return real === r || real.startsWith(r.endsWith(path.sep) ? r : r + path.sep);
 }
 
-interface Loaded {
+export interface Loaded {
   bundle: string;
   manifestRaw: string;
   version: string;
   entry: string;
   requiresConfig: boolean;
+  /** The manifest's `loop` value as written, unchecked; undefined when the bundle declares none. */
+  loop?: unknown;
 }
 
-async function loadBundle(out: string, graph: string): Promise<Loaded> {
+export async function loadBundle(out: string, graph: string): Promise<Loaded> {
   const bundle = resolveUnderBase(path.join(out, "plugins"), graph, "graph bundle");
   const manifestRaw = await readFile(path.join(bundle, "graphloom.manifest.json"), "utf8").catch(() => {
     throw new Refused(`no graph bundle ${graph}: ${path.join(bundle, "graphloom.manifest.json")} was not found (the bundle is plugins/${graph}/ in --out ${out})`);
   });
-  let manifest: { graphId?: unknown; version?: unknown; sdkProtocol?: unknown; taskConfig?: unknown };
+  let manifest: { graphId?: unknown; version?: unknown; sdkProtocol?: unknown; taskConfig?: unknown; loop?: unknown };
   try {
     manifest = JSON.parse(manifestRaw) as typeof manifest;
   } catch {
@@ -181,11 +183,12 @@ async function loadBundle(out: string, graph: string): Promise<Loaded> {
     version: manifest.version,
     entry: resolveBundleEntryFromManifest(bundle, manifestRaw),
     requiresConfig: manifest.taskConfig === "required",
+    ...(manifest.loop !== undefined ? { loop: manifest.loop } : {}),
   };
 }
 
 /** `--profile`: a path (contains `/` or ends in `.json`) from the current directory, otherwise a name looked up in `--out` and then in the bundle. */
-async function resolveProfile(value: string, cwd: string, out: string, bundle: string): Promise<string> {
+export async function resolveProfile(value: string, cwd: string, out: string, bundle: string): Promise<string> {
   if (value.includes("/") || value.endsWith(".json")) {
     const file = path.resolve(cwd, value);
     if (!(await exists(file))) throw new Refused(`profile ${value} was not found`);
@@ -197,7 +200,10 @@ async function resolveProfile(value: string, cwd: string, out: string, bundle: s
   throw new Refused(`profile ${value} was not found (looked in ${tried.join(" and ")})`);
 }
 
-async function readProfile(file: string): Promise<unknown> {
+export async function readProfile(file: string): Promise<unknown> {
+  // The size is checked before the file is read, so a huge or endless file is never loaded; the message is the same one.
+  const size = await stat(file).then((s) => (s.isFile() ? s.size : 0), () => 0);
+  if (size > MAX_TASK_CONFIG_BYTES) throw new Refused(`profile ${file} is ${size} bytes, more than ${MAX_TASK_CONFIG_BYTES}`);
   const bytes = await readFile(file);
   if (bytes.length > MAX_TASK_CONFIG_BYTES) throw new Refused(`profile ${file} is ${bytes.length} bytes, more than ${MAX_TASK_CONFIG_BYTES}`);
   try {

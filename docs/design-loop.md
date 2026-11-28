@@ -1,8 +1,11 @@
 # GraphLoom loop (research and proposal)
 
-Status: research draft. Implemented so far: the SDK's `validateLoopReply`
-and the `packages/loop` skeleton (definition, pure engine, durable store);
-nothing else (no evaluator, hub timer, CLI or hook). It extends the
+Status: research draft. Implemented so far: the SDK's `validateLoopReply`,
+the `packages/loop` skeleton (definition, pure engine, durable store), the
+evaluator core, the runner-backed read host, the plugin-host `loopCandidates`
+callback and `graphloom loop evaluate` (the last three are on the
+`loop-read-host` branch); nothing else (no hub timer, janitor graph or
+issue-fix hook). It extends the
 [run hub](design-run-hub.md) and [`task new`](design-typescript-core.md#16-preparing-a-task-graphloom-task-new)
 without changing graph topology, acceptance or supervisor authority. Companion
 drafts: [hub janitor](design-hub-janitor.md) (the first loop) and the
@@ -451,6 +454,8 @@ interface LoopCandidate { key: string; taskArgs: string[]; observedState?: strin
   `ok: false` with its message, not a thrown error.
 - `id` is unique in the tick. The evaluator returns results in request order and
   runs a round's reads sequentially, so the transcript is deterministic.
+- The hook child is **confined** (section 14.9), so "the hook never receives
+  credentials" is enforced, not promised.
 - Credentials come from the runner config's `github.tokenEnv`, read by the
   evaluator from its own environment (the hub service's captured one). The hook
   never receives them, and a result never contains them.
@@ -574,6 +579,44 @@ gives a `Runner`, and `runner.runJob(job, ctx)` runs a read. The test helper
   reads keep that confinement. **Still to confirm at build time:** that the
   sandbox does not need the scratch directory mounted for a read-only job.
 
+**The hook child runs confined.** A plain plugin-host child is not a scope: it
+runs as the operator, so a hook could read `/proc/<parent>/environ` (the
+evaluator's token), token files in the home directory, or open a socket
+(verified by a hostile fixture). `graphloom loop evaluate`, and only it, spawns
+the hook child under bubblewrap through an opt-in `launcher` on
+`createChildPluginHost` (the controller and `task new` are unchanged):
+
+- Own pid, net, ipc, uts and cgroup namespaces; a private `/proc` and `/dev`; an
+  empty tmpfs `/tmp` as the working directory; the root remounted read-only;
+  `--cap-drop ALL`, no new privileges, `--new-session`, `--die-with-parent`.
+- Read-only binds of only: `/usr` and the library links, `/etc/ld.so.cache`, the
+  node binary, the worker module with its package closure, and the bundle.
+  Nothing else exists in the sandbox: not the home directory, `/etc`, the
+  working directory, the bundle's siblings, or inherited file descriptors.
+- Environment cleared to `PATH` (its value is visible; a P2 information leak).
+- It is not `confineWorker`, which binds `/` read-only and so leaves every file
+  readable; the repo's `confinementUnsupported` and `packageClosure` are reused.
+- **Fail closed:** where bubblewrap is missing or cannot create the namespaces,
+  `loop evaluate` exits 1 naming the cause. There is no flag to run unconfined.
+  `--replay` is confined too, since the hook runs there. The probe proves a
+  mount and pid namespace can be created, not `--unshare-net`; a bwrap that
+  fails at spawn time still exits 1 and never runs unconfined.
+- Not limited: memory and process count inside the sandbox (the host's timeout
+  of 10 s and the pid namespace bound a fork or memory bomb), and nested user
+  namespaces are allowed. Candidates for later hardening.
+- The read host's GitHub executor keeps its own runner sandbox; this
+  confinement is for the evaluator's hook child.
+
+**Command surface.** `graphloom loop evaluate <graph> [--out] [--profile]
+[--runner-config] [--now] [--replay <file>] [--json]`. Exit codes: 0 candidates
+(or a replay that reproduced), 1 could not run (usage, bundle not loopable, no
+runner config or token, confinement unsupported, replay differs), 2 refused,
+3 blocked, 4 deferred. `--json` prints `{ outcome, transcript }`, a replay
+verdict `{ replay: { ok, ... } }`, or `{ error }`; human text goes to stderr.
+A bad `--now` is a usage error. `--replay` accepts a transcript or a `--json`
+output, a regular file up to 16 MiB; profiles are size-checked before reading.
+SIGTERM and SIGINT close both hosts and exit 143 or 130.
+
 ### 14.10 Verification
 
 - `validateLoopReply`: every refusal (extra property, bad key, duplicate id,
@@ -586,8 +629,11 @@ gives a `Runner`, and `runner.runJob(job, ctx)` runs a read. The test helper
 
 ## 15. Open items
 
-1. **Hook protocol follow-up** (section 14.9): confirm at build time that a
-   sandboxed read needs no mounted scratch directory.
+1. **Hook protocol follow-ups**: generate the manifest `loop` key from
+   `describe()` (today a bundle author writes it; only the CLI validates it, the
+   controller and intake do not), and harden the hook sandbox with memory and
+   process limits (section 14.9). A sandboxed read needs no mounted scratch
+   directory (checked).
 2. **Repository modes** (`required | optional | none`, folder snapshot) and the
    controller-owned private repository: janitor design, open point 1.
 3. **Worktree release** for finished managed runs: janitor design, open point 3.
