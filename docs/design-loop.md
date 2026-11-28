@@ -366,9 +366,12 @@ write token and no model:
   failed probe is recorded as a finding in the report; it is not a graph failure.
 - **Plan and Apply nodes**, report first, then removal only with `apply: true`:
   GraphLoom-**labelled** containers, volumes and images older than a threshold
-  that belong to no non-terminal run. Finished runs' worktrees and old installed
-  versions are reported as candidates only in v1 (no operation removes a
-  hub-managed run's worktree yet; see the janitor design). Defaults to report-only until
+  that belong to no non-terminal run, and archives terminal hub submissions past
+  a per-state age so loops cannot fill the hub's queue (design-hub-janitor 7;
+  archiving keeps the idempotency tombstone, so a loop key stays reserved).
+  It then purges archived runs' files (state directory, worktree and branch)
+  through the hub's `hub purge` after a longer age; old installed versions are
+  reported as candidates only in v1. Defaults to report-only until
   the profile sets `apply: true`. Never touches unlabelled Docker objects, a
   run that is live, blocked or waiting, or a failed run's evidence.
 
@@ -636,9 +639,10 @@ SIGTERM and SIGINT close both hosts and exit 143 or 130.
    directory (checked).
 2. **Repository modes** (`required | optional | none`, folder snapshot) and the
    controller-owned private repository: janitor design, open point 1.
-3. **Worktree release** for finished managed runs: janitor design, open point 3.
-   Matters sooner than the janitor suggests, because every Triage-refused issue
-   leaves a worktree.
+3. **Worktree release** for finished managed runs: resolved by archive followed
+   by `hub purge` (#373); the janitor does both on age (janitor design, open
+   point 3). Every Triage-refused issue still leaves a worktree until its run is
+   purged.
 4. **New `graphloom.github` reads**: `assignee` on `list-issues`, an issue
    timeline read (issue-fix "Looping").
 5. **Runner config `repositories` map** (slug to local path) and the loop file
