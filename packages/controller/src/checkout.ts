@@ -12,6 +12,7 @@ import { checkoutWriteDigest, checkoutWritePathProblem, writeScopeAllows } from 
 import type { ExecutorSourceOverride, JobEvidenceItem, JobResult, Runner } from "@graphloom/runner";
 import { cacheKey, dropEntry, environmentInput, isCacheable, outputsBlocked, restoreOutputs, saveOutputs } from "./prepare-cache.js";
 import { candidateChange } from "./worktree.js";
+import { removeTree as removeWritableTree } from "./remove-tree.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -627,19 +628,7 @@ async function git(cwd: string, args: string[], input?: string): Promise<string>
   return (await pending).stdout;
 }
 
-/** Remove a tree, making read-only directories writable first (Go's module cache marks them so). */
+/** Remove a tree, best effort, making read-only directories writable first (Go's module cache marks them so). */
 async function removeTree(dir: string): Promise<void> {
-  try {
-    await rm(dir, { recursive: true, force: true });
-  } catch {
-    await makeWritable(dir).catch(() => undefined);
-    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
-  }
-}
-
-async function makeWritable(dir: string): Promise<void> {
-  await chmod(dir, 0o755);
-  for (const entry of await readdir(dir, { withFileTypes: true })) {
-    if (entry.isDirectory()) await makeWritable(path.join(dir, entry.name));
-  }
+  await removeWritableTree(dir).catch(() => undefined);
 }

@@ -8,7 +8,7 @@ import { realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { projectPanels, renderPanels, type ChatRenderer, type MonitorFormat } from "@graphloom/monitor";
-import type { HubEnvironmentSummary, HubHealth, HubLaunchMemoryRecord, HubRehearsal, HubSchedulingState, HubStatus, HubSubmission, HubRetryPolicy, MonitorPanelKind, MonitorSnapshot, PanelSelection } from "@graphloom/sdk";
+import type { HubEnvironmentSummary, HubHealth, HubLaunchMemoryRecord, HubPurgeReport, HubRehearsal, HubSchedulingState, HubStatus, HubSubmission, HubRetryPolicy, MonitorPanelKind, MonitorSnapshot, PanelSelection } from "@graphloom/sdk";
 import { HUB_REHEARSAL_STOP_AT } from "@graphloom/sdk";
 import { formatBytes } from "@graphloom/hub";
 import { hubPaths, integer, loadHubConfig } from "./hub-config.js";
@@ -43,6 +43,7 @@ export const HUB_USAGE = [
   "graphloom hub pause <submission> [--command-id <id>]",
   "graphloom hub cancel <submission> [--command-id <id>]",
   "graphloom hub archive <submission> [--command-id <id>]",
+  "graphloom hub purge <submission>... | --archived [--before <iso|duration>] [--state <state> ...] [--graph <id>] [--repo <path|text>] [--key <text>] [--since <iso|duration>] [--until <iso|duration>] [--grep <text>] [--rehearsal] [--force] [--dry-run] [--json] [--socket <path>]",
   "graphloom hub resume <submission> [--command-id <id>] [--reconciled] [--approve <id> [--input <name>=<value> ...]|--decline <id> [--reason <text>]] [--upgrade] [--update-plugin] [--update-executors] [--supervisor <harness>]",
 ];
 /** One paragraph per command for `graphloom hub <command> --help`. */
@@ -60,14 +61,15 @@ const HUB_HELP: Record<string, string> = {
   policy: "Changes a submission's automatic retry policy; --renew restores its allowance.",
   pause: "Holds a submission and cooperatively stops its run.",
   cancel: "Permanently withdraws a submission and drains its run.",
-  archive: "Moves a terminal, drained submission out of the queue into the bounded archive index.",
+  archive: "Moves a terminal, drained submission out of the queue into the bounded archive index.\nIts run files stay (state directory, worktree, branch) until hub purge removes them.",
+  purge: "Removes archived submissions' run files: the run's state directory (<hub>/runs/<runId>: state, scratch,\nagent sessions), its worktree and its branch, as graphloom delete does, and its ownership record, so its\nversion and the one its plugin link names no longer keep self prune from removing them. The archive\nindex keeps the entry (ids, key, verdict, times, memory, blocker), marked purged with purgedAt; hub list\n--archived shows it as purged and hub inspect says the files were purged. A live submission is refused:\narchive it first. Name submissions, or --archived to purge every archived one matching hub list's\nfilters (--state, --graph, --repo, --key, --since, --until, --grep), --before (archived before an ISO time\nor a duration ago) and --rehearsal (rehearsal submissions only). A run with uncommitted worktree changes\nor branch commits beyond its pinned head is refused unless --force discards them. --dry-run lists what\nwould be removed and its size. Repeating a purge is harmless: it finishes one that failed partway.\nExit 0 when nothing was refused.",
   resume: "Lifts a hold or requests another attempt, with an optional operator remedy.",
 };
 const PANELS: MonitorPanelKind[] = ["overview", "topology", "stages", "jobs", "activity", "job", "usage", "output"];
 const FORMATS: MonitorFormat[] = ["text", "ansi", "markdown", "json"];
 const RENDERERS: ChatRenderer[] = ["auto", "plain", "katex"];
-const valueFlags = ["task", "token-env-file", "config", "socket", "key", "format", "chat-renderer", "job", "attempt", "stage", "cursor", "page-size", "width", "since", "until", "graph", "repo", "grep", "limit", "stream", "launch", "command-id", "approve", "decline", "reason", "supervisor", "automatic", "max-automatic-resumes", "max-elapsed-ms", "base-delay-ms", "max-delay-ms", "scenario", "commands", "stop-at"];
-const booleanFlags = ["refresh", "no-preflight", "limits", "capture-env", "write-token", "write", "json", "plain", "once", "follow", "reconciled", "upgrade", "update-plugin", "update-executors", "follow-current", "renew", "archived", "rehearsal", "offline", "help"];
+const valueFlags = ["before", "task", "token-env-file", "config", "socket", "key", "format", "chat-renderer", "job", "attempt", "stage", "cursor", "page-size", "width", "since", "until", "graph", "repo", "grep", "limit", "stream", "launch", "command-id", "approve", "decline", "reason", "supervisor", "automatic", "max-automatic-resumes", "max-elapsed-ms", "base-delay-ms", "max-delay-ms", "scenario", "commands", "stop-at"];
+const booleanFlags = ["refresh", "no-preflight", "limits", "capture-env", "write-token", "write", "json", "plain", "once", "follow", "reconciled", "upgrade", "update-plugin", "update-executors", "follow-current", "renew", "archived", "rehearsal", "offline", "force", "dry-run", "help"];
 const repeatable = ["panel", "input", "state"];
 
 export async function hubCommand(args: string[]): Promise<number> {
@@ -92,6 +94,7 @@ export async function hubCommand(args: string[]): Promise<number> {
     serve: ["config", "socket"], service: ["config", "capture-env", "token-env-file", "write-token", "limits", "write", "refresh"], doctor: ["task", "json", "socket"], submit: ["key", "socket", "no-preflight", "rehearsal", "scenario", "commands", "offline", "stop-at"], status: ["json", "socket"], limit: ["socket"],
     list: ["json", "socket", "state", "graph", "repo", "key", "since", "until", "grep", "limit", "archived"],
     pause: ["command-id", "socket"], cancel: ["command-id", "socket"], archive: ["command-id", "socket"],
+    purge: ["socket", "json", "archived", "before", "state", "graph", "repo", "key", "since", "until", "grep", "rehearsal", "force", "dry-run"],
     resume: ["command-id", "socket", "reconciled", "approve", "input", "decline", "reason", "upgrade", "update-plugin", "update-executors", "supervisor"],
     inspect: ["socket", "panel", "format", "chat-renderer", "job", "attempt", "stage", "cursor", "page-size", "width", "follow-current"],
     watch: ["socket", "panel", "job", "attempt", "stage", "cursor", "page-size", "width", "follow-current", "plain", "json", "once", "since"],
@@ -184,6 +187,7 @@ export async function hubCommand(args: string[]): Promise<number> {
     const status = await hubRequest<HubStatus>("GET", `/v1/submissions${query ? `?${query}` : ""}`, undefined, socket);
     console.log(yes("json") ? JSON.stringify(status, null, 2) : query ? formatHubSearch(status) : formatHubList(status)); return 0;
   }
+  if (command === "purge") return hubPurge(parsed.positionals.slice(1), values, socket);
   if (command === "limit") {
     const limit = integer(Number(need()), "limit", 0, 1024);
     console.log(formatHubList(await hubRequest<HubStatus>("POST", "/v1/limit", { limit }, socket))); return 0;
@@ -355,15 +359,77 @@ export function pointInTime(value: string, now: number, name: string): string {
 export function formatHubSearch(status: HubStatus): string {
   const one = (value: string) => safeText(value).replace(/\s+/g, " ").trim();
   const rows = [
-    ...status.submissions.map((item) => ({ at: item.acceptedAt, id: item.id, state: item.state, runId: item.runId, graph: status.summaries?.[item.id]?.graph, line: status.summaries?.[item.id]?.firstLine, blocker: blockerOf(item), archived: false, rehearsal: item.input.rehearsal !== undefined ? status.rehearsals?.[item.id]?.verdict ?? "pending" : undefined })),
-    ...(status.archived ?? []).map((entry) => ({ at: entry.acceptedAt, id: entry.id, state: entry.state, runId: entry.runId, graph: entry.graph, line: entry.request?.firstLine, blocker: entry.state === "succeeded" ? undefined : entry.blocker, archived: true, rehearsal: entry.rehearsal !== undefined ? entry.rehearsalVerdict ?? "pending" : undefined })),
+    ...status.submissions.map((item) => ({ at: item.acceptedAt, id: item.id, state: item.state, runId: item.runId, graph: status.summaries?.[item.id]?.graph, line: status.summaries?.[item.id]?.firstLine, blocker: blockerOf(item), archived: false, purged: false, rehearsal: item.input.rehearsal !== undefined ? status.rehearsals?.[item.id]?.verdict ?? "pending" : undefined })),
+    ...(status.archived ?? []).map((entry) => ({ at: entry.acceptedAt, id: entry.id, state: entry.state, runId: entry.runId, graph: entry.graph, line: entry.request?.firstLine, blocker: entry.state === "succeeded" ? undefined : entry.blocker, archived: true, purged: entry.purgedAt !== undefined, rehearsal: entry.rehearsal !== undefined ? entry.rehearsalVerdict ?? "pending" : undefined })),
   ].sort((a, b) => Date.parse(b.at) - Date.parse(a.at) || b.id.localeCompare(a.id));
   const matched = status.matched ?? rows.length;
   return [`Hub ${status.hubId} · ${rows.length === matched ? `${matched}` : `${rows.length} of ${matched}`} matching submission${matched === 1 ? "" : "s"}`,
     ...(status.fault ? [`Fault: ${safeText(status.fault)}`] : []),
-    ...rows.map((row) => [row.at, row.id, `${row.state}${row.archived ? " (archived)" : ""}`.padEnd(21), row.runId, row.graph ?? "-", row.line ? one(row.line) : "-", ...(row.rehearsal !== undefined ? [`rehearsal: ${row.rehearsal}`] : []), ...(row.blocker ? [`blocker: ${one(row.blocker)}`] : [])].join("  ")),
+    ...rows.map((row) => [row.at, row.id, `${row.state}${row.purged ? " (archived, purged)" : row.archived ? " (archived)" : ""}`.padEnd(21), row.runId, row.graph ?? "-", row.line ? one(row.line) : "-", ...(row.rehearsal !== undefined ? [`rehearsal: ${row.rehearsal}`] : []), ...(row.blocker ? [`blocker: ${one(row.blocker)}`] : [])].join("  ")),
     ...(rows.length ? [] : ["No matching submissions."]),
   ].join("\n");
+}
+
+const PURGE_FILTERS = ["before", "state", "graph", "repo", "key", "since", "until", "grep", "rehearsal"];
+/** A purge result: the hub's report, or why it refused one submission. */
+export type HubPurgeResult = HubPurgeReport | { id: string; error: string };
+
+/**
+ * `hub purge` (docs/design-run-hub.md §4.3): named submissions, or with `--archived` every
+ * archived entry `hub list --archived` finds under the same filters, plus `--before`
+ * (archive time) and `--rehearsal`. Entries already purged are skipped in bulk. One
+ * request per submission, so one refusal never stops the rest. Exit 0 when none was refused.
+ */
+async function hubPurge(ids: string[], values: Record<string, string | boolean | string[] | undefined>, socket: string): Promise<number> {
+  const bulk = values.archived === true;
+  const filters = PURGE_FILTERS.filter((name) => values[name] !== undefined);
+  if (bulk && ids.length > 0) throw new Error("hub purge takes submissions or --archived with filters, not both");
+  if (!bulk && filters.length > 0) throw new Error(`${filters.map((name) => `--${name}`).join(", ")} ${filters.length === 1 ? "selects" : "select"} archived submissions: add --archived`);
+  if (!bulk && ids.length === 0) throw new Error("hub purge needs submissions, or --archived (with filters) for every matching archived submission");
+  const dryRun = values["dry-run"] === true;
+  let targets = ids;
+  let skipped = 0;
+  if (bulk) {
+    const now = Date.now();
+    const { before, rehearsal, ...search } = values;
+    const filter = listFilter({ ...Object.fromEntries(Object.entries(search).filter(([name]) => PURGE_FILTERS.includes(name))), archived: true, limit: String(HUB_LIST_LIMIT_MAX) }, now);
+    const cutoff = typeof before === "string" ? Date.parse(pointInTime(before, now, "before")) : undefined;
+    const status = await hubRequest<HubStatus>("GET", `/v1/submissions?${listQuery(filter).toString()}`, undefined, socket);
+    const entries = (status.archived ?? []).filter((entry) => (cutoff === undefined || Date.parse(entry.archivedAt) < cutoff) && (rehearsal !== true || entry.rehearsal !== undefined));
+    skipped = entries.filter((entry) => entry.purgedAt !== undefined).length;
+    targets = entries.filter((entry) => entry.purgedAt === undefined).map((entry) => entry.id);
+  }
+  const results: HubPurgeResult[] = [];
+  for (const id of targets) {
+    try { results.push(await hubRequest<HubPurgeReport>("POST", `/v1/submissions/${encodeURIComponent(id)}/purge`, { dryRun, force: values.force === true }, socket, 30 * 60_000)); }
+    catch (error) {
+      if (!(error instanceof HubHttpError)) throw error;
+      results.push({ id, error: error.message });
+    }
+  }
+  const refused = results.filter((item) => "error" in item).length;
+  if (values.json === true) console.log(JSON.stringify({ dryRun, results, ...(skipped > 0 ? { alreadyPurged: skipped } : {}) }, null, 2));
+  else console.log(formatHubPurge(results, dryRun, skipped));
+  return refused > 0 ? 1 : 0;
+}
+
+/** One line per submission, then the total. */
+export function formatHubPurge(results: readonly HubPurgeResult[], dryRun: boolean, skipped = 0): string {
+  const lines: string[] = [];
+  let bytes = 0;
+  let done = 0;
+  for (const item of results) {
+    if ("error" in item) { lines.push(`refused ${item.id}: ${safeText(item.error).replace(/\s+/g, " ")}`); continue; }
+    const where = [item.stateDir, ...(item.worktreePath !== undefined ? [`worktree ${item.worktreePath}`] : [])].join(", ");
+    if (item.alreadyPurged) lines.push(`already purged ${item.id}  ${item.runId}${item.purgedAt !== undefined ? `  (at ${item.purgedAt})` : ""}${item.indexError !== undefined ? `; archive index not updated: ${safeText(item.indexError)}` : ""}`);
+    else {
+      lines.push(`${dryRun ? "would purge" : "purged"} ${item.id}  ${item.runId}  ${formatBytes(item.bytes)}  ${where}${item.indexError !== undefined ? `; archive index not updated: ${safeText(item.indexError)}` : ""}`);
+      bytes += item.bytes; done += 1;
+    }
+  }
+  const refused = results.filter((item) => "error" in item).length;
+  const total = `${dryRun ? "Would purge" : "Purged"} ${done} submission${done === 1 ? "" : "s"} (${formatBytes(bytes)}${dryRun ? "" : " freed"})${refused > 0 ? `, ${refused} refused` : ""}${skipped > 0 ? `, ${skipped} already purged` : ""}.`;
+  return [...lines, total].join("\n");
 }
 
 /** `hub status`: exit 0 healthy, 1 unreachable, 3 faulted or shutting down. */

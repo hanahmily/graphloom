@@ -13,6 +13,7 @@ import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ttyRun } from "./doctor-env.js";
 import { hubRetentionFile, registerHubRetention } from "../src/hub-retention.js";
+import { purgeRunFiles } from "../src/hub-purge.js";
 import { makeSandbox, realCli, removeTree, repoRoot, startDetached, tempBase, waitUntil, type Sandbox } from "./install-env.js";
 
 let base: string;
@@ -225,6 +226,39 @@ describe("self prune", () => {
     expect(sb.installed()).toEqual(["0.1.0", "0.1.2", "0.1.3"]);
     await registerHubRetention(sb.ghome, hub, []);
     expect(sb.graphloom(["self", "prune", "--force"], quiet).status).toBe(0);
+    expect(sb.installed()).toEqual(["0.1.2", "0.1.3"]);
+  });
+
+  it("stops keeping the owner and plugin-link versions of an archived hub run once hub purge removed its files", async () => {
+    const sb = await makeSandbox(base);
+    await installed(sb, "0.1.0", "0.1.1", "0.1.2", "0.1.3");
+    // An archived hub submission's run, owned by 0.1.0, whose private plugin link resolves into 0.1.1.
+    const hub = path.join(sb.root, "hub");
+    const runId = "hub-11111111-2222-4333-8444-555555555555";
+    const stateDir = path.join(hub, "runs", runId);
+    await mkdir(stateDir, { recursive: true });
+    const repo = path.join(sb.root, "repo");
+    await mkdir(repo, { recursive: true });
+    expect(spawnSync("git", ["init", "-q"], { cwd: repo }).status).toBe(0);
+    await writeFile(path.join(stateDir, "state.json"), JSON.stringify({
+      runId, status: "succeeded", intake: { repoPath: repo, pinnedHead: "0".repeat(40) }, worktreePath: path.join(repo, "graphloom", runId), worktreeBranch: `graphloom/${runId}`,
+      install: { version: "0.1.0", root: path.join(sb.ghome, "versions", "0.1.0") },
+    }));
+    await writeFile(path.join(stateDir, "managed-run.json"), JSON.stringify({ protocolVersion: 1, hubId: "h-1", hubStateDir: hub, submissionId: "s-1", runId, generation: 1, launchId: "l-1" }));
+    const link = path.join(hub, "submissions", "s-1", "plugins", "hello");
+    await mkdir(path.dirname(link), { recursive: true });
+    await symlink(path.join(sb.ghome, "versions", "0.1.1", "examples", "plugins", "hello"), link);
+    await sb.ownRun(runId, { version: "0.1.0", stateDir, plugin: link });
+    expect(sb.graphloom(["self", "list"], quiet).stdout.trim().split("\n")).toEqual(["0.1.3 (current)", "0.1.2 (previous)", "0.1.1 (plugin links)", "0.1.0 (owns 1 run)"]);
+    expect(sb.graphloom(["self", "prune"], quiet).stdout.trim()).toBe("nothing to prune");
+
+    const report = await purgeRunFiles({ hubDirectory: hub, submissionId: "s-1", runId }, { installHomes: [sb.ghome] });
+    expect(report.ownershipRecords).toEqual([path.join(sb.ghome, "runs", `${runId}.json`)]);
+    expect(existsSync(stateDir)).toBe(false);
+    expect(sb.graphloom(["self", "list"], quiet).stdout.trim().split("\n")).toEqual(["0.1.3 (current)", "0.1.2 (previous)", "0.1.1", "0.1.0"]);
+    const pruned = sb.graphloom(["self", "prune"], quiet);
+    expect(pruned.status, pruned.stderr).toBe(0);
+    expect(pruned.stdout.trim().split("\n").sort()).toEqual(["removed 0.1.0", "removed 0.1.1"]);
     expect(sb.installed()).toEqual(["0.1.2", "0.1.3"]);
   });
 

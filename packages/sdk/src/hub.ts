@@ -298,6 +298,33 @@ export interface HubArchiveEntry {
   rehearsalVerdict?: HubRehearsalVerdict["verdict"];
   /** The memory its latest finished launch recorded at its end, kept from the submission. */
   lastLaunchMemory?: HubLaunchMemoryRecord;
+  /** When `hub purge` removed the run's files (state directory, worktree, branch) (docs/design-run-hub.md §4.3). */
+  purgedAt?: string;
+}
+/**
+ * `POST /v1/submissions/:id/purge`: what purging one archived submission's run files
+ * removed, or with `dryRun` would remove (docs/design-run-hub.md §4.3).
+ */
+export interface HubPurgeReport {
+  id: string;
+  runId: string;
+  /** `<hub directory>/runs/<runId>`. */
+  stateDir: string;
+  /** The run's worktree, when its state names one. */
+  worktreePath?: string;
+  /** The run's branch, deleted with its worktree. */
+  branch?: string;
+  /** Disk use of what is (or would be) removed: the state directory and the worktree. */
+  bytes: number;
+  dryRun?: boolean;
+  /** Nothing was left to remove: an earlier purge removed it. */
+  alreadyPurged?: boolean;
+  /** When the archive index records the purge; absent for a dry run or a submission the index no longer lists. */
+  purgedAt?: string;
+  /** Ownership records (`<install home>/runs/<runId>.json`) removed with the run. */
+  ownershipRecords?: string[];
+  /** Why the archive index could not record the purge (the files are removed). */
+  indexError?: string;
 }
 export interface HubStatus {
   hubId: string;

@@ -229,7 +229,7 @@ export async function routeManagedCommand(cmd: string, args: string[]): Promise<
   catch { return false; }
   const binding = await readManagedBinding(stateDir);
   if (!binding) return false;
-  if (cmd === "delete") throw new Error("a managed run cannot be deleted; cancel/archive it through its hub first");
+  if (cmd === "delete") throw new Error(`a managed run cannot be deleted; cancel or finish it, archive it (graphloom hub archive ${binding.submissionId}), then remove its run files with graphloom hub purge ${binding.submissionId}`);
   if (args.includes("--on-stop")) throw new Error("managed resume does not accept --on-stop; use hub inspect or hub watch for monitoring");
   if (cmd === "resume") {
     // A hub rehearsal resumes only as a rehearsal, and a real hub run never as one.

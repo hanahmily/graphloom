@@ -101,6 +101,8 @@ graphloom hub pause <submission>
 graphloom hub resume <submission>
 graphloom hub cancel <submission>
 graphloom hub archive <submission>
+graphloom hub purge <submission>
+graphloom hub purge --archived --before 30d --dry-run
 ```
 
 `graphloom --help` lists every hub command; `graphloom hub --help` lists them
@@ -127,7 +129,10 @@ new desired state immediately; `inspect` shows `stopping` until cleanup finishes
 `resume` removes a hold or requests another attempt and joins the queue. It never
 bypasses capacity. `cancel` permanently withdraws the submission and drains any
 active execution; it retains run state and worktree. Continuing a canceled task
-requires a new submission. `limit 0` stops new admissions and lets current runs
+requires a new submission. `archive` moves a terminal, drained submission out of
+the queue into the archive index ([§4.1](#41-archive-index)) and keeps its run
+files; `purge` removes an archived submission's run files
+([§4.3](#43-purging-an-archived-submissions-run-files)). `limit 0` stops new admissions and lets current runs
 finish. Lowering a limit never kills an existing run.
 
 `hub resume` also accepts explicit operator remedies already supported by ordinary
@@ -336,7 +341,8 @@ and never discard unsettled intent to compact history. Pause, cancel, drainage
 and settlement remain writable at the admission cap. Actual disk exhaustion stops
 new work and reports the persistence failure; it cannot be solved by a logical
 capacity reservation. An explicit archive operation removes
-terminal queue records while retaining run artifacts, compact idempotency
+terminal queue records while retaining run artifacts (until an explicit purge,
+§4.3, removes them), compact idempotency
 tombstones in the snapshot, and a history entry in the archive index (§4.1). A tombstone records the key, request digest and original
 submission/run IDs: a matching request returns an archived result, never a new run.
 The same 16 MiB cap applies; refuse new keys if it is reached. Keys remain reserved
@@ -386,6 +392,12 @@ earlier are not listed, and their runs remain findable only by run ID under
 `archive-index.json.damaged-<time>`, the hub starts with an empty index and
 reports `archiveIndexError` in health, and admission continues.
 
+`hub purge` (§4.3) marks an entry `purgedAt` in place: the entry keeps its
+position and every other field, so a purged submission stays findable with its
+ids, key, final state, rehearsal verdict, times, recorded memory and blocker.
+`hub list --archived` shows it as `<state> (archived, purged)`; `--json`
+carries `purgedAt`.
+
 ### 4.2 Moving a run to a newer plugin
 
 Submission records the plugin twice: the bundle the run is pinned to (resolved,
@@ -429,6 +441,77 @@ including a plain `hub resume`, keeps the recorded bundle exactly; it also
 repairs a private link an interrupted update left behind. A failure of this
 reconciliation blocks the submission with `plugin reconciliation failed: …`
 (unless the run succeeded), dropping a resume accepted while the launch drained.
+
+### 4.3 Purging an archived submission's run files
+
+Archiving keeps the run's files: its state directory `<hub directory>/runs/<runId>`
+(state, evidence, scratch, agent sessions), its worktree `<repo>/graphloom/<runId>`
+and its branch. They stay until the operator purges them; nothing removes them
+automatically. Plain `graphloom delete` refuses a managed run, archived or not, and
+names `hub purge`.
+
+```sh
+graphloom hub purge <submission>...                       # named archived submissions
+graphloom hub purge --archived --before 30d --dry-run     # what would go, and its size
+graphloom hub purge --archived --key widgets --rehearsal  # hub list filters select in bulk
+```
+
+`hub purge` accepts submission or run ids, or `--archived` with `hub list`'s
+filters (`--state`, `--graph`, `--repo`, `--key`, `--since`, `--until`, `--grep`;
+§3.1) plus `--before <iso|duration>` (archived before) and `--rehearsal`
+(rehearsal submissions only). A bulk purge reads the archive index, so a
+submission the index no longer lists is purged only by its id. Entries already
+purged are skipped. Each submission is one request
+(`POST /v1/submissions/:id/purge`, body `{"dryRun"?, "force"?}`), so one refusal
+never stops the rest; the command exits 1 when any was refused.
+
+For each submission the hub:
+
+1. Refuses a live one (any submission still in the queue: `409`, naming what to do
+   first, archive it or cancel it), an unknown one (`404`), and a second purge of
+   the same submission while one runs (`409`). Only this hub's tombstones are
+   purgeable, and only their run directory under this hub's `runs/`.
+2. Deletes the run through the controller's run deletion, the code `graphloom
+   delete` uses: under the run's lock, it refuses a run a live controller owns, a
+   worktree with uncommitted changes and a branch with commits beyond the pinned
+   head unless `--force` discards them, and a run whose binding names another hub
+   or submission, even with `--force`. It removes the worktree (`git worktree
+   remove`, then `git worktree prune`), the branch at the tip it checked, the
+   repository's record of the branch's state directory, then the state directory
+   with `state.json` last. Read-only directories, such as a Go module cache in
+   scratch or the worktree, are made writable and removed. The hub drained the
+   run before archiving it, so a `running` status a killed controller left is not
+   a refusal here.
+3. Removes the run's ownership record (`<install home>/runs/<runId>.json`, in the
+   home the run's state names and in the hub's own home) when it names this state
+   directory.
+4. Marks the archive index entry `purgedAt` (§4.1) and refreshes retention.
+
+A purge is idempotent and finishes one that failed partway: the controller removes
+`state.json` only after the worktree and branch, so a state directory without it
+is removed as is; a run that never saved state but whose worktree or branch the
+repository records for its state directory needs `--force`. A missing state
+directory reports `alreadyPurged` and still removes a leftover ownership record and
+marks the entry. When the index no longer lists the submission the files are
+removed anyway and the reply carries `indexError`. `--dry-run` removes nothing and
+reports, per submission, the state directory, worktree, branch and their disk use;
+`--json` prints the replies.
+
+After a purge, `hub inspect` (and `GET /v1/submissions/:id`) answers `410` with
+the time the run files were purged; for an archived submission that was not
+purged it names the run's state directory. `graphloom inspect <runId>` no longer
+finds the run.
+
+What a purge releases. An archived submission holds no hub retention marker
+(§9.1): its captured runtime, plugin and executors were released when it left the
+queue. What still kept its versions installed was the run's ownership record,
+which `self prune` and `self list` honour while the record's state directory
+exists, for the owning version and for the version the run's plugin link (the
+hub's private `submissions/<s>/plugins/<graph>`) resolves into
+([release design §4.3](design-release.md#43-shim-commands-graphloom-upgrade-graphloom-self)). Purging removes
+the state directory and the record, so both versions become prunable unless
+something else keeps them. The submission's own `submissions/<s>/` directory
+(captured task, launch logs, command journal) stays; it pins nothing.
 
 ## 5. Concurrency contract
 
@@ -1028,6 +1111,7 @@ its authentication remain a separately designed feature.
 | `POST /v1/submissions` | Durable task submission; `Idempotency-Key` supported |
 | `GET /v1/submissions` and `GET /v1/submissions/:id` | Bounded list and detail; search parameters `state` (repeatable), `graph`, `repo`, `key`, `since`, `until`, `grep`, `limit`, `archived` (§3.1) |
 | `POST /v1/submissions/:id/commands` | Typed pause, resume, cancel, policy-update or archive command |
+| `POST /v1/submissions/:id/purge` | Remove an archived submission's run files, or report them with `dryRun`; body `{"dryRun"?, "force"?}` (§4.3) |
 | `PATCH /v1/settings` | Change global concurrency limit |
 | `GET /v1/health` | Health and aggregate scheduling state: version, socket, counts, faults, archive index size, the hub's environment summary (§3.1) |
 | `POST /v1/doctor` | Doctor's checks run by the hub in its own environment; body `{"taskPath"?}` (absolute); one at a time (§3.1) |
@@ -1195,7 +1279,8 @@ and executor pins across daemon shutdown. A pending or launched `--update-plugin
 also retains the bundle it moves to; once the hub records it (§4.2), the
 replaced bundle is no longer a captured input. Drained succeeded/canceled submissions
 and archived submissions release their hub pins; normal run ownership records
-continue to protect retained run artifacts. Shutdown releases the daemon's own
+continue to protect retained run artifacts until `hub purge` removes the run's
+files and its record (§4.3). Shutdown releases the daemon's own
 runtime reference when no remaining submission needs it. Missing or unreadable
 run state prevents release and reports a retention error; it never pins versions
 installed later. A private list of known install homes lets a restarted hub

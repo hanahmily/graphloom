@@ -6,7 +6,7 @@ import { createConnection } from "node:net";
 import { chmod, lstat, mkdir, open, readdir, unlink } from "node:fs/promises";
 import path from "node:path";
 import { checkHubStateFormat, openHub, type Hub, type HubDriver } from "@graphloom/hub";
-import type { HubHealth, HubInput, HubRehearsal, HubRehearsalVerdict, HubResumeRemedy, HubRetryPolicy, HubStatus, HubSubmission, MonitorSnapshot } from "@graphloom/sdk";
+import type { HubHealth, HubInput, HubPurgeReport, HubRehearsal, HubRehearsalVerdict, HubResumeRemedy, HubRetryPolicy, HubStatus, HubSubmission, MonitorSnapshot } from "@graphloom/sdk";
 import { parseRehearsalSettings, readHubVerdict, rehearsalLine } from "./hub-rehearsal.js";
 import { object, integer, type HubServiceConfig } from "./hub-config.js";
 import { HubHttpError, readJson } from "./hub-client.js";
@@ -15,7 +15,8 @@ import { createHubRuntime, readSubmissionMonitor, cacheMonitor, type HubMonitorC
 import { withHubSnapshot } from "./hub-observe.js";
 import { HubInstallationRetention, inputReferences } from "./hub-retention.js";
 import { resolveOperatorPlugin } from "./hub-plugin.js";
-import { selfInstall } from "./ownership.js";
+import { installHome, selfInstall } from "./ownership.js";
+import { purgeRunFiles } from "./hub-purge.js";
 import { HubEvents } from "./hub-events.js";
 import { parseListQuery, readLiveRequest, searchHub, type LiveRequest } from "./hub-history.js";
 import { hubRunEnvironment, runHubDoctor, summarizeHubEnvironment, type HubDoctorResult } from "./hub-environment.js";
@@ -48,6 +49,11 @@ export interface HubServiceOptions {
    * Absent, the hub refuses a restart request (it cannot restart itself).
    */
   onIdleRestart?: () => void;
+  /**
+   * Install homes whose run ownership records `hub purge` removes (besides the one a run's
+   * state names). Production: this installation's home; a test hub with a synthetic driver: none.
+   */
+  installHomes?: readonly string[];
 }
 
 /** Owner-only HTTP over Unix: no network listener or arbitrary command endpoint. */
@@ -174,6 +180,46 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
     restarting = true;
     options.onIdleRestart?.();
   };
+  // Purges in progress, by submission: a second purge of the same one is refused, not raced.
+  const purging = new Set<string>();
+  const installHomes = options.installHomes ?? (options.driver === undefined ? [installHome(selfInstall())] : []);
+  /** `hub purge` (§4.3): an archived submission's run files, never a live submission's. */
+  const purge = async (id: string, dryRun: boolean, force: boolean): Promise<HubPurgeReport> => {
+    const archived = scheduler.archivedSubmission(id);
+    if (!archived) {
+      const live = scheduler.list().submissions.find((item) => item.id === id || item.runId === id);
+      if (!live) throw new HubHttpError(`unknown hub submission ${id}`, 404);
+      const next = ["succeeded", "failed", "canceled"].includes(live.state) && !live.launch ? `archive it first (graphloom hub archive ${live.id})` : "cancel it or let it finish, then archive it";
+      throw new HubHttpError(`submission ${live.id} is ${live.state}, not archived: hub purge removes only archived submissions' run files; ${next}`, 409);
+    }
+    const { tombstone, entry } = archived;
+    if (purging.has(tombstone.id)) throw new HubHttpError(`a purge of submission ${tombstone.id} is already running`, 409);
+    purging.add(tombstone.id);
+    try {
+      const report = await purgeRunFiles({ hubDirectory: config.directory, submissionId: tombstone.id, runId: tombstone.runId, ...(entry?.repoPath !== undefined ? { repoPath: entry.repoPath } : {}) }, { dryRun, force, installHomes });
+      if (dryRun) return { ...report, ...(entry?.purgedAt !== undefined ? { purgedAt: entry.purgedAt } : {}) };
+      let purgedAt: string | undefined;
+      let indexError: string | undefined;
+      try {
+        purgedAt = (await scheduler.markPurged(tombstone.id))?.purgedAt;
+        if (purgedAt === undefined) indexError = "the archive index no longer holds this submission's entry";
+      } catch (error) { indexError = error instanceof Error ? error.message : String(error); }
+      // Archived submissions hold no hub pins; refreshing keeps the markers current anyway.
+      await capture();
+      return { ...report, ...(purgedAt !== undefined ? { purgedAt } : {}), ...(indexError !== undefined ? { indexError } : {}) };
+    } catch (error) {
+      if (error instanceof HubHttpError) throw error;
+      throw new HubHttpError(error instanceof Error ? error.message : String(error), 409);
+    } finally { purging.delete(tombstone.id); }
+  };
+  /** Why an archived submission has no live record to show: archived, and maybe purged. */
+  const archivedNotice = (id: string): HubHttpError | undefined => {
+    const archived = scheduler.archivedSubmission(id);
+    if (!archived) return undefined;
+    const { tombstone, entry } = archived;
+    if (entry?.purgedAt !== undefined) return new HubHttpError(`submission ${tombstone.id} (run ${tombstone.runId}) is archived and its run files were purged at ${entry.purgedAt}; hub list --archived shows its archive entry`, 410);
+    return new HubHttpError(`submission ${tombstone.id} is archived; its run stays at ${path.join(config.directory, "runs", tombstone.runId)} (graphloom inspect ${tombstone.runId}); hub list --archived shows its archive entry`, 404);
+  };
   const server = createServer((request, response) => {
     void (async () => {
       const url = new URL(request.url ?? "/", "http://hub.local");
@@ -263,7 +309,7 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
         const since = url.searchParams.has("since") ? integer(Number(url.searchParams.get("since")), "since") : undefined;
         return respond(response, 200, events.read(since, url.searchParams.get("submission") ?? undefined));
       }
-      const match = /^\/v1\/submissions\/([^/]+)(?:\/(snapshot|pause|resume|cancel|archive|policy|logs))?$/.exec(url.pathname);
+      const match = /^\/v1\/submissions\/([^/]+)(?:\/(snapshot|pause|resume|cancel|archive|policy|logs|purge))?$/.exec(url.pathname);
       if (match) {
         const id = decodeURIComponent(match[1]!);
         const action = match[2];
@@ -274,7 +320,14 @@ export async function serveHub(options: HubServiceOptions): Promise<HubService> 
           cache.delete(archived.id); requests.delete(archived.id);
           await capture(); return respond(response, 202, archived);
         }
-        const submission = scheduler.inspect(id);
+        if (request.method === "POST" && action === "purge") {
+          const body = await payload(request, ["dryRun", "force"]);
+          for (const name of ["dryRun", "force"] as const) if (body[name] !== undefined && typeof body[name] !== "boolean") throw new HubHttpError(`${name} must be a boolean`, 400);
+          return respond(response, 200, await purge(id, body.dryRun === true, body.force === true));
+        }
+        let submission: HubSubmission;
+        try { submission = scheduler.inspect(id); }
+        catch (error) { throw archivedNotice(id) ?? error; }
         if (request.method === "GET") {
           if (action === undefined) {
             const verdict = submission.input.rehearsal !== undefined ? await readHubVerdict(config.directory, submission.runId) : undefined;
