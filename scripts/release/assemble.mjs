@@ -18,12 +18,20 @@ import { chmod, copyFile, cp, mkdir, readFile, readlink, realpath, rm, writeFile
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs, readJson, runMain, sha256, sha256File, walk } from "./lib.mjs";
+import { lockstepDirs } from "./prepare.mjs";
 import { pruneTree } from "./prune-tree.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
-/** Core packages: `package.json` and `dist/` only (§2.3). */
-export const CORE_PACKAGES = ["packages/sdk", "packages/agent-harness", "packages/controller", "packages/plugin-host", "packages/supervisor", "packages/runner", "packages/hub", "packages/monitor", "apps/graphloom"];
+/**
+ * The core packages (§2.3), which ship only `package.json` and `dist/`: the
+ * lockstep workspaces (§3) except the root, that is `packages/*` but testkit,
+ * and `apps/*`. Derived from the root package.json's workspaces so that a new
+ * package the CLI imports ships without a list to update.
+ */
+export function corePackages(root) {
+  return lockstepDirs(root).filter((rel) => rel !== ".");
+}
 
 /** The commands of the release gate (§6 step 4), recorded in `release.json`. */
 export const GATE = ["NODE_ENV=development npm ci --include=dev", "npm run build", "npm run typecheck", "npm test"];
@@ -51,7 +59,7 @@ const filtered = (skip) => (src) => !skip(path.basename(src));
  */
 export function checkLockstep(src, version) {
   const problems = [];
-  for (const rel of [".", ...CORE_PACKAGES]) {
+  for (const rel of lockstepDirs(src)) {
     const pkg = readJson(path.join(src, rel, "package.json"));
     if (pkg.version !== version) problems.push(`${rel === "." ? "package.json" : `${rel}/package.json`} is ${pkg.version}, not the product version ${version}`);
   }
@@ -97,7 +105,7 @@ export async function assemble({ src, out, nodeDir, nodePin, version, commit, ep
 
   await cp(path.join(src, "node_modules"), path.join(dest, "node_modules"), { recursive: true, verbatimSymlinks: true, filter: filtered(skipInModules) });
 
-  for (const rel of CORE_PACKAGES) {
+  for (const rel of corePackages(src)) {
     await mkdir(path.join(dest, rel), { recursive: true });
     await copyFile(path.join(src, rel, "package.json"), path.join(dest, rel, "package.json"));
     if (!existsSync(path.join(src, rel, "dist"))) throw new Error(`${rel} is not built`);
