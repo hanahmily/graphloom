@@ -43,6 +43,7 @@ export class HubArchiveIndex {
   }
 
   list(): HubArchiveEntry[] { return structuredClone(this.entries); }
+  get(id: string): HubArchiveEntry | undefined { const entry = this.entries.find((item) => item.id === id); return entry && structuredClone(entry); }
   get size(): number { return this.entries.length; }
 
   /** Adds or replaces `entry` (by submission id), evicts the oldest past the bounds, and syncs. */
@@ -56,6 +57,17 @@ export class HubArchiveIndex {
     }
     await durableWrite(this.file, serialize(this.hubId, next));
     this.entries = next;
+  }
+
+  /** Records that the entry's run files were purged, in place (its position and other fields kept); false when no entry has `id`. */
+  async markPurged(id: string, purgedAt: string): Promise<boolean> {
+    const index = this.entries.findIndex((item) => item.id === id);
+    if (index < 0) return false;
+    if (this.entries[index]!.purgedAt !== undefined) return true;
+    const next = this.entries.map((item, at) => at === index ? { ...item, purgedAt } : item);
+    await durableWrite(this.file, serialize(this.hubId, next));
+    this.entries = next;
+    return true;
   }
 }
 
@@ -71,8 +83,8 @@ export function boundEntry(entry: HubArchiveEntry): HubArchiveEntry {
   if (out.request) out.request.firstLine = clip(out.request.firstLine, ARCHIVE_FIRST_LINE_CHARS);
   if (out.blocker !== undefined) out.blocker = clip(out.blocker.replace(/\s+/g, " ").trim(), ARCHIVE_BLOCKER_CHARS);
   if (Buffer.byteLength(JSON.stringify(out)) <= ARCHIVE_ENTRY_BYTES) return out;
-  const { archived, id, runId, requestDigest, acceptedAt, settledAt, archivedAt, state } = out;
-  return { archived, id, runId, requestDigest, acceptedAt, settledAt, archivedAt, state, repoPath: clip(out.repoPath, 1024), taskPath: clip(out.taskPath, 1024) };
+  const { archived, id, runId, requestDigest, acceptedAt, settledAt, archivedAt, state, purgedAt } = out;
+  return { archived, id, runId, requestDigest, acceptedAt, settledAt, archivedAt, state, repoPath: clip(out.repoPath, 1024), taskPath: clip(out.taskPath, 1024), ...(purgedAt !== undefined ? { purgedAt } : {}) };
 }
 
 function isIndex(value: unknown): value is ArchiveIndexFile {

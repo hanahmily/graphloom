@@ -1,6 +1,6 @@
 ---
 name: graphloom-hub
-description: Drive GraphLoom runs through the run hub, the operator's systemd user service that queues submissions under a concurrency limit and continues them automatically. Checks the hub is reachable (never starts it), submits a checked task with graphloom hub submit, submits rehearsals (hub submit --rehearsal) that exercise the hub on stand-ins with no model calls, reports status with hub list and hub inspect panels, pauses, cancels, resumes (with --approve, --decline, --reconciled, --update-plugin, --upgrade remedies the user chose), reads launch logs, sets the concurrency limit, archives finished submissions, and searches past and archived submissions with hub list filters. Every control action only on the user's yes; never diagnoses, fixes or answers a run's questions. Use when the user wants to submit, check, stop, resume or find runs on the hub.
+description: Drive GraphLoom runs through the run hub, the operator's systemd user service that queues submissions under a concurrency limit and continues them automatically. Checks the hub is reachable (never starts it), submits a checked task with graphloom hub submit, submits rehearsals (hub submit --rehearsal) that exercise the hub on stand-ins with no model calls, reports status with hub list and hub inspect panels, pauses, cancels, resumes (with --approve, --decline, --reconciled, --update-plugin, --upgrade remedies the user chose), reads launch logs, sets the concurrency limit, archives finished submissions, purges archived run files, and searches past and archived submissions with hub list filters. Every control action only on the user's yes; never diagnoses, fixes or answers a run's questions. Use when the user wants to submit, check, stop, resume or find runs on the hub.
 ---
 
 # Drive runs through the GraphLoom hub
@@ -19,9 +19,10 @@ Every `graphloom hub` command talks to it over a Unix socket
   `systemctl --user start|stop|restart`: it is the operator's service; when
   unreachable, say so and give the operator the command (section 1).
 - **Control only on a yes.** `hub submit`, `hub pause`, `hub cancel`,
-  `hub resume`, `hub limit`, `hub policy` and `hub archive` change what runs.
-  Show the exact command and run it only after the user says yes to it.
-  `hub cancel` cannot be undone. `hub limit` affects every queued run.
+  `hub resume`, `hub limit`, `hub policy`, `hub archive` and `hub purge`
+  change what runs. Show the exact command and run it only after the user
+  says yes to it. `hub cancel` and `hub purge` cannot be undone. `hub limit`
+  affects every queued run.
 - **Report; never diagnose, fix or answer.** On a blocked, failed or paused
   submission, quote its blocker and ask the user what to do; offer
   graphloom-triage for a diagnosis. Never answer an approval or a question the
@@ -71,8 +72,7 @@ Never run the start yourself. Meanwhile a run can start directly with
 graphloom-run, outside the hub's limit; the user chooses.
 
 `graphloom hub status --json`: `reachable`, `healthy` (and `version`,
-`counts`, `fault`). A hub older than `hub status` refuses it: use `graphloom
-hub list` (exit 0: reachable; a `Fault:` line is a fault).
+`counts`, `fault`).
 
 ## 2. Submit a run
 
@@ -287,7 +287,10 @@ stays reserved (the same task with it returns the archived result, never a new
 run). The archive index keeps a compact entry (ids, key, graph, repository,
 task path, request first line, times, final state, state directory, blocker)
 that `hub list --archived` searches; the newest 5,000, older ones drop out of
-search but stay on disk. Ask first.
+search but stay on disk. Ask first. `graphloom hub purge <submission>` (or
+`--archived` with list filters, `--before <iso|duration>`; `--dry-run` first)
+deletes its run directory, worktree and branch, keeping the entry marked
+purged; ask first.
 
 ## 9. Search past submissions
 
@@ -320,9 +323,6 @@ first line>`, then any `blocker: ...`. `--json`: `submissions` (full records),
 ```sh
 graphloom hub list --state blocked --json | jq '.submissions[] | {id, automaticResumes, failureRepeats, launch}'
 ```
-
-On a hub older than these flags (`--state is not valid for hub list`), use
-`graphloom hub list --json | jq '.submissions[] | select(...)'` (queue only).
 
 One run's history, also for a run missing from the index: `graphloom inspect
 <runId>` and `graphloom stats <runId>`; a bare run id is found under the

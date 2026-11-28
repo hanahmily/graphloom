@@ -602,8 +602,20 @@ current version cannot start.
 | `upgrade [<v>] [--no-switch]` | Install `<v>` (default latest) and switch `current`, then list runs owned by older versions (§5.3) |
 | `self list` | Installed versions, marking `current`, `previous`, versions owned by runs, and a skipped version (§5.4) |
 | `self use <v>` / `self rollback` | Switch `current` to an installed version, or to `previous`. Switching to an older version records the version left as skipped by automatic updates (§5.4) |
-| `self prune [--dry-run] [--force]` | Remove versions that are not `current`, not `previous`, and not owned by any `runs/<runId>.json` whose state directory still exists; `--force` is needed to override ownership |
+| `self prune [--dry-run] [--force]` | Remove versions that nothing keeps (below); `--force` is needed to override ownership and plugin links |
 | `self uninstall [--purge-config]` | Remove the shim and `$GRAPHLOOM_HOME`; `--purge-config` also removes `~/.config/graphloom`. Never touches run state or worktrees under target repositories, or harness logins. Removes the agent skill copies GraphLoom installed and the user did not edit ([agent skills §3](design-agent-skills.md#3-distribution-graphloom-skills)) |
+
+What keeps a version from `self prune`:
+
+| Keeps | Overridden by `--force` |
+|---|---|
+| `current` and `previous` | Never |
+| A run hub's retention marker `hub-retention/<version>/<hub>.json`: a live hub submission's captured runtime, plugin and executors, and its run's owner ([run hub §9.1](design-run-hub.md#91-the-services-environment)). Archived submissions hold none | Never |
+| An ownership record `runs/<runId>.json` whose `stateDir` exists: its `version`, and the version its `plugin` link resolves into (§4.7). This includes an archived hub submission's run until `graphloom hub purge` removes its state directory and record ([run hub §4.3](design-run-hub.md#43-purging-an-archived-submissions-run-files)); an ordinary run's until `graphloom delete` | Yes |
+| Auto-prune only: the three newest versions | Not applicable |
+
+`self list` marks the first and third kinds (`current`, `previous`, `owns N
+runs`, `plugin links`); it does not show hub retention markers.
 
 There is no `self upgrade`. No release has shipped, so no operator depends on
 it, and one spelling avoids two documented paths. The shim answers
@@ -837,7 +849,8 @@ own toolchain.
   keeps both its `version` and the version directory that `plugin`
   resolves into. A plugin link that no run records is not seen, so prune
   can remove the version it points into. `--force` overrides both kinds of
-  keep, but never `current` or `previous`.
+  keep, but never `current` or `previous`. A hub run's record is removed with
+  its state directory by `graphloom hub purge`, which releases both versions.
 - **Trust anchor.** The `allowed_signers` that verifies `SHA256SUMS.sig`
   comes with the installer that runs, never with the download: the
   `release/allowed_signers` of the version tree `install.sh` sits in (or

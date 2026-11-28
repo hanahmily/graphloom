@@ -578,6 +578,24 @@ describe("archive index", () => {
     expect(reopened.archived()).toEqual([entry]);
     expect(await reopened.submit(request("ticket-9"))).toMatchObject({ archived: true, id: s.id });
   });
+  it("marks an archived entry purged in place, keeps the first time, and refuses a live submission", async () => {
+    const f = await fixture(0);
+    const first = await cancelAndArchive(f.hub, "p1");
+    const second = await cancelAndArchive(f.hub, "p2");
+    const live = await accepted(f.hub, "p3");
+    await expect(f.hub.markPurged(live.id)).rejects.toThrow(`hub submission ${live.id} is queued, not archived`);
+    await expect(f.hub.markPurged("s-unknown")).rejects.toThrow("unknown hub submission s-unknown");
+    expect(f.hub.archivedSubmission(live.id)).toBeUndefined();
+    const before = f.hub.archived();
+    const marked = await f.hub.markPurged(first.runId);
+    expect(marked).toEqual({ ...before[0], purgedAt: expect.any(String) });
+    expect((await f.hub.markPurged(first.id))?.purgedAt).toBe(marked!.purgedAt);
+    expect(f.hub.archived().map((entry) => [entry.id, entry.purgedAt !== undefined])).toEqual([[first.id, true], [second.id, false]]);
+    expect(f.hub.archivedSubmission(first.id)).toMatchObject({ tombstone: { id: first.id, runId: first.runId }, entry: { purgedAt: marked!.purgedAt } });
+    await f.hub.close({ graceMs: 0 });
+    const reopened = await openHub(f.options); hubs.push(reopened);
+    expect(reopened.archived()[0]).toEqual(marked);
+  });
   it("records what the describe hook reads, and archives without it when the hook fails", async () => {
     const f = await fixture(0); await f.hub.close({ graceMs: 0 });
     let fail = false;

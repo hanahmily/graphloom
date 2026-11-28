@@ -145,6 +145,33 @@ export class Hub {
     return Object.values(this.snapshot.submissions).some((s) => s.key === scoped) || this.snapshot.tombstones.some((s) => s.key === scoped);
   }
   inspect(id: string): HubSubmission { return copy(this.get(id)); }
+  /**
+   * An archived submission, by submission or run id: its tombstone and, while the
+   * bounded index keeps it, its index entry. Undefined for a live or unknown one.
+   */
+  archivedSubmission(id: string): { tombstone: HubArchivedSubmission; entry?: HubArchiveEntry } | undefined {
+    const tombstone = this.snapshot.tombstones.find((item) => item.id === id || item.runId === id);
+    if (!tombstone) return undefined;
+    const entry = this.archiveIndex.get(tombstone.id);
+    return { tombstone: copy(tombstone), ...(entry ? { entry } : {}) };
+  }
+  /**
+   * Records in the archive index that an archived submission's run files were purged
+   * (docs/design-run-hub.md §4.3); a repeat keeps the first time. Refuses a live
+   * submission. Undefined when the index no longer holds the submission's entry.
+   */
+  async markPurged(id: string): Promise<HubArchiveEntry | undefined> {
+    return this.enqueue(async () => {
+      const archived = this.archivedSubmission(id);
+      if (!archived) {
+        const live = Object.values(this.snapshot.submissions).find((s) => s.id === id || s.runId === id);
+        throw new Error(live ? `hub submission ${live.id} is ${live.state}, not archived` : `unknown hub submission ${id}`);
+      }
+      if (this.fault) throw new Error(`hub persistence fault: ${this.fault}`);
+      await this.archiveIndex.markPurged(archived.tombstone.id, this.stamp());
+      return this.archiveIndex.get(archived.tombstone.id);
+    });
+  }
   /** The bounded archive index, oldest first (docs/design-run-hub.md §4.1). */
   archived(): HubArchiveEntry[] { return this.archiveIndex.list(); }
   /** Why the archive index started empty, when its file was unreadable. */

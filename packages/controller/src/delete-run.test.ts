@@ -11,7 +11,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createScriptedGraph, dispatch, stop, type GraphDefinition } from "@graphloom/sdk";
 import { createScriptedRunner } from "@graphloom/runner";
-import { createController, loadRunState, saveRunState } from "./index.js";
+import { createController, deleteManagedRun, loadRunState, saveRunState } from "./index.js";
 import { HELLO_VERSION } from "./testing/hello-version.js";
 
 const execFileAsync = promisify(execFile);
@@ -295,21 +295,60 @@ describe("deleting a run", () => {
     expect(await branches(env)).toBe("");
   });
 
-  it("can repeat a delete whose state directory removal failed", async () => {
+  it("removes read-only directories a Go module cache leaves in the state directory and the worktree", async () => {
     const env = await makeEnv();
-    const run = await stoppedRun(env, "stuck");
-    const locked = path.join(run.stateDir, "extra", "locked");
-    await mkdir(locked, { recursive: true });
-    await writeFile(path.join(locked, "held"), "x", "utf8");
-    await chmod(locked, 0o500);
-    cleanups.push(() => chmod(locked, 0o700).catch(() => undefined));
-    await expect(createController().delete(run.stateDir)).rejects.toThrow(/EACCES/);
-    expect(existsSync(run.worktreePath)).toBe(false);
-    expect(existsSync(path.join(run.stateDir, "state.json"))).toBe(true);
-
-    await chmod(locked, 0o700);
-    await createController().delete("stuck", { stateRoot: env.stateRoot });
+    const run = await stoppedRun(env, "modcache");
+    for (const root of [path.join(run.stateDir, "scratch"), run.worktreePath]) {
+      const cache = path.join(root, "go", "mod", "example.com", "m@v1.0.0");
+      await mkdir(cache, { recursive: true });
+      await writeFile(path.join(cache, "go.mod"), "module example.com/m\n", "utf8");
+      await chmod(cache, 0o555);
+      await chmod(path.dirname(cache), 0o555);
+      cleanups.push(() => chmod(path.dirname(cache), 0o755).then(() => chmod(cache, 0o755)).catch(() => undefined));
+    }
+    // The worktree's cache is untracked: force discards it, as for any uncommitted change.
+    await createController().delete("modcache", { stateRoot: env.stateRoot, force: true });
     expect(await readdir(env.stateRoot)).toEqual([]);
+    expect(existsSync(run.worktreePath)).toBe(false);
+    expect(await branches(env)).toBe("");
+  });
+
+  it("deletes a managed run only for the hub submission its binding names", async () => {
+    const env = await makeEnv();
+    const run = await stoppedRun(env, "managed");
+    const hubStateDir = path.join(path.dirname(env.stateRoot), "hub");
+    await writeFile(path.join(run.stateDir, "managed-run.json"), JSON.stringify({ protocolVersion: 1, hubId: "h-1", hubStateDir, submissionId: "s-1", runId: "managed", generation: 1, launchId: "l-1" }), "utf8");
+    await expect(createController().delete(run.stateDir)).rejects.toThrow("cannot delete a hub-managed run; archive it through the hub, then remove its files with graphloom hub purge");
+    await expect(deleteManagedRun(run.stateDir, { hubStateDir, submissionId: "s-2", runId: "managed", repoPath: env.repoPath })).rejects.toThrow(`it belongs to hub submission s-1 of the hub at ${hubStateDir}`);
+    await expect(deleteManagedRun(run.stateDir, { hubStateDir: path.join(hubStateDir, "other"), submissionId: "s-1", runId: "managed", repoPath: env.repoPath })).rejects.toThrow("it belongs to hub submission s-1");
+    // A controller killed mid-run leaves `running`; the hub has drained it, so that label is no refusal.
+    await saveRunState({ ...await loadRunState(run.stateDir), status: "running" });
+    expect(await deleteManagedRun(run.stateDir, { hubStateDir, submissionId: "s-1", runId: "managed", repoPath: env.repoPath })).toMatchObject({ runId: "managed", worktreePath: run.worktreePath });
+    expect(existsSync(run.stateDir)).toBe(false);
+    expect(existsSync(run.worktreePath)).toBe(false);
+    expect(await branches(env)).toBe("");
+    expect(await deleteManagedRun(run.stateDir, { hubStateDir, submissionId: "s-1", runId: "managed", repoPath: env.repoPath })).toBeUndefined();
+  });
+
+  it("finishes a managed delete that stopped after state.json went, and one whose run never saved state only with force", async () => {
+    const env = await makeEnv();
+    const hubStateDir = path.join(path.dirname(env.stateRoot), "hub");
+    const run = await stoppedRun(env, "leftover");
+    await createController().delete(run.stateDir).catch(() => undefined);
+    // What a delete interrupted after removing state.json leaves: the state directory alone.
+    await mkdir(path.join(run.stateDir, "scratch", "ro"), { recursive: true });
+    await chmod(path.join(run.stateDir, "scratch", "ro"), 0o555);
+    expect(await deleteManagedRun(run.stateDir, { hubStateDir, submissionId: "s-1", runId: "leftover", repoPath: env.repoPath })).toMatchObject({ runId: "leftover" });
+    expect(existsSync(run.stateDir)).toBe(false);
+
+    const stateless = await stoppedRun(env, "stateless");
+    await rm(path.join(stateless.stateDir, "state.json"));
+    await expect(deleteManagedRun(stateless.stateDir, { hubStateDir, submissionId: "s-2", runId: "stateless", repoPath: env.repoPath })).rejects.toThrow("cannot delete run stateless: it has no saved state but");
+    expect(existsSync(stateless.worktreePath)).toBe(true);
+    await deleteManagedRun(stateless.stateDir, { hubStateDir, submissionId: "s-2", runId: "stateless", repoPath: env.repoPath, force: true });
+    expect(existsSync(stateless.stateDir)).toBe(false);
+    expect(existsSync(stateless.worktreePath)).toBe(false);
+    expect(await branches(env)).toBe("");
   });
 
   it("finishes a delete that stopped partway", async () => {

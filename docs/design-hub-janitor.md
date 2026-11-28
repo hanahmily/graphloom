@@ -179,7 +179,11 @@ next day gets a fresh one; it is not rerun (loop design, decision 4).
    worktree per refused issue, so (a) is more urgent than the janitor alone
    suggests.
 4. **Whose cleanup for archived runs?** `hub archive` keeps run artifacts by
-   design; deleting them is a decision beyond v1. v1 removes only Docker objects (point 3
+   design; the operator now removes an archived run's state directory, worktree
+   and branch with `graphloom hub purge`
+   ([run hub §4.3](design-run-hub.md#43-purging-an-archived-submissions-run-files)),
+   which a later janitor version could call instead of reimplementing it; deleting
+   them from the graph is a decision beyond v1. v1 removes only Docker objects (point 3
    defers worktrees), and never `state.json`, evidence or the archive index.
 5. **Docker rootless vs rootful.** Rootful needs the `docker` group, which is
    root-equivalent; the executor's grant is then as strong as that. Document

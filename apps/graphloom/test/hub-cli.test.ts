@@ -113,7 +113,7 @@ describe("hub command over a Unix socket", () => {
   it("lists every hub command, --stage and --follow-current in help, and prints one command's help", async () => {
     const all = await invoke(["--help"]);
     expect(all.code).toBe(0);
-    for (const command of ["status", "list", "inspect", "watch", "pause", "cancel", "archive", "resume"]) expect(all.out).toContain(`graphloom hub ${command} `);
+    for (const command of ["status", "list", "inspect", "watch", "pause", "cancel", "archive", "purge", "resume"]) expect(all.out).toContain(`graphloom hub ${command} `);
     for (const flag of ["--stage <stage>", "--follow-current", "--archived", "--grep <text>", "--state <state>"]) expect(all.out).toContain(flag);
     const one = await invoke(["list", "--help"]);
     expect(one.code).toBe(0);
@@ -124,7 +124,7 @@ describe("hub command over a Unix socket", () => {
     expect(lines[0]).toBe("graphloom — TypeScript harness");
     const hubLines = lines.filter((line) => line.includes("graphloom hub "));
     expect(hubLines.length).toBeGreaterThanOrEqual(14);
-    expect(hubLines.filter((line) => /^ {2}graphloom hub [a-z]/.test(line))).toHaveLength(15);
+    expect(hubLines.filter((line) => /^ {2}graphloom hub [a-z]/.test(line))).toHaveLength(16);
     expect(lines.findIndex((line) => line.startsWith("  graphloom hub status"))).toBeGreaterThan(lines.indexOf("Usage:"));
   });
 
